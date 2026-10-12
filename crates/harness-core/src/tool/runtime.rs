@@ -1,7 +1,7 @@
 use crate::budget::BudgetConfig;
 use crate::env::SharedExecutionEnv;
 use crate::extensions::{
-    execute_activate_skill, CustomToolContext, HookContext, HookEvaluation,
+    execute_activate_skill, CustomToolContext, ExtensionDispatch, HookContext, HookEvaluation,
 };
 use crate::loop_guard::MAX_EDIT_FAILURE_STREAK;
 use crate::messages::{ToolCall, ToolResultMessage, ToolResultMeta};
@@ -108,8 +108,136 @@ impl ToolRuntime {
     /// Execute a single tool call through the full security, policy, approval, TOCTOU, and ACI pipeline.
     ///
     /// Returns the tool result, the policy decision label, and every Gate 3 hook evaluation that
-    /// contributed to the outcome (for `HookEvaluated` telemetry).
+    /// contributed to the outcome (for `HookEvaluated` telemetry). `PostToolUse` observers run for
+    /// *every* outcome, including early kernel-policy, path-escape, approval and TOCTOU denials, so a
+    /// project audit hook never misses a call.
     pub async fn execute_call(
+        &self,
+        call: &ToolCall,
+        turn: usize,
+        cancel_rx: watch::Receiver<bool>,
+    ) -> (ToolResultMessage, String, Vec<HookEvaluation>) {
+        let (message, decision, mut evaluations) =
+            self.execute_call_inner(call, turn, cancel_rx).await;
+        evaluations.extend(self.post_tool_hooks(call, turn, &message).await);
+        (message, decision, evaluations)
+    }
+
+    /// Fail-closed `PreToolUse` policy-hook gate.
+    ///
+    /// Exposed so a call dispatched outside [`ToolRuntime::execute_call`] (currently
+    /// `recall_evidence`, which needs the live transcript) still runs through the exact same
+    /// `PreToolUse` `PolicyHook`s as every other tool.
+    pub async fn pre_tool_hook_gate(
+        &self,
+        call: &ToolCall,
+        turn: usize,
+    ) -> Result<Vec<HookEvaluation>, (ToolResultMessage, Vec<HookEvaluation>)> {
+        let hook_engine = self.hook_engine();
+        if hook_engine.is_empty() {
+            return Ok(Vec::new());
+        }
+        let hook_ctx = HookContext::for_tool(
+            turn,
+            self.env.workspace().root().to_path_buf(),
+            &call.name,
+            call.call_id.as_str(),
+            &call.raw_arguments,
+        );
+        let pre = hook_engine
+            .evaluate_policy(crate::extensions::HookEvent::PreToolUse, &hook_ctx)
+            .await;
+        let evaluations = pre.evaluations().to_vec();
+        match pre.reason() {
+            Some(reason) => {
+                let out = ToolExecutionOutput::error(
+                    ErrorCode::PolicyDenied,
+                    format!("policy hook denied '{}': {}", call.name, reason),
+                    ToolResultMeta {
+                        relative_path: Self::extract_relative_path(&call.raw_arguments),
+                        ..Default::default()
+                    },
+                );
+                Err((Self::into_message(call, out), evaluations))
+            }
+            None => Ok(evaluations),
+        }
+    }
+
+    /// Fail-open `PostToolUse` observer pipeline for one tool result.
+    pub async fn post_tool_hooks(
+        &self,
+        call: &ToolCall,
+        turn: usize,
+        message: &ToolResultMessage,
+    ) -> Vec<HookEvaluation> {
+        let hook_engine = self.hook_engine();
+        if hook_engine.is_empty() {
+            return Vec::new();
+        }
+        let mut ctx = HookContext::for_tool(
+            turn,
+            self.env.workspace().root().to_path_buf(),
+            &call.name,
+            call.call_id.as_str(),
+            &call.raw_arguments,
+        );
+        ctx.relative_path = message.meta.relative_path.clone();
+        ctx.outcome = Some(if message.outcome.is_success() {
+            "success".to_string()
+        } else {
+            "error".to_string()
+        });
+        hook_engine
+            .run_observers(crate::extensions::HookEvent::PostToolUse, &ctx)
+            .await
+    }
+
+    /// Run one extension tool call, gated against a concurrent `unregister_extension`.
+    fn run_extension_tool(
+        &self,
+        dispatch: &ExtensionDispatch,
+        raw_arguments: &str,
+    ) -> ToolExecutionOutput {
+        let Some(_guard) = dispatch.in_flight.begin() else {
+            return ToolExecutionOutput::error(
+                ErrorCode::NotExecutedCancelled,
+                format!(
+                    "NOT_EXECUTED_CANCELLED: extension '{}' was unmounted before '{}' could start",
+                    dispatch.extension_id, dispatch.tool_name
+                ),
+                ToolResultMeta::default(),
+            );
+        };
+        if dispatch.in_flight.is_cancelled() {
+            return ToolExecutionOutput::error(
+                ErrorCode::NotExecutedCancelled,
+                format!(
+                    "NOT_EXECUTED_CANCELLED: extension '{}' was unmounted; '{}' was cancelled",
+                    dispatch.extension_id, dispatch.tool_name
+                ),
+                ToolResultMeta::default(),
+            );
+        }
+        let out = dispatch.handler.execute(
+            raw_arguments,
+            &CustomToolContext {
+                workspace: self.env.workspace(),
+                in_flight: Some(Arc::clone(&dispatch.in_flight)),
+            },
+        );
+        if out.outcome.is_success()
+            && matches!(
+                dispatch.effect_class,
+                EffectClass::Mutating | EffectClass::SideEffect
+            )
+        {
+            dispatch.in_flight.record_side_effect(&dispatch.tool_name);
+        }
+        out
+    }
+
+    async fn execute_call_inner(
         &self,
         call: &ToolCall,
         turn: usize,
@@ -159,34 +287,11 @@ impl ToolRuntime {
         // Gate 3: PreToolUse policy hooks run BEFORE the kernel policy engine and are fail-closed.
         // A hook may only ever restrict; the kernel `PolicyEngine::evaluate` below is evaluated
         // independently, so a hook can never turn a kernel denial into an allow.
-        let hook_engine = self.hook_engine();
         let mut hook_evaluations: Vec<HookEvaluation> = Vec::new();
-        if !hook_engine.is_empty() {
-            let hook_ctx = HookContext::for_tool(
-                turn,
-                self.env.workspace().root().to_path_buf(),
-                &call.name,
-                call.call_id.as_str(),
-                &call.raw_arguments,
-            );
-            let pre = hook_engine
-                .evaluate_policy(crate::extensions::HookEvent::PreToolUse, &hook_ctx)
-                .await;
-            hook_evaluations.extend(pre.evaluations().iter().cloned());
-            if let Some(reason) = pre.reason() {
-                let out = ToolExecutionOutput::error(
-                    ErrorCode::PolicyDenied,
-                    format!("policy hook denied '{}': {}", call.name, reason),
-                    ToolResultMeta {
-                        relative_path: Self::extract_relative_path(&call.raw_arguments),
-                        ..Default::default()
-                    },
-                );
-                return (
-                    Self::into_message(call, out),
-                    "deny_policy_hook".to_string(),
-                    hook_evaluations,
-                );
+        match self.pre_tool_hook_gate(call, turn).await {
+            Ok(evaluations) => hook_evaluations.extend(evaluations),
+            Err((denied, evaluations)) => {
+                return (denied, "deny_policy_hook".to_string(), evaluations);
             }
         }
 
@@ -467,13 +572,8 @@ impl ToolRuntime {
             ),
             // Gate 3: an extension-provided tool. It already passed the same registry lookup,
             // `--tool-filter`, kernel `PolicyEngine` and approval pipeline as every kernel tool.
-            other => match self.registry.extension_handler(other) {
-                Some(handler) => handler.execute(
-                    &effective_raw_args,
-                    &CustomToolContext {
-                        workspace: self.env.workspace(),
-                    },
-                ),
+            other => match self.registry.extension_dispatch(other) {
+                Some(dispatch) => self.run_extension_tool(&dispatch, &effective_raw_args),
                 None => ToolExecutionOutput::error(
                     ErrorCode::UnknownTool,
                     format!("unknown tool '{}'", other),
@@ -481,28 +581,6 @@ impl ToolRuntime {
                 ),
             },
         };
-
-        // Gate 3: PostToolUse observer hooks are fail-open telemetry; they never change the result.
-        if !hook_engine.is_empty() {
-            let mut post_ctx = HookContext::for_tool(
-                turn,
-                self.env.workspace().root().to_path_buf(),
-                &call.name,
-                call.call_id.as_str(),
-                &call.raw_arguments,
-            );
-            post_ctx.relative_path = exec_out.meta.relative_path.clone();
-            post_ctx.outcome = Some(if exec_out.outcome.is_success() {
-                "success".to_string()
-            } else {
-                "error".to_string()
-            });
-            hook_evaluations.extend(
-                hook_engine
-                    .run_observers(crate::extensions::HookEvent::PostToolUse, &post_ctx)
-                    .await,
-            );
-        }
 
         (Self::into_message(call, exec_out), decision_label, hook_evaluations)
     }

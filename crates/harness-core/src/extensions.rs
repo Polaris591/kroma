@@ -13,7 +13,7 @@
 //!    frozen prefix KV cache of earlier turns stays intact.
 
 use crate::messages::ToolResultMeta;
-use crate::prompt::{escape_control_chars, escape_fence_attribute, fence_untrusted};
+use crate::prompt::{escape_fence_attribute, fence_untrusted};
 use crate::tool::definition::{RegisteredTool, ToolDefinition, ToolMetadata};
 use crate::tool::output_buffer::floor_char_boundary;
 use crate::tools::ToolExecutionOutput;
@@ -24,7 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Tools the kernel owns. An extension may never register, replace or remove one of these, so a
@@ -53,6 +54,17 @@ pub const SKILL_BODY_MAX_BYTES: usize = 16 * 1024;
 pub const SUBTREE_DOC_MAX_BYTES: usize = 8 * 1024;
 /// Hard cap on the total JIT subtree guidance injected across one run.
 pub const SUBTREE_TOTAL_MAX_BYTES: usize = 32 * 1024;
+/// Hard cap on the bytes captured from a command hook's stdout/stderr. The reader is started
+/// before the child is awaited, so a noisy hook can never fill an OS pipe buffer and deadlock.
+const HOOK_OUTPUT_LIMIT_BYTES: usize = 4096;
+/// Bounded post-exit drain window. `CommandHookRunner::run` must never block forever on a pipe a
+/// grandchild process still holds open, so the reader results are collected with a deadline.
+const HOOK_DRAIN_DEADLINE: Duration = Duration::from_millis(200);
+/// Grace between `SIGTERM` and `SIGKILL` when sweeping a hook's process group.
+const HOOK_KILL_GRACE: Duration = Duration::from_millis(20);
+/// How long `unregister_extension` waits for in-flight calls to observe the cancellation signal
+/// before reporting them as cancelled-but-not-drained.
+const UNMOUNT_DRAIN_WINDOW: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------------------------
 // Extension registration
@@ -127,22 +139,183 @@ pub enum ExtensionError {
     UnknownExtension(String),
     #[error("tool name '{0}' is reserved by the kernel and cannot be shadowed by an extension")]
     ReservedKernelTool(String),
+    #[error("tool name '{0}' is already provided by another mounted extension")]
+    ToolNameTaken(String),
     #[error("extension '{extension}' declares tool '{tool}' twice")]
     DuplicateTool { extension: String, tool: String },
+    #[error("skill name '{0}' is already registered")]
+    DuplicateSkill(String),
     #[error("extension '{extension}' targets unsupported API version '{found}' (expected {expected})")]
     UnsupportedApiVersion {
         extension: String,
         found: String,
         expected: String,
     },
+    #[error("extension '{extension}' contributes '{capability}' without declaring it in manifest.capabilities")]
+    UndeclaredCapability { extension: String, capability: String },
+    #[error("extension '{extension}' is project-untrusted and may not register '{capability}'")]
+    UntrustedCapability { extension: String, capability: String },
+    #[error(
+        "extension '{extension}' source checksum changed (trusted {expected}, found {found}); re-trust it explicitly before mounting"
+    )]
+    ChecksumMismatch {
+        extension: String,
+        expected: String,
+        found: String,
+    },
     #[error("invalid extension manifest: {0}")]
     InvalidManifest(String),
+}
+
+/// Skill names are used as fence attributes and catalog keys, so they are restricted to a
+/// conservative charset that cannot forge prompt structure.
+pub fn is_valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Host-side context handed to an extension tool handler. Deliberately narrow: a handler gets the
 /// capability-guarded workspace and nothing else, so loading an extension cannot widen OS access.
 pub struct CustomToolContext<'a> {
     pub workspace: &'a WorkspaceCap,
+    /// Set when the call was dispatched by a mounted extension. A long-running handler may poll
+    /// [`CustomToolContext::is_cancelled`] to stop early when the extension is unmounted mid-call.
+    pub in_flight: Option<Arc<InFlightTracker>>,
+}
+
+impl<'a> CustomToolContext<'a> {
+    pub fn new(workspace: &'a WorkspaceCap) -> Self {
+        Self {
+            workspace,
+            in_flight: None,
+        }
+    }
+
+    /// True once the owning extension was unmounted; the handler should return promptly.
+    pub fn is_cancelled(&self) -> bool {
+        self.in_flight
+            .as_ref()
+            .is_some_and(|tracker| tracker.is_cancelled())
+    }
+}
+
+/// Per-extension in-flight call accounting.
+///
+/// Shared between the registry (which owns the mount lifecycle) and every dispatch of an extension
+/// tool, so `unregister_extension` can stop new calls, signal cancellation to the calls already
+/// running, and report exactly what it could not wait for or undo.
+pub struct InFlightTracker {
+    extension_id: ExtensionId,
+    active: AtomicUsize,
+    cancelled: AtomicBool,
+    unmounted: AtomicBool,
+    side_effects: Mutex<Vec<String>>,
+}
+
+impl fmt::Debug for InFlightTracker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InFlightTracker")
+            .field("extension_id", &self.extension_id)
+            .field("active", &self.active.load(Ordering::SeqCst))
+            .field("cancelled", &self.cancelled.load(Ordering::SeqCst))
+            .finish()
+    }
+}
+
+impl InFlightTracker {
+    fn new(extension_id: ExtensionId) -> Self {
+        Self {
+            extension_id,
+            active: AtomicUsize::new(0),
+            cancelled: AtomicBool::new(false),
+            unmounted: AtomicBool::new(false),
+            side_effects: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn extension_id(&self) -> &ExtensionId {
+        &self.extension_id
+    }
+
+    /// Register a new in-flight call. Returns `None` once the extension has been unmounted, so an
+    /// unmount strictly stops new dispatches even when one raced with the lookup.
+    pub fn begin(self: &Arc<Self>) -> Option<InFlightCall> {
+        if self.unmounted.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.active.fetch_add(1, Ordering::SeqCst);
+        if self.unmounted.load(Ordering::SeqCst) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(InFlightCall {
+            tracker: Arc::clone(self),
+        })
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn is_unmounted(&self) -> bool {
+        self.unmounted.load(Ordering::SeqCst)
+    }
+
+    /// Record that a `Mutating`/`SideEffect` call completed. These are the effects an unmount
+    /// cannot roll back, so they are reported in the [`UnmountReport`].
+    pub fn record_side_effect(&self, tool_name: &str) {
+        if let Ok(mut guard) = self.side_effects.lock() {
+            guard.push(tool_name.to_string());
+        }
+    }
+
+    fn active(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    fn side_effects_snapshot(&self) -> Vec<String> {
+        self.side_effects
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// RAII guard for one in-flight extension call; dropping it ends the call's accounting.
+pub struct InFlightCall {
+    tracker: Arc<InFlightTracker>,
+}
+
+impl Drop for InFlightCall {
+    fn drop(&mut self) {
+        self.tracker.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Result of unmounting an extension: what was cancelled, what drained in time, and which effects
+/// were already committed and therefore cannot be reversed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmountReport {
+    pub extension_id: ExtensionId,
+    /// In-flight calls that were still running when the drain window expired.
+    pub cancelled_in_flight: usize,
+    /// In-flight calls that observed the cancellation signal and finished within the drain window.
+    pub drained_in_flight: usize,
+    /// `Mutating`/`SideEffect` extension tool calls that completed before the unmount.
+    pub irreversible_side_effects: Vec<String>,
+}
+
+/// A resolved extension tool dispatch: the handler plus the in-flight bookkeeping the runtime needs
+/// to gate the call against a concurrent unmount.
+#[derive(Clone)]
+pub struct ExtensionDispatch {
+    pub extension_id: ExtensionId,
+    pub tool_name: String,
+    pub effect_class: EffectClass,
+    pub handler: Arc<dyn CustomToolHandler>,
+    pub in_flight: Arc<InFlightTracker>,
 }
 
 /// Execution contract for an extension-provided tool.
@@ -197,6 +370,8 @@ pub struct ScopedExtension {
     pub policy_hooks: Vec<Arc<dyn PolicyHook>>,
     pub observer_hooks: Vec<Arc<dyn ObserverHook>>,
     pub skills: Vec<SkillEntry>,
+    /// Optional teardown callback, invoked once when the extension is unmounted.
+    pub cleanup: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ScopedExtension {
@@ -207,6 +382,7 @@ impl ScopedExtension {
             policy_hooks: Vec::new(),
             observer_hooks: Vec::new(),
             skills: Vec::new(),
+            cleanup: None,
         }
     }
 
@@ -229,6 +405,11 @@ impl ScopedExtension {
         self.skills.push(skill);
         self
     }
+
+    pub fn with_cleanup(mut self, cleanup: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.cleanup = Some(cleanup);
+        self
+    }
 }
 
 /// A mounted extension. Dropping it does not unmount; the registry owns the lifecycle so unmount
@@ -245,6 +426,7 @@ struct RegisteredExtensionTool {
     metadata: ToolMetadata,
     handler: Arc<dyn CustomToolHandler>,
     extension_id: ExtensionId,
+    in_flight: Arc<InFlightTracker>,
 }
 
 impl fmt::Debug for RegisteredExtensionTool {
@@ -267,6 +449,11 @@ pub struct ExtensionState {
     observer_hooks: Vec<(ExtensionId, Arc<dyn ObserverHook>)>,
     skills: BTreeMap<String, SkillEntry>,
     manifests: BTreeMap<ExtensionId, ExtensionManifest>,
+    /// Trusted source checksums, keyed by extension id. Deliberately survives an unmount so a
+    /// changed extension source must be re-trusted before it can be mounted again.
+    trusted_checksums: BTreeMap<String, String>,
+    /// Per-extension teardown callbacks, run once on unmount.
+    cleanups: BTreeMap<String, Vec<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl fmt::Debug for ExtensionState {
@@ -304,8 +491,24 @@ impl ExtensionState {
             .collect()
     }
 
-    pub fn handler_for(&self, name: &str) -> Option<Arc<dyn CustomToolHandler>> {
-        self.tools.get(name).map(|tool| Arc::clone(&tool.handler))
+    pub fn dispatch_for(&self, name: &str) -> Option<ExtensionDispatch> {
+        self.tools.get(name).map(|tool| ExtensionDispatch {
+            extension_id: tool.extension_id.clone(),
+            tool_name: tool.definition.name.clone(),
+            effect_class: tool.metadata.effect_class,
+            handler: Arc::clone(&tool.handler),
+            in_flight: Arc::clone(&tool.in_flight),
+        })
+    }
+
+    /// Re-trust an extension whose source checksum changed. Operator-only: a project-supplied
+    /// extension can never grant itself this.
+    pub fn retrust_checksum(&mut self, id: &ExtensionId, checksum: impl Into<String>) {
+        self.trusted_checksums.insert(id.0.clone(), checksum.into());
+    }
+
+    pub fn trusted_checksum(&self, id: &ExtensionId) -> Option<&str> {
+        self.trusted_checksums.get(&id.0).map(|s| s.as_str())
     }
 
     pub fn policy_hooks(&self) -> Vec<Arc<dyn PolicyHook>> {
@@ -346,13 +549,84 @@ impl ExtensionState {
             return Err(ExtensionError::DuplicateExtension(id.0));
         }
 
+        // Capability matrix: every contributed surface must be declared in `manifest.capabilities`,
+        // so an extension cannot silently acquire a capability it never advertised.
+        let declared: BTreeSet<&str> = ext
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect();
+        let require_capability = |capability: &str| -> Result<(), ExtensionError> {
+            if declared.contains(capability) {
+                Ok(())
+            } else {
+                Err(ExtensionError::UndeclaredCapability {
+                    extension: id.0.clone(),
+                    capability: capability.to_string(),
+                })
+            }
+        };
+        if !ext.tools.is_empty() {
+            require_capability("tools")?;
+        }
+        if !ext.policy_hooks.is_empty() {
+            require_capability("policy_hook")?;
+        }
+        if !ext.observer_hooks.is_empty() {
+            require_capability("observer_hook")?;
+        }
+        if !ext.skills.is_empty() {
+            require_capability("skills")?;
+        }
+
+        // Trust boundary: a project-discovered extension may only ever contribute read-only tools,
+        // telemetry hooks and skills. Gating tool use (`PolicyHook`) or mutating the workspace
+        // requires explicit operator trust.
+        if ext.manifest.trust_level == ExtensionTrustLevel::ProjectUntrusted {
+            if !ext.policy_hooks.is_empty() {
+                return Err(ExtensionError::UntrustedCapability {
+                    extension: id.0.clone(),
+                    capability: "policy_hook".to_string(),
+                });
+            }
+            for tool in &ext.tools {
+                if tool.metadata.effect_class != EffectClass::ReadOnly {
+                    return Err(ExtensionError::UntrustedCapability {
+                        extension: id.0.clone(),
+                        capability: format!(
+                            "tool '{}' ({:?})",
+                            tool.definition.name, tool.metadata.effect_class
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Source checksum re-trust: once a digest is pinned, a different digest is refused until an
+        // operator explicitly re-trusts the extension.
+        if let Some(checksum) = ext.manifest.checksum.as_deref() {
+            if let Some(pinned) = self.trusted_checksums.get(&id.0) {
+                if pinned != checksum {
+                    return Err(ExtensionError::ChecksumMismatch {
+                        extension: id.0.clone(),
+                        expected: pinned.clone(),
+                        found: checksum.to_string(),
+                    });
+                }
+            }
+        }
+
         // Validate the whole contribution first: no partial mount on failure.
         let mut staged: Vec<(String, RegisteredExtensionTool)> = Vec::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for tool in ext.tools {
             let name = tool.definition.name.clone();
-            if RESERVED_KERNEL_TOOLS.contains(&name.as_str()) || self.tools.contains_key(&name) {
+            if RESERVED_KERNEL_TOOLS.contains(&name.as_str()) {
                 return Err(ExtensionError::ReservedKernelTool(name));
+            }
+            if self.tools.contains_key(&name) {
+                return Err(ExtensionError::ToolNameTaken(name));
             }
             if !seen.insert(name.clone()) {
                 return Err(ExtensionError::DuplicateTool {
@@ -367,14 +641,28 @@ impl ExtensionState {
                     metadata: tool.metadata,
                     handler: tool.handler,
                     extension_id: id.clone(),
+                    in_flight: Arc::new(InFlightTracker::new(id.clone())),
                 },
             ));
         }
+        let mut seen_skills: BTreeSet<String> = BTreeSet::new();
         for skill in &ext.skills {
-            if skill.name.trim().is_empty() {
+            let name = skill.name.trim();
+            if name.is_empty() {
                 return Err(ExtensionError::InvalidManifest(
                     "skill name must not be empty".to_string(),
                 ));
+            }
+            if !is_valid_skill_name(name) {
+                return Err(ExtensionError::InvalidManifest(format!(
+                    "invalid skill name '{}': expected characters [A-Za-z0-9._-]",
+                    name
+                )));
+            }
+            // A collision would overwrite another extension's (or a workspace) skill and break the
+            // byte-for-byte reversibility guarantee, so it is rejected before anything is committed.
+            if !seen_skills.insert(name.to_string()) || self.skills.contains_key(name) {
+                return Err(ExtensionError::DuplicateSkill(name.to_string()));
             }
         }
 
@@ -394,21 +682,72 @@ impl ExtensionState {
             skill.extension_id = Some(id.clone());
             self.skills.insert(skill.name.clone(), skill);
         }
+        if let Some(checksum) = ext.manifest.checksum.clone() {
+            self.trusted_checksums.insert(id.0.clone(), checksum);
+        }
+        if let Some(cleanup) = ext.cleanup {
+            self.cleanups.entry(id.0.clone()).or_default().push(cleanup);
+        }
         self.manifests.insert(id.clone(), ext.manifest);
         Ok(id)
     }
 
     /// Unmount an extension and restore every surface to its pre-mount state.
-    pub fn unregister(&mut self, id: &ExtensionId) -> Result<(), ExtensionError> {
+    ///
+    /// New dispatches stop immediately, in-flight calls are signalled and given a bounded drain
+    /// window, extension cleanup callbacks run, and the report records what could not be drained or
+    /// reversed. The trusted-checksum pin is intentionally kept so a changed source needs re-trust.
+    pub fn unregister(&mut self, id: &ExtensionId) -> Result<UnmountReport, ExtensionError> {
         if !self.manifests.contains_key(id) {
             return Err(ExtensionError::UnknownExtension(id.0.clone()));
         }
+
+        // 1. Stop new calls and signal cancellation to every in-flight call of this extension.
+        let trackers: Vec<Arc<InFlightTracker>> = self
+            .tools
+            .values()
+            .filter(|tool| &tool.extension_id == id)
+            .map(|tool| Arc::clone(&tool.in_flight))
+            .collect();
+        let in_flight_before: usize = trackers.iter().map(|tracker| tracker.active()).sum();
+        for tracker in &trackers {
+            tracker.unmounted.store(true, Ordering::SeqCst);
+            tracker.cancelled.store(true, Ordering::SeqCst);
+        }
+
+        // 2. Bounded drain window: a cooperative handler observes the signal and returns promptly.
+        let deadline = Instant::now() + UNMOUNT_DRAIN_WINDOW;
+        while trackers.iter().any(|tracker| tracker.active() > 0) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let remaining: usize = trackers.iter().map(|tracker| tracker.active()).sum();
+        let mut irreversible_side_effects: Vec<String> = trackers
+            .iter()
+            .flat_map(|tracker| tracker.side_effects_snapshot())
+            .collect();
+        irreversible_side_effects.sort();
+        irreversible_side_effects.dedup();
+
+        // 3. Run teardown callbacks in reverse registration order before removing the surfaces.
+        if let Some(callbacks) = self.cleanups.remove(&id.0) {
+            for callback in callbacks.into_iter().rev() {
+                callback();
+            }
+        }
+
+        // 4. Remove every contributed surface.
         self.tools.retain(|_, tool| &tool.extension_id != id);
         self.policy_hooks.retain(|(owner, _)| owner != id);
         self.observer_hooks.retain(|(owner, _)| owner != id);
         self.skills.retain(|_, skill| skill.extension_id.as_ref() != Some(id));
         self.manifests.remove(id);
-        Ok(())
+
+        Ok(UnmountReport {
+            extension_id: id.clone(),
+            cancelled_in_flight: remaining,
+            drained_in_flight: in_flight_before.saturating_sub(remaining),
+            irreversible_side_effects,
+        })
     }
 }
 
@@ -620,6 +959,24 @@ pub struct CommandHookOutcome {
     pub stdout: String,
 }
 
+/// Sweep a hook's whole process group so no background grandchild can keep the inherited
+/// stdout/stderr pipe FDs open after the direct child exits.
+#[cfg(unix)]
+fn sweep_process_group(pgid: i32) {
+    if pgid > 1 {
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+        std::thread::sleep(HOOK_KILL_GRACE);
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn sweep_process_group(_pgid: i32) {}
+
 impl CommandHookRunner {
     pub fn new(argv: Vec<String>) -> Self {
         Self {
@@ -678,6 +1035,39 @@ impl CommandHookRunner {
             });
         }
 
+        // Start bounded readers *before* waiting on the child: a hook that writes more than an OS
+        // pipe buffer holds while the parent is inside `try_wait` would otherwise deadlock.
+        let (out_tx, out_rx) = std::sync::mpsc::channel();
+        let (err_tx, err_rx) = std::sync::mpsc::channel();
+        match child.stdout.take() {
+            Some(out) => {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = out
+                        .take((HOOK_OUTPUT_LIMIT_BYTES + 1) as u64)
+                        .read_to_end(&mut buf);
+                    let _ = out_tx.send(buf);
+                });
+            }
+            None => {
+                let _ = out_tx.send(Vec::new());
+            }
+        }
+        match child.stderr.take() {
+            Some(err) => {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = err
+                        .take((HOOK_OUTPUT_LIMIT_BYTES + 1) as u64)
+                        .read_to_end(&mut buf);
+                    let _ = err_tx.send(buf);
+                });
+            }
+            None => {
+                let _ = err_tx.send(Vec::new());
+            }
+        }
+
         let deadline = Instant::now() + self.timeout;
         let mut timed_out = false;
         let status = loop {
@@ -691,25 +1081,20 @@ impl CommandHookRunner {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 Err(e) => {
+                    sweep_process_group(pgid);
                     return Err(HookError::Failed(
                         hook_name,
                         format!("failed to wait for hook: {}", e),
-                    ))
+                    ));
                 }
             }
         };
 
+        // Sweep the process group on *every* exit path. A background grandchild that inherited
+        // stdout/stderr would otherwise keep the pipe FDs open and hang the drain below.
+        sweep_process_group(pgid);
+
         if timed_out {
-            #[cfg(unix)]
-            if pgid > 1 {
-                unsafe {
-                    libc::kill(-pgid, libc::SIGTERM);
-                }
-                std::thread::sleep(Duration::from_millis(50));
-                unsafe {
-                    libc::kill(-pgid, libc::SIGKILL);
-                }
-            }
             let _ = child.kill();
             let _ = child.wait();
             return Err(HookError::Timeout(
@@ -718,20 +1103,13 @@ impl CommandHookRunner {
             ));
         }
 
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        if let Some(mut out) = child.stdout.take() {
-            let _ = out.read_to_string(&mut stdout);
-        }
-        if let Some(mut err) = child.stderr.take() {
-            let _ = err.read_to_string(&mut stderr);
-        }
-        #[cfg(unix)]
-        if pgid > 1 {
-            unsafe {
-                libc::kill(-pgid, libc::SIGTERM);
-            }
-        }
+        let _ = child.wait();
+
+        // Bounded drain: `run` may never block forever, even if a grandchild survived the sweep.
+        let stdout_bytes = out_rx.recv_timeout(HOOK_DRAIN_DEADLINE).unwrap_or_default();
+        let stderr_bytes = err_rx.recv_timeout(HOOK_DRAIN_DEADLINE).unwrap_or_default();
+        let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+        let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
         let code = status.and_then(|s| s.code());
         let mut message = stdout.trim().to_string();
@@ -1186,8 +1564,9 @@ impl SubtreeContextTracker {
     /// Load not-yet-seen ancestor `AGENTS.md`/`CLAUDE.md` documents for `rel_path`.
     ///
     /// Reads go through `WorkspaceCap::open_existing_no_symlink`, so symlinked or sensitive
-    /// documents are refused atomically. A directory is marked as visited even when it has no
-    /// guidance file, which keeps the per-tool-call stat cost bounded.
+    /// documents are refused atomically. A directory that exists but has no guidance file yet is
+    /// remembered so the per-tool-call stat cost stays bounded; a directory that does not exist yet
+    /// is *not* remembered, because a later `write` may create its `AGENTS.md`.
     pub fn load_for_path(
         &mut self,
         workspace: &WorkspaceCap,
@@ -1197,13 +1576,17 @@ impl SubtreeContextTracker {
             return Vec::new();
         }
         let mut loads = Vec::new();
-        for dir in Self::ancestor_dirs(rel_path) {
-            if !self.loaded_dirs.insert(dir.clone()) {
+        for dir in Self::candidate_dirs(workspace, rel_path) {
+            if self.loaded_dirs.contains(&dir) {
                 continue;
             }
             let Some((file_name, text)) = read_subtree_doc(workspace, &dir) else {
+                if workspace.read_dir_no_symlink(&dir).is_ok() {
+                    self.loaded_dirs.insert(dir);
+                }
                 continue;
             };
+            self.loaded_dirs.insert(dir.clone());
             let remaining = self.total_budget.saturating_sub(self.total_bytes);
             if remaining == 0 {
                 break;
@@ -1213,12 +1596,18 @@ impl SubtreeContextTracker {
                 escape_fence_attribute(&dir),
                 escape_fence_attribute(file_name)
             );
-            let rendered = fence_untrusted(
-                "untrusted_subtree_context",
-                &attrs,
-                &text,
-                remaining.min(SUBTREE_DOC_MAX_BYTES),
-            );
+            // Size the body cap so the *whole* rendered fence fits the remaining cumulative budget,
+            // not just the body: otherwise the fixed fence wrapper could push the total over it.
+            let body_cap = remaining
+                .saturating_sub(crate::prompt::fence_overhead_bytes(
+                    "untrusted_subtree_context",
+                    &attrs,
+                ))
+                .min(SUBTREE_DOC_MAX_BYTES);
+            if body_cap == 0 {
+                break;
+            }
+            let rendered = fence_untrusted("untrusted_subtree_context", &attrs, &text, body_cap);
             self.total_bytes += rendered.len();
             loads.push(SubtreeContextLoad {
                 directory: dir,
@@ -1228,6 +1617,23 @@ impl SubtreeContextTracker {
             });
         }
         loads
+    }
+
+    /// Ancestor directories of `rel_path`, shallowest first, plus the target itself when it is an
+    /// existing directory (so `ls a/b` also loads `a/b/AGENTS.md`, not just `a/AGENTS.md`).
+    fn candidate_dirs(workspace: &WorkspaceCap, rel_path: &str) -> Vec<String> {
+        let mut dirs = Self::ancestor_dirs(rel_path);
+        if let Ok(normalized) = WorkspaceCap::validate_relative_components(rel_path) {
+            let text = normalized.to_string_lossy().to_string();
+            if !text.is_empty()
+                && text != "."
+                && !dirs.contains(&text)
+                && workspace.read_dir_no_symlink(&text).is_ok()
+            {
+                dirs.push(text);
+            }
+        }
+        dirs
     }
 }
 
@@ -1351,7 +1757,9 @@ fn parse_skill(dir_name: &str, path: &str, raw: &str) -> SkillEntry {
                 };
                 let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
                 match key.trim() {
-                    "name" if !value.is_empty() => name = value,
+                    // A hostile frontmatter `name:` cannot inject a fence attribute: anything
+                    // outside the conservative charset falls back to the directory name.
+                    "name" if !value.is_empty() && is_valid_skill_name(&value) => name = value,
                     "description" if !value.is_empty() => description = value,
                     _ => {}
                 }
@@ -1412,8 +1820,8 @@ pub fn execute_activate_skill(catalog: &[SkillEntry], raw_args: &str) -> ToolExe
             for skill in catalog {
                 out.push_str(&format!(
                     "  {}  —  {}\n",
-                    escape_control_chars(&skill.name),
-                    escape_control_chars(&skill.description)
+                    escape_fence_attribute(&skill.name),
+                    escape_fence_attribute(&skill.description)
                 ));
             }
             out
@@ -1433,10 +1841,12 @@ pub fn execute_activate_skill(catalog: &[SkillEntry], raw_args: &str) -> ToolExe
     let name = name.unwrap();
     match catalog.iter().find(|skill| skill.name == name) {
         Some(skill) => {
+            // The header sits outside the fence, so it uses the same attribute escaping as the
+            // fence itself: a hostile `SKILL.md` cannot inject prompt text or fake fence tags.
             let header = format!(
                 "[Activated skill: {} — {}]\n{}\n",
-                escape_control_chars(&skill.name),
-                escape_control_chars(&skill.description),
+                escape_fence_attribute(&skill.name),
+                escape_fence_attribute(&skill.description),
                 skill.render()
             );
             ToolExecutionOutput::success(header, ToolResultMeta::default())
@@ -1445,7 +1855,7 @@ pub fn execute_activate_skill(catalog: &[SkillEntry], raw_args: &str) -> ToolExe
             ErrorCode::InvalidArguments,
             format!(
                 "unknown skill '{}'\n{}",
-                escape_control_chars(&name),
+                escape_fence_attribute(&name),
                 listing(catalog)
             ),
             ToolResultMeta::default(),

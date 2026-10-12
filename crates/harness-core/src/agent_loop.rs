@@ -18,9 +18,11 @@ use crate::revision::{RevisionId, SnapshotStore};
 use crate::extensions::{
     is_subtree_context_tool, HookContext, HookEvaluation, SubtreeContextTracker,
 };
+use crate::tool::policy::PolicyCheckResult;
 use crate::tool::runtime::ToolRuntime;
 use crate::tools::recall_evidence::execute_recall_evidence;
-use crate::types::{ErrorCode, RunId, RunStatus, TerminalReason};
+use crate::tools::ToolExecutionOutput;
+use crate::types::{EffectClass, ErrorCode, RunId, RunStatus, TerminalReason};
 use std::collections::HashSet;
 use sha2::Digest;
 use std::sync::Arc;
@@ -284,6 +286,10 @@ impl AgentRunner {
             projector.restore_last_touched(
                 checkpoint.last_touched.into_iter().map(|item| (item.path, item.last_touched_turn))
             );
+            // Gate 3: restore the subtree directories whose JIT guidance is already present in the
+            // restored (still active) transcript, so `--resume` / `--fork` never re-inject it.
+            self.subtree_tracker
+                .restore_loaded_dirs(checkpoint.subtree_dirs.iter().cloned());
         }
         // Gate 2: re-seed the raw-evidence store from the WAL so `recall_evidence` can still resolve
         // stubs compacted in an earlier process. The WAL keeps the pre-overlay (raw) item for every
@@ -822,6 +828,18 @@ impl AgentRunner {
                 );
             }
 
+            // Gate 3: checkpoint the post-batch leaf so the `subtree_dirs` (and pinned baseline /
+            // last-touched ledger) loaded by *this* batch survive a later `--resume` / `--fork`,
+            // even when the run ends here (`MaxTurns`, `MaxToolCalls`, `LoopDetected`, cancellation).
+            self.persist_session_checkpoint(&projector, &transcript, current_turn);
+            if let Some(err) = self.session_persist_error.clone() {
+                return self.finish_run(
+                    TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
+                    &budget_tracker, &projector, modified_files_set.into_iter().collect(),
+                    last_assistant_text, transcript, logger,
+                );
+            }
+
             if let Some(abort_reason) = batch_abort {
                 let mut mod_list: Vec<String> = modified_files_set.into_iter().collect();
                 mod_list.sort();
@@ -1221,6 +1239,14 @@ impl AgentRunner {
                                 decision: dec.clone(),
                                 reason: None,
                             });
+                            // A policy-hook denial means the call never ran, so it must not count
+                            // toward the loop/oscillation detectors.
+                            if dec == "deny_policy_hook" {
+                                loop_guard.rollback_recorded(&LoopGuard::compute_signature(
+                                    &call.name,
+                                    &call.raw_arguments,
+                                ));
+                            }
                         }
                         if let Some(ref path) = msg.meta.relative_path {
                             loop_guard.record_file_tool_outcome(
@@ -1323,32 +1349,94 @@ impl AgentRunner {
                             )
                             .is_ok();
                     let (mut msg, decision, serial_hook_evaluations) = if recall_available {
-                        // Gate 2: resolve the stub's raw evidence against the live projector store
-                        // (seeded from the WAL on `--resume`). Read-only, so no approval is needed.
-                        let out = execute_recall_evidence(projector, &call.raw_arguments);
-                        // Evidence-recovery success-rate telemetry for the Gate 2 evaluation.
-                        if out.outcome.is_success() {
-                            projector.record_recall_hit();
-                        } else {
-                            projector.record_recall_miss();
+                        // Gate 3: `recall_evidence` is dispatched here because it resolves against the
+                        // live transcript, but it still runs the exact same fail-closed `PreToolUse`
+                        // policy-hook gate, kernel `PolicyEngine` evaluation and fail-open
+                        // `PostToolUse` observer pipeline as every tool routed through the runtime.
+                        match self
+                            .tool_runtime
+                            .pre_tool_hook_gate(call, budget_tracker.turns_used())
+                            .await
+                        {
+                            Err((denied, mut hooks)) => {
+                                // PostToolUse observers run for denied calls too, exactly as in
+                                // `ToolRuntime::execute_call`.
+                                hooks.extend(
+                                    self.tool_runtime
+                                        .post_tool_hooks(call, budget_tracker.turns_used(), &denied)
+                                        .await,
+                                );
+                                (denied, "deny_policy_hook".to_string(), hooks)
+                            }
+                            Ok(mut hooks) => {
+                                let check = self.tool_runtime.policy_engine().evaluate(
+                                    &call.name,
+                                    EffectClass::ReadOnly,
+                                    false,
+                                );
+                                let (message, decision) = if let PolicyCheckResult::Deny(reason) = check
+                                {
+                                    let out = ToolExecutionOutput::error(
+                                        ErrorCode::PolicyDenied,
+                                        format!("{} ({})", reason, call.name),
+                                        ToolResultMeta {
+                                            relative_path: rel_path.clone(),
+                                            ..Default::default()
+                                        },
+                                    );
+                                    (
+                                        ToolResultMessage {
+                                            call_id: call.call_id.clone(),
+                                            tool_name: call.name.clone(),
+                                            outcome: out.outcome,
+                                            content: Arc::from(out.content),
+                                            meta: out.meta,
+                                        },
+                                        format!("deny:{}", reason),
+                                    )
+                                } else {
+                                    // Gate 2: resolve the stub's raw evidence against the live
+                                    // projector store (seeded from the WAL on `--resume`).
+                                    let out = execute_recall_evidence(projector, &call.raw_arguments);
+                                    if out.outcome.is_success() {
+                                        projector.record_recall_hit();
+                                    } else {
+                                        projector.record_recall_miss();
+                                    }
+                                    (
+                                        ToolResultMessage {
+                                            call_id: call.call_id.clone(),
+                                            tool_name: call.name.clone(),
+                                            outcome: out.outcome,
+                                            content: Arc::from(out.content),
+                                            meta: out.meta,
+                                        },
+                                        "allow_evidence".to_string(),
+                                    )
+                                };
+                                hooks.extend(
+                                    self.tool_runtime
+                                        .post_tool_hooks(call, budget_tracker.turns_used(), &message)
+                                        .await,
+                                );
+                                (message, decision, hooks)
+                            }
                         }
-                        (
-                            ToolResultMessage {
-                                call_id: call.call_id.clone(),
-                                tool_name: call.name.clone(),
-                                outcome: out.outcome,
-                                content: Arc::from(out.content),
-                                meta: out.meta,
-                            },
-                            "allow_evidence".to_string(),
-                            Vec::new(),
-                        )
                     } else {
                         self.tool_runtime
                             .execute_call(call, budget_tracker.turns_used(), self.cancel_rx.clone())
                             .await
                     };
                     Self::log_hook_evaluations(logger, &serial_hook_evaluations);
+
+                    // A call denied by a `PreToolUse` policy hook never executed, so it must not
+                    // count toward the loop/oscillation detectors.
+                    if decision == "deny_policy_hook" {
+                        loop_guard.rollback_recorded(&LoopGuard::compute_signature(
+                            &call.name,
+                            &call.raw_arguments,
+                        ));
+                    }
 
                     // O1: a `bash` call can rewrite the workspace without setting `modified_file`,
                     // so flag the batch for a post-batch revision capture.

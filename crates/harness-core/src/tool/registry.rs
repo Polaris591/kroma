@@ -1,5 +1,6 @@
 use crate::extensions::{
-    ExtensionError, ExtensionId, ExtensionState, HookEngine, ScopedExtension, SkillEntry,
+    ExtensionDispatch, ExtensionError, ExtensionId, ExtensionState, HookEngine, ScopedExtension,
+    SkillEntry, UnmountReport,
 };
 use crate::tool::definition::{builtin_tool_registrations, RegisteredTool, ToolDefinition};
 use crate::tool::policy::{PolicyEngine, PolicyMode};
@@ -72,15 +73,33 @@ impl ToolRegistry {
         self.extensions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Mount an extension. Rejects reserved kernel tool names, duplicate extensions and a mismatched
-    /// API version before mutating anything, so a failed mount is a no-op.
+    /// Mount an extension. Rejects reserved kernel tool names, duplicate extensions, undeclared
+    /// capabilities, trust-level violations, duplicate skill names and a mismatched API version
+    /// before mutating anything, so a failed mount is a no-op.
     pub fn register_extension(&self, ext: ScopedExtension) -> Result<ExtensionId, ExtensionError> {
+        // A skill contributed by an extension may not shadow a workspace-discovered skill: that
+        // would silently change which body `activate_skill` returns and break reversibility.
+        for skill in &ext.skills {
+            if self.workspace_skills.iter().any(|s| s.name == skill.name) {
+                return Err(ExtensionError::DuplicateSkill(skill.name.clone()));
+            }
+        }
         self.ext().register(ext)
     }
 
-    /// Unmount an extension, removing every tool, hook and skill it contributed.
-    pub fn unregister_extension(&self, id: &ExtensionId) -> Result<(), ExtensionError> {
+    /// Unmount an extension, removing every tool, hook and skill it contributed. In-flight calls
+    /// are signalled and drained within a bounded window; the report records what was cancelled and
+    /// which irreversible side effects already happened.
+    pub fn unregister_extension(
+        &self,
+        id: &ExtensionId,
+    ) -> Result<UnmountReport, ExtensionError> {
         self.ext().unregister(id)
+    }
+
+    /// Re-trust an extension whose source checksum changed (operator-only).
+    pub fn retrust_extension_checksum(&self, id: &ExtensionId, checksum: impl Into<String>) {
+        self.ext().retrust_checksum(id, checksum);
     }
 
     /// Mounted extension ids, in deterministic order.
@@ -93,12 +112,9 @@ impl ToolRegistry {
         self.ext().is_empty()
     }
 
-    /// Handler for an extension-provided tool, if one is mounted under that name.
-    pub fn extension_handler(
-        &self,
-        name: &str,
-    ) -> Option<Arc<dyn crate::extensions::CustomToolHandler>> {
-        self.ext().handler_for(name)
+    /// Resolved dispatch for an extension-provided tool, if one is mounted under that name.
+    pub fn extension_dispatch(&self, name: &str) -> Option<ExtensionDispatch> {
+        self.ext().dispatch_for(name)
     }
 
     /// Every tool currently registered (kernel + extension), in strict ASCII ascending order.

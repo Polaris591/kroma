@@ -1143,13 +1143,13 @@ async fn main() -> ExitCode {
         }
     }
 
-    // Gate 3: subtree JIT context. A `--fork` rewind abandons the branch whose subtree guidance is
-    // no longer in context, so the loaded-directory set is only restored on a plain `--resume`.
+    // Gate 3: subtree JIT context. `--fork <TURN>` has already rewound the session leaf to a turn
+    // `<= TURN`, so `latest_active_checkpoint()` returns the checkpoint on the *rewound* branch: the
+    // directories whose guidance is still present in that branch's transcript must be restored for
+    // a fork exactly as for a plain resume, or they would be re-injected on touch.
     let mut subtree_tracker = SubtreeContextTracker::new(!cli.no_subtree_context);
-    if cli.fork_turn.is_none() {
-        if let Some(checkpoint) = session.latest_active_checkpoint() {
-            subtree_tracker.restore_loaded_dirs(checkpoint.subtree_dirs.clone());
-        }
+    if let Some(checkpoint) = session.latest_active_checkpoint() {
+        subtree_tracker.restore_loaded_dirs(checkpoint.subtree_dirs.clone());
     }
 
     let runtime = build_runtime_with_registry(registry, env, policy_engine, budget);

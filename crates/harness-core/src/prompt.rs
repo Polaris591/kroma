@@ -299,22 +299,48 @@ pub fn sanitize_untrusted_doc(doc: &str) -> String {
     }
     // Neutralize any closing/opening fence-tag attempt (case-insensitive). Escaping every angle
     // bracket in the body is the only way to guarantee a hostile `</tag>` cannot terminate the
-    // fence early, so it is done unconditionally once any known tag name appears.
+    // fence early, so it is done unconditionally once any known tag name appears. A partial tag
+    // (e.g. one truncated at a byte boundary) is still caught by the `</` check.
     let lower = out.to_ascii_lowercase();
-    if UNTRUSTED_FENCE_TAGS.iter().any(|tag| lower.contains(tag)) {
+    if UNTRUSTED_FENCE_TAGS.iter().any(|tag| lower.contains(tag)) || out.contains("</") {
         out = out.replace('<', "&lt;").replace('>', "&gt;");
     }
     out
 }
 
+/// Truncate `s` to at most `max` bytes on a UTF-8 boundary without splitting an HTML entity that
+/// sanitization introduced (e.g. `&lt;`), so a truncated fence body can never leave a dangling `&l`.
+fn floor_entity_boundary(s: &str, max: usize) -> usize {
+    let cut = crate::tool::output_buffer::floor_char_boundary(s, max);
+    if let Some(amp) = s[..cut].rfind('&') {
+        if !s[amp..cut].contains(';') {
+            return amp;
+        }
+    }
+    cut
+}
+
+/// Exact byte length of the `<tag attrs>\n…\n</tag>` wrapper, excluding the body.
+///
+/// Callers that must respect a *cumulative* byte budget use this to size the body cap so the whole
+/// rendered fence stays within the remaining budget.
+pub fn fence_overhead_bytes(tag: &str, attrs: &str) -> usize {
+    2 * tag.len() + attrs.len() + 7
+}
+
 /// Wrap an untrusted body in a paired `<tag attrs> ... </tag>` fence.
 ///
-/// The body is control/Bidi escaped and any embedded fence-tag attempt is neutralized, then the
-/// *inner* payload is truncated to `max_body_bytes` before the closing tag is appended, so a
-/// truncated body can never swallow the closing boundary.
+/// The body is control/Bidi escaped and any embedded fence-tag attempt (including one matching the
+/// caller-supplied `tag`, which need not be a member of [`UNTRUSTED_FENCE_TAGS`]) is neutralized.
+/// The *inner* payload is truncated before the closing tag is appended, so a truncated body can
+/// never swallow the closing boundary.
 pub fn fence_untrusted(tag: &str, attrs: &str, body: &str, max_body_bytes: usize) -> String {
-    let sanitized = sanitize_untrusted_doc(body);
-    let cut = crate::tool::output_buffer::floor_char_boundary(&sanitized, max_body_bytes);
+    let mut sanitized = sanitize_untrusted_doc(body);
+    let lower_tag = tag.to_ascii_lowercase();
+    if !lower_tag.is_empty() && sanitized.to_ascii_lowercase().contains(&lower_tag) {
+        sanitized = sanitized.replace('<', "&lt;").replace('>', "&gt;");
+    }
+    let cut = floor_entity_boundary(&sanitized, max_body_bytes);
     format!(
         "<{}{}>\n{}\n</{}>",
         tag,
@@ -325,11 +351,34 @@ pub fn fence_untrusted(tag: &str, attrs: &str, body: &str, max_body_bytes: usize
 }
 
 /// Escape a value that will be interpolated into a fence tag's double-quoted attribute.
+///
+/// All HTML-significant characters (`&`, `<`, `>`, `"`, `'`) and control/Bidi characters are
+/// escaped, so an untrusted name can never break out of the attribute or forge a fence tag.
 pub fn escape_fence_attribute(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
-    for ch in escape_control_chars(value).chars() {
+    for ch in value.chars() {
+        let cp = ch as u32;
+        let is_bidi_or_sep = matches!(
+            cp,
+            0x061C | 0x200E | 0x200F | 0x2028..=0x202E | 0x2066..=0x2069
+        );
         match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ if ch.is_control() || cp < 0x20 || cp == 0x7f || is_bidi_or_sep => {
+                if cp <= 0xff {
+                    out.push_str(&format!("\\x{:02x}", cp));
+                } else {
+                    out.push_str(&format!("\\u{{{:04x}}}", cp));
+                }
+            }
             _ => out.push(ch),
         }
     }

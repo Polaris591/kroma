@@ -168,6 +168,21 @@ impl LoopGuard {
         self.recent_signatures.push_back(sig);
     }
 
+    /// Undo the recording made by [`LoopGuard::check_and_record`] for `signature`.
+    ///
+    /// A `PreToolUse` policy hook may still deny a call after it was recorded. A call that never
+    /// executed must not count toward the oscillation detectors, so its signature is removed from
+    /// the sliding window.
+    pub fn rollback_recorded(&mut self, signature: &str) {
+        if let Some(pos) = self
+            .recent_signatures
+            .iter()
+            .rposition(|recorded| recorded == signature)
+        {
+            self.recent_signatures.remove(pos);
+        }
+    }
+
     /// Record the outcome of a tool execution on a file path to maintain the per-file edit failure streak.
     pub fn record_file_tool_outcome(&mut self, tool_name: &str, path: &str, success: bool) -> usize {
         let norm_path = clean_relative_path(path);

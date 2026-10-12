@@ -19,9 +19,10 @@ use harness_core::env::LocalHostEnv;
 use harness_core::events::{EventLogger, EventPayload};
 use harness_core::extensions::{
     discover_skills, execute_activate_skill, CommandObserverHook, CommandPolicyHook,
-    CustomToolContext, ExtensionError, ExtensionManifest, HookContext, HookEngine, HookError,
-    HookEvent, ObserverHook, PolicyHook, PolicyHookDecision, ScopedExtension, ScopedToolDefinition,
-    SubtreeContextTracker, EXTENSION_API_VERSION, SUBTREE_DOC_MAX_BYTES,
+    CustomToolContext, CustomToolHandler, ExtensionError, ExtensionManifest,
+    ExtensionTrustLevel, HookContext, HookEngine, HookError, HookEvent, ObserverHook, PolicyHook,
+    PolicyHookDecision, ScopedExtension, ScopedToolDefinition, SkillEntry, SubtreeContextTracker,
+    EXTENSION_API_VERSION, SUBTREE_DOC_MAX_BYTES, SUBTREE_TOTAL_MAX_BYTES,
 };
 use harness_core::messages::{
     AssistantTurn, FinishReason, ToolCall, ToolOutcome, ToolResultMeta, TranscriptItem,
@@ -38,6 +39,7 @@ use harness_core::workspace::WorkspaceCap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -59,6 +61,21 @@ fn read_only_engine() -> PolicyEngine {
 
 fn ask_engine() -> PolicyEngine {
     PolicyEngine::new(PolicyMode::Ask, Arc::new(NonInteractiveApprovalHandler))
+}
+
+fn allow_write_engine() -> PolicyEngine {
+    PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler))
+}
+
+/// A skill entry with a fixed body, used by the collision and trust-boundary tests.
+fn skill(name: &str) -> SkillEntry {
+    SkillEntry {
+        name: name.to_string(),
+        description: format!("{} description", name),
+        body: format!("{} body", name),
+        path: format!("<extension>{}", name),
+        extension_id: None,
+    }
 }
 
 fn call(name: &str, args: &str) -> ToolCall {
@@ -113,12 +130,20 @@ fn echo_tool(name: &str, effect: EffectClass, prefix: &'static str) -> ScopedToo
     )
 }
 
+/// A manifest that declares every capability the test extensions use, so capability-matrix
+/// enforcement never masks the invariant under test. Tests that exercise the matrix build their
+/// own manifest.
 fn manifest(name: &str) -> ExtensionManifest {
     ExtensionManifest {
         name: name.to_string(),
         version: "1.0.0".to_string(),
         api_version: EXTENSION_API_VERSION.to_string(),
-        capabilities: vec!["tools".to_string()],
+        capabilities: vec![
+            "tools".to_string(),
+            "policy_hook".to_string(),
+            "observer_hook".to_string(),
+            "skills".to_string(),
+        ],
         trust_level: harness_core::extensions::ExtensionTrustLevel::OperatorTrusted,
         source: "test".to_string(),
         checksum: None,
@@ -1474,18 +1499,24 @@ async fn test_fork_rewind_resets_subtree_jit_state() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// A `--fork` resume re-derives subtree state from the rewound branch rather than the checkpoint.
+/// The final turn's JIT-loaded `subtree_dirs` must be persisted in the checkpoint, and a `--fork`
+/// rewind must restore the directories recorded on the *rewound* branch (never re-injecting guidance
+/// that is still present in that branch's transcript).
 #[tokio::test]
-async fn test_forked_resume_reloads_subtree_guidance_through_the_agent_loop() {
-    let root = temp_root("fork-agent");
+async fn test_final_turn_subtree_dirs_persisted_in_checkpoint_and_preserved_on_fork() {
+    let root = temp_root("fork-persist");
     let ws = root.join("ws");
     let state = root.join("state");
     fs::create_dir_all(ws.join("crates/sub/src")).unwrap();
+    fs::create_dir_all(ws.join("other/pkg")).unwrap();
     fs::create_dir_all(&state).unwrap();
-    fs::write(ws.join("crates/sub/AGENTS.md"), "branch guidance\n").unwrap();
+    fs::write(ws.join("crates/sub/AGENTS.md"), "already loaded guidance\n").unwrap();
+    fs::write(ws.join("other/pkg/AGENTS.md"), "fresh guidance\n").unwrap();
     fs::write(ws.join("crates/sub/src/lib.rs"), "pub fn a() {}\n").unwrap();
+    fs::write(ws.join("other/pkg/mod.rs"), "pub fn b() {}\n").unwrap();
 
     let mut journal = SessionJournal::create(state.join("sessions"), &ws).unwrap();
+    let wal_path = journal.path().to_path_buf();
     journal
         .append_item(
             0,
@@ -1494,7 +1525,7 @@ async fn test_forked_resume_reloads_subtree_guidance_through_the_agent_loop() {
             }),
         )
         .unwrap();
-    // Simulate the abandoned branch having already loaded the subtree.
+    // The abandoned branch had already injected `crates/sub` guidance at this leaf.
     journal
         .checkpoint_with_revision(0, 0, Vec::new(), "", None, vec!["crates/sub".to_string()])
         .unwrap();
@@ -1506,22 +1537,23 @@ async fn test_forked_resume_reloads_subtree_guidance_through_the_agent_loop() {
             }),
         )
         .unwrap();
-    let fork_turn = 0;
-    journal.fork_at_turn(fork_turn).unwrap();
+    journal.fork_at_turn(0).unwrap();
 
-    // CLI-equivalent wiring: only a plain resume restores the checkpoint's loaded set.
+    // CLI-equivalent wiring: `fork_at_turn` already rewound the leaf, so the rewound checkpoint's
+    // loaded set is restored for a fork exactly as for a plain resume.
     let mut tracker = SubtreeContextTracker::new(true);
-    if fork_turn == 0 {
-        tracker.reset_for_fork();
-    } else if let Some(cp) = journal.latest_active_checkpoint() {
-        tracker.restore_loaded_dirs(cp.subtree_dirs.clone());
+    if let Some(checkpoint) = journal.latest_active_checkpoint() {
+        tracker.restore_loaded_dirs(checkpoint.subtree_dirs.clone());
     }
 
     let turns = vec![
         AssistantTurn {
             content: None,
             reasoning_blocks: vec![],
-            tool_calls: vec![call("read", r#"{"path":"crates/sub/src/lib.rs"}"#)],
+            tool_calls: vec![
+                call_n("read", r#"{"path":"crates/sub/src/lib.rs"}"#, 0),
+                call_n("read", r#"{"path":"other/pkg/mod.rs"}"#, 1),
+            ],
             finish_reason: FinishReason::ToolCalls,
             usage: None,
         },
@@ -1549,29 +1581,573 @@ async fn test_forked_resume_reloads_subtree_guidance_through_the_agent_loop() {
         .with_subtree_context(tracker)
         .run(logger)
         .await;
+    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
 
-    let read_result = summary
+    let result_for = |path: &str| {
+        summary
+            .transcript
+            .iter()
+            .find_map(|item| match item {
+                TranscriptItem::ToolResult(tr) if tr.meta.relative_path.as_deref() == Some(path) => {
+                    Some(tr.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the read result for {} must be recorded", path))
+    };
+
+    // Restored from the rewound checkpoint: the guidance is already in the branch's transcript, so
+    // it must NOT be re-injected.
+    let already = result_for("crates/sub/src/lib.rs");
+    assert!(
+        !already.content.contains("<untrusted_subtree_context"),
+        "a directory restored from the rewound checkpoint must not be re-injected: {}",
+        already.content
+    );
+    assert!(!already.content.contains("already loaded guidance"));
+
+    // A directory that the rewound branch had not visited yet is still loaded JIT.
+    let fresh = result_for("other/pkg/mod.rs");
+    assert!(
+        fresh
+            .content
+            .contains("<untrusted_subtree_context directory=\"other/pkg\" file=\"AGENTS.md\">"),
+        "an unvisited subtree must still load its guidance: {}",
+        fresh.content
+    );
+    assert!(fresh.content.contains("fresh guidance"));
+
+    // The post-batch checkpoint persisted by this run must carry the freshly loaded directory, so a
+    // later `--resume` / `--fork` never re-injects it.
+    let reopened = SessionJournal::open(&wal_path).unwrap();
+    let persisted = reopened
+        .latest_active_checkpoint()
+        .expect("the run must persist a checkpoint");
+    assert!(
+        persisted.subtree_dirs.iter().any(|d| d == "other/pkg"),
+        "the final checkpoint must persist the JIT-loaded subtree dirs: {:?}",
+        persisted.subtree_dirs
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- 7. capability matrix, trust boundary and checksum re-trust ----------------------------
+
+/// The manifest capability matrix, the `ProjectUntrusted` trust boundary and the source-checksum
+/// re-trust rule are all enforced at mount time, and every rejection is a no-op.
+#[test]
+fn test_capability_matrix_and_untrusted_extension_restrictions_and_checksum_retrust() {
+    let registry = ToolRegistry::new(None);
+
+    // (a) A contribution without its declared capability is rejected before anything is mounted.
+    let undeclared_tool = ScopedExtension::new(ExtensionManifest {
+        capabilities: vec![],
+        ..manifest("undeclared")
+    })
+    .with_tool(echo_tool("undeclared_tool", EffectClass::ReadOnly, "x:"));
+    assert_eq!(
+        registry.register_extension(undeclared_tool).unwrap_err(),
+        ExtensionError::UndeclaredCapability {
+            extension: "undeclared".to_string(),
+            capability: "tools".to_string(),
+        }
+    );
+    let undeclared_hook = ScopedExtension::new(ExtensionManifest {
+        capabilities: vec!["tools".to_string()],
+        ..manifest("undeclared-hook")
+    })
+    .with_policy_hook(FixedPolicyHook::allow("undeclared-policy"));
+    assert_eq!(
+        registry.register_extension(undeclared_hook).unwrap_err(),
+        ExtensionError::UndeclaredCapability {
+            extension: "undeclared-hook".to_string(),
+            capability: "policy_hook".to_string(),
+        }
+    );
+    assert!(
+        registry.extensions_are_empty(),
+        "a rejected mount must leave the registry untouched"
+    );
+    assert!(registry.hook_engine().is_empty());
+
+    // (b) A `ProjectUntrusted` extension may not gate tool use ...
+    let untrusted_policy = ScopedExtension::new(ExtensionManifest {
+        trust_level: ExtensionTrustLevel::ProjectUntrusted,
+        ..manifest("untrusted-policy")
+    })
+    .with_policy_hook(FixedPolicyHook::allow("untrusted-policy-hook"));
+    assert_eq!(
+        registry.register_extension(untrusted_policy).unwrap_err(),
+        ExtensionError::UntrustedCapability {
+            extension: "untrusted-policy".to_string(),
+            capability: "policy_hook".to_string(),
+        }
+    );
+
+    // ... nor mutate the workspace ...
+    let untrusted_write = ScopedExtension::new(ExtensionManifest {
+        trust_level: ExtensionTrustLevel::ProjectUntrusted,
+        ..manifest("untrusted-write")
+    })
+    .with_tool(echo_tool("untrusted_write_tool", EffectClass::Mutating, "m:"));
+    assert!(matches!(
+        registry.register_extension(untrusted_write).unwrap_err(),
+        ExtensionError::UntrustedCapability { .. }
+    ));
+    let untrusted_shell = ScopedExtension::new(ExtensionManifest {
+        trust_level: ExtensionTrustLevel::ProjectUntrusted,
+        ..manifest("untrusted-shell")
+    })
+    .with_tool(echo_tool("untrusted_shell_tool", EffectClass::SideEffect, "s:"));
+    assert!(matches!(
+        registry.register_extension(untrusted_shell).unwrap_err(),
+        ExtensionError::UntrustedCapability { .. }
+    ));
+
+    // ... but read-only tools, observer hooks and skills are permitted.
+    let untrusted_ok = ScopedExtension::new(ExtensionManifest {
+        trust_level: ExtensionTrustLevel::ProjectUntrusted,
+        ..manifest("untrusted-readonly")
+    })
+    .with_tool(echo_tool("untrusted_read_tool", EffectClass::ReadOnly, "r:"))
+    .with_observer_hook(failing_observer("untrusted-observer"))
+    .with_skill(skill("untrusted-skill"));
+    let untrusted_id = registry.register_extension(untrusted_ok).unwrap();
+    assert!(registry.skills().iter().any(|s| s.name == "untrusted-skill"));
+    registry.unregister_extension(&untrusted_id).unwrap();
+    assert!(!registry.skills().iter().any(|s| s.name == "untrusted-skill"));
+
+    // (c) Source checksum re-trust: once a digest is pinned, a different digest is refused until an
+    // operator explicitly re-trusts the extension.
+    let pinned = ScopedExtension::new(ExtensionManifest {
+        checksum: Some("sha256:aaa".to_string()),
+        ..manifest("pinned")
+    });
+    let pinned_id = registry.register_extension(pinned).unwrap();
+    registry.unregister_extension(&pinned_id).unwrap();
+
+    let changed = ScopedExtension::new(ExtensionManifest {
+        checksum: Some("sha256:bbb".to_string()),
+        ..manifest("pinned")
+    });
+    assert_eq!(
+        registry.register_extension(changed).unwrap_err(),
+        ExtensionError::ChecksumMismatch {
+            extension: "pinned".to_string(),
+            expected: "sha256:aaa".to_string(),
+            found: "sha256:bbb".to_string(),
+        }
+    );
+    assert!(registry.extensions_are_empty(), "a checksum mismatch must not mount");
+
+    // The unchanged digest still mounts after an unmount ...
+    let same = ScopedExtension::new(ExtensionManifest {
+        checksum: Some("sha256:aaa".to_string()),
+        ..manifest("pinned")
+    });
+    registry.register_extension(same).unwrap();
+
+    // ... and an explicit operator re-trust accepts the new digest.
+    registry.retrust_extension_checksum(&pinned_id, "sha256:bbb");
+    registry.unregister_extension(&pinned_id).unwrap();
+    let retrusted = ScopedExtension::new(ExtensionManifest {
+        checksum: Some("sha256:bbb".to_string()),
+        ..manifest("pinned")
+    });
+    registry.register_extension(retrusted).unwrap();
+}
+
+// ---- 8. in-flight unmount ------------------------------------------------------------------
+
+/// Unmounting an extension while one of its tools is in flight stops new calls, signals and drains
+/// the in-flight call, runs the cleanup callback and reports the irreversible side effects.
+///
+/// Multi-threaded on purpose: the extension handler blocks, and the test must still be able to
+/// observe it running and call `unregister_extension` concurrently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_inflight_extension_tool_unmount_cancels_and_reports_side_effects() {
+    let root = temp_root("inflight");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+
+    let started = Arc::new(AtomicBool::new(false));
+    let started_handler = Arc::clone(&started);
+    let cleanup_ran = Arc::new(AtomicBool::new(false));
+    let cleanup_flag = Arc::clone(&cleanup_ran);
+
+    let slow_handler: Arc<dyn CustomToolHandler> =
+        Arc::new(move |_raw: &str, ctx: &CustomToolContext<'_>| {
+            started_handler.store(true, Ordering::SeqCst);
+            // Cooperative handler: stop as soon as the unmount signals cancellation.
+            for _ in 0..2_000 {
+                if ctx.is_cancelled() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            ToolExecutionOutput::success("slow mutated".to_string(), ToolResultMeta::default())
+        });
+
+    let registry = ToolRegistry::new(None);
+    let id = registry
+        .register_extension(
+            ScopedExtension::new(manifest("inflight"))
+                .with_tool(echo_tool("fast_mutate", EffectClass::Mutating, "fast:"))
+                .with_tool(ScopedToolDefinition::new(
+                    tool_def("slow_mutate"),
+                    meta(EffectClass::Mutating),
+                    slow_handler,
+                ))
+                .with_cleanup(Arc::new(move || {
+                    cleanup_flag.store(true, Ordering::SeqCst);
+                })),
+        )
+        .unwrap();
+
+    let runtime = build_runtime_with_registry(
+        registry.clone(),
+        workspace_of(&root),
+        allow_write_engine(),
+        BudgetConfig::default(),
+    );
+
+    // A mutating call that completes before the unmount is recorded as irreversible.
+    let (_tx, rx) = watch::channel(false);
+    let (fast, decision, _) = runtime
+        .execute_call(&call("fast_mutate", r#"{"value":"x"}"#), 1, rx)
+        .await;
+    assert_eq!(fast.outcome, ToolOutcome::Success, "{}", fast.content);
+    assert_eq!(decision, "allow");
+
+    // Start a slow call, wait until it is actually inside the handler, then unmount.
+    let spawned_runtime = runtime.clone();
+    let (_tx2, rx2) = watch::channel(false);
+    let slow_call = call("slow_mutate", r#"{"value":"y"}"#);
+    let handle = tokio::spawn(async move { spawned_runtime.execute_call(&slow_call, 1, rx2).await });
+    for _ in 0..2_000 {
+        if started.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(started.load(Ordering::SeqCst), "the extension handler must have started");
+
+    let report = registry.unregister_extension(&id).unwrap();
+    assert_eq!(report.extension_id, id);
+    assert!(
+        cleanup_ran.load(Ordering::SeqCst),
+        "the extension cleanup callback must run on unmount"
+    );
+    assert_eq!(
+        report.cancelled_in_flight + report.drained_in_flight,
+        1,
+        "the in-flight call must be accounted for: {:?}",
+        report
+    );
+    assert!(
+        report
+            .irreversible_side_effects
+            .contains(&"fast_mutate".to_string()),
+        "a completed mutating call must be reported as irreversible: {:?}",
+        report
+    );
+
+    // The cooperative in-flight call observes the cancellation and returns.
+    let (slow, slow_decision, _) = handle.await.unwrap();
+    assert_eq!(slow.outcome, ToolOutcome::Success, "{}", slow.content);
+    assert_eq!(slow_decision, "allow");
+
+    // New dispatches for the unmounted extension are refused.
+    let (_tx3, rx3) = watch::channel(false);
+    let (denied, _, _) = runtime
+        .execute_call(&call("slow_mutate", r#"{"value":"z"}"#), 1, rx3)
+        .await;
+    assert_eq!(
+        denied.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::UnknownTool
+        },
+        "an unmounted extension tool must no longer be dispatchable"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- 9. command hook robustness -----------------------------------------------------------
+
+/// A command hook that spawns a grandchild inheriting stdout/stderr must still return promptly: the
+/// process group is swept and the pipe drain is deadline-bounded.
+#[test]
+fn test_command_hook_grandchild_holding_stdout_pipe_does_not_hang() {
+    let root = temp_root("hook-grandchild");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let ctx = HookContext::new(1, ws.clone());
+
+    // `/bin/sh -c 'sleep 30 & exit 0'` exits 0 immediately while the background `sleep` inherits the
+    // stdout/stderr pipe FDs; without a process-group sweep the post-exit drain would block ~30s.
+    let hook = CommandPolicyHook::new(
+        "grandchild",
+        vec!["/bin/sh".into(), "-c".into(), "sleep 30 & exit 0".into()],
+    )
+    .with_timeout(Duration::from_millis(500));
+
+    let started = std::time::Instant::now();
+    let decision = hook
+        .evaluate(HookEvent::PreToolUse, &ctx)
+        .expect("a cleanly exiting hook must not fail");
+    let elapsed = started.elapsed();
+    assert_eq!(decision, PolicyHookDecision::Allow);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the hook must not wait on a grandchild pipe (took {:?})",
+        elapsed
+    );
+
+    // The same guarantee holds when the hook also floods the pipe with more than one buffer.
+    let noisy = CommandPolicyHook::new(
+        "noisy",
+        vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "yes harness | head -c 200000; exit 0".into(),
+        ],
+    )
+    .with_timeout(Duration::from_millis(1_500));
+    let started = std::time::Instant::now();
+    let decision = noisy
+        .evaluate(HookEvent::PreToolUse, &ctx)
+        .expect("a noisy hook must not deadlock or fail");
+    assert_eq!(decision, PolicyHookDecision::Allow);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "a hook writing more than a pipe buffer must not deadlock (took {:?})",
+        started.elapsed()
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- 10. skill collisions ------------------------------------------------------------------
+
+/// A skill name that collides with a workspace skill or another extension's skill is rejected before
+/// anything is committed, so unmounting an extension always removes exactly its own skills.
+#[test]
+fn test_duplicate_skill_collision_rejected_preserving_reversibility() {
+    let registry = ToolRegistry::new(None).with_workspace_skills(vec![skill("workspace-skill")]);
+
+    // (a) Colliding with a workspace-discovered skill is rejected and leaves no residue.
+    let workspace_collision = ScopedExtension::new(manifest("ws-collision"))
+        .with_skill(skill("workspace-skill"));
+    assert_eq!(
+        registry.register_extension(workspace_collision).unwrap_err(),
+        ExtensionError::DuplicateSkill("workspace-skill".to_string())
+    );
+    assert!(registry.extensions_are_empty());
+    assert_eq!(registry.skills().len(), 1);
+
+    // (b) Two extensions contributing the same skill name: the second is rejected and the first is
+    // untouched, so its unmount stays byte-for-byte reversible.
+    let first = registry
+        .register_extension(ScopedExtension::new(manifest("a")).with_skill(skill("shared")))
+        .unwrap();
+    let second = ScopedExtension::new(manifest("b")).with_skill(skill("shared"));
+    assert_eq!(
+        registry.register_extension(second).unwrap_err(),
+        ExtensionError::DuplicateSkill("shared".to_string())
+    );
+    assert_eq!(registry.extension_ids(), vec![first.clone()]);
+    assert_eq!(
+        registry.skills().iter().filter(|s| s.name == "shared").count(),
+        1,
+        "the first extension's skill must survive the rejected mount"
+    );
+    registry.unregister_extension(&first).unwrap();
+    assert!(!registry.skills().iter().any(|s| s.name == "shared"));
+    assert_eq!(registry.skills().len(), 1, "only the workspace skill remains");
+
+    // (c) A single extension declaring the same skill twice is rejected.
+    let intra = ScopedExtension::new(manifest("dup"))
+        .with_skill(skill("twice"))
+        .with_skill(skill("twice"));
+    assert_eq!(
+        registry.register_extension(intra).unwrap_err(),
+        ExtensionError::DuplicateSkill("twice".to_string())
+    );
+
+    // (d) A skill name outside the conservative charset is rejected.
+    let hostile = ScopedExtension::new(manifest("bad-name"))
+        .with_skill(skill("bad name/../../escape"));
+    assert!(matches!(
+        registry.register_extension(hostile).unwrap_err(),
+        ExtensionError::InvalidManifest(_)
+    ));
+    assert!(registry.extensions_are_empty());
+}
+
+// ---- 11. recall_evidence shares the hook pipeline ------------------------------------------
+
+/// `recall_evidence` is dispatched by the agent loop (it needs the live transcript) but must still
+/// run through the same `PreToolUse` policy hooks and `PostToolUse` observer hooks as every other
+/// tool.
+#[tokio::test]
+async fn test_recall_evidence_runs_pre_and_post_tool_hooks() {
+    let root = temp_root("recall-hooks");
+    let ws = root.join("ws");
+    let state = root.join("state");
+    fs::create_dir_all(&ws).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(ws.join("a.txt"), "hello\n").unwrap();
+
+    let turns = vec![
+        AssistantTurn {
+            content: None,
+            reasoning_blocks: vec![],
+            tool_calls: vec![
+                call_n("read", r#"{"path":"a.txt"}"#, 0),
+                call_n(
+                    "recall_evidence",
+                    r#"{"source_entry_id":"ev-0001-call_recall"}"#,
+                    1,
+                ),
+            ],
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        },
+        AssistantTurn {
+            content: Some("done".into()),
+            reasoning_blocks: vec![],
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        },
+    ];
+    let provider = Arc::new(FakeProvider::new(turns));
+
+    let registry = ToolRegistry::new(None);
+    registry
+        .register_extension(
+            ScopedExtension::new(manifest("recall-hooks"))
+                .with_policy_hook(FixedPolicyHook::deny(
+                    "recall-deny",
+                    "evidence recall is disabled for this repository",
+                ))
+                .with_observer_hook(failing_observer("recall-observer")),
+        )
+        .unwrap();
+    let runtime = build_runtime_with_registry(
+        registry,
+        Arc::new(LocalHostEnv::new(&ws, state.clone()).unwrap()),
+        read_only_engine(),
+        BudgetConfig::default(),
+    );
+
+    let cfg = AgentRunConfig::new("read then recall", BudgetConfig::default());
+    let run_id = cfg.run_id;
+    let logger = EventLogger::new(run_id, Some(state.clone()), false).unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .with_prompt_builder(PromptBuilder::default())
+        .run(logger)
+        .await;
+
+    let recall_result = summary
         .transcript
         .iter()
         .find_map(|item| match item {
-            TranscriptItem::ToolResult(tr) if tr.tool_name == "read" => Some(tr),
+            TranscriptItem::ToolResult(tr) if tr.tool_name == "recall_evidence" => Some(tr),
             _ => None,
         })
-        .expect("the read result must be recorded");
+        .expect("the recall_evidence result must be recorded");
+    assert_eq!(
+        recall_result.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::PolicyDenied
+        },
+        "a PreToolUse policy hook must gate recall_evidence: {}",
+        recall_result.content
+    );
     assert!(
-        read_result.content.contains("branch guidance"),
-        "a forked branch must reload its subtree guidance: {}",
-        read_result.content
+        recall_result
+            .content
+            .contains("evidence recall is disabled"),
+        "{}",
+        recall_result.content
     );
 
-    // The checkpoint persisted by this run must carry the reloaded directory.
     let log = fs::read_dir(&state)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| fs::read_to_string(e.path()).unwrap_or_default())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(log.contains("SubtreeContextLoaded"), "the JIT load must be logged");
+    assert!(
+        log.contains("recall-deny") && log.contains("pre_tool_use"),
+        "the PreToolUse policy hook must be evaluated for recall_evidence"
+    );
+    assert!(
+        log.contains("recall-observer") && log.contains("failed_open"),
+        "the PostToolUse observer must run for the denied recall_evidence call"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- 12. subtree multi-ancestor ordering and total cap -------------------------------------
+
+/// Ancestor guidance loads outer-to-inner, and the cumulative JIT budget is enforced across the
+/// sibling subtrees visited in one run.
+#[test]
+fn test_subtree_jit_multi_ancestor_order_and_total_cap() {
+    let root = temp_root("subtree-cap");
+    let ws = root.join("ws");
+    fs::create_dir_all(ws.join("a/b/c")).unwrap();
+    fs::write(ws.join("a/AGENTS.md"), "outer guidance\n").unwrap();
+    fs::write(ws.join("a/b/AGENTS.md"), "middle guidance\n").unwrap();
+    fs::write(ws.join("a/b/c/file.rs"), "x\n").unwrap();
+
+    let cap = WorkspaceCap::new(&ws).unwrap();
+    let mut tracker = SubtreeContextTracker::new(true);
+    let loads = tracker.load_for_path(&cap, "a/b/c/file.rs");
+    let dirs: Vec<&str> = loads.iter().map(|l| l.directory.as_str()).collect();
+    assert_eq!(
+        dirs,
+        vec!["a", "a/b"],
+        "ancestor guidance must load shallowest-first (outer before inner)"
+    );
+    assert!(loads[0].rendered.contains("outer guidance"));
+    assert!(loads[1].rendered.contains("middle guidance"));
+    assert!(loads[0].rendered.contains("directory=\"a\""));
+    assert!(loads[1].rendered.contains("directory=\"a/b\""));
+
+    // The cumulative budget binds across sibling subtrees in a single run.
+    for i in 0..6 {
+        let dir = format!("sib{}", i);
+        fs::create_dir_all(ws.join(&dir)).unwrap();
+        fs::write(
+            ws.join(format!("{}/AGENTS.md", dir)),
+            format!("sib{} padding\n{}", i, "y\n".repeat(4_000)),
+        )
+        .unwrap();
+        fs::write(ws.join(format!("{}/f.rs", dir)), "x\n").unwrap();
+    }
+    let mut capped = SubtreeContextTracker::new(true);
+    for i in 0..6 {
+        capped.load_for_path(&cap, &format!("sib{}/f.rs", i));
+    }
+    assert!(capped.total_bytes() > 0);
+    assert!(
+        capped.total_bytes() <= SUBTREE_TOTAL_MAX_BYTES,
+        "the cumulative JIT budget must hold (got {} bytes, cap {})",
+        capped.total_bytes(),
+        SUBTREE_TOTAL_MAX_BYTES
+    );
+    assert!(
+        capped.loaded_dirs().len() < 6 * 2,
+        "once the budget is exhausted, later subtrees must stop loading: {:?}",
+        capped.loaded_dirs()
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
