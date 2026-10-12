@@ -58,6 +58,23 @@ pub struct SessionCheckpoint {
     pub pinned_baseline_end: usize,
     pub last_touched: Vec<FileTouch>,
     pub reasoning_blocks_sha256: String,
+    /// Workspace revision captured before this turn began (Gate 1). `serde(default)` keeps WALs
+    /// written before Gate 1 readable.
+    #[serde(default)]
+    pub workspace_revision_id: Option<String>,
+}
+
+/// Append-only record binding a captured `WorkspaceRevision` to the WAL entry that was active when
+/// it was taken. `--undo` / `--restore-rev` / `--list-revisions` replay these records.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevisionRecord {
+    pub leaf_id: Option<String>,
+    pub turn: usize,
+    pub revision_id: String,
+    pub parent_revision_id: Option<String>,
+    pub changed_paths: Vec<String>,
+    pub tracked_file_count: usize,
+    pub captured_at_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +112,18 @@ enum WalPayload {
         pinned_baseline_end: usize,
         last_touched: Vec<FileTouch>,
         reasoning_blocks_sha256: String,
+        #[serde(default)]
+        workspace_revision_id: Option<String>,
+    },
+    /// A workspace revision snapshot was captured at `turn` (Gate 1).
+    RevisionCaptured {
+        leaf_id: Option<String>,
+        turn: usize,
+        revision_id: String,
+        parent_revision_id: Option<String>,
+        changed_paths: Vec<String>,
+        tracked_file_count: usize,
+        captured_at_ms: u64,
     },
 }
 
@@ -116,6 +145,7 @@ pub struct SessionJournal {
     leaf_id: Option<String>,
     entries: HashMap<String, SessionEntry>,
     checkpoints: Vec<SessionCheckpoint>,
+    revision_records: Vec<RevisionRecord>,
     completion_resolution_leaf_ids: Vec<String>,
     projection_updates: Vec<ProjectionOverlay>,
 }
@@ -153,6 +183,7 @@ impl SessionJournal {
             leaf_id: None,
             entries: HashMap::new(),
             checkpoints: Vec::new(),
+            revision_records: Vec::new(),
             completion_resolution_leaf_ids: Vec::new(),
             projection_updates: Vec::new(),
         };
@@ -250,6 +281,7 @@ impl SessionJournal {
         let mut entries: HashMap<String, SessionEntry> = HashMap::new();
         let mut leaf_id: Option<String> = None;
         let mut checkpoints: Vec<SessionCheckpoint> = Vec::new();
+        let mut revision_records: Vec<RevisionRecord> = Vec::new();
         let mut completion_resolution_leaf_ids: Vec<String> = Vec::new();
         let mut projection_updates: Vec<ProjectionOverlay> = Vec::new();
 
@@ -321,8 +353,14 @@ impl SessionJournal {
                     }
                     completion_resolution_leaf_ids.push(leaf_id);
                 }
-                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256 } => {
-                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256 });
+                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id } => {
+                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id });
+                }
+                WalPayload::RevisionCaptured { leaf_id, turn, revision_id, parent_revision_id, changed_paths, tracked_file_count, captured_at_ms } => {
+                    if !revision_id.starts_with("r-") {
+                        return Err(SessionError::Invalid(format!("invalid revision id '{}'", revision_id)));
+                    }
+                    revision_records.push(RevisionRecord { leaf_id, turn, revision_id, parent_revision_id, changed_paths, tracked_file_count, captured_at_ms });
                 }
             }
             prev_hash = line.hash;
@@ -350,6 +388,7 @@ impl SessionJournal {
             leaf_id,
             entries,
             checkpoints,
+            revision_records,
             completion_resolution_leaf_ids,
             projection_updates,
         })
@@ -638,8 +677,26 @@ impl SessionJournal {
         &mut self,
         turn: usize,
         pinned_baseline_end: usize,
+        last_touched: Vec<FileTouch>,
+        reasoning_blocks_sha256: impl Into<String>,
+    ) -> Result<(), SessionError> {
+        self.checkpoint_with_revision(
+            turn,
+            pinned_baseline_end,
+            last_touched,
+            reasoning_blocks_sha256,
+            None,
+        )
+    }
+
+    /// Checkpoint variant that also binds the workspace revision captured before this turn (Gate 1).
+    pub fn checkpoint_with_revision(
+        &mut self,
+        turn: usize,
+        pinned_baseline_end: usize,
         mut last_touched: Vec<FileTouch>,
         reasoning_blocks_sha256: impl Into<String>,
+        workspace_revision_id: Option<String>,
     ) -> Result<(), SessionError> {
         last_touched.sort_by(|a, b| a.path.cmp(&b.path));
         let checkpoint = SessionCheckpoint {
@@ -648,6 +705,7 @@ impl SessionJournal {
             pinned_baseline_end,
             last_touched,
             reasoning_blocks_sha256: reasoning_blocks_sha256.into(),
+            workspace_revision_id,
         };
         self.append_payload(WalPayload::Checkpoint {
             leaf_id: checkpoint.leaf_id.clone(),
@@ -655,9 +713,59 @@ impl SessionJournal {
             pinned_baseline_end: checkpoint.pinned_baseline_end,
             last_touched: checkpoint.last_touched.clone(),
             reasoning_blocks_sha256: checkpoint.reasoning_blocks_sha256.clone(),
+            workspace_revision_id: checkpoint.workspace_revision_id.clone(),
         })?;
         self.checkpoints.push(checkpoint);
         Ok(())
+    }
+
+    /// Record a captured `WorkspaceRevision` against the current transcript leaf (Gate 1).
+    pub fn record_revision_capture(
+        &mut self,
+        turn: usize,
+        revision_id: &str,
+        parent_revision_id: Option<&str>,
+        changed_paths: Vec<String>,
+        tracked_file_count: usize,
+    ) -> Result<(), SessionError> {
+        let record = RevisionRecord {
+            leaf_id: self.leaf_id.clone(),
+            turn,
+            revision_id: revision_id.to_string(),
+            parent_revision_id: parent_revision_id.map(|s| s.to_string()),
+            changed_paths,
+            tracked_file_count,
+            captured_at_ms: now_ms(),
+        };
+        self.append_payload(WalPayload::RevisionCaptured {
+            leaf_id: record.leaf_id.clone(),
+            turn: record.turn,
+            revision_id: record.revision_id.clone(),
+            parent_revision_id: record.parent_revision_id.clone(),
+            changed_paths: record.changed_paths.clone(),
+            tracked_file_count: record.tracked_file_count,
+            captured_at_ms: record.captured_at_ms,
+        })?;
+        self.revision_records.push(record);
+        Ok(())
+    }
+
+    /// Workspace revisions captured on the currently selected branch, in WAL append order.
+    pub fn revision_records(&self) -> Vec<RevisionRecord> {
+        let depth_map = self.active_depth_map();
+        self.revision_records
+            .iter()
+            .filter(|record| match record.leaf_id.as_deref() {
+                Some(leaf) => depth_map.contains_key(leaf),
+                None => true,
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Revision the workspace is expected to be in right now, per the active branch.
+    pub fn latest_revision_id(&self) -> Option<String> {
+        self.revision_records().last().map(|r| r.revision_id.clone())
     }
 
     fn append_payload(&mut self, payload: WalPayload) -> Result<(), SessionError> {

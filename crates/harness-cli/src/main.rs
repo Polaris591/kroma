@@ -7,11 +7,13 @@ use harness_core::completion_gate::{configured_timeout, parse_command_argv, Work
 use harness_core::env::{AllowAllGate, ExecutionEnv, LocalHostEnv, SharedCompletionGate};
 use harness_core::events::{ resolve_default_state_dir, EventLogger };
 use harness_core::prompt::PromptBuilder;
+use harness_core::revision::{RestoreResult, RevisionId, SnapshotStore};
 use harness_core::session::SessionJournal;
+use harness_core::workspace::WorkspaceCap;
 use harness_core::provider::chat_completions::{ ChatCompletionsClient, ChatCompletionsConfig };
 use harness_core::tool::policy::{ PolicyEngine, PolicyMode };
 use harness_core::types::RunStatus;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -20,7 +22,7 @@ use tokio::sync::watch;
 #[derive(Debug, Clone)]
 pub struct CliArgs {
     pub workspace: PathBuf,
-    pub task: String,
+    pub task: Option<String>,
     pub policy_mode: PolicyMode,
     pub no_stream: bool,
     pub strict_log: bool,
@@ -31,6 +33,21 @@ pub struct CliArgs {
     pub fork_turn: Option<usize>,
     pub verify_cmd: Option<String>,
     pub no_verify: bool,
+    /// Restore the workspace (and rewind the session leaf) to the previous turn's revision.
+    pub undo: bool,
+    /// Restore the workspace to a specific captured `WorkspaceRevision`.
+    pub restore_rev: Option<String>,
+    /// Allow `--undo` / `--restore-rev` to overwrite external modifications.
+    pub force_restore: bool,
+    /// List the workspace revisions captured for the session.
+    pub list_revisions: bool,
+}
+
+impl CliArgs {
+    /// True when the invocation only performs a workspace-revision management action.
+    pub fn is_revision_management(&self) -> bool {
+        self.undo || self.restore_rev.is_some() || self.list_revisions
+    }
 }
 
 pub fn parse_cli_args<I>(args: I) -> Result<CliArgs, String>
@@ -66,6 +83,10 @@ where
     let mut fork_turn: Option<usize> = None;
     let mut verify_cmd: Option<String> = None;
     let mut no_verify = false;
+    let mut undo = false;
+    let mut restore_rev: Option<String> = None;
+    let mut force_restore = false;
+    let mut list_revisions = false;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -130,6 +151,24 @@ where
             "--no-verify" => {
                 no_verify = true;
             }
+            "--undo" => {
+                undo = true;
+            }
+            "--restore-rev" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --restore-rev <REV_ID>".to_string())?;
+                if val.trim().is_empty() {
+                    return Err("empty value for --restore-rev".to_string());
+                }
+                restore_rev = Some(val.trim().to_string());
+            }
+            "--force-restore" => {
+                force_restore = true;
+            }
+            "--list-revisions" => {
+                list_revisions = true;
+            }
             "--tool-filter" => {
                 let val = iter
                     .next()
@@ -159,9 +198,30 @@ where
         }
     }
 
-    let task = task.ok_or_else(|| "missing required --task <prompt>".to_string())?;
+    let task = task.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     if fork_turn.is_some() && resume.is_none() {
         return Err("--fork <TURN> requires --resume <SESSION_WAL>".to_string());
+    }
+
+    let management = undo || restore_rev.is_some() || list_revisions;
+    if management {
+        if resume.is_none() {
+            return Err(
+                "--undo, --restore-rev and --list-revisions require --resume <SESSION_WAL|latest>"
+                    .to_string(),
+            );
+        }
+        if undo && restore_rev.is_some() {
+            return Err("--undo and --restore-rev are mutually exclusive".to_string());
+        }
+        if undo && fork_turn.is_some() {
+            return Err("--undo already rewinds the session leaf; drop --fork".to_string());
+        }
+    } else if force_restore {
+        return Err("--force-restore requires --undo or --restore-rev".to_string());
+    }
+    if !management && task.is_none() {
+        return Err("missing required --task <prompt>".to_string());
     }
 
     // Resolve `--resume` against the session store first, so `latest`, a bare session id
@@ -207,6 +267,10 @@ where
         fork_turn,
         verify_cmd,
         no_verify,
+        undo,
+        restore_rev,
+        force_restore,
+        list_revisions,
     })
 }
 
@@ -383,6 +447,216 @@ fn build_completion_gate(choice: CompletionGateChoice) -> SharedCompletionGate {
     }
 }
 
+/// Exit code returned when a restore would overwrite work done outside the harness.
+const EXIT_RESTORE_CONFLICT: u8 = 3;
+/// Exit code returned when an interrupted restore left the workspace needing recovery.
+const EXIT_RESTORE_RECOVERY_REQUIRED: u8 = 4;
+
+fn snapshot_store_for(state_dir: &Path) -> SnapshotStore {
+    SnapshotStore::new(state_dir.join("snapshots"))
+}
+
+/// Execute `--list-revisions` / `--undo` / `--restore-rev` without contacting a model provider.
+fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
+    let Some(session_path) = cli.resume.as_ref() else {
+        eprintln!("error: --undo, --restore-rev and --list-revisions require --resume <SESSION_WAL|latest>");
+        return ExitCode::from(2);
+    };
+    let mut journal = match SessionJournal::open(session_path) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("error: failed to open session WAL: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    let workspace = match WorkspaceCap::new(&cli.workspace) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("error: failed to initialize workspace capability: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    let store = snapshot_store_for(state_dir);
+
+    if cli.list_revisions {
+        let records = journal.revision_records();
+        if records.is_empty() {
+            println!("no workspace revisions recorded for this session");
+            return ExitCode::SUCCESS;
+        }
+        let current = journal.latest_revision_id();
+        println!(
+            "workspace revisions for session {} ({} captured):",
+            journal.session_id(),
+            records.len()
+        );
+        for record in &records {
+            let marker = if Some(record.revision_id.clone()) == current {
+                "  <- current"
+            } else {
+                ""
+            };
+            println!(
+                "  turn {:>4}  {}  files={} changed={}{}",
+                record.turn,
+                record.revision_id,
+                record.tracked_file_count,
+                record.changed_paths.len(),
+                marker
+            );
+            for path in &record.changed_paths {
+                println!("        {}", path);
+            }
+        }
+        println!("snapshot store: {}", store.root().display());
+        return ExitCode::SUCCESS;
+    }
+
+    let (target, expected, rewind_turn) = if cli.undo {
+        let records = journal.revision_records();
+        let Some(current) = records.last() else {
+            eprintln!("error: no workspace revision recorded for this session");
+            return ExitCode::from(2);
+        };
+        // Skip any trailing capture that describes the same workspace content, so `--undo` means
+        // "go back to the last revision the workspace actually differed from".
+        let Some(previous) = records
+            .iter()
+            .rev()
+            .find(|record| record.revision_id != current.revision_id)
+        else {
+            eprintln!(
+                "error: nothing to undo; the workspace is unchanged since revision {}",
+                current.revision_id
+            );
+            return ExitCode::from(2);
+        };
+        match (
+            RevisionId::parse(&previous.revision_id),
+            RevisionId::parse(&current.revision_id),
+        ) {
+            (Ok(target), Ok(expected)) => (target, Some(expected), Some(previous.turn)),
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        let raw = cli.restore_rev.as_deref().unwrap_or_default();
+        let target = match RevisionId::parse(raw) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+        };
+        let expected = journal
+            .latest_revision_id()
+            .and_then(|id| RevisionId::parse(&id).ok());
+        (target, expected, None)
+    };
+
+    // An interrupted restore leaves its intent journal behind. Finishing that restore is the only
+    // safe action: applying a *different* target on top of a half-applied tree would compound it.
+    let result = match store.pending_restore() {
+        Ok(Some(intent)) if intent.target_revision == target => {
+            println!(
+                "resuming an interrupted restore of {} from {}",
+                target,
+                store.intent_path().display()
+            );
+            store.recover_pending_restore(&workspace)
+        }
+        Ok(Some(intent)) => {
+            eprintln!(
+                "error: an interrupted restore of {} must be completed before restoring {}",
+                intent.target_revision, target
+            );
+            eprintln!("  intent journal: {}", store.intent_path().display());
+            eprintln!(
+                "  re-run with --restore-rev {} to finish it",
+                intent.target_revision
+            );
+            return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
+        }
+        Ok(None) => store.restore_revision(&workspace, &target, expected.as_ref(), cli.force_restore),
+        Err(e) => Err(e),
+    };
+
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: restore failed: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+
+    match result {
+        RestoreResult::Applied {
+            restored_revision,
+            restored_files,
+            removed_files,
+        } => {
+            println!(
+                "restored workspace to {} ({} file(s) written, {} removed)",
+                restored_revision,
+                restored_files.len(),
+                removed_files.len()
+            );
+            for path in &restored_files {
+                println!("  restored {}", path);
+            }
+            for path in &removed_files {
+                println!("  removed  {}", path);
+            }
+            if let Some(turn) = rewind_turn {
+                match journal.fork_at_turn(turn) {
+                    Ok(leaf) => println!("rewound session transcript to turn {} (leaf {})", turn, leaf),
+                    Err(e) => {
+                        eprintln!(
+                            "error: workspace restored but the session leaf could not be rewound: {}",
+                            e
+                        );
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        RestoreResult::Conflict {
+            target_revision,
+            conflicting_paths,
+        } => {
+            eprintln!(
+                "error: refusing to restore {}; {} path(s) changed outside the harness (pass --force-restore to overwrite)",
+                target_revision,
+                conflicting_paths.len()
+            );
+            for conflict in &conflicting_paths {
+                eprintln!("  {:?} {}", conflict.kind, conflict.path);
+            }
+            ExitCode::from(EXIT_RESTORE_CONFLICT)
+        }
+        RestoreResult::RecoveryRequired {
+            target_revision,
+            journal_path,
+            reason,
+        } => {
+            eprintln!(
+                "error: restore of {} did not complete; the workspace needs recovery",
+                target_revision
+            );
+            eprintln!("  intent journal: {}", journal_path.display());
+            eprintln!("  reason: {}", reason);
+            eprintln!(
+                "  re-run with --restore-rev {} to finish the restore",
+                target_revision
+            );
+            ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED)
+        }
+    }
+}
+
 pub fn usage_text() -> String {
     "\
 Usage: harness run --workspace <DIR> --task <TASK> [OPTIONS]
@@ -403,6 +677,12 @@ Options:
   --no-verify               Disable the completion verification gate entirely
   --tool-filter <CSV>       Benchmarking ablation filter (e.g. read,edit,write,bash)
 
+Workspace Revision Management (requires --resume):
+  --undo                    Restore the workspace and session leaf to the previous turn's revision
+  --restore-rev <REV_ID>    Restore the workspace to a specific captured revision
+  --force-restore           Overwrite external modifications during --undo / --restore-rev
+  --list-revisions          List the workspace revisions captured for the session
+
 Environment Credentials:
   HARNESS_API_KEY           Provider API key (stripped from child shell environments)
   HARNESS_BASE_URL          OpenAI-compatible base URL (HTTPS required for remote hosts)
@@ -414,7 +694,10 @@ Environment Credentials:
 
 Security Notice:
   Sensitive path guard blocks accidental access to .env/keys via file tools;
-  granting --allow-shell executes commands under the current OS user without an OS container sandbox."
+  granting --allow-shell executes commands under the current OS user without an OS container sandbox.
+
+Exit codes:
+  0 success, 1 run failure, 2 invalid invocation, 3 restore conflict, 4 restore recovery required."
         .to_string()
 }
 
@@ -431,6 +714,13 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    let state_dir = resolve_default_state_dir();
+
+    // Gate 1: revision management actions never contact a provider and never need an API key.
+    if cli.is_revision_management() {
+        return run_revision_management(&cli, &state_dir);
+    }
 
     let api_key = match std::env::var("HARNESS_API_KEY") {
         Ok(k) if !k.trim().is_empty() => k,
@@ -464,7 +754,6 @@ async fn main() -> ExitCode {
     };
 
     let budget = BudgetConfig::default();
-    let state_dir = resolve_default_state_dir();
     let env = match LocalHostEnv::new(&cli.workspace, state_dir.clone()) {
         Ok(e) => Arc::new(e),
         Err(e) => {
@@ -517,11 +806,11 @@ async fn main() -> ExitCode {
         }
     };
 
-    let mut run_cfg = AgentRunConfig::new(cli.task, budget.clone());
+    let mut run_cfg = AgentRunConfig::new(cli.task.clone().unwrap_or_default(), budget.clone());
     run_cfg.stream = !cli.no_stream;
     run_cfg.strict_log = cli.strict_log;
 
-    let mut logger = match EventLogger::new(run_cfg.run_id, Some(state_dir), cli.strict_log) {
+    let mut logger = match EventLogger::new(run_cfg.run_id, Some(state_dir.clone()), cli.strict_log) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -549,9 +838,14 @@ async fn main() -> ExitCode {
 
     let max_gate_retries = std::env::var("HARNESS_GATE_MAX_RETRIES")
         .ok().and_then(|s| s.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(3);
+    let snapshot_store = Arc::new(snapshot_store_for(&state_dir));
+    if !cli.quiet {
+        eprintln!("[harness] workspace revisions: {}", snapshot_store.root().display());
+    }
     let runner = AgentRunner::new(run_cfg, provider, runtime, cancel_rx)
         .with_prompt_builder(prompt_builder)
         .with_session_journal(session)
+        .with_snapshot_store(snapshot_store)
         .with_completion_gate(build_completion_gate(gate_choice))
         .with_completion_gate_max_retries(max_gate_retries);
     let (summary, _logger) = runner.run(logger).await;
@@ -760,6 +1054,74 @@ mod tests {
         // Empty or missing values must be rejected rather than silently ignored.
         assert!(parse_cli_args(base_cli(vec!["--verify-cmd".into(), "   ".into()])).is_err());
         assert!(parse_cli_args(base_cli(vec!["--verify-cmd".into()])).is_err());
+    }
+
+    #[test]
+    fn test_workspace_revision_management_flags_parse() {
+        // `--list-revisions` and `--undo` are standalone actions: no --task required.
+        let listed = parse_cli_args(vec![
+            "harness".into(), "run".into(), "--workspace".into(), "./repo".into(),
+            "--resume".into(), "session.wal.jsonl".into(), "--list-revisions".into(),
+        ])
+        .unwrap();
+        assert!(listed.list_revisions);
+        assert!(listed.task.is_none());
+        assert!(listed.is_revision_management());
+
+        let undo = parse_cli_args(vec![
+            "harness".into(), "run".into(), "--workspace".into(), "./repo".into(),
+            "--resume".into(), "session.wal.jsonl".into(), "--undo".into(),
+            "--force-restore".into(),
+        ])
+        .unwrap();
+        assert!(undo.undo);
+        assert!(undo.force_restore);
+
+        let restore = parse_cli_args(vec![
+            "harness".into(), "run".into(), "--workspace".into(), "./repo".into(),
+            "--resume".into(), "session.wal.jsonl".into(),
+            "--restore-rev".into(), "r-0123456789abcdef0123456789abcdef".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            restore.restore_rev.as_deref(),
+            Some("r-0123456789abcdef0123456789abcdef")
+        );
+
+        // A normal run still requires --task.
+        assert!(parse_cli_args(vec![
+            "harness".into(), "run".into(), "--workspace".into(), "./repo".into(),
+        ])
+        .unwrap_err()
+        .contains("--task"));
+
+        // Management actions need a session to act on.
+        assert!(parse_cli_args(vec![
+            "harness".into(), "run".into(), "--workspace".into(), "./repo".into(),
+            "--undo".into(),
+        ])
+        .unwrap_err()
+        .contains("require --resume"));
+
+        // Conflicting or dangling combinations are rejected rather than guessed at.
+        assert!(parse_cli_args(vec![
+            "harness".into(), "run".into(), "--workspace".into(), "./repo".into(),
+            "--resume".into(), "session.wal.jsonl".into(), "--undo".into(),
+            "--restore-rev".into(), "r-0123456789abcdef0123456789abcdef".into(),
+        ])
+        .unwrap_err()
+        .contains("mutually exclusive"));
+        assert!(parse_cli_args(vec![
+            "harness".into(), "run".into(), "--workspace".into(), "./repo".into(),
+            "--resume".into(), "session.wal.jsonl".into(), "--undo".into(), "--fork".into(), "2".into(),
+        ])
+        .unwrap_err()
+        .contains("drop --fork"));
+        assert!(parse_cli_args(base_cli(vec!["--force-restore".into()]))
+            .unwrap_err()
+            .contains("--force-restore requires"));
+        assert!(parse_cli_args(base_cli(vec!["--restore-rev".into(), "   ".into()])).is_err());
+        assert!(parse_cli_args(base_cli(vec!["--restore-rev".into()])).is_err());
     }
 
     #[test]

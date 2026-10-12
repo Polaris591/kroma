@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-pub const EVENT_SCHEMA_VERSION: &str = "0.6.0";
+pub const EVENT_SCHEMA_VERSION: &str = "0.7.0";
 
 #[derive(Debug, Error)]
 pub enum EventLogError {
@@ -79,6 +79,16 @@ pub enum EventPayload {
         after_bytes: usize,
         compacted_seq_indices: Vec<usize>,
         pinned_files: Vec<String>,
+    },
+    /// A `WorkspaceRevision` snapshot was captured and recorded in the session WAL (Gate 1).
+    RevisionCaptured {
+        turn: usize,
+        revision_id: String,
+        parent_revision_id: Option<String>,
+        changed_paths: Vec<String>,
+        tracked_file_count: usize,
+        /// `baseline` for the pre-mutation capture, `mutation` for a post-tool-batch capture.
+        trigger: String,
     },
     LoopGuardTriggered {
         call_id: ToolCallId,
@@ -310,6 +320,23 @@ impl EventLogger {
                     eprintln!(
                         "📦 [compact] {}B -> {}B (pinned={:?})",
                         before_bytes, after_bytes, pinned_files
+                    );
+                }
+                EventPayload::RevisionCaptured {
+                    turn,
+                    revision_id,
+                    changed_paths,
+                    tracked_file_count,
+                    trigger,
+                    ..
+                } => {
+                    eprintln!(
+                        "📸 [revision] turn={} rev={} trigger={} files={} changed={}",
+                        turn,
+                        revision_id,
+                        trigger,
+                        tracked_file_count,
+                        changed_paths.len()
                     );
                 }
                 EventPayload::RunTerminated {

@@ -14,6 +14,7 @@ use crate::prompt::PromptBuilder;
 use crate::provider::{
     validate_assistant_turn_batch, ModelProvider, ProviderRequest,
 };
+use crate::revision::{RevisionId, SnapshotStore};
 use crate::tool::runtime::ToolRuntime;
 use crate::types::{ErrorCode, RunId, RunStatus, TerminalReason};
 use std::collections::HashSet;
@@ -76,7 +77,11 @@ pub struct AgentRunner {
     session_journal: Option<SessionJournal>,
     session_turn_offset: usize,
     session_persist_error: Option<String>,
+    revision_error: Option<String>,
     completion_gate_max_retries: usize,
+    snapshot_store: Option<Arc<SnapshotStore>>,
+    current_revision_id: Option<RevisionId>,
+    batch_mutated: bool,
 }
 
 impl AgentRunner {
@@ -97,7 +102,11 @@ impl AgentRunner {
             session_journal: None,
             session_turn_offset: 0,
             session_persist_error: None,
+            revision_error: None,
             completion_gate_max_retries: 3,
+            snapshot_store: None,
+            current_revision_id: None,
+            batch_mutated: false,
         }
     }
 
@@ -113,6 +122,13 @@ impl AgentRunner {
 
     pub fn with_session_journal(mut self, journal: SessionJournal) -> Self {
         self.session_journal = Some(journal);
+        self
+    }
+
+    /// Attach a workspace snapshot store so every mutating turn captures a `WorkspaceRevision`
+    /// (Gate 1). Without a store the run behaves exactly as before.
+    pub fn with_snapshot_store(mut self, store: Arc<SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
         self
     }
 
@@ -190,6 +206,15 @@ impl AgentRunner {
         if let Some(err) = self.session_persist_error.clone() {
             return self.finish_run(
                 TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
+            );
+        }
+        // Gate 1: capture the pre-mutation workspace state so the first turn can be undone.
+        let baseline_turn = self.session_turn_offset;
+        self.capture_workspace_revision(baseline_turn, "baseline", &mut logger);
+        if let Some(err) = self.revision_error.clone() {
+            return self.finish_run(
+                TerminalReason::StrictLogFailure(err),
                 &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
             );
         }
@@ -628,6 +653,7 @@ impl AgentRunner {
 
             // Execute tool batch with Read-Only Parallel Sub-Batches (`Semaphore(8)`) + Mutating Barriers,
             // guaranteeing 1:1 `tool_call_id` closure in exact index order (§4.1 V6-06).
+            self.batch_mutated = false;
             let batch_abort = self
                 .execute_tool_batch(
                     &tool_calls,
@@ -641,6 +667,18 @@ impl AgentRunner {
                 .await;
 
             debug_assert!(verify_tool_call_pairing(&transcript));
+
+            // Gate 1: a batch that mutated files gets a fresh revision bound to this turn.
+            if self.batch_mutated {
+                self.capture_workspace_revision(absolute_turn, "mutation", &mut logger);
+            }
+            if let Some(err) = self.revision_error.clone() {
+                return self.finish_run(
+                    TerminalReason::StrictLogFailure(err),
+                    &budget_tracker, &projector, modified_files_set.into_iter().collect(),
+                    last_assistant_text, transcript, logger,
+                );
+            }
 
             if let Some(err) = self.session_persist_error.clone() {
                 return self.finish_run(
@@ -752,6 +790,57 @@ impl AgentRunner {
         }
     }
 
+    /// Capture a `WorkspaceRevision`, bind it to the current WAL leaf, and emit telemetry.
+    ///
+    /// A capture failure is fail-closed: if the store is attached, the run must not continue while
+    /// believing it has undo protection it does not actually have.
+    fn capture_workspace_revision(
+        &mut self,
+        absolute_turn: usize,
+        trigger: &str,
+        logger: &mut EventLogger,
+    ) {
+        let Some(store) = self.snapshot_store.clone() else { return; };
+        let workspace = self.tool_runtime.env().workspace().clone();
+        let wal_entry_id = self.session_journal.as_ref()
+            .and_then(|journal| journal.leaf_id())
+            .map(|id| id.to_string());
+        let parent = self.current_revision_id.clone();
+        match store.capture_revision(&workspace, parent.as_ref(), wal_entry_id.as_deref(), absolute_turn) {
+            Ok(revision) => {
+                if let Some(journal) = self.session_journal.as_mut() {
+                    if let Err(err) = journal.record_revision_capture(
+                        absolute_turn,
+                        revision.revision_id.as_str(),
+                        revision.parent_revision_id.as_ref().map(|p| p.as_str()),
+                        revision.changed_paths.clone(),
+                        revision.tracked_files.len(),
+                    ) {
+                        self.revision_error = Some(format!(
+                            "failed to record workspace revision {} in the session WAL: {}",
+                            revision.revision_id, err
+                        ));
+                    }
+                }
+                let _ = logger.log(EventPayload::RevisionCaptured {
+                    turn: absolute_turn,
+                    revision_id: revision.revision_id.as_str().to_string(),
+                    parent_revision_id: revision.parent_revision_id.as_ref().map(|p| p.as_str().to_string()),
+                    changed_paths: revision.changed_paths.clone(),
+                    tracked_file_count: revision.tracked_files.len(),
+                    trigger: trigger.to_string(),
+                });
+                self.current_revision_id = Some(revision.revision_id);
+            }
+            Err(err) => {
+                self.revision_error = Some(format!(
+                    "workspace revision capture failed ({}); aborting rather than continuing without undo protection: {}",
+                    trigger, err
+                ));
+            }
+        }
+    }
+
     fn persist_session_checkpoint(
         &mut self,
         projector: &ContextProjector,
@@ -759,6 +848,7 @@ impl AgentRunner {
         relative_turn: usize,
     ) {
         let absolute_turn = self.session_turn_offset.saturating_add(relative_turn);
+        let workspace_revision_id = self.current_revision_id.as_ref().map(|id| id.as_str().to_string());
         let Some(journal) = self.session_journal.as_mut() else { return; };
         if let Err(err) = journal.sync_projected_transcript(transcript) {
             self.session_persist_error = Some(err.to_string());
@@ -780,7 +870,7 @@ impl AgentRunner {
         let reasoning_hash = serde_json::to_vec(&reasoning)
             .map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes)))
             .unwrap_or_default();
-        if let Err(err) = journal.checkpoint(absolute_turn, projector.last_pinned_baseline_end(), last_touched, reasoning_hash) {
+        if let Err(err) = journal.checkpoint_with_revision(absolute_turn, projector.last_pinned_baseline_end(), last_touched, reasoning_hash, workspace_revision_id) {
             self.session_persist_error = Some(err.to_string());
         }
     }
@@ -1063,6 +1153,7 @@ impl AgentRunner {
                         }
                         if msg.meta.modified_file {
                             modified_files_set.insert(path.clone());
+                            self.batch_mutated = true;
                         }
                         if msg.tool_name == "read" && msg.outcome.is_success() {
                             projector.notify_file_read(&path);

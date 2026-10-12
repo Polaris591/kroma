@@ -8,6 +8,7 @@ pub mod loop_guard;
 pub mod messages;
 pub mod prompt;
 pub mod provider;
+pub mod revision;
 pub mod sensitive_paths;
 pub mod session;
 pub mod tool;
