@@ -67,7 +67,8 @@ other, the restore failed with `ENOTDIR` / `EISDIR` after the intent journal was
   overwrite semantics.
 
 **Tests:** `test_file_and_directory_kind_swap_restores_in_both_directions`,
-`test_nested_new_directory_tree_is_pruned_on_undo`.
+`test_nested_new_directory_tree_is_pruned_on_undo`,
+`test_force_restore_clears_obstructing_symlink_and_directory`.
 
 ### F3 — [P1] Files skipped in the target revision were deleted on restore
 
@@ -123,6 +124,7 @@ Added to `crates/harness-core/tests/gate1_workspace_revision.rs`:
 | `test_external_symlink_and_mode_change_are_conflicts` | external `chmod`, created symlink, symlink swap |
 | `test_skipped_large_file_is_preserved_on_restore` | >4 MiB file recorded in `skipped_paths` is never removed |
 | `test_resumed_run_baseline_survives_undo_rewind` | `--resume` baseline binding + undo rewind |
+| `test_force_restore_clears_obstructing_symlink_and_directory` | `--force-restore` over an obstructing non-empty directory / symlink |
 
 Plus one `harness-cli` unit test for F4.
 
@@ -148,7 +150,7 @@ recorded here and in `docs/GATE1_CI_LOG.txt` (R7–R9) so the next Gate 1 pass p
 
 ```
 cargo build --workspace --all-targets   # 0 warnings
-cargo test  --workspace                 # 83 passed / 0 failed
+cargo test  --workspace                 # 84 passed / 0 failed
 ```
 
 Full transcript, including the end-to-end CLI run, in `docs/GATE1_CI_LOG.txt`.

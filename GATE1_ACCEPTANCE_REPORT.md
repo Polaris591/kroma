@@ -72,9 +72,9 @@ From `IMPLEMENTATION_GATES_AND_EVAL.md`:
 
 ## 3. Verification
 
-**Automated:** `cargo test --workspace` → **83 passed / 0 failed / 0 warnings**.
+**Automated:** `cargo test --workspace` → **84 passed / 0 failed / 0 warnings**.
 
-New Gate 1 test binary `crates/harness-core/tests/gate1_workspace_revision.rs` (12 integration tests):
+New Gate 1 test binary `crates/harness-core/tests/gate1_workspace_revision.rs` (13 integration tests):
 
 | Test | Invariant |
 | --- | --- |
@@ -90,6 +90,7 @@ New Gate 1 test binary `crates/harness-core/tests/gate1_workspace_revision.rs` (
 | `test_external_symlink_and_mode_change_are_conflicts` | External `chmod`, a symlink created at a target-only path, and a symlink swapped onto a tracked path are all reported as conflicts. |
 | `test_skipped_large_file_is_preserved_on_restore` | A >4 MiB file recorded in `skipped_paths` is never removed when restoring to that revision. |
 | `test_resumed_run_baseline_survives_undo_rewind` | A resumed run binds its baseline to the pre-run leaf, so `--undo` rewinds without evicting the baseline revision. |
+| `test_force_restore_clears_obstructing_symlink_and_directory` | `--force-restore` removes an obstructing non-empty directory or symlink (without following it) instead of wedging in `RecoveryRequired`. |
 
 Plus unit tests: `revision_id_parse_rejects_traversal_and_accepts_content_addresses`, `revision_id_is_content_addressed_and_mode_sensitive`, `diff_paths_reports_added_removed_and_modified_paths_only`, CLI `test_workspace_revision_management_flags_parse`, and CLI `test_restore_rev_records_revision_so_a_following_undo_stays_in_sync`.
 
@@ -135,7 +136,7 @@ seq 10 set_leaf            leaf_id=48984b2d-…   (the --undo rewind, appended, 
 | `crates/harness-core/src/events.rs` | `EventPayload::RevisionCaptured`, live-stderr line, schema version `0.7.0`. |
 | `crates/harness-core/src/agent_loop.rs` | `with_snapshot_store`, baseline/mutation capture, fail-closed `revision_error`, checkpoint carries the revision id, baseline captured before the task message, `current_revision_id` seeded from the WAL. |
 | `crates/harness-cli/src/main.rs` | `--undo` / `--restore-rev` / `--force-restore` / `--list-revisions`, optional `--task`, `run_revision_management`, `record_restored_revision`, usage text, exit codes 3/4, parse tests. |
-| `crates/harness-core/tests/gate1_workspace_revision.rs` | **new** — 12 Gate 1 acceptance tests. |
+| `crates/harness-core/tests/gate1_workspace_revision.rs` | **new** — 13 Gate 1 acceptance tests. |
 | `Cargo.toml`, `Cargo.lock` | workspace version `0.9.0`. |
 | `docs/GATE1_CI_LOG.txt` | **new** — build/test/E2E evidence + residual risk register. |
 | `V090_GATE1_REVIEW_FIX_REPORT.md` | **new** — the six post-review fixes and the still-open findings. |

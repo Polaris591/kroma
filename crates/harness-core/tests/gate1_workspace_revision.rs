@@ -875,6 +875,70 @@ fn test_skipped_large_file_is_preserved_on_restore() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Test 13: `--force-restore` clears an obstructing symlink or directory before writing, without
+/// following the symlink and without wedging in `RecoveryRequired`.
+#[test]
+fn test_force_restore_clears_obstructing_symlink_and_directory() {
+    let root = temp_root("force-obstruction");
+    let ws_dir = root.join("ws");
+    let outside_dir = root.join("outside");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::create_dir_all(&outside_dir).unwrap();
+    fs::write(outside_dir.join("secret.txt"), "OUTSIDE_SECRET\n").unwrap();
+    fs::write(ws_dir.join("foo"), "foo v1\n").unwrap();
+
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let baseline = store.capture_revision(&workspace, None, None, 0).unwrap();
+    fs::write(ws_dir.join("foo"), "foo v2\n").unwrap();
+    let mutated = store
+        .capture_revision(&workspace, Some(&baseline.revision_id), None, 1)
+        .unwrap();
+
+    // External non-empty directory parked on the tracked path.
+    fs::remove_file(ws_dir.join("foo")).unwrap();
+    fs::create_dir_all(ws_dir.join("foo/nested")).unwrap();
+    fs::write(ws_dir.join("foo/nested/inner.txt"), "user data\n").unwrap();
+
+    let refused = store
+        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
+        .unwrap();
+    assert!(
+        matches!(refused, RestoreResult::Conflict { .. }),
+        "an obstructing directory must be a conflict without force: {:?}",
+        refused
+    );
+    assert!(ws_dir.join("foo/nested/inner.txt").exists());
+
+    let forced = store
+        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), true)
+        .unwrap();
+    assert!(
+        matches!(forced, RestoreResult::Applied { .. }),
+        "force must clear the obstructing directory instead of wedging: {:?}",
+        forced
+    );
+    assert!(fs::symlink_metadata(ws_dir.join("foo")).unwrap().file_type().is_file());
+    assert_eq!(read(ws_dir.join("foo")), "foo v1\n");
+    assert!(!ws_dir.join("foo/nested").exists());
+
+    // External symlink parked on the tracked path: force must unlink the link, not its target.
+    fs::remove_file(ws_dir.join("foo")).unwrap();
+    std::os::unix::fs::symlink(outside_dir.join("secret.txt"), ws_dir.join("foo")).unwrap();
+    let forced_link = store
+        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), true)
+        .unwrap();
+    assert!(
+        matches!(forced_link, RestoreResult::Applied { .. }),
+        "force must replace the symlink itself: {:?}",
+        forced_link
+    );
+    assert!(fs::symlink_metadata(ws_dir.join("foo")).unwrap().file_type().is_file());
+    assert_eq!(read(ws_dir.join("foo")), "foo v1\n");
+    assert_eq!(read(outside_dir.join("secret.txt")), "OUTSIDE_SECRET\n");
+    let _ = fs::remove_dir_all(root);
+}
+
 fn scripted_write_provider(call_id: &str, path: &str, content: &str) -> Arc<FakeProvider> {
     Arc::new(FakeProvider::new(vec![
         AssistantTurn {
