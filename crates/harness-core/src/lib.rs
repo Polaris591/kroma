@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod attribution;
 pub mod budget;
 pub mod context_projector;
 pub mod completion_gate;

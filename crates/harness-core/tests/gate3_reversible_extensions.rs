@@ -1427,6 +1427,7 @@ async fn test_fork_rewind_resets_subtree_jit_state() {
             "",
             None,
             vec!["crates/sub".to_string()],
+            Vec::new(),
         )
         .unwrap();
     assert_eq!(
@@ -1527,7 +1528,7 @@ async fn test_final_turn_subtree_dirs_persisted_in_checkpoint_and_preserved_on_f
         .unwrap();
     // The abandoned branch had already injected `crates/sub` guidance at this leaf.
     journal
-        .checkpoint_with_revision(0, 0, Vec::new(), "", None, vec!["crates/sub".to_string()])
+        .checkpoint_with_revision(0, 0, Vec::new(), "", None, vec!["crates/sub".to_string()], Vec::new())
         .unwrap();
     journal
         .append_item(
@@ -2154,10 +2155,11 @@ fn test_subtree_jit_multi_ancestor_order_and_total_cap() {
 
 // ---- event schema -------------------------------------------------------------------------
 
-/// Gate 3 bumps the diagnostic schema and the new payloads round-trip through the logger.
+/// Gate 3 bumped the diagnostic schema; Gate 4 bumps it again. The new payloads round-trip
+/// through the logger.
 #[test]
 fn test_gate3_event_schema_and_payloads() {
-    assert_eq!(harness_core::events::EVENT_SCHEMA_VERSION, "0.8.0");
+    assert_eq!(harness_core::events::EVENT_SCHEMA_VERSION, "0.9.0");
 
     let root = temp_root("events");
     let state = root.join("state");
@@ -2192,7 +2194,7 @@ fn test_gate3_event_schema_and_payloads() {
     assert!(body.contains("\"HookEvaluated\""));
     assert!(body.contains("\"ExtensionChanged\""));
     assert!(body.contains("\"SubtreeContextLoaded\""));
-    assert!(body.contains("\"0.8.0\""));
+    assert!(body.contains("\"0.9.0\""));
 
     let _ = fs::remove_dir_all(&root);
 }

@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "harness-cli"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "harness-core",
  "libc",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "harness-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "libc",
  "regex",

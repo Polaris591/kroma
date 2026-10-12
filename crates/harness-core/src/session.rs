@@ -4,6 +4,7 @@
 //! provider reasoning signatures/opaque payloads). It does not promise provider-side KV-cache
 //! hits: those additionally depend on stable wire serialization and provider cache policy.
 
+use crate::attribution::MutationRecord;
 use crate::context_projector::{
     extract_source_entry_id, CompactionReason, ContextProjector, EvidenceLink,
 };
@@ -71,6 +72,9 @@ pub struct SessionCheckpoint {
     /// branch (Gate 3). `serde(default)` keeps earlier WALs readable.
     #[serde(default)]
     pub subtree_dirs: Vec<String>,
+    /// Gate 4 mutation ledger as of this checkpoint. `serde(default)` keeps earlier WALs readable.
+    #[serde(default)]
+    pub mutations: Vec<MutationRecord>,
 }
 
 /// Append-only record binding a captured `WorkspaceRevision` to the WAL entry that was active when
@@ -134,6 +138,9 @@ enum WalPayload {
         workspace_revision_id: Option<String>,
         #[serde(default)]
         subtree_dirs: Vec<String>,
+        /// Gate 4 mutation ledger (branch-scoped). `serde(default)` keeps earlier WALs readable.
+        #[serde(default)]
+        mutations: Vec<MutationRecord>,
     },
     /// A workspace revision snapshot was captured at `turn` (Gate 1).
     RevisionCaptured {
@@ -373,8 +380,8 @@ impl SessionJournal {
                     }
                     completion_resolution_leaf_ids.push(leaf_id);
                 }
-                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs } => {
-                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs });
+                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs, mutations } => {
+                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs, mutations });
                 }
                 WalPayload::RevisionCaptured { leaf_id, turn, revision_id, parent_revision_id, changed_paths, tracked_file_count, captured_at_ms } => {
                     if !revision_id.starts_with("r-") {
@@ -811,11 +818,13 @@ impl SessionJournal {
             reasoning_blocks_sha256,
             None,
             Vec::new(),
+            Vec::new(),
         )
     }
 
-    /// Checkpoint variant that also binds the workspace revision captured before this turn (Gate 1)
-    /// and the ancestor directories whose JIT guidance is already in context (Gate 3).
+    /// Checkpoint variant that also binds the workspace revision captured before this turn (Gate 1),
+    /// the ancestor directories whose JIT guidance is already in context (Gate 3), and the branch's
+    /// mutation ledger (Gate 4).
     pub fn checkpoint_with_revision(
         &mut self,
         turn: usize,
@@ -824,6 +833,7 @@ impl SessionJournal {
         reasoning_blocks_sha256: impl Into<String>,
         workspace_revision_id: Option<String>,
         mut subtree_dirs: Vec<String>,
+        mutations: Vec<MutationRecord>,
     ) -> Result<(), SessionError> {
         last_touched.sort_by(|a, b| a.path.cmp(&b.path));
         subtree_dirs.sort();
@@ -836,6 +846,7 @@ impl SessionJournal {
             reasoning_blocks_sha256: reasoning_blocks_sha256.into(),
             workspace_revision_id,
             subtree_dirs,
+            mutations,
         };
         self.append_payload(WalPayload::Checkpoint {
             leaf_id: checkpoint.leaf_id.clone(),
@@ -845,6 +856,7 @@ impl SessionJournal {
             reasoning_blocks_sha256: checkpoint.reasoning_blocks_sha256.clone(),
             workspace_revision_id: checkpoint.workspace_revision_id.clone(),
             subtree_dirs: checkpoint.subtree_dirs.clone(),
+            mutations: checkpoint.mutations.clone(),
         })?;
         self.checkpoints.push(checkpoint);
         Ok(())

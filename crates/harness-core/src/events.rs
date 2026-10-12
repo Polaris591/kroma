@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-pub const EVENT_SCHEMA_VERSION: &str = "0.8.0";
+pub const EVENT_SCHEMA_VERSION: &str = "0.9.0";
 
 #[derive(Debug, Error)]
 pub enum EventLogError {
@@ -123,6 +123,24 @@ pub enum EventPayload {
         directory: String,
         file_name: String,
         bytes: usize,
+    },
+    /// Gate 4: a post-mutation structural check ran. `status` is `ok` | `warning` | `skipped`.
+    PredictiveCheck {
+        path: String,
+        status: String,
+        issue_count: usize,
+        duration_ms: u64,
+        summary: Option<String>,
+    },
+    /// Gate 4: a failure was ranked against the session mutation ledger. `source` is
+    /// `completion_gate` or `predict_cmd`; the report is always a *candidate* attribution.
+    FailureAttributed {
+        source: String,
+        candidate_count: usize,
+        top_mutation_id: Option<String>,
+        top_path: Option<String>,
+        top_confidence: Option<f64>,
+        top_revision_before: Option<String>,
     },
     RunTerminated {
         status: RunStatus,

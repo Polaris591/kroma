@@ -1,9 +1,13 @@
+use crate::attribution::{
+    AttributionEngine, AttributionReport, MutationLedger, MutationTelemetry,
+};
 use crate::budget::{BudgetConfig, BudgetTracker};
-use crate::context_projector::{verify_tool_call_pairing, ContextProjector};
-use crate::completion_gate::failure_fingerprint;
+use crate::context_projector::{source_entry_id, verify_tool_call_pairing, ContextProjector};
+use crate::completion_gate::{failure_fingerprint, WorkspaceCompletionGate};
 use crate::session::{FileTouch, SessionJournal};
 use crate::env::{
-    AllowAllGate, CompletionGateContext, GateOutcome, SharedCompletionGate, SharedExecutionEnv,
+    AllowAllGate, CompletionGate, CompletionGateContext, GateOutcome, SharedCompletionGate,
+    SharedExecutionEnv,
 };
 use crate::events::{EventLogger, EventPayload};
 use crate::loop_guard::{LoopGuard, LoopGuardVerdict};
@@ -29,6 +33,12 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch, Semaphore};
 
 pub const READ_ONLY_CONCURRENCY_LIMIT: usize = 8;
+
+/// Gate 4: upper bound on `--predict-cmd` executions per run, so an optional early-check command
+/// cannot multiply the cost of a long mutating session without bound.
+pub const MAX_PREDICT_CMD_RUNS: usize = 8;
+/// Gate 4: number of ranked candidates surfaced in a failure prompt.
+pub const ATTRIBUTION_TOP_K: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct RunSummary {
@@ -93,6 +103,11 @@ pub struct AgentRunner {
     batch_ran_side_effect: bool,
     /// Gate 3: ancestor `AGENTS.md`/`CLAUDE.md` directories already injected into this branch.
     subtree_tracker: SubtreeContextTracker,
+    /// Gate 4: session-scoped, branch-aware record of every mutating operation.
+    mutation_ledger: MutationLedger,
+    /// Gate 4: optional fast command run after a mutating batch to surface failures early.
+    predict_cmd: Option<Arc<WorkspaceCompletionGate>>,
+    predict_cmd_runs: usize,
 }
 
 impl AgentRunner {
@@ -120,6 +135,9 @@ impl AgentRunner {
             batch_mutated: false,
             batch_ran_side_effect: false,
             subtree_tracker: SubtreeContextTracker::default(),
+            mutation_ledger: MutationLedger::new(),
+            predict_cmd: None,
+            predict_cmd_runs: 0,
         }
     }
 
@@ -165,6 +183,25 @@ impl AgentRunner {
     pub fn with_subtree_context(mut self, tracker: SubtreeContextTracker) -> Self {
         self.subtree_tracker = tracker;
         self
+    }
+
+    /// Attach the Gate 4 mutation ledger (used by tests and callers that build the ledger outside
+    /// the session WAL). A `--resume` still re-seeds it from the branch checkpoint.
+    pub fn with_mutation_ledger(mut self, ledger: MutationLedger) -> Self {
+        self.mutation_ledger = ledger;
+        self
+    }
+
+    /// Attach an optional `--predict-cmd` gate, run once per mutating batch (bounded by
+    /// [`MAX_PREDICT_CMD_RUNS`]) to surface an early predictive failure plus its candidate
+    /// attribution before the model claims completion.
+    pub fn with_predictive_command(mut self, gate: Arc<WorkspaceCompletionGate>) -> Self {
+        self.predict_cmd = Some(gate);
+        self
+    }
+
+    pub fn mutation_ledger(&self) -> &MutationLedger {
+        &self.mutation_ledger
     }
 
     /// Run the agent loop, then emit fail-open `RunCompleted` observer hooks (Gate 3).
@@ -290,6 +327,12 @@ impl AgentRunner {
             // restored (still active) transcript, so `--resume` / `--fork` never re-inject it.
             self.subtree_tracker
                 .restore_loaded_dirs(checkpoint.subtree_dirs.iter().cloned());
+            // Gate 4: restore the branch's mutation ledger, then drop every record from a turn the
+            // active branch never reached. A `--fork <TURN>` rewind selects an earlier leaf, so
+            // attribution can never blame a mutation that only exists on an abandoned branch.
+            self.mutation_ledger.restore(checkpoint.mutations.clone());
+            self.mutation_ledger
+                .prune_after_turn(self.session_turn_offset as u32);
         }
         // Gate 2: re-seed the raw-evidence store from the WAL so `recall_evidence` can still resolve
         // stubs compacted in an earlier process. The WAL keeps the pre-overlay (raw) item for every
@@ -689,6 +732,20 @@ impl AgentRunner {
                                     "\n\n[ANTI-OSCILLATION WARNING] The failure fingerprint is identical to the previous attempt. First use `read` to inspect the relevant source and surrounding context; choose a different fix strategy; do not repeat the previous `edit` unchanged."
                                 );
                             }
+                            // Gate 4: rank the session's recorded mutations against the gate's
+                            // diagnostics and hand the model a *candidate* list with the exact
+                            // evidence pointer and pre-change revision for each hypothesis.
+                            let report = AttributionEngine::attribute_failure(
+                                &self.mutation_ledger,
+                                &feedback,
+                                "completion_gate",
+                                ATTRIBUTION_TOP_K,
+                            );
+                            Self::log_failure_attribution(&mut logger, "completion_gate", &report);
+                            if let Some(block) = report.render_for_model() {
+                                gate_message.push_str("\n\n");
+                                gate_message.push_str(&block);
+                            }
                             self.record_transcript_item(
                                 &mut transcript,
                                 TranscriptItem::User(UserMessage { content: gate_message }),
@@ -812,6 +869,11 @@ impl AgentRunner {
             if self.batch_mutated || self.batch_ran_side_effect {
                 self.capture_workspace_revision(absolute_turn, "mutation", &mut logger);
             }
+            // Gate 4: bind the post-batch revision to every mutation recorded during this batch, so
+            // a candidate can name both the pre-change revision (a safe `--restore-rev` target) and
+            // the state that actually failed.
+            self.mutation_ledger
+                .backfill_revision_after(absolute_turn as u32, self.current_revision_id.clone());
             if let Some(err) = self.revision_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(err),
@@ -852,6 +914,67 @@ impl AgentRunner {
                     transcript,
                     logger,
                 );
+            }
+
+            // Gate 4: optional `--predict-cmd`. Run once per mutating batch (bounded) so a fast
+            // syntax/type check can surface an early failure — with its candidate attribution —
+            // before the model spends the rest of the budget on a broken tree.
+            if (self.batch_mutated || self.batch_ran_side_effect)
+                && self.predict_cmd.is_some()
+                && self.predict_cmd_runs < MAX_PREDICT_CMD_RUNS
+            {
+                self.predict_cmd_runs += 1;
+                let gate = self.predict_cmd.clone().expect("checked above");
+                let mut mod_list: Vec<String> = modified_files_set.iter().cloned().collect();
+                mod_list.sort();
+                let ctx = CompletionGateContext {
+                    run_id: self.config.run_id,
+                    workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
+                    modified_files: mod_list,
+                    turns_used: current_turn,
+                };
+                if let Ok(GateOutcome::Rejected { feedback }) = gate.check(&ctx).await {
+                    let report = AttributionEngine::attribute_failure(
+                        &self.mutation_ledger,
+                        &feedback,
+                        "predict_cmd",
+                        ATTRIBUTION_TOP_K,
+                    );
+                    let _ = logger.log(EventPayload::PredictiveCheck {
+                        path: report
+                            .top()
+                            .and_then(|c| c.relative_path.clone())
+                            .unwrap_or_else(|| "<run>".to_string()),
+                        status: "warning".to_string(),
+                        issue_count: report.anchors.len(),
+                        duration_ms: 0,
+                        summary: Some(format!(
+                            "--predict-cmd failed on attempt {}/{}",
+                            self.predict_cmd_runs, MAX_PREDICT_CMD_RUNS
+                        )),
+                    });
+                    Self::log_failure_attribution(&mut logger, "predict_cmd", &report);
+                    let mut message = format!(
+                        "[Predictive check failed, attempt {}/{}]: {}\nFix this now; the failure is cheaper to resolve before more edits.",
+                        self.predict_cmd_runs, MAX_PREDICT_CMD_RUNS, feedback
+                    );
+                    if let Some(block) = report.render_for_model() {
+                        message.push_str("\n\n");
+                        message.push_str(&block);
+                    }
+                    self.record_transcript_item(
+                        &mut transcript,
+                        TranscriptItem::User(UserMessage { content: message }),
+                        current_turn.saturating_add(1),
+                    );
+                    if let Some(err) = self.session_persist_error.clone() {
+                        return self.finish_run(
+                            TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                            &budget_tracker, &projector, modified_files_set.into_iter().collect(),
+                            last_assistant_text, transcript, logger,
+                        );
+                    }
+                }
             }
 
             // §3.2 V6-07: Mid-Run Steering — non-blocking check on `steer_rx.try_recv()` after 1:1 tool closure
@@ -1061,7 +1184,7 @@ impl AgentRunner {
         let reasoning_hash = serde_json::to_vec(&reasoning)
             .map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes)))
             .unwrap_or_default();
-        if let Err(err) = journal.checkpoint_with_revision(absolute_turn, projector.last_pinned_baseline_end(), last_touched, reasoning_hash, workspace_revision_id, self.subtree_tracker.loaded_dirs()) {
+        if let Err(err) = journal.checkpoint_with_revision(absolute_turn, projector.last_pinned_baseline_end(), last_touched, reasoning_hash, workspace_revision_id, self.subtree_tracker.loaded_dirs(), self.mutation_ledger.records().to_vec()) {
             self.session_persist_error = Some(err.to_string());
         }
     }
@@ -1275,6 +1398,15 @@ impl AgentRunner {
                             compaction_reread_count: projector.compaction_reread_count(),
                         });
                         self.apply_subtree_context(&mut msg, logger);
+                        // Gate 4: record the mutation against the canonical transcript index of this
+                        // tool result, so the candidate can carry the Gate 2 `source_entry_id`.
+                        let canonical_index = transcript.len();
+                        self.record_mutation_from_result(
+                            &msg,
+                            canonical_index,
+                            budget_tracker.turns_used(),
+                            logger,
+                        );
                         self.record_transcript_item(
                             transcript, TranscriptItem::ToolResult(msg),
                             budget_tracker.turns_used(),
@@ -1487,6 +1619,14 @@ impl AgentRunner {
                     });
 
                     self.apply_subtree_context(&mut msg, logger);
+                    // Gate 4: record the mutation (including a pathless `bash` side-effect record).
+                    let canonical_index = transcript.len();
+                    self.record_mutation_from_result(
+                        &msg,
+                        canonical_index,
+                        budget_tracker.turns_used(),
+                        logger,
+                    );
                     self.record_transcript_item(
                         transcript, TranscriptItem::ToolResult(msg),
                         budget_tracker.turns_used(),
@@ -1512,6 +1652,77 @@ impl AgentRunner {
                 message: evaluation.message.clone(),
             });
         }
+    }
+
+    /// Gate 4: append a `MutationRecord` for one successful tool result.
+    ///
+    /// `edit`/`write` carry their spans in `meta.mutation` (built by the tool runtime). A `bash`
+    /// call can rewrite files the tool cannot report (O1), so it is recorded with no spans: a
+    /// candidate may point at the turn but must never invent a filename the tool never named.
+    fn record_mutation_from_result(
+        &mut self,
+        msg: &ToolResultMessage,
+        canonical_index: usize,
+        relative_turn: usize,
+        logger: &mut EventLogger,
+    ) {
+        if !msg.outcome.is_success() {
+            return;
+        }
+        let absolute_turn = self.session_turn_offset.saturating_add(relative_turn) as u32;
+        let source_entry_id = Some(source_entry_id(canonical_index, msg.call_id.as_str()));
+        match msg.meta.mutation.clone() {
+            Some(MutationTelemetry { spans, predictive }) => {
+                self.mutation_ledger.record_mutation(
+                    absolute_turn,
+                    msg.tool_name.clone(),
+                    msg.call_id.as_str().to_string(),
+                    source_entry_id,
+                    self.current_revision_id.clone(),
+                    spans,
+                );
+                if let Some(predictive) = predictive {
+                    let _ = logger.log(EventPayload::PredictiveCheck {
+                        path: msg.meta.relative_path.clone().unwrap_or_default(),
+                        status: predictive.status,
+                        issue_count: predictive.issue_count,
+                        duration_ms: predictive.duration_ms,
+                        summary: Some(predictive.summary),
+                    });
+                }
+            }
+            None => {
+                if msg.tool_name == "bash" {
+                    self.mutation_ledger.record_mutation(
+                        absolute_turn,
+                        msg.tool_name.clone(),
+                        msg.call_id.as_str().to_string(),
+                        source_entry_id,
+                        self.current_revision_id.clone(),
+                        Vec::new(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Gate 4: persist the ranked candidate attribution as machine-readable telemetry.
+    fn log_failure_attribution(
+        logger: &mut EventLogger,
+        source: &str,
+        report: &AttributionReport,
+    ) {
+        let top = report.top();
+        let _ = logger.log(EventPayload::FailureAttributed {
+            source: source.to_string(),
+            candidate_count: report.candidates.len(),
+            top_mutation_id: top.map(|c| c.mutation_id.clone()),
+            top_path: top.and_then(|c| c.relative_path.clone()),
+            top_confidence: top.map(|c| c.confidence),
+            top_revision_before: top
+                .and_then(|c| c.revision_before.as_ref())
+                .map(|rev| rev.as_str().to_string()),
+        });
     }
 
     /// Gate 3: append not-yet-loaded ancestor `AGENTS.md`/`CLAUDE.md` guidance to a tool result.

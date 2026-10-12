@@ -1,3 +1,4 @@
+use crate::attribution::MutationTelemetry;
 use crate::types::{EditDiagKind, EditMatchTier, ErrorCode, ToolCallId};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -117,6 +118,10 @@ pub struct ToolResultMeta {
     pub edit_match_tier: Option<EditMatchTier>,
     pub diag_kind: Option<EditDiagKind>,
     pub modified_file: bool,
+    /// Gate 4: the spans this call mutated plus its post-mutation predictive-check summary.
+    /// `serde(default)` keeps pre-Gate-4 WAL transcripts readable.
+    #[serde(default)]
+    pub mutation: Option<MutationTelemetry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

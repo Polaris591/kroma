@@ -1,3 +1,7 @@
+use crate::attribution::{
+    added_symbols_for_call, language_name, mutation_summary, MutationTelemetry, MutatedFileSpan,
+    PredictiveReport, PredictiveValidator,
+};
 use crate::budget::BudgetConfig;
 use crate::env::SharedExecutionEnv;
 use crate::extensions::{
@@ -30,6 +34,8 @@ pub struct ToolRuntime {
     env: SharedExecutionEnv,
     budget: BudgetConfig,
     bash_grace_period: Duration,
+    /// Gate 4: run the post-mutation structural check on `edit`/`write` results.
+    predictive_check: bool,
 }
 
 impl ToolRuntime {
@@ -45,12 +51,23 @@ impl ToolRuntime {
             env,
             budget,
             bash_grace_period: Duration::from_secs(2),
+            predictive_check: true,
         }
     }
 
     pub fn with_bash_grace_period(mut self, grace: Duration) -> Self {
         self.bash_grace_period = grace;
         self
+    }
+
+    /// Enable/disable the Gate 4 post-mutation structural check (`--no-predictive-check`).
+    pub fn with_predictive_check(mut self, enabled: bool) -> Self {
+        self.predictive_check = enabled;
+        self
+    }
+
+    pub fn predictive_check_enabled(&self) -> bool {
+        self.predictive_check
     }
 
     pub fn registry(&self) -> &ToolRegistry {
@@ -582,7 +599,65 @@ impl ToolRuntime {
             },
         };
 
+        let exec_out = self.attach_gate4_telemetry(call, exec_out, &effective_raw_args);
+
         (Self::into_message(call, exec_out), decision_label, hook_evaluations)
+    }
+
+    /// Gate 4: run the post-mutation structural check on a successful `edit`/`write`, attach the
+    /// advisory warning block to the tool output, and record the mutation spans + check summary in
+    /// the result metadata so the agent loop can build a `MutationRecord`.
+    ///
+    /// The change is never rolled back here: the block is advisory evidence only.
+    fn attach_gate4_telemetry(
+        &self,
+        call: &ToolCall,
+        mut out: ToolExecutionOutput,
+        raw_args: &str,
+    ) -> ToolExecutionOutput {
+        if !out.outcome.is_success() || !matches!(call.name.as_str(), "edit" | "write") {
+            return out;
+        }
+        let Some(rel) = out.meta.relative_path.clone() else {
+            return out;
+        };
+        let content = crate::attribution::read_workspace_text(self.env.workspace(), &rel).ok();
+        let report = match &content {
+            Some(content) => PredictiveValidator::new(self.predictive_check)
+                .validate_content(&rel, content),
+            None => PredictiveReport::skipped(
+                &rel,
+                language_name(&rel),
+                "file could not be re-read after the mutation",
+                0,
+            ),
+        };
+        if let Some(block) = report.render_block() {
+            let mut appended = String::from(out.content.as_str());
+            appended.push('\n');
+            appended.push_str(&block);
+            out.content = appended;
+        }
+        let (start_line, end_line) = out.meta.lines_range.unwrap_or((0, 0));
+        let span = MutatedFileSpan {
+            relative_path: rel.clone(),
+            start_line,
+            end_line,
+            added_symbols: added_symbols_for_call(&call.name, raw_args, content.as_deref()),
+            summary: mutation_summary(&call.name, &rel, start_line, end_line),
+        };
+        out.meta.mutation = Some(MutationTelemetry {
+            spans: vec![span],
+            // A `skipped` report (check disabled via `--no-predictive-check`, unsupported file type,
+            // unreadable or oversized file) produces no `PredictiveCheck` telemetry: an event means
+            // a structural check actually ran.
+            predictive: if report.status == "skipped" {
+                None
+            } else {
+                Some(report.summary())
+            },
+        });
+        out
     }
 
     fn build_approval_diff_preview(tool_name: &str, rel_path: &str, raw_args: &str) -> String {

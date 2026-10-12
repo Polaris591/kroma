@@ -56,6 +56,10 @@ pub struct CliArgs {
     pub observer_hook: Option<String>,
     /// Gate 3: disable automatic JIT subtree `AGENTS.md`/`CLAUDE.md` loading.
     pub no_subtree_context: bool,
+    /// Gate 4: disable the automatic post-`edit`/`write` structural check.
+    pub no_predictive_check: bool,
+    /// Gate 4: optional fast command run after a mutating batch to surface an early failure.
+    pub predict_cmd: Option<String>,
 }
 
 impl CliArgs {
@@ -107,6 +111,8 @@ where
     let mut policy_hook: Option<String> = None;
     let mut observer_hook: Option<String> = None;
     let mut no_subtree_context = false;
+    let mut no_predictive_check = false;
+    let mut predict_cmd: Option<String> = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -222,6 +228,18 @@ where
             "--no-subtree-context" => {
                 no_subtree_context = true;
             }
+            "--no-predictive-check" => {
+                no_predictive_check = true;
+            }
+            "--predict-cmd" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --predict-cmd <CMD>".to_string())?;
+                if val.trim().is_empty() {
+                    return Err("empty value for --predict-cmd".to_string());
+                }
+                predict_cmd = Some(val);
+            }
             "--tool-filter" => {
                 let val = iter
                     .next()
@@ -330,6 +348,8 @@ where
         policy_hook,
         observer_hook,
         no_subtree_context,
+        no_predictive_check,
+        predict_cmd,
     })
 }
 
@@ -919,6 +939,10 @@ Extensions / Hooks / Skills (Gate 3):
   --observer-hook <CMD>     Fail-open PostToolUse observer hook (failures are logged, never block)
   --no-subtree-context      Disable automatic JIT subtree AGENTS.md/CLAUDE.md loading
 
+Predictive Validation / Attribution (Gate 4):
+  --no-predictive-check     Disable the post-edit/write structural (syntax/delimiter) check
+  --predict-cmd <CMD>       Fast command run after a mutating batch to surface failures early
+
 Workspace Revision Management (requires --resume):
   --undo                    Restore the workspace and session leaf to the previous turn's revision
   --restore-rev <REV_ID>    Restore the workspace to a specific captured revision
@@ -1152,7 +1176,8 @@ async fn main() -> ExitCode {
         subtree_tracker.restore_loaded_dirs(checkpoint.subtree_dirs.clone());
     }
 
-    let runtime = build_runtime_with_registry(registry, env, policy_engine, budget);
+    let runtime = build_runtime_with_registry(registry, env, policy_engine, budget)
+        .with_predictive_check(!cli.no_predictive_check);
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -1179,6 +1204,31 @@ async fn main() -> ExitCode {
         .with_subtree_context(subtree_tracker)
         .with_completion_gate(build_completion_gate(gate_choice))
         .with_completion_gate_max_retries(max_gate_retries);
+    // Gate 4: `--predict-cmd` is an explicit operator authorization, exactly like `--verify-cmd`,
+    // so it runs without needing `--allow-shell`.
+    let runner = match cli.predict_cmd.as_deref() {
+        Some(raw) => match parse_command_argv(raw) {
+            Ok(argv) if !argv.is_empty() => {
+                if !cli.quiet {
+                    eprintln!("[harness] predictive check: {}", argv.join(" "));
+                }
+                runner.with_predictive_command(Arc::new(WorkspaceCompletionGate::with_auto_detection(
+                    Some(argv),
+                    configured_timeout(),
+                    false,
+                )))
+            }
+            Ok(_) => {
+                eprintln!("error: empty value for --predict-cmd");
+                return ExitCode::from(2);
+            }
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+        },
+        None => runner,
+    };
     let (summary, _logger) = runner.run(logger).await;
 
     if let Some(ref text) = summary.final_assistant_text {
