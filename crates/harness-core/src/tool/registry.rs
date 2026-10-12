@@ -69,6 +69,14 @@ impl ToolRegistry {
         self
     }
 
+    /// Gate 5: physically remove `spawn_subagent` from the registry (used for all child subagent
+    /// runtimes so `max_depth == 1` and recursive subagent spawning is structurally impossible, as
+    /// well as when `--no-subagents` / `--max-subagents 0` is configured).
+    pub fn without_subagents(mut self) -> Self {
+        self.builtin.retain(|t| t.definition.name != "spawn_subagent");
+        self
+    }
+
     fn ext(&self) -> std::sync::MutexGuard<'_, ExtensionState> {
         self.extensions.lock().unwrap_or_else(|e| e.into_inner())
     }

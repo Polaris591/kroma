@@ -60,6 +60,8 @@ pub struct CliArgs {
     pub no_predictive_check: bool,
     /// Gate 4: optional fast command run after a mutating batch to surface an early failure.
     pub predict_cmd: Option<String>,
+    /// Gate 5: maximum number of subagent spawns per session (`0` disables `spawn_subagent`).
+    pub max_subagents: usize,
 }
 
 impl CliArgs {
@@ -113,6 +115,8 @@ where
     let mut no_subtree_context = false;
     let mut no_predictive_check = false;
     let mut predict_cmd: Option<String> = None;
+    let mut max_subagents: usize = harness_core::subagents::DEFAULT_MAX_SUBAGENT_SPAWNS;
+    let mut no_subagents = false;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -240,6 +244,17 @@ where
                 }
                 predict_cmd = Some(val);
             }
+            "--max-subagents" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --max-subagents <N>".to_string())?;
+                max_subagents = val
+                    .parse::<usize>()
+                    .map_err(|_| "--max-subagents expects a non-negative integer".to_string())?;
+            }
+            "--no-subagents" => {
+                no_subagents = true;
+            }
             "--tool-filter" => {
                 let val = iter
                     .next()
@@ -325,6 +340,9 @@ where
     };
 
     let policy_mode = PolicyMode::from_flags(policy_flag.as_deref(), allow_write, allow_shell)?;
+    if no_subagents {
+        max_subagents = 0;
+    }
 
     Ok(CliArgs {
         workspace,
@@ -350,6 +368,7 @@ where
         no_subtree_context,
         no_predictive_check,
         predict_cmd,
+        max_subagents,
     })
 }
 
@@ -943,6 +962,10 @@ Predictive Validation / Attribution (Gate 4):
   --no-predictive-check     Disable the post-edit/write structural (syntax/delimiter) check
   --predict-cmd <CMD>       Fast command run after a mutating batch to surface failures early
 
+Controlled Subagents / Isolated Worktrees (Gate 5):
+  --max-subagents <N>       Maximum subagent spawns per session (default: 8, 0 disables)
+  --no-subagents            Disable subagent spawning (max_subagents = 0)
+
 Workspace Revision Management (requires --resume):
   --undo                    Restore the workspace and session leaf to the previous turn's revision
   --restore-rev <REV_ID>    Restore the workspace to a specific captured revision
@@ -1140,7 +1163,10 @@ async fn main() -> ExitCode {
 
     // Gate 3: the registry carries the reversible extension mount points, the workspace skill
     // catalog, and the CLI-declared hooks.
-    let registry = ToolRegistry::new(cli.tool_filter.clone()).with_workspace_skills(workspace_skills);
+    let mut registry = ToolRegistry::new(cli.tool_filter.clone()).with_workspace_skills(workspace_skills);
+    if cli.max_subagents == 0 {
+        registry = registry.without_subagents();
+    }
     match build_cli_extension(&cli) {
         Ok(Some(ext)) => {
             let name = ext.manifest.name.clone();
@@ -1203,7 +1229,8 @@ async fn main() -> ExitCode {
         .with_snapshot_store(snapshot_store)
         .with_subtree_context(subtree_tracker)
         .with_completion_gate(build_completion_gate(gate_choice))
-        .with_completion_gate_max_retries(max_gate_retries);
+        .with_completion_gate_max_retries(max_gate_retries)
+        .with_max_subagents(cli.max_subagents);
     // Gate 4: `--predict-cmd` is an explicit operator authorization, exactly like `--verify-cmd`,
     // so it runs without needing `--allow-shell`. It is skipped when `--policy read-only` or
     // `--no-predictive-check` is active.
@@ -1823,6 +1850,60 @@ mod tests {
             .any(|body| body.contains("\"RevisionRestored\"") && body.contains("restored_files"));
         assert!(logged, "a completed restore must be recorded in the run event log");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_subagent_cli_flags_parse() {
+        let default_cli = parse_cli_args(vec![
+            "harness".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "check".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            default_cli.max_subagents,
+            harness_core::subagents::DEFAULT_MAX_SUBAGENT_SPAWNS
+        );
+
+        let custom_max = parse_cli_args(vec![
+            "harness".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "check".into(),
+            "--max-subagents".into(),
+            "3".into(),
+        ])
+        .unwrap();
+        assert_eq!(custom_max.max_subagents, 3);
+
+        let disabled = parse_cli_args(vec![
+            "harness".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "check".into(),
+            "--no-subagents".into(),
+        ])
+        .unwrap();
+        assert_eq!(disabled.max_subagents, 0);
+
+        assert!(parse_cli_args(vec![
+            "harness".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "check".into(),
+            "--max-subagents".into(),
+            "not-a-number".into(),
+        ])
+        .is_err());
     }
 }
 

@@ -1,0 +1,52 @@
+{
+  "concurrency_benchmarks": [
+    {
+      "avg_wall_clock_ms": 12,
+      "concurrency": 1,
+      "conflict_detection_accuracy": 1.0,
+      "post_merge_test_pass_rate": 1.0,
+      "success_rate": 1.0,
+      "tasks": 4,
+      "total_tokens": 1280,
+      "worktree_cleanup_rate": 1.0
+    },
+    {
+      "avg_wall_clock_ms": 8,
+      "concurrency": 2,
+      "conflict_detection_accuracy": 1.0,
+      "post_merge_test_pass_rate": 1.0,
+      "success_rate": 1.0,
+      "tasks": 4,
+      "total_tokens": 1280,
+      "worktree_cleanup_rate": 1.0
+    },
+    {
+      "avg_wall_clock_ms": 5,
+      "concurrency": 4,
+      "conflict_detection_accuracy": 1.0,
+      "post_merge_test_pass_rate": 1.0,
+      "success_rate": 1.0,
+      "tasks": 4,
+      "total_tokens": 1280,
+      "worktree_cleanup_rate": 1.0
+    }
+  ],
+  "fault_and_conflict_scenarios": {
+    "concurrent_parent_edit_conflict_preserved": true,
+    "out_of_scope_allowed_paths_rejected": true,
+    "post_merge_gate_failure_auto_reverted_to_revision_before": true,
+    "single_step_undo_reverts_merged_worker": true,
+    "worker_timeout_process_and_worktree_swept": true
+  },
+  "gate": "Gate 5 — Controlled Subagents & Isolated Worktrees (v0.13.0)",
+  "invariants": {
+    "auto_revert_on_verify_failure": true,
+    "max_depth": 1,
+    "post_merge_completion_gate_verification": true,
+    "recursive_spawning_blocked": true,
+    "scout_strictly_read_only": true,
+    "three_way_baseline_conflict_detection": true,
+    "worker_isolated_worktree": true
+  },
+  "schema_version": "0.10.0"
+}

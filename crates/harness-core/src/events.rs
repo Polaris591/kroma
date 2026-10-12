@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-pub const EVENT_SCHEMA_VERSION: &str = "0.9.0";
+pub const EVENT_SCHEMA_VERSION: &str = "0.10.0";
 
 #[derive(Debug, Error)]
 pub enum EventLogError {
@@ -141,6 +141,32 @@ pub enum EventPayload {
         top_path: Option<String>,
         top_confidence: Option<f64>,
         top_revision_before: Option<String>,
+    },
+    /// Gate 5: a bounded child subagent was spawned (`scout` or `worker`).
+    SubagentSpawned {
+        subagent_id: String,
+        role: String,
+        max_turns: usize,
+        isolated_worktree: bool,
+    },
+    /// Gate 5: a child subagent finished (or was cancelled/timed out).
+    SubagentCompleted {
+        subagent_id: String,
+        role: String,
+        status: String,
+        turns_used: usize,
+        tool_calls_used: usize,
+        tokens_used: u64,
+        duration_ms: u64,
+    },
+    /// Gate 5: an isolated `worker` worktree merge was evaluated against the parent workspace.
+    WorktreeMerged {
+        subagent_id: String,
+        status: String,
+        written_files: Vec<String>,
+        removed_files: Vec<String>,
+        conflict_paths: Vec<String>,
+        revision_after: Option<String>,
     },
     RunTerminated {
         status: RunStatus,
@@ -432,6 +458,54 @@ impl EventLogger {
                     eprintln!(
                         "📄 [subtree-context] {}/{} ({}B)",
                         directory, file_name, bytes
+                    );
+                }
+                EventPayload::SubagentSpawned {
+                    subagent_id,
+                    role,
+                    max_turns,
+                    isolated_worktree,
+                } => {
+                    eprintln!(
+                        "🤖 [subagent:{}] spawned role={} max_turns={} isolated={}",
+                        subagent_id, role, max_turns, isolated_worktree
+                    );
+                }
+                EventPayload::SubagentCompleted {
+                    subagent_id,
+                    role,
+                    status,
+                    turns_used,
+                    tool_calls_used,
+                    tokens_used,
+                    duration_ms,
+                } => {
+                    eprintln!(
+                        "🤖 [subagent:{}] {} role={} ({}ms, turns={}, tools={}, tokens={})",
+                        subagent_id,
+                        status,
+                        role,
+                        duration_ms,
+                        turns_used,
+                        tool_calls_used,
+                        tokens_used
+                    );
+                }
+                EventPayload::WorktreeMerged {
+                    subagent_id,
+                    status,
+                    written_files,
+                    removed_files,
+                    conflict_paths,
+                    ..
+                } => {
+                    eprintln!(
+                        "🌿 [worktree:{}] merge={} written={} removed={} conflicts={}",
+                        subagent_id,
+                        status,
+                        written_files.len(),
+                        removed_files.len(),
+                        conflict_paths.len()
                     );
                 }
                 EventPayload::RunTerminated {

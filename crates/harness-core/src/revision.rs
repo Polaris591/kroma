@@ -716,7 +716,28 @@ impl SnapshotStore {
         Ok(Some(newest.revision_id.as_str().to_string()))
     }
 
-    fn read_blob(&self, sha256: &str) -> Result<Vec<u8>, RevisionError> {
+    /// Scan a workspace (such as an isolated worker worktree) and store its tracked file blobs in
+    /// the content-addressed blob store without writing a parent `revisions/r-*.json` manifest.
+    pub fn scan_workspace_to_blobs(
+        &self,
+        workspace: &WorkspaceCap,
+    ) -> Result<(BTreeMap<String, TrackedFile>, Vec<String>), RevisionError> {
+        self.ensure_layout()?;
+        let mut tracked: BTreeMap<String, TrackedFile> = BTreeMap::new();
+        let mut skipped: BTreeSet<String> = BTreeSet::new();
+        let mut total_bytes = 0u64;
+        self.scan_dir(
+            workspace,
+            Path::new("."),
+            0,
+            &mut tracked,
+            &mut skipped,
+            &mut total_bytes,
+        )?;
+        Ok((tracked, skipped.into_iter().collect()))
+    }
+
+    pub fn read_blob(&self, sha256: &str) -> Result<Vec<u8>, RevisionError> {
         let path = self.blob_path(sha256);
         let mut file = OpenOptions::new()
             .read(true)
@@ -836,7 +857,7 @@ impl SnapshotStore {
 /// re-opened with `O_NOFOLLOW | O_DIRECTORY`, so a symlinked component is refused rather than
 /// traversed. Only the final component is chmod-ed: pre-existing ancestors (e.g. `/tmp`) keep their
 /// own permissions and are never touched.
-fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
+pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
     // Lexically normalize (resolving `.` / `..`) and split into (anchor, components). Every
     // intermediate component is re-opened with `O_NOFOLLOW`, so it is always a real directory and
     // lexical `..` resolution matches what the filesystem would do.
@@ -1004,7 +1025,7 @@ fn diff_paths(
 
 /// What a workspace path currently is, resolved without following symlinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LiveEntryStat {
+pub(crate) enum LiveEntryStat {
     /// The path, or an ancestor needed to reach it, does not exist (including when an ancestor is
     /// a plain file that blocks directory traversal).
     Absent,
@@ -1018,7 +1039,7 @@ enum LiveEntryStat {
 
 /// [`LiveEntryStat`] plus the content hash of a regular file, for conflict comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum LiveEntryState {
+pub(crate) enum LiveEntryState {
     Absent,
     Regular { sha256: String, mode: u32, size: u64 },
     Directory,
@@ -1027,7 +1048,7 @@ enum LiveEntryState {
 
 /// Inspect a workspace path without following symlinks, classifying absent / regular / directory /
 /// non-regular so a user-created symlink or directory can never masquerade as "unchanged".
-fn stat_live_entry(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryStat, RevisionError> {
+pub(crate) fn stat_live_entry(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryStat, RevisionError> {
     let norm = match WorkspaceCap::validate_relative_components(rel) {
         Ok(n) => n,
         Err(WorkspaceError::InvalidPath { .. }) => return Ok(LiveEntryStat::Absent),
@@ -1130,7 +1151,7 @@ fn classify_blocked_parent(
 /// Full live state of a path: absent / directory / non-regular, or a regular file with its content
 /// hash and permission bits. A regular file larger than the snapshot cap is reported by size
 /// rather than hashed in full, since it can never equal a tracked entry.
-fn live_entry_state(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryState, RevisionError> {
+pub(crate) fn live_entry_state(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryState, RevisionError> {
     match stat_live_entry(workspace, rel)? {
         LiveEntryStat::Absent => Ok(LiveEntryState::Absent),
         LiveEntryStat::Directory => Ok(LiveEntryState::Directory),
@@ -1175,7 +1196,7 @@ fn live_entry_state(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryStat
 
 /// True when `path` is a real directory that legitimately holds tracked files of `rev` (for
 /// example `foo` when `foo/bar.txt` is tracked). Such a directory is expected, not external work.
-fn is_ancestor_dir_of(rev: &WorkspaceRevision, path: &str) -> bool {
+pub(crate) fn is_ancestor_dir_of(rev: &WorkspaceRevision, path: &str) -> bool {
     let prefix = format!("{}/", path);
     rev.tracked_files.keys().any(|candidate| candidate.starts_with(&prefix))
 }
@@ -1261,7 +1282,7 @@ fn classify_conflict_against_target(
     }
 }
 
-fn write_tracked_file(
+pub(crate) fn write_tracked_file(
     workspace: &WorkspaceCap,
     rel: &str,
     bytes: &[u8],
@@ -1297,7 +1318,7 @@ fn write_tracked_file(
 /// is removed: a symlink, directory, or special file swapped into the path is external work and is
 /// never deleted. With `force` the obstructing entry itself is removed, then any directories the
 /// mutation created that are now empty are pruned so an undone nested tree leaves nothing behind.
-fn remove_tracked_file(
+pub(crate) fn remove_tracked_file(
     workspace: &WorkspaceCap,
     rel: &str,
     force: bool,

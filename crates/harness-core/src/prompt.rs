@@ -243,6 +243,7 @@ pub const UNTRUSTED_FENCE_TAGS: &[&str] = &[
     "untrusted_subtree_context",
     "predictive_validation",
     "candidate_failure_attribution",
+    "subagent_report",
 ];
 
 /// Escape newlines, backslashes, angle brackets, C0/C1 control characters, DEL, Unicode line

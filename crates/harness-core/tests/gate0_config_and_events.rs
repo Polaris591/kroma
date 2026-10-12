@@ -78,6 +78,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
             "ls",
             "read",
             "recall_evidence",
+            "spawn_subagent",
             "write"
         ]
     );
@@ -93,7 +94,8 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
             "grep",
             "ls",
             "read",
-            "recall_evidence"
+            "recall_evidence",
+            "spawn_subagent"
         ]
     );
     assert!(reg.lookup_for_dispatch("edit", PolicyMode::ReadOnly).is_err());
@@ -114,10 +116,10 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
     assert!(filtered.lookup_for_dispatch("grep", PolicyMode::Ask).is_err());
 
     // Non-interactive PolicyEngine hides tools that would be automatically denied:
-    // - Non-interactive Ask: hides bash, edit, write -> activate_skill, find, grep, ls, read, recall_evidence
-    // - Non-interactive AllowWrite: hides bash -> activate_skill, edit, find, grep, ls, read, recall_evidence, write
-    // - Non-interactive AllowShell: hides edit, write -> activate_skill, bash, find, grep, ls, read, recall_evidence
-    // - Non-interactive FullAutonomous: exposes all 9 tools
+    // - Non-interactive Ask: hides bash, edit, write -> activate_skill, find, grep, ls, read, recall_evidence, spawn_subagent
+    // - Non-interactive AllowWrite: hides bash -> activate_skill, edit, find, grep, ls, read, recall_evidence, spawn_subagent, write
+    // - Non-interactive AllowShell: hides edit, write -> activate_skill, bash, find, grep, ls, read, recall_evidence, spawn_subagent
+    // - Non-interactive FullAutonomous: exposes all 10 tools
     use harness_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine};
     use std::sync::Arc;
 
@@ -129,7 +131,15 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         .collect();
     assert_eq!(
         ask_non_tty,
-        vec!["activate_skill", "find", "grep", "ls", "read", "recall_evidence"]
+        vec![
+            "activate_skill",
+            "find",
+            "grep",
+            "ls",
+            "read",
+            "recall_evidence",
+            "spawn_subagent"
+        ]
     );
 
     let pe_aw = PolicyEngine::new(
@@ -143,7 +153,17 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         .collect();
     assert_eq!(
         aw_non_tty,
-        vec!["activate_skill", "edit", "find", "grep", "ls", "read", "recall_evidence", "write"]
+        vec![
+            "activate_skill",
+            "edit",
+            "find",
+            "grep",
+            "ls",
+            "read",
+            "recall_evidence",
+            "spawn_subagent",
+            "write"
+        ]
     );
 
     let pe_as = PolicyEngine::new(
@@ -157,7 +177,16 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         .collect();
     assert_eq!(
         as_non_tty,
-        vec!["activate_skill", "bash", "find", "grep", "ls", "read", "recall_evidence"]
+        vec![
+            "activate_skill",
+            "bash",
+            "find",
+            "grep",
+            "ls",
+            "read",
+            "recall_evidence",
+            "spawn_subagent"
+        ]
     );
 
     let pe_full = PolicyEngine::new(
@@ -180,6 +209,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
             "ls",
             "read",
             "recall_evidence",
+            "spawn_subagent",
             "write"
         ]
     );

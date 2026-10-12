@@ -39,6 +39,7 @@ pub const RESERVED_KERNEL_TOOLS: &[&str] = &[
     "ls",
     "read",
     "recall_evidence",
+    "spawn_subagent",
     "write",
 ];
 

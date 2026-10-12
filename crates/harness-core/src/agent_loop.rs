@@ -19,10 +19,16 @@ use crate::provider::{
     validate_assistant_turn_batch, ModelProvider, ProviderRequest,
 };
 use crate::revision::{RevisionId, SnapshotStore};
+use crate::subagents::{
+    build_worker_mutation_spans, parse_spawn_subagent_specs, render_subagent_batch_report,
+    IsolatedWorktree, ProviderSubagentBackend, SubagentBackend, SubagentExecutionRequest,
+    SubagentResult, SubagentRole, SubagentRunOutcome, WorktreeMergeResult,
+    DEFAULT_MAX_SUBAGENT_SPAWNS,
+};
 use crate::extensions::{
     is_subtree_context_tool, HookContext, HookEvaluation, SubtreeContextTracker,
 };
-use crate::tool::policy::PolicyCheckResult;
+use crate::tool::policy::{ApprovalDecision, ApprovalRequest, PolicyCheckResult};
 use crate::tool::runtime::ToolRuntime;
 use crate::tools::recall_evidence::execute_recall_evidence;
 use crate::tools::ToolExecutionOutput;
@@ -108,6 +114,13 @@ pub struct AgentRunner {
     /// Gate 4: optional fast command run after a mutating batch to surface failures early.
     predict_cmd: Option<Arc<WorkspaceCompletionGate>>,
     predict_cmd_runs: usize,
+    /// Gate 5: backend driving child `Scout` / `Worker` subagent runs.
+    subagent_backend: Arc<dyn SubagentBackend>,
+    /// Gate 5: maximum number of subagents this session may spawn (`0` disables `spawn_subagent`).
+    max_subagent_spawns: usize,
+    subagents_spawned: usize,
+    /// Gate 5: optional total token cap (input + output) enforced on child subagent runs.
+    max_total_tokens: Option<u64>,
 }
 
 impl AgentRunner {
@@ -117,6 +130,7 @@ impl AgentRunner {
         tool_runtime: ToolRuntime,
         cancel_rx: watch::Receiver<bool>,
     ) -> Self {
+        let subagent_backend = Arc::new(ProviderSubagentBackend::new(Arc::clone(&provider)));
         Self {
             config,
             provider,
@@ -138,6 +152,10 @@ impl AgentRunner {
             mutation_ledger: MutationLedger::new(),
             predict_cmd: None,
             predict_cmd_runs: 0,
+            subagent_backend,
+            max_subagent_spawns: DEFAULT_MAX_SUBAGENT_SPAWNS,
+            subagents_spawned: 0,
+            max_total_tokens: None,
         }
     }
 
@@ -204,6 +222,31 @@ impl AgentRunner {
         &self.mutation_ledger
     }
 
+    /// Gate 5: attach a custom [`SubagentBackend`] for `spawn_subagent` calls.
+    pub fn with_subagent_backend(mut self, backend: Arc<dyn SubagentBackend>) -> Self {
+        self.subagent_backend = backend;
+        self
+    }
+
+    /// Gate 5: attach a dedicated [`ModelProvider`] for child subagent runs.
+    pub fn with_subagent_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
+        self.subagent_backend = Arc::new(ProviderSubagentBackend::new(provider));
+        self
+    }
+
+    /// Gate 5: configure the maximum number of subagents this session may spawn (`0` disables
+    /// `spawn_subagent` and hides it from the model-visible tool schema).
+    pub fn with_max_subagents(mut self, max_subagents: usize) -> Self {
+        self.max_subagent_spawns = max_subagents;
+        self
+    }
+
+    /// Gate 5: enforce a hard total-token ceiling (input + output) on this runner.
+    pub fn with_max_total_tokens(mut self, max_tokens: Option<u64>) -> Self {
+        self.max_total_tokens = max_tokens;
+        self
+    }
+
     /// Run the agent loop, then emit fail-open `RunCompleted` observer hooks (Gate 3).
     ///
     /// The observers run after the loop terminates on *every* exit path, because the wrapper sees
@@ -250,10 +293,13 @@ impl AgentRunner {
 
         let policy_engine = self.tool_runtime.policy_engine();
         let policy_mode = policy_engine.mode();
-        let visible_tools = self
+        let mut visible_tools = self
             .tool_runtime
             .registry()
             .visible_definitions_for_engine(policy_engine);
+        if self.max_subagent_spawns == 0 {
+            visible_tools.retain(|t| t.name != "spawn_subagent");
+        }
         let static_prefix = self.prompt_builder.build_static_prefix(&visible_tools);
 
         if let Err(e) = logger.log(EventPayload::RunStarted {
@@ -429,6 +475,24 @@ impl AgentRunner {
                     transcript,
                     logger,
                 );
+            }
+
+            if let Some(max_tok) = self.max_total_tokens {
+                if budget_tracker
+                    .total_input_tokens()
+                    .saturating_add(budget_tracker.total_output_tokens())
+                    >= max_tok
+                {
+                    return self.finish_run(
+                        TerminalReason::MaxTurns,
+                        &budget_tracker,
+                        &projector,
+                        modified_files_set.into_iter().collect(),
+                        last_assistant_text,
+                        transcript,
+                        logger,
+                    );
+                }
             }
 
             if !budget_tracker.try_begin_turn() {
@@ -1566,6 +1630,15 @@ impl AgentRunner {
                                 self.tool_runtime.policy_engine().mode(),
                             )
                             .is_ok();
+                    let spawn_subagent_available = call.name == "spawn_subagent"
+                        && self
+                            .tool_runtime
+                            .registry()
+                            .lookup_for_dispatch(
+                                "spawn_subagent",
+                                self.tool_runtime.policy_engine().mode(),
+                            )
+                            .is_ok();
                     let (mut msg, decision, serial_hook_evaluations) = if recall_available {
                         // Gate 3: `recall_evidence` is dispatched here because it resolves against the
                         // live transcript, but it still runs the exact same fail-closed `PreToolUse`
@@ -1640,6 +1713,14 @@ impl AgentRunner {
                                 (message, decision, hooks)
                             }
                         }
+                    } else if spawn_subagent_available {
+                        self.execute_spawn_subagent_call(
+                            call,
+                            budget_tracker.turns_used(),
+                            modified_files_set,
+                            logger,
+                        )
+                        .await
                     } else {
                         self.tool_runtime
                             .execute_call(call, budget_tracker.turns_used(), self.cancel_rx.clone())
@@ -1750,6 +1831,602 @@ impl AgentRunner {
                 message: evaluation.message.clone(),
             });
         }
+    }
+
+    /// Gate 5: execute a `spawn_subagent` call through the PreToolUse policy-hook gate, kernel
+    /// `PolicyEngine`, subagent spawn budget, isolated worktree materialization, concurrent
+    /// execution, three-way merge, post-merge verification, and PostToolUse observer hooks.
+    async fn execute_spawn_subagent_call(
+        &mut self,
+        call: &ToolCall,
+        relative_turn: usize,
+        modified_files_set: &mut HashSet<String>,
+        logger: &mut EventLogger,
+    ) -> (ToolResultMessage, String, Vec<HookEvaluation>) {
+        match self
+            .tool_runtime
+            .pre_tool_hook_gate(call, relative_turn)
+            .await
+        {
+            Err((denied, mut hooks)) => {
+                hooks.extend(
+                    self.tool_runtime
+                        .post_tool_hooks(call, relative_turn, &denied)
+                        .await,
+                );
+                (denied, "deny_policy_hook".to_string(), hooks)
+            }
+            Ok(mut hooks) => {
+                let (out, decision) = self
+                    .execute_spawn_subagent_inner(call, relative_turn, modified_files_set, logger)
+                    .await;
+                let message = ToolResultMessage {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
+                    outcome: out.outcome,
+                    content: Arc::from(out.content),
+                    meta: out.meta,
+                };
+                hooks.extend(
+                    self.tool_runtime
+                        .post_tool_hooks(call, relative_turn, &message)
+                        .await,
+                );
+                (message, decision, hooks)
+            }
+        }
+    }
+
+    async fn execute_spawn_subagent_inner(
+        &mut self,
+        call: &ToolCall,
+        relative_turn: usize,
+        modified_files_set: &mut HashSet<String>,
+        logger: &mut EventLogger,
+    ) -> (ToolExecutionOutput, String) {
+        let started = std::time::Instant::now();
+        if self.max_subagent_spawns == 0 {
+            return (
+                ToolExecutionOutput::error(
+                    ErrorCode::PolicyDenied,
+                    "spawn_subagent is disabled for this session (--no-subagents / max_subagents=0)"
+                        .to_string(),
+                    ToolResultMeta::default(),
+                ),
+                "deny:subagents_disabled".to_string(),
+            );
+        }
+
+        let specs = match parse_spawn_subagent_specs(&call.raw_arguments) {
+            Ok(s) => s,
+            Err(err) => {
+                return (
+                    ToolExecutionOutput::error(
+                        ErrorCode::InvalidArguments,
+                        err,
+                        ToolResultMeta::default(),
+                    ),
+                    "deny_invalid_args".to_string(),
+                );
+            }
+        };
+
+        if self.subagents_spawned.saturating_add(specs.len()) > self.max_subagent_spawns {
+            return (
+                ToolExecutionOutput::error(
+                    ErrorCode::PolicyDenied,
+                    format!(
+                        "subagent spawn budget exceeded: requested {}, already spawned {}, max_subagents={}",
+                        specs.len(),
+                        self.subagents_spawned,
+                        self.max_subagent_spawns
+                    ),
+                    ToolResultMeta::default(),
+                ),
+                "deny:subagent_budget_exceeded".to_string(),
+            );
+        }
+
+        let has_worker = specs.iter().any(|s| s.role == SubagentRole::Worker);
+        let effective_effect = if has_worker {
+            EffectClass::Mutating
+        } else {
+            EffectClass::ReadOnly
+        };
+
+        let check = self
+            .tool_runtime
+            .policy_engine()
+            .evaluate(&call.name, effective_effect, false);
+        let decision_label = match check {
+            PolicyCheckResult::Allow => {
+                if has_worker {
+                    "allow_subagent_worker".to_string()
+                } else {
+                    "allow_subagent_scout".to_string()
+                }
+            }
+            PolicyCheckResult::Deny(reason) => {
+                return (
+                    ToolExecutionOutput::error(
+                        ErrorCode::PolicyDenied,
+                        format!(
+                            "{} (spawn_subagent role={})",
+                            reason,
+                            if has_worker { "worker" } else { "scout" }
+                        ),
+                        ToolResultMeta::default(),
+                    ),
+                    format!("deny:{}", reason),
+                );
+            }
+            PolicyCheckResult::Ask => {
+                let req = ApprovalRequest {
+                    tool_name: call.name.clone(),
+                    effect_class: effective_effect,
+                    is_sensitive_path: false,
+                    target_path: None,
+                    diff_preview: None,
+                    command_preview: Some(call.raw_arguments.clone()),
+                    workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
+                };
+                let pe = self.tool_runtime.policy_engine().clone();
+                let decision = tokio::task::spawn_blocking(move || pe.prompt_approval(&req))
+                    .await
+                    .unwrap_or(ApprovalDecision::Deny);
+                match decision {
+                    ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => {
+                        "ask_approved".to_string()
+                    }
+                    ApprovalDecision::Deny => {
+                        return (
+                            ToolExecutionOutput::error(
+                                ErrorCode::PolicyDenied,
+                                "spawn_subagent execution denied by approval policy".to_string(),
+                                ToolResultMeta::default(),
+                            ),
+                            "ask_denied".to_string(),
+                        );
+                    }
+                }
+            }
+        };
+
+        let absolute_turn = self.session_turn_offset.saturating_add(relative_turn);
+
+        // If earlier tools in this same batch mutated the parent workspace, capture a revision now
+        // so any worker subagent starts from the up-to-date parent state.
+        if has_worker && (self.batch_mutated || self.batch_ran_side_effect) {
+            let prior_changed =
+                self.capture_workspace_revision(absolute_turn, "mutation", logger);
+            for path in &prior_changed {
+                modified_files_set.insert(path.clone());
+            }
+            self.mutation_ledger.backfill_revision_and_paths(
+                absolute_turn as u32,
+                self.current_revision_id.clone(),
+                &prior_changed,
+                self.snapshot_store.is_some(),
+            );
+            self.batch_mutated = false;
+            self.batch_ran_side_effect = false;
+        }
+
+        let store = self.snapshot_store.clone().unwrap_or_else(|| {
+            Arc::new(SnapshotStore::new(
+                self.tool_runtime.env().state_dir().join("snapshots"),
+            ))
+        });
+
+        if has_worker && self.current_revision_id.is_none() {
+            match store.capture_revision(
+                self.tool_runtime.env().workspace(),
+                None,
+                None,
+                absolute_turn,
+            ) {
+                Ok(rev) => {
+                    self.current_revision_id = Some(rev.revision_id);
+                }
+                Err(e) => {
+                    return (
+                        ToolExecutionOutput::error(
+                            ErrorCode::IoError,
+                            format!("failed to capture baseline revision for worker worktree: {}", e),
+                            ToolResultMeta::default(),
+                        ),
+                        decision_label,
+                    );
+                }
+            }
+        }
+
+        let worktrees_base = self.tool_runtime.env().state_dir().join("worktrees");
+        let subagents_state_base = self.tool_runtime.env().state_dir().join("subagents");
+        let workspace_skills = self.tool_runtime.registry().skills();
+        let parent_policy_mode = self.tool_runtime.policy_engine().mode();
+        let parent_budget = self.config.budget.clone();
+        let predictive_check = self.tool_runtime.predictive_check_enabled();
+
+        let mut prepared = Vec::with_capacity(specs.len());
+        for spec in specs {
+            self.subagents_spawned += 1;
+            let subagent_id = format!("sub-{:04}", self.subagents_spawned);
+            let _ = logger.log(EventPayload::SubagentSpawned {
+                subagent_id: subagent_id.clone(),
+                role: spec.role.as_str().to_string(),
+                max_turns: spec.budget.max_turns,
+                isolated_worktree: spec.role == SubagentRole::Worker,
+            });
+            let worktree = if spec.role == SubagentRole::Worker {
+                let wt_dir = worktrees_base.join(format!("wt-{}", subagent_id));
+                match IsolatedWorktree::materialize(
+                    &subagent_id,
+                    self.tool_runtime.env().workspace(),
+                    &store,
+                    self.current_revision_id.as_ref(),
+                    wt_dir,
+                ) {
+                    Ok(wt) => Some(wt),
+                    Err(e) => {
+                        return (
+                            ToolExecutionOutput::error(
+                                ErrorCode::IoError,
+                                format!(
+                                    "failed to materialize isolated worktree for {}: {}",
+                                    subagent_id, e
+                                ),
+                                ToolResultMeta::default(),
+                            ),
+                            decision_label,
+                        );
+                    }
+                }
+            } else {
+                None
+            };
+            prepared.push((subagent_id, spec, worktree));
+        }
+
+        let mut join_handles = Vec::with_capacity(prepared.len());
+        let mut worktree_slots: Vec<(String, crate::subagents::SubagentSpec, Option<IsolatedWorktree>)> =
+            Vec::with_capacity(prepared.len());
+
+        for (subagent_id, spec, worktree) in prepared {
+            let child_workspace = match &worktree {
+                Some(wt) => wt.workspace().clone(),
+                None => self.tool_runtime.env().workspace().clone(),
+            };
+            let backend = Arc::clone(&self.subagent_backend);
+            let mut parent_cancel = self.cancel_rx.clone();
+            let timeout_ms = spec.budget.timeout_ms;
+            let req_id = subagent_id.clone();
+            let req_spec = spec.clone();
+            let child_state_dir = subagents_state_base.join(&subagent_id);
+            let skills = workspace_skills.clone();
+            let budget_clone = parent_budget.clone();
+
+            let handle = tokio::spawn(async move {
+                let started_sub = std::time::Instant::now();
+                let (child_cancel_tx, child_cancel_rx) = watch::channel(*parent_cancel.borrow());
+                let cancel_tx_for_signal = child_cancel_tx.clone();
+                let mut parent_cancel_for_watcher = parent_cancel.clone();
+                let watcher = tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep( std::time::Duration::from_millis(timeout_ms)) => {
+                            let _ = cancel_tx_for_signal.send(true);
+                        }
+                        _ = async {
+                            loop {
+                                if *parent_cancel_for_watcher.borrow() {
+                                    break;
+                                }
+                                if parent_cancel_for_watcher.changed().await.is_err() {
+                                    std::future::pending::<()>().await;
+                                }
+                            }
+                        } => {
+                            let _ = cancel_tx_for_signal.send(true);
+                        }
+                    }
+                });
+
+                let req = SubagentExecutionRequest {
+                    subagent_id: req_id,
+                    spec: req_spec,
+                    workspace: child_workspace,
+                    state_dir: child_state_dir,
+                    workspace_skills: skills,
+                    parent_policy_mode,
+                    parent_budget: budget_clone,
+                    predictive_check,
+                    cancel_rx: child_cancel_rx,
+                };
+
+                // Allow the child loop a short grace window after `child_cancel_tx` fires to
+                // sweep any child processes cleanly, then hard-bound the join.
+                let hard_deadline =
+                    std::time::Duration::from_millis(timeout_ms.saturating_add(150));
+                let res = tokio::select! {
+                    r = backend.run_subagent(req) => r,
+                    _ = tokio::time::sleep(hard_deadline) => {
+                        let _ = child_cancel_tx.send(true);
+                        Ok(SubagentRunOutcome {
+                            status: RunStatus::Cancelled,
+                            terminal_reason: TerminalReason::RunDeadlineExceeded,
+                            summary: "subagent timed out and was cancelled".to_string(),
+                            relevant_files: Vec::new(),
+                            findings: Vec::new(),
+                            turns_used: 0,
+                            tool_calls_used: 0,
+                            tokens_used: 0,
+                            duration_ms: started_sub.elapsed().as_millis() as u64,
+                            visible_tools: Vec::new(),
+                        })
+                    }
+                    _ = async {
+                        loop {
+                            if *parent_cancel.borrow() {
+                                break;
+                            }
+                            if parent_cancel.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    } => {
+                        let _ = child_cancel_tx.send(true);
+                        Ok(SubagentRunOutcome {
+                            status: RunStatus::Cancelled,
+                            terminal_reason: TerminalReason::UserCancelled,
+                            summary: "subagent cancelled by parent run".to_string(),
+                            relevant_files: Vec::new(),
+                            findings: Vec::new(),
+                            turns_used: 0,
+                            tool_calls_used: 0,
+                            tokens_used: 0,
+                            duration_ms: started_sub.elapsed().as_millis() as u64,
+                            visible_tools: Vec::new(),
+                        })
+                    }
+                };
+                watcher.abort();
+                res
+            });
+
+            join_handles.push(handle);
+            worktree_slots.push((subagent_id, spec, worktree));
+        }
+
+        let mut results: Vec<SubagentResult> = Vec::with_capacity(worktree_slots.len());
+        let mut batch_worker_spans = Vec::new();
+        let mut first_modified_path: Option<String> = None;
+        let mut in_batch_parent_rev = self.current_revision_id.clone();
+
+        for (handle, (subagent_id, spec, mut worktree)) in
+            join_handles.into_iter().zip(worktree_slots.into_iter())
+        {
+            let outcome = match handle.await {
+                Ok(Ok(o)) => o,
+                Ok(Err(err)) => SubagentRunOutcome {
+                    status: RunStatus::Failed,
+                    terminal_reason: TerminalReason::ProviderProtocolError(err.clone()),
+                    summary: format!("subagent error: {}", err),
+                    relevant_files: Vec::new(),
+                    findings: Vec::new(),
+                    turns_used: 0,
+                    tool_calls_used: 0,
+                    tokens_used: 0,
+                    duration_ms: 0,
+                    visible_tools: Vec::new(),
+                },
+                Err(join_err) => SubagentRunOutcome {
+                    status: RunStatus::Cancelled,
+                    terminal_reason: TerminalReason::UserCancelled,
+                    summary: format!("subagent task join error: {}", join_err),
+                    relevant_files: Vec::new(),
+                    findings: Vec::new(),
+                    turns_used: 0,
+                    tool_calls_used: 0,
+                    tokens_used: 0,
+                    duration_ms: 0,
+                    visible_tools: Vec::new(),
+                },
+            };
+
+            let status_str = match outcome.status {
+                RunStatus::Completed => "completed",
+                RunStatus::Cancelled => "cancelled",
+                RunStatus::BudgetExhausted => "budget_exhausted",
+                RunStatus::Failed => "failed",
+                _ => "failed",
+            };
+            let _ = logger.log(EventPayload::SubagentCompleted {
+                subagent_id: subagent_id.clone(),
+                role: spec.role.as_str().to_string(),
+                status: status_str.to_string(),
+                turns_used: outcome.turns_used,
+                tool_calls_used: outcome.tool_calls_used,
+                tokens_used: outcome.tokens_used,
+                duration_ms: outcome.duration_ms,
+            });
+
+            let mut merge_result = None;
+            let mut worktree_cleaned_up = true;
+
+            if let Some(ref mut wt) = worktree {
+                if outcome.status == RunStatus::Completed && !*self.cancel_rx.borrow() {
+                    match wt
+                        .merge_into_parent(
+                            self.tool_runtime.env().workspace(),
+                            &store,
+                            in_batch_parent_rev.as_ref(),
+                            spec.allowed_write_globs.as_deref(),
+                            Some(&self.completion_gate),
+                            spec.revert_on_verify_failure,
+                            absolute_turn,
+                        )
+                        .await
+                    {
+                        Ok(merge) => {
+                            match &merge {
+                                WorktreeMergeResult::Applied {
+                                    merged_revision,
+                                    written_files,
+                                    removed_files,
+                                    ..
+                                } => {
+                                    let _ = logger.log(EventPayload::WorktreeMerged {
+                                        subagent_id: subagent_id.clone(),
+                                        status: "applied".to_string(),
+                                        written_files: written_files.clone(),
+                                        removed_files: removed_files.clone(),
+                                        conflict_paths: Vec::new(),
+                                        revision_after: Some(
+                                            merged_revision.as_str().to_string(),
+                                        ),
+                                    });
+                                    if !written_files.is_empty() || !removed_files.is_empty() {
+                                        for p in written_files.iter().chain(removed_files.iter()) {
+                                            if first_modified_path.is_none() {
+                                                first_modified_path = Some(p.clone());
+                                            }
+                                            modified_files_set.insert(p.clone());
+                                        }
+                                        self.batch_mutated = true;
+                                        batch_worker_spans.extend(build_worker_mutation_spans(
+                                            self.tool_runtime.env().workspace(),
+                                            &subagent_id,
+                                            written_files,
+                                            removed_files,
+                                        ));
+                                        in_batch_parent_rev = Some(merged_revision.clone());
+                                    }
+                                }
+                                WorktreeMergeResult::Conflict {
+                                    conflicting_paths, ..
+                                } => {
+                                    worktree_cleaned_up = false;
+                                    let _ = logger.log(EventPayload::WorktreeMerged {
+                                        subagent_id: subagent_id.clone(),
+                                        status: "conflict".to_string(),
+                                        written_files: Vec::new(),
+                                        removed_files: Vec::new(),
+                                        conflict_paths: conflicting_paths.clone(),
+                                        revision_after: in_batch_parent_rev
+                                            .as_ref()
+                                            .map(|r| r.as_str().to_string()),
+                                    });
+                                }
+                                WorktreeMergeResult::VerificationFailed {
+                                    merged_revision,
+                                    revision_before,
+                                    reverted,
+                                    written_files,
+                                    removed_files,
+                                    ..
+                                } => {
+                                    let _ = logger.log(EventPayload::WorktreeMerged {
+                                        subagent_id: subagent_id.clone(),
+                                        status: merge.status_str().to_string(),
+                                        written_files: written_files.clone(),
+                                        removed_files: removed_files.clone(),
+                                        conflict_paths: Vec::new(),
+                                        revision_after: if *reverted {
+                                            revision_before
+                                                .as_ref()
+                                                .map(|r| r.as_str().to_string())
+                                        } else {
+                                            Some(merged_revision.as_str().to_string())
+                                        },
+                                    });
+                                    if !*reverted
+                                        && (!written_files.is_empty() || !removed_files.is_empty())
+                                    {
+                                        for p in written_files.iter().chain(removed_files.iter()) {
+                                            if first_modified_path.is_none() {
+                                                first_modified_path = Some(p.clone());
+                                            }
+                                            modified_files_set.insert(p.clone());
+                                        }
+                                        self.batch_mutated = true;
+                                        batch_worker_spans.extend(build_worker_mutation_spans(
+                                            self.tool_runtime.env().workspace(),
+                                            &subagent_id,
+                                            written_files,
+                                            removed_files,
+                                        ));
+                                        in_batch_parent_rev = Some(merged_revision.clone());
+                                    }
+                                }
+                            }
+                            merge_result = Some(merge);
+                        }
+                        Err(e) => {
+                            let _ = wt.cleanup();
+                            let _ = logger.log(EventPayload::WorktreeMerged {
+                                subagent_id: subagent_id.clone(),
+                                status: format!("error:{}", e),
+                                written_files: Vec::new(),
+                                removed_files: Vec::new(),
+                                conflict_paths: Vec::new(),
+                                revision_after: in_batch_parent_rev
+                                    .as_ref()
+                                    .map(|r| r.as_str().to_string()),
+                            });
+                        }
+                    }
+                } else {
+                    let _ = wt.cleanup();
+                    worktree_cleaned_up = wt.is_cleaned_up();
+                    let _ = logger.log(EventPayload::WorktreeMerged {
+                        subagent_id: subagent_id.clone(),
+                        status: "aborted_cleanup".to_string(),
+                        written_files: Vec::new(),
+                        removed_files: Vec::new(),
+                        conflict_paths: Vec::new(),
+                        revision_after: in_batch_parent_rev
+                            .as_ref()
+                            .map(|r| r.as_str().to_string()),
+                    });
+                }
+            }
+
+            results.push(SubagentResult {
+                subagent_id,
+                role: spec.role,
+                status: outcome.status,
+                terminal_reason: format!("{:?}", outcome.terminal_reason),
+                summary: outcome.summary,
+                relevant_files: outcome.relevant_files,
+                findings: outcome.findings,
+                turns_used: outcome.turns_used,
+                tool_calls_used: outcome.tool_calls_used,
+                tokens_used: outcome.tokens_used,
+                duration_ms: outcome.duration_ms,
+                merge_result,
+                worktree_cleaned_up,
+            });
+        }
+
+        let report_text = render_subagent_batch_report(&results);
+        let modified_any = !batch_worker_spans.is_empty();
+        let meta = ToolResultMeta {
+            relative_path: first_modified_path,
+            modified_file: modified_any,
+            duration_ms: started.elapsed().as_millis() as u64,
+            mutation: if modified_any {
+                Some(MutationTelemetry {
+                    spans: batch_worker_spans,
+                    predictive: None,
+                })
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+
+        (ToolExecutionOutput::success(report_text, meta), decision_label)
     }
 
     /// Gate 4: append a `MutationRecord` for one successful tool result.

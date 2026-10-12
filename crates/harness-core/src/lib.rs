@@ -13,6 +13,7 @@ pub mod provider;
 pub mod revision;
 pub mod sensitive_paths;
 pub mod session;
+pub mod subagents;
 pub mod tool;
 pub mod tools;
 pub mod types;

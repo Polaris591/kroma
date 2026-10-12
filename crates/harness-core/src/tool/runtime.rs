@@ -108,9 +108,9 @@ impl ToolRuntime {
                 }
             }
         }
-        // `recall_evidence` resolves against the live session transcript, which is owned by the
-        // agent loop, so it must run on the serial barrier where that transcript is reachable.
-        if call.name == "recall_evidence" {
+        // `recall_evidence` and `spawn_subagent` resolve against the live session / subagent
+        // coordinator owned by the agent loop, so they must run on the serial barrier.
+        if call.name == "recall_evidence" || call.name == "spawn_subagent" {
             return false;
         }
         true
@@ -585,6 +585,13 @@ impl ToolRuntime {
             "recall_evidence" => ToolExecutionOutput::error(
                 ErrorCode::InvalidArguments,
                 "recall_evidence must be dispatched by the agent loop against the live session transcript".to_string(),
+                ToolResultMeta::default(),
+            ),
+            // Gate 5: `spawn_subagent` is dispatched by the agent loop, which owns the subagent
+            // backend, spawn budget, snapshot store, and completion gate.
+            "spawn_subagent" => ToolExecutionOutput::error(
+                ErrorCode::InvalidArguments,
+                "spawn_subagent must be dispatched by the agent loop against the subagent coordinator".to_string(),
                 ToolResultMeta::default(),
             ),
             // Gate 3: an extension-provided tool. It already passed the same registry lookup,

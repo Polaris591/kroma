@@ -332,6 +332,7 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
             "mutate_note",
             "read",
             "recall_evidence",
+            "spawn_subagent",
             "write"
         ]
     );
@@ -2159,7 +2160,7 @@ fn test_subtree_jit_multi_ancestor_order_and_total_cap() {
 /// through the logger.
 #[test]
 fn test_gate3_event_schema_and_payloads() {
-    assert_eq!(harness_core::events::EVENT_SCHEMA_VERSION, "0.9.0");
+    assert_eq!(harness_core::events::EVENT_SCHEMA_VERSION, "0.10.0");
 
     let root = temp_root("events");
     let state = root.join("state");
@@ -2194,7 +2195,7 @@ fn test_gate3_event_schema_and_payloads() {
     assert!(body.contains("\"HookEvaluated\""));
     assert!(body.contains("\"ExtensionChanged\""));
     assert!(body.contains("\"SubtreeContextLoaded\""));
-    assert!(body.contains("\"0.9.0\""));
+    assert!(body.contains("\"0.10.0\""));
 
     let _ = fs::remove_dir_all(&root);
 }
