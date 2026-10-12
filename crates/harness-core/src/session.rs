@@ -8,9 +8,9 @@ use crate::messages::TranscriptItem;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -126,9 +126,12 @@ impl SessionJournal {
         session_dir: impl AsRef<Path>,
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, SessionError> {
-        fs::create_dir_all(session_dir.as_ref())?;
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(session_dir.as_ref())?;
         // F-08: the session store holds structured transcripts, so keep it user-private (0700).
-        let _ = fs::set_permissions(session_dir.as_ref(), fs::Permissions::from_mode(0o700));
+        fs::set_permissions(session_dir.as_ref(), fs::Permissions::from_mode(0o700))?;
         let session_id = Uuid::new_v4().to_string();
         let path = session_dir.as_ref().join(format!("{}.wal.jsonl", session_id));
         let file = OpenOptions::new()
@@ -136,9 +139,10 @@ impl SessionJournal {
             .append(true)
             .read(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)?;
         acquire_wal_lock(&file)?;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
         let mut journal = Self {
             path,
             session_id: session_id.clone(),
@@ -334,7 +338,8 @@ impl SessionJournal {
             // Durably record the repair before returning the handle to the caller.
             file.sync_all()?;
         }
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        // F-01/F-08: set 0600 on the open FD itself (`fchmod`), never by path (`chmod`).
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
         Ok(Self {
             path,
             session_id,
@@ -354,6 +359,59 @@ impl SessionJournal {
     pub fn session_id(&self) -> &str { &self.session_id }
     pub fn workspace_root(&self) -> &Path { &self.workspace_root }
     pub fn leaf_id(&self) -> Option<&str> { self.leaf_id.as_deref() }
+
+    /// Read-only header inspection used by `--resume latest` and workspace inference so scanning
+    /// candidate WAL files never acquires exclusive write locks, never mutates permissions, and
+    /// never truncates trailing bytes on unselected files.
+    pub fn peek_workspace_root(path: impl AsRef<Path>) -> Result<PathBuf, SessionError> {
+        let path = path.as_ref();
+        let sym_meta = fs::symlink_metadata(path)?;
+        if sym_meta.file_type().is_symlink() || !sym_meta.file_type().is_file() {
+            return Err(SessionError::Invalid(
+                "session WAL candidate is not a regular file".into(),
+            ));
+        }
+        if sym_meta.len() == 0 || sym_meta.len() > MAX_WAL_FILE_BYTES {
+            return Err(SessionError::Invalid(
+                "session WAL candidate size out of bounds".into(),
+            ));
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        let opened_meta = file.metadata()?;
+        if !opened_meta.file_type().is_file()
+            || (sym_meta.dev(), sym_meta.ino()) != (opened_meta.dev(), opened_meta.ino())
+        {
+            return Err(SessionError::Invalid(
+                "session WAL candidate changed identity".into(),
+            ));
+        }
+        let mut reader = BufReader::new(file.take(MAX_WAL_LINE_BYTES as u64));
+        let mut first_line = Vec::new();
+        let n = reader.read_until(b'\n', &mut first_line)?;
+        if n == 0 || !first_line.ends_with(b"\n") {
+            return Err(SessionError::Invalid("missing complete WAL header".into()));
+        }
+        let line: WalLine = serde_json::from_slice(&first_line[..first_line.len() - 1])
+            .map_err(|e| SessionError::Invalid(format!("invalid WAL header JSON: {}", e)))?;
+        if line.seq != 0 || line.prev_hash != ZERO_HASH {
+            return Err(SessionError::Invalid("invalid WAL header sequence".into()));
+        }
+        let computed = calculate_hash(line.seq, &line.prev_hash, &line.payload)?;
+        if line.hash != computed {
+            return Err(SessionError::Invalid("WAL header hash mismatch".into()));
+        }
+        match line.payload {
+            WalPayload::Header {
+                version,
+                workspace_root,
+                ..
+            } if version == WAL_VERSION => Ok(workspace_root),
+            _ => Err(SessionError::Invalid("first WAL entry is not a valid header".into())),
+        }
+    }
 
     /// Latest checkpoint whose transcript leaf is on the currently selected branch.
     ///

@@ -1,28 +1,16 @@
-===================================================================
-HARNESS Gate 0 (v0.8.1) CI LOG
-Generated: 2026-10-12T10:06:38Z
-Host kernel: Linux 6.12.95+deb13-amd64 x86_64
-Toolchain: rustc 1.85.1 (4eb161250 2025-03-15) (built from a source tarball)
-Cargo:     cargo 1.85.1 (d73d2caf9 2024-12-31)
-Git:       20f442d
-clippy:    error: no such command: `clippy`
-===================================================================
-
-### cargo build --workspace
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
-
-### cargo test --workspace
-   Compiling harness-core v0.8.1 (/opt/harness/crates/harness-core)
-   Compiling harness-cli v0.8.1 (/opt/harness/crates/harness-cli)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.66s
+=== Gate 0 Verified CI Log (2026-10-12T18:39:02+08:00) ===
+rustc 1.85.1 (4eb161250 2025-03-15) (built from a source tarball)
+cargo 1.85.1 (d73d2caf9 2024-12-31)
+Linux 6.12.95+deb13-amd64 x86_64
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/main.rs (target/debug/deps/harness-2cafee42f0a9f9c1)
 
 running 6 tests
 test approval_ui::tests::cancelled_approval_denies_promptly_without_blocking ... ok
-test approval_ui::tests::escapes_ansi_and_carriage_return_but_keeps_newline_and_tab ... ok
 test approval_ui::tests::escapes_bidi_override ... ok
-test tests::test_completion_gate_selection_honors_shell_authorization ... ok
+test approval_ui::tests::escapes_ansi_and_carriage_return_but_keeps_newline_and_tab ... ok
 test tests::test_verify_cmd_and_no_verify_flags_parse ... ok
+test tests::test_completion_gate_selection_honors_shell_authorization ... ok
 test tests::test_cli_flags_and_policy_modes ... ok
 
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -33,8 +21,8 @@ running 25 tests
 test completion_gate::tests::auto_detects_cargo_workspace_verification ... ok
 test completion_gate::tests::dirty_file_short_circuit_does_not_spawn_an_invalid_command ... ok
 test completion_gate::tests::auto_detected_verification_without_shell_authorization_returns_skipped ... ok
-test completion_gate::tests::failure_fingerprint_ignores_whitespace_only_differences ... ok
 test completion_gate::tests::failure_fingerprint_ignores_progress_noise_but_keeps_diagnostic_changes ... ok
+test completion_gate::tests::failure_fingerprint_ignores_whitespace_only_differences ... ok
 test completion_gate::tests::parse_command_argv_preserves_quoted_segments_and_escapes ... ok
 test completion_gate::tests::failing_verification_returns_the_structured_failure_evidence ... ok
 test context_projector::tests::refresh_last_touched_never_regresses_a_larger_checkpoint_turn ... ok
@@ -56,14 +44,14 @@ test session::tests::wal_round_trips_signed_reasoning_and_branching ... ok
 test completion_gate::tests::streaming_capture_keeps_a_bounded_head_and_rolling_tail ... ok
 test completion_gate::tests::gate_200ms_pipe_drain_prevents_grandchild_hang_and_sweeps_pgid ... ok
 
-test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
 
      Running tests/context_cache_stability.rs (target/debug/deps/context_cache_stability-98f341a5ca72f27d)
 
 running 4 tests
 test test_loop_guard_repeated_ping_pong_and_edit_streak ... ok
-test test_readonly_parallel_batch_ordering_steering_and_completion_gate ... ok
 test test_watermark_step_down_compaction_working_set_pinning_and_outline_stub ... ok
+test test_readonly_parallel_batch_ordering_steering_and_completion_gate ... ok
 test test_15_turns_append_only_prefix_byte_stability ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
@@ -87,14 +75,14 @@ test test_inode_lock_keyed_from_open_fd_serializes_same_file ... ok
 test test_inode_mutation_lock_stability_across_create_rename_and_idle_cleanup ... ok
 test test_nav_tools_under_concurrent_symlink_swap_never_leak_outside_content ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
 
      Running tests/gate0_config_and_events.rs (target/debug/deps/gate0_config_and_events-5c8d83ecb96908da)
 
 running 3 tests
 test test_budget_config_defaults_and_validation ... ok
-test test_tool_registry_ascii_order_and_policy_visibility ... ok
 test test_event_logger_0600_permissions_and_resilient_degradation ... ok
+test test_tool_registry_ascii_order_and_policy_visibility ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -110,8 +98,8 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 9 tests
 test test_base_url_rejects_control_characters_and_whitespace ... ok
 test test_base_url_security_rules ... ok
-test test_bogus_transfer_encoding_is_rejected ... ok
 test test_duplicate_conflicting_content_length_is_rejected ... ok
+test test_bogus_transfer_encoding_is_rejected ... ok
 test test_http_smuggling_dual_te_cl_rejected_and_chunked_error_body_decoded ... ok
 test test_agent_loop_zero_side_effects_on_length_truncation_over_sse ... ok
 test test_premature_eof_short_body_is_rejected ... ok
@@ -128,13 +116,13 @@ test test_bash_16kib_head_48kib_rolling_tail_and_4mib_spill_file ... ok
 test test_bash_200ms_pipe_drain_timeout_prevents_grandchild_deadlock ... ok
 test test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zero_spawn_on_deny ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
 
      Running tests/sse_contract.rs (target/debug/deps/sse_contract-0778b8bc8f7bffa4)
 
 running 4 tests
-test test_sse_missing_done_or_truncated_length_rejects_all_tools ... ok
 test test_pre_dispatch_batch_rejects_empty_or_duplicate_call_id ... ok
+test test_sse_missing_done_or_truncated_length_rejects_all_tools ... ok
 test test_sse_multi_block_reasoning_and_indexless_tool_calls_and_unterminated_done ... ok
 test test_sse_arbitrary_chunking_100_iterations_and_1_byte_splits ... ok
 

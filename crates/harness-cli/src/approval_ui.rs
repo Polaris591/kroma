@@ -120,9 +120,10 @@ impl ApprovalHandler for TtyApprovalUi {
             return ApprovalDecision::Deny;
         }
 
-        // F-06: wait for input in bounded poll slices so a Ctrl-C (which sets `APPROVAL_CANCELLED`
-        // from the async signal task) aborts the prompt instead of leaving the runtime wedged on a
-        // synchronous read that will never return.
+        // F-06: wait for input in bounded poll slices and read byte-by-byte inside the poll loop so
+        // a Ctrl-C (which sets `APPROVAL_CANCELLED` from the async signal task) aborts the prompt
+        // within 100ms even if stdin received a partial line without a trailing newline.
+        let mut raw_bytes: Vec<u8> = Vec::with_capacity(64);
         loop {
             if APPROVAL_CANCELLED.load(Ordering::SeqCst) {
                 return ApprovalDecision::Deny;
@@ -143,13 +144,24 @@ impl ApprovalHandler for TtyApprovalUi {
             if rc == 0 {
                 continue;
             }
-            break;
+            let mut b = [0u8; 1];
+            let n = unsafe { libc::read(libc::STDIN_FILENO, b.as_mut_ptr() as *mut libc::c_void, 1) };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return ApprovalDecision::Deny;
+            }
+            if n == 0 || b[0] == b'\n' {
+                break;
+            }
+            if raw_bytes.len() < 256 {
+                raw_bytes.push(b[0]);
+            }
         }
 
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_err() {
-            return ApprovalDecision::Deny;
-        }
+        let line = String::from_utf8_lossy(&raw_bytes);
 
         match line.trim().to_ascii_lowercase().as_str() {
             "y" | "yes" => ApprovalDecision::AllowOnce,

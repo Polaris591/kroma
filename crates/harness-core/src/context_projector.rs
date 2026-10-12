@@ -135,6 +135,7 @@ impl ContextProjector {
             // stale messages are never re-sent and compaction bookkeeping cannot dangle.
             self.projected_items.truncate(canonical.len());
             self.compacted_indices.retain(|&idx| idx < canonical.len());
+            self.last_pinned_baseline_end = self.last_pinned_baseline_end.min(canonical.len());
         }
         self.refresh_last_touched_from_transcript();
 
@@ -400,7 +401,10 @@ fn compute_working_set_pins(
                 };
                 match tr.tool_name.as_str() {
                     "edit" | "write" if tr.meta.modified_file => {
-                        file_last_modified_turn.insert(path.clone(), turn_counter);
+                        let slot = file_last_modified_turn
+                            .entry(path.clone())
+                            .or_insert(turn_counter);
+                        *slot = (*slot).max(turn_counter);
                         file_latest_edit_idx.insert(path.clone(), idx);
                     }
                     "read" => {

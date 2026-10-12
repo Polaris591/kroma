@@ -155,9 +155,8 @@ pub async fn execute_edit(
     };
     let rel_str = norm_rel.to_string_lossy().to_string();
 
-    // Open existing file via race-free open_existing_no_symlink (eliminates TOCTOU)
-    let (_, mut file) = match workspace.open_existing_no_symlink(&args.path) {
-        Ok(f) => f,
+    let (parent_dir, file_name) = match workspace.open_parent_dir_no_symlink(&norm_rel, false) {
+        Ok(res) => res,
         Err(e) => {
             return ToolExecutionOutput::error(
                 e.error_code(),
@@ -170,14 +169,33 @@ pub async fn execute_edit(
         }
     };
 
-    // F-07: key the mutation lock off the already-open file descriptor's identity, never by
-    // re-deriving it from a path that could be re-pointed between the check and the lock.
-    let (_lock_key, _guard) = match inode_locks.acquire_for_fd(file.as_raw_fd(), None).await {
+    // F-07: key the mutation lock off the already-open parent directory FD + leaf file name
+    // (matching `execute_write`), and acquire the lock BEFORE opening the target file so
+    // concurrent `write`/`edit` calls on the same path are strictly serialized.
+    let (_lock_key, _guard) = match inode_locks
+        .acquire_for_fd(parent_dir.as_raw_fd(), Some(file_name.as_os_str()))
+        .await
+    {
         Ok(g) => g,
         Err(e) => {
             return ToolExecutionOutput::error(
                 ErrorCode::IoError,
                 format!("failed to acquire inode lock on '{}': {}", rel_str, e),
+                ToolResultMeta {
+                    relative_path: Some(rel_str),
+                    ..Default::default()
+                },
+            );
+        }
+    };
+
+    // Open existing file via race-free open_existing_no_symlink while holding the parent+leaf lock
+    let (_, mut file) = match workspace.open_existing_no_symlink(&args.path) {
+        Ok(f) => f,
+        Err(e) => {
+            return ToolExecutionOutput::error(
+                e.error_code(),
+                e.to_string(),
                 ToolResultMeta {
                     relative_path: Some(rel_str),
                     ..Default::default()
@@ -472,19 +490,6 @@ pub async fn execute_edit(
     final_bytes.extend_from_slice(&new_body_bytes);
 
     let mode = sym_meta.permissions().mode();
-    let (parent_dir, file_name) = match workspace.open_parent_dir_no_symlink(&norm_rel, false) {
-        Ok(res) => res,
-        Err(e) => {
-            return ToolExecutionOutput::error(
-                e.error_code(),
-                e.to_string(),
-                ToolResultMeta {
-                    relative_path: Some(rel_str),
-                    ..Default::default()
-                },
-            );
-        }
-    };
     if let Err((code, msg)) = atomic_write_at(&parent_dir, &file_name, &final_bytes, mode, false) {
         return ToolExecutionOutput::error(
             code,

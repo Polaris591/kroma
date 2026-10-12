@@ -417,17 +417,21 @@ async fn test_inode_lock_keyed_from_open_fd_serializes_same_file() {
     atomic_write_file(&target, b"v1", 0o644, true).unwrap();
 
     let locks = InodeMutationLock::new();
-    let first = fs::File::open(&target).unwrap();
-    let (_k, guard) = locks.acquire_for_fd(first.as_raw_fd(), None).await.unwrap();
+    let cap = WorkspaceCap::new(&tmp_root).unwrap();
+    let (parent_dir1, leaf1) = cap.open_parent_dir_no_symlink(Path::new("x.txt"), false).unwrap();
+    let (_k, guard) = locks
+        .acquire_for_fd(parent_dir1.as_raw_fd(), Some(leaf1.as_os_str()))
+        .await
+        .unwrap();
     assert_eq!(locks.active_lock_count(), 1);
 
-    let second = fs::File::open(&target).unwrap();
+    let (parent_dir2, leaf2) = cap.open_parent_dir_no_symlink(Path::new("x.txt"), false).unwrap();
     let blocked = tokio::time::timeout(
         std::time::Duration::from_millis(30),
-        locks.acquire_for_fd(second.as_raw_fd(), None),
+        locks.acquire_for_fd(parent_dir2.as_raw_fd(), Some(leaf2.as_os_str())),
     )
     .await;
-    assert!(blocked.is_err(), "same-FD-identity lock must serialize writers");
+    assert!(blocked.is_err(), "parent-FD + leaf-name lock must serialize concurrent write/edit");
     drop(guard);
     assert_eq!(locks.active_lock_count(), 0);
 

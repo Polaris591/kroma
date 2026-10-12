@@ -796,14 +796,16 @@ impl ChatCompletionsClient {
         // Reject CR/LF in values that reach the HTTP request line/headers to prevent
         // header injection: `api_key` is written into the `Authorization` header and
         // `model` is interpolated into the request body.
-        if config.api_key.contains('\r') || config.api_key.contains('\n') {
+        // Reject any ASCII control characters (including CR, LF, NUL, DEL) in values that reach
+        // HTTP headers or the request body.
+        if config.api_key.bytes().any(|b| b < 0x20 || b == 0x7f) {
             return Err(ProviderError::Transport(
-                "api_key must not contain CR or LF control characters".to_string(),
+                "api_key must not contain ASCII control characters".to_string(),
             ));
         }
-        if config.model.contains('\r') || config.model.contains('\n') {
+        if config.model.bytes().any(|b| b < 0x20 || b == 0x7f) {
             return Err(ProviderError::Transport(
-                "model must not contain CR or LF control characters".to_string(),
+                "model must not contain ASCII control characters".to_string(),
             ));
         }
         let endpoint = validate_base_url(&config.base_url)?;
@@ -1287,7 +1289,12 @@ impl ChatCompletionsClient {
                     )
                 })?;
                 if size_line.is_empty() {
-                    break;
+                    return Err(classify_sse_err(
+                        assembler.saw_any_business_chunk(),
+                        ProviderError::IncompleteStream(
+                            "unexpected EOF before terminating 0 chunk in SSE stream".to_string(),
+                        ),
+                    ));
                 }
                 let trimmed = size_line.trim();
                 if trimmed.is_empty() {
@@ -1386,18 +1393,30 @@ impl ChatCompletionsClient {
                 }
             }
         } else {
+            let mut total_read = 0usize;
             let mut buf = [0u8; 4096];
             loop {
+                if let Some(len) = content_length {
+                    if total_read >= len {
+                        break;
+                    }
+                }
+                let max_to_read = match content_length {
+                    Some(len) => (len - total_read).min(buf.len()),
+                    None => buf.len(),
+                };
                 let read_to = step_timeout(budget.idle_timeout).map_err(|_| {
                     classify_sse_err(
                         assembler.saw_any_business_chunk(),
                         ProviderError::IncompleteStream("SSE stream timeout".to_string()),
                     )
                 })?;
-                let read_res = tokio::time::timeout(read_to, reader.read(&mut buf)).await;
+                let read_res =
+                    tokio::time::timeout(read_to, reader.read(&mut buf[..max_to_read])).await;
                 match read_res {
                     Ok(Ok(0)) => break,
                     Ok(Ok(n)) => {
+                        total_read += n;
                         if ttft_ms.is_none() {
                             ttft_ms = Some(attempt_start.elapsed().as_millis() as u64);
                         }
@@ -1420,6 +1439,17 @@ impl ChatCompletionsClient {
                             ProviderError::IncompleteStream("SSE stream idle timeout".to_string()),
                         ));
                     }
+                }
+            }
+            if let Some(len) = content_length {
+                if total_read < len {
+                    return Err(classify_sse_err(
+                        assembler.saw_any_business_chunk(),
+                        ProviderError::IncompleteStream(format!(
+                            "SSE body ended prematurely: expected {} bytes, received {}",
+                            len, total_read
+                        )),
+                    ));
                 }
             }
         }

@@ -178,11 +178,11 @@ where
     let workspace = match workspace {
         Some(w) => w,
         None => match resume.as_ref() {
-            Some(path) => match SessionJournal::open(path) {
-                Ok(journal) => journal.workspace_root().to_path_buf(),
+            Some(path) => match SessionJournal::peek_workspace_root(path) {
+                Ok(ws_root) => ws_root,
                 Err(e) => {
                     return Err(format!(
-                        "failed to open session WAL {} to infer workspace: {}",
+                        "failed to read session WAL {} to infer workspace: {}",
                         path.display(),
                         e
                     ))
@@ -246,10 +246,12 @@ fn resolve_resume_path(
                 continue;
             }
             if let Some(ws) = ws_canon.as_deref() {
-                match SessionJournal::open(&path) {
-                    Ok(journal) if journal.workspace_root() == ws => {}
+                match SessionJournal::peek_workspace_root(&path) {
+                    Ok(ws_root) if ws_root == ws => {}
                     _ => continue,
                 }
+            } else if SessionJournal::peek_workspace_root(&path).is_err() {
+                continue;
             }
             let modified = match entry.metadata().and_then(|m| m.modified()) {
                 Ok(t) => t,
@@ -272,10 +274,16 @@ fn resolve_resume_path(
         return Ok(raw.to_path_buf());
     }
 
-    // A bare session id / filename resolves against the session store.
-    let direct = sessions_dir.join(raw);
-    if direct.exists() {
-        return Ok(direct);
+    // A bare session id / filename resolves against the session store (reject any path traversal).
+    if !raw
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir))
+    {
+        let direct = sessions_dir.join(raw);
+        if direct.exists() {
+            validate_resume_path_candidate(&direct)?;
+            return Ok(direct);
+        }
     }
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         let mut matches: Vec<PathBuf> = entries
