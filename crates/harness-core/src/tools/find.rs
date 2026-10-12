@@ -66,7 +66,7 @@ pub fn execute_find(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
             );
         }
     };
-    let rel_str = norm_rel.to_string_lossy().to_string();
+    let rel_str = norm_rel.to_string_lossy().replace('\\', "/");
 
     let mut files = Vec::new();
     let mut skipped_sensitive = 0usize;
@@ -187,7 +187,7 @@ pub fn walk_workspace_files(
         }
     }
 
-    let start_str = start_rel.to_string_lossy().to_string();
+    let start_str = start_rel.to_string_lossy().replace('\\', "/");
     match workspace.open_dir_no_symlink(&start_str) {
         Ok(_) => walk_workspace_files_inner(
             workspace,
@@ -219,7 +219,7 @@ fn walk_workspace_files_inner(
     out_files: &mut Vec<PathBuf>,
     skipped_sensitive: &mut usize,
 ) {
-    let dir_rel_str = dir_rel.to_string_lossy().to_string();
+    let dir_rel_str = dir_rel.to_string_lossy().replace('\\', "/");
     let Ok((_, mut entries)) = workspace.read_dir_no_symlink(&dir_rel_str) else {
         return;
     };
@@ -285,7 +285,7 @@ fn load_dir_ignore_rules(workspace: &WorkspaceCap, dir_rel: &Path, rules: &mut V
         };
         // F-02: ignore files are read through the same symlink-safe, FD-relative open as any other
         // workspace file, never via a raw path read.
-        let rel_str = rel.to_string_lossy().to_string();
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
         let Ok((_, mut file)) = workspace.open_existing_no_symlink(&rel_str) else {
             continue;
         };

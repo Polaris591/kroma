@@ -73,7 +73,7 @@ pub fn execute_grep(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
             );
         }
     };
-    let rel_str = norm_rel.to_string_lossy().to_string();
+    let rel_str = norm_rel.to_string_lossy().replace('\\', "/");
 
     let mut files = Vec::new();
     let mut skipped_sensitive = 0usize;
@@ -95,7 +95,7 @@ pub fn execute_grep(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
     let mut truncated = false;
 
     'file_loop: for rel_file in files {
-        let rel_file_str = rel_file.to_string_lossy().to_string();
+        let rel_file_str = rel_file.to_string_lossy().replace('\\', "/");
         // F-02: never `fs::read` a path that was only *checked* earlier. Re-open through
         // `open_existing_no_symlink`, which enforces `openat2(RESOLVE_BENEATH |
         // RESOLVE_NO_SYMLINKS)` at open time (and `O_NONBLOCK` to avoid FIFO deadlock), then bound

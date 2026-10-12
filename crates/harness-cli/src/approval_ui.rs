@@ -9,7 +9,10 @@ use std::sync::Mutex;
 pub static APPROVAL_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// How long the approval read blocks before re-checking the cancellation flag.
+#[cfg(unix)]
 const APPROVAL_POLL_INTERVAL_MS: libc::c_int = 100;
+#[cfg(windows)]
+const APPROVAL_POLL_INTERVAL_MS: u32 = 100;
 
 /// Escape untrusted text before writing it to a terminal (F-06).
 ///
@@ -53,8 +56,14 @@ impl TtyApprovalUi {
     pub fn new() -> Self {
         // F-06: both stdin (to read the decision) and stderr (to render the banner) must be a TTY,
         // otherwise the interactive prompt cannot be trusted or displayed correctly.
+        #[cfg(unix)]
         let interactive_tty = unsafe {
             libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDERR_FILENO) == 1
+        };
+        #[cfg(windows)]
+        let interactive_tty = {
+            use std::io::IsTerminal;
+            io::stdin().is_terminal() && io::stderr().is_terminal()
         };
         Self {
             interactive_tty,
@@ -163,6 +172,7 @@ impl ApprovalHandler for TtyApprovalUi {
         // a Ctrl-C (which sets `APPROVAL_CANCELLED` from the async signal task) aborts the prompt
         // within 100ms even if stdin received a partial line without a trailing newline.
         let mut raw_bytes: Vec<u8> = Vec::with_capacity(64);
+        #[cfg(unix)]
         loop {
             if APPROVAL_CANCELLED.load(Ordering::SeqCst) {
                 self.record_resolved(req_id, "deny_cancelled");
@@ -196,6 +206,44 @@ impl ApprovalHandler for TtyApprovalUi {
                 return ApprovalDecision::Deny;
             }
             if n == 0 || b[0] == b'\n' {
+                break;
+            }
+            if raw_bytes.len() < 256 {
+                raw_bytes.push(b[0]);
+            }
+        }
+        #[cfg(windows)]
+        loop {
+            use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+            use windows_sys::Win32::Storage::FileSystem::ReadFile;
+            use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+            if APPROVAL_CANCELLED.load(Ordering::SeqCst) {
+                self.record_resolved(req_id, "deny_cancelled");
+                return ApprovalDecision::Deny;
+            }
+            let h_in = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+            if h_in.is_null() {
+                self.record_resolved(req_id, "deny_io_error");
+                return ApprovalDecision::Deny;
+            }
+            let wait_rc = unsafe { WaitForSingleObject(h_in, APPROVAL_POLL_INTERVAL_MS) };
+            if wait_rc == WAIT_TIMEOUT {
+                continue;
+            }
+            if wait_rc != WAIT_OBJECT_0 {
+                self.record_resolved(req_id, "deny_io_error");
+                return ApprovalDecision::Deny;
+            }
+            let mut b = [0u8; 1];
+            let mut n_read: u32 = 0;
+            let ok = unsafe { ReadFile(h_in, b.as_mut_ptr(), 1, &mut n_read, std::ptr::null_mut()) };
+            if ok == 0 {
+                self.record_resolved(req_id, "deny_io_error");
+                return ApprovalDecision::Deny;
+            }
+            if n_read == 0 || b[0] == b'\n' {
                 break;
             }
             if raw_bytes.len() < 256 {

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -252,13 +253,12 @@ impl HeadTailBuffer {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if let Ok(mut f) = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-        {
+        let mut opts = OpenOptions::new();
+        opts.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        if let Ok(mut f) = opts.open(path) {
+            #[cfg(unix)]
             let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
             // Write already-accumulated head + tail to spill file aligned on UTF-8 char boundaries
             let to_write = floor_char_boundary(&self.head_buf, self.spill_cap);

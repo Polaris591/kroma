@@ -19,11 +19,46 @@ use harness_core::types::{RunStatus, ToolCallId};
 use harness_core::workspace::WorkspaceCap;
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::watch;
 use uuid::Uuid;
+
+fn create_symlink_file(src: impl AsRef<Path>, dst: impl AsRef<Path>) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(src, dst).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(src, dst).unwrap();
+}
+
+fn set_file_mode(path: impl AsRef<Path>, mode: u32) {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    #[cfg(windows)]
+    {
+        let mut perms = fs::metadata(path.as_ref()).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly((mode & 0o222) == 0);
+        fs::set_permissions(path, perms).unwrap();
+    }
+}
+
+fn get_file_mode(path: impl AsRef<Path>) -> u32 {
+    #[cfg(unix)]
+    {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+    #[cfg(windows)]
+    {
+        if fs::metadata(path).unwrap().permissions().readonly() {
+            0o444
+        } else {
+            0o600
+        }
+    }
+}
 
 fn temp_root(tag: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("harness-gate1-{}-{}", tag, Uuid::new_v4()));
@@ -116,7 +151,7 @@ fn test_capture_then_restore_applies_modified_deleted_and_created_files() {
     fs::write(ws_dir.join("src/b.rs"), "fn b() {}\n").unwrap();
     fs::write(ws_dir.join("keep.txt"), "keep\n").unwrap();
     // A non-default mode must survive the round trip.
-    fs::set_permissions(ws_dir.join("src/a.rs"), fs::Permissions::from_mode(0o600)).unwrap();
+    set_file_mode(ws_dir.join("src/a.rs"), 0o600);
 
     let workspace = WorkspaceCap::new(&ws_dir).unwrap();
     let store = SnapshotStore::new(root.join("snapshots"));
@@ -177,7 +212,7 @@ fn test_capture_then_restore_applies_modified_deleted_and_created_files() {
     assert_eq!(read(ws_dir.join("keep.txt")), "keep\n");
     assert!(!ws_dir.join("src/new.rs").exists());
     assert_eq!(
-        fs::metadata(ws_dir.join("src/a.rs")).unwrap().permissions().mode() & 0o777,
+        get_file_mode(ws_dir.join("src/a.rs")),
         0o600,
         "the tracked file mode must be restored, not reset to the process default"
     );
@@ -498,7 +533,7 @@ fn test_symlinks_and_sensitive_files_are_never_captured_or_overwritten() {
     fs::write(ws_dir.join("node_modules/dep.js"), "dep\n").unwrap();
     fs::write(ws_dir.join("target/build.bin"), "bin\n").unwrap();
     fs::write(outside_dir.join("secret.txt"), "OUTSIDE_SECRET\n").unwrap();
-    std::os::unix::fs::symlink(outside_dir.join("secret.txt"), ws_dir.join("escape.txt")).unwrap();
+    create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("escape.txt"));
 
     let workspace = WorkspaceCap::new(&ws_dir).unwrap();
     let store = SnapshotStore::new(root.join("snapshots"));
@@ -530,7 +565,7 @@ fn test_symlinks_and_sensitive_files_are_never_captured_or_overwritten() {
 
     // Swap the tracked file for a symlink pointing outside the workspace.
     fs::remove_file(ws_dir.join("real.txt")).unwrap();
-    std::os::unix::fs::symlink(outside_dir.join("secret.txt"), ws_dir.join("real.txt")).unwrap();
+    create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("real.txt"));
 
     let refused = store
         .restore_revision(&workspace, &baseline.revision_id, Some(&baseline.revision_id), false)
@@ -762,7 +797,7 @@ fn test_external_symlink_and_mode_change_are_conflicts() {
     fs::write(outside_dir.join("secret.txt"), "OUTSIDE_SECRET\n").unwrap();
     fs::write(ws_dir.join("x.rs"), "x v1\n").unwrap();
     fs::write(ws_dir.join("g.rs"), "g v1\n").unwrap();
-    fs::set_permissions(ws_dir.join("x.rs"), fs::Permissions::from_mode(0o644)).unwrap();
+    set_file_mode(ws_dir.join("x.rs"), 0o644);
 
     let workspace = WorkspaceCap::new(&ws_dir).unwrap();
     let store = SnapshotStore::new(root.join("snapshots"));
@@ -775,7 +810,7 @@ fn test_external_symlink_and_mode_change_are_conflicts() {
         .unwrap();
 
     // External chmod: same bytes, different mode -> ModifiedExternally.
-    fs::set_permissions(ws_dir.join("x.rs"), fs::Permissions::from_mode(0o600)).unwrap();
+    set_file_mode(ws_dir.join("x.rs"), 0o600);
     let mode_conflict = store
         .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
         .unwrap();
@@ -787,10 +822,10 @@ fn test_external_symlink_and_mode_change_are_conflicts() {
         }
         other => panic!("expected Conflict for a mode change, got {:?}", other),
     }
-    fs::set_permissions(ws_dir.join("x.rs"), fs::Permissions::from_mode(0o644)).unwrap();
+    set_file_mode(ws_dir.join("x.rs"), 0o644);
 
     // External symlink at a path the baseline wants to restore (only in target).
-    std::os::unix::fs::symlink(outside_dir.join("secret.txt"), ws_dir.join("g.rs")).unwrap();
+    create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("g.rs"));
     let link_conflict = store
         .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
         .unwrap();
@@ -810,7 +845,7 @@ fn test_external_symlink_and_mode_change_are_conflicts() {
 
     // External symlink swapped onto a tracked path that the expected revision has -> ModifiedExternally.
     fs::remove_file(ws_dir.join("x.rs")).unwrap();
-    std::os::unix::fs::symlink(outside_dir.join("secret.txt"), ws_dir.join("x.rs")).unwrap();
+    create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("x.rs"));
     let swap_conflict = store
         .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
         .unwrap();
@@ -924,7 +959,7 @@ fn test_force_restore_clears_obstructing_symlink_and_directory() {
 
     // External symlink parked on the tracked path: force must unlink the link, not its target.
     fs::remove_file(ws_dir.join("foo")).unwrap();
-    std::os::unix::fs::symlink(outside_dir.join("secret.txt"), ws_dir.join("foo")).unwrap();
+    create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("foo"));
     let forced_link = store
         .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), true)
         .unwrap();

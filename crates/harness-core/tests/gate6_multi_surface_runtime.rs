@@ -166,7 +166,7 @@ impl ModelProvider for SlowCancellableProvider {
 #[tokio::test]
 async fn test_acp_stdio_initialize_prompt_event_stream_and_evidence_recall() {
     assert_eq!(EVENT_SCHEMA_VERSION, "1.0.0");
-    assert_eq!(harness_core::version(), "1.0.0");
+    assert_eq!(harness_core::version(), env!("CARGO_PKG_VERSION"));
 
     let root = temp_root("acp-stdio");
     let ws = root.join("ws");
@@ -249,7 +249,7 @@ async fn test_acp_stdio_initialize_prompt_event_stream_and_evidence_recall() {
     let init_resp = read_until_response(&mut client_lines, 1, &mut notifications).await;
     assert!(init_resp.is_ok(), "initialize failed: {:?}", init_resp.error);
     let init_val = init_resp.result.unwrap();
-    assert_eq!(init_val["version"], "1.0.0");
+    assert_eq!(init_val["version"], harness_core::version());
     assert_eq!(init_val["event_schema_version"], "1.0.0");
     assert_eq!(init_val["capabilities"]["session"], true);
     assert_eq!(init_val["capabilities"]["cancel"], true);
@@ -994,7 +994,10 @@ async fn test_interactive_repl_slash_commands_and_multiturn_session() {
     let repl = InteractiveRepl::new(dispatcher);
 
     let banner = repl.render_status_banner().await;
-    assert!(banner.contains("Harness v1.0.0 Interactive REPL"));
+    assert!(banner.contains(&format!(
+        "Harness v{} Interactive REPL",
+        harness_core::version()
+    )));
     assert!(banner.contains("policy: allow-write+allow-shell"));
 
     // 1. `/help`

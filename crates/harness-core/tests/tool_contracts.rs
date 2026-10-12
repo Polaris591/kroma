@@ -5,8 +5,23 @@ use harness_core::tools::{
 use harness_core::types::ErrorCode;
 use harness_core::workspace::{InodeMutationLock, WorkspaceCap};
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::path::Path;
 use uuid::Uuid;
+
+fn symlink(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        if src.as_ref().is_dir() {
+            std::os::windows::fs::symlink_dir(src, dst)
+        } else {
+            std::os::windows::fs::symlink_file(src, dst)
+        }
+    }
+}
 
 #[tokio::test]
 async fn test_read_write_ls_find_grep_contracts() {

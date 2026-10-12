@@ -74,7 +74,7 @@ pub fn execute_read(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
             );
         }
     };
-    let rel_str = norm_rel.to_string_lossy().to_string();
+    let rel_str = norm_rel.to_string_lossy().replace('\\', "/");
 
     let meta = match file.metadata() {
         Ok(m) => m,

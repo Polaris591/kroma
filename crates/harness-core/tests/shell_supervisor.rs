@@ -7,6 +7,7 @@ use harness_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, Po
 use harness_core::tools::bash::execute_bash;
 use harness_core::types::{ErrorCode, ToolCallId};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -87,6 +88,7 @@ async fn test_bash_16kib_head_48kib_rolling_tail_and_4mib_spill_file() {
     let spill_file = tmp_state.join("tool-call_300k.log");
     assert!(spill_file.exists(), "Spill log file must be written");
     let spill_meta = fs::metadata(&spill_file).unwrap();
+    #[cfg(unix)]
     assert_eq!(spill_meta.permissions().mode() & 0o777, 0o600);
     assert!(spill_meta.len() > 250 * 1024);
 
@@ -221,6 +223,7 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
             code: ErrorCode::NotExecutedCancelled
         }
     );
+    #[cfg(unix)]
     if let Ok(pid_str) = fs::read_to_string(&pid_file) {
         if let Ok(sub_pid) = pid_str.trim().parse::<i32>() {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -278,12 +281,15 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
         .find_map(|l| l.trim().parse::<i32>().ok())
         .expect("should parse background sleep PID from stdout");
     assert!(bg_pid > 0);
-    let bg_alive = unsafe { libc::kill(bg_pid, 0) == 0 };
-    assert!(
-        !bg_alive,
-        "Background grandchild PID {} must be killed by NormalExit process group cleanup",
-        bg_pid
-    );
+    #[cfg(unix)]
+    {
+        let bg_alive = unsafe { libc::kill(bg_pid, 0) == 0 };
+        assert!(
+            !bg_alive,
+            "Background grandchild PID {} must be killed by NormalExit process group cleanup",
+            bg_pid
+        );
+    }
 
     let _ = fs::remove_dir_all(&tmp_ws);
     let _ = fs::remove_dir_all(&tmp_state);

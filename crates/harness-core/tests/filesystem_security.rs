@@ -5,13 +5,29 @@ use harness_core::messages::{ToolCall, ToolOutcome};
 use harness_core::sensitive_paths::SensitivePathGuard;
 use harness_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
 use harness_core::types::{ErrorCode, ToolCallId};
-use harness_core::workspace::{InodeMutationLock, WorkspaceCap};
+use harness_core::workspace::{
+    is_windows_reserved_device_name, InodeMutationLock, WorkspaceCap, WorkspaceError,
+};
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::watch;
 use uuid::Uuid;
+
+fn symlink(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        if src.as_ref().is_dir() {
+            std::os::windows::fs::symlink_dir(src, dst)
+        } else {
+            std::os::windows::fs::symlink_file(src, dst)
+        }
+    }
+}
 
 #[test]
 fn test_sensitive_path_guard_rules_and_exemptions() {
@@ -237,10 +253,8 @@ async fn test_inode_mutation_lock_stability_across_create_rename_and_idle_cleanu
 #[test]
 fn test_open_existing_no_symlink_and_atomic_write_at_parent_fd() {
     use harness_core::tools::write::atomic_write_at;
-    use harness_core::workspace::WorkspaceError;
     use std::ffi::OsStr;
     use std::io::Read;
-    use std::os::unix::io::AsRawFd;
 
     let tmp_root = std::env::temp_dir().join(format!("harness-openat2-{}", Uuid::new_v4()));
     let ws_dir = tmp_root.join("ws");
@@ -257,9 +271,13 @@ fn test_open_existing_no_symlink_and_atomic_write_at_parent_fd() {
 
     let cap = WorkspaceCap::new(&ws_dir).unwrap();
 
-    // 1. Verify root_dir_fd has FD_CLOEXEC set
-    let flags = unsafe { libc::fcntl(cap.root_dir_fd().as_raw_fd(), libc::F_GETFD) };
-    assert!(flags >= 0 && (flags & libc::FD_CLOEXEC) != 0);
+    // 1. Verify root_dir_fd has FD_CLOEXEC set on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let flags = unsafe { libc::fcntl(cap.root_dir_fd().as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && (flags & libc::FD_CLOEXEC) != 0);
+    }
 
     // 2. Normal file opens cleanly via open_existing_no_symlink and step-by-step O_NOFOLLOW fallback
     let (norm, mut f) = cap.open_existing_no_symlink("sub/real.txt").unwrap();
@@ -410,12 +428,11 @@ async fn test_nav_tools_never_follow_swapped_symlinks_or_escape_the_workspace() 
     let _ = fs::remove_dir_all(&tmp_root);
 }
 
-/// F-07: the mutation lock keyed off an already-open FD must serialize two writers of the same
-/// file without ever re-deriving the key from a path.
+/// F-07: the mutation lock keyed off an already-open FD / handle must serialize two writers of the
+/// same file without ever re-deriving the key from a path.
 #[tokio::test]
 async fn test_inode_lock_keyed_from_open_fd_serializes_same_file() {
     use harness_core::tools::write::atomic_write_file;
-    use std::os::unix::io::AsRawFd;
 
     let tmp_root = std::env::temp_dir().join(format!("harness-f07-{}", Uuid::new_v4()));
     fs::create_dir_all(&tmp_root).unwrap();
@@ -426,7 +443,7 @@ async fn test_inode_lock_keyed_from_open_fd_serializes_same_file() {
     let cap = WorkspaceCap::new(&tmp_root).unwrap();
     let (parent_dir1, leaf1) = cap.open_parent_dir_no_symlink(Path::new("x.txt"), false).unwrap();
     let (_k, guard) = locks
-        .acquire_for_fd(parent_dir1.as_raw_fd(), Some(leaf1.as_os_str()))
+        .acquire_for_file(&parent_dir1, Some(leaf1.as_os_str()))
         .await
         .unwrap();
     assert_eq!(locks.active_lock_count(), 1);
@@ -434,10 +451,10 @@ async fn test_inode_lock_keyed_from_open_fd_serializes_same_file() {
     let (parent_dir2, leaf2) = cap.open_parent_dir_no_symlink(Path::new("x.txt"), false).unwrap();
     let blocked = tokio::time::timeout(
         std::time::Duration::from_millis(30),
-        locks.acquire_for_fd(parent_dir2.as_raw_fd(), Some(leaf2.as_os_str())),
+        locks.acquire_for_file(&parent_dir2, Some(leaf2.as_os_str())),
     )
     .await;
-    assert!(blocked.is_err(), "parent-FD + leaf-name lock must serialize concurrent write/edit");
+    assert!(blocked.is_err(), "parent-handle + leaf-name lock must serialize concurrent write/edit");
     drop(guard);
     assert_eq!(locks.active_lock_count(), 0);
 
@@ -532,3 +549,132 @@ fn test_nav_tools_under_concurrent_symlink_swap_never_leak_outside_content() {
     attacker.join().unwrap();
     let _ = fs::remove_dir_all(&tmp_root);
 }
+
+#[test]
+fn test_windows_path_normalization_dos_devices_ntfs_ads_and_shell_resolution() {
+    use harness_core::process_group::resolve_windows_shell_with_env;
+    use harness_core::tools::bash::is_blacklisted_env_var;
+    use std::ffi::OsStr;
+
+    // 1. Backslash relative paths normalize cleanly to forward slashes
+    let norm = WorkspaceCap::validate_relative_components(r".\crates\harness-core\src\lib.rs")
+        .expect("backslash relative path must normalize");
+    assert_eq!(norm.to_string_lossy(), "crates/harness-core/src/lib.rs");
+
+    // 2. Windows drive letters and UNC paths are rejected as PathEscape
+    for abs in [
+        r"C:\Windows\System32\drivers\etc\hosts",
+        "c:/Users/Admin/.ssh/id_rsa",
+        r"\\server\share\secret.txt",
+        r"src\..\..\outside.txt",
+    ] {
+        assert!(
+            matches!(
+                WorkspaceCap::validate_relative_components(abs),
+                Err(WorkspaceError::PathEscape { .. })
+            ),
+            "expected PathEscape for '{}'",
+            abs
+        );
+    }
+
+    // 3. Reserved Windows DOS device names (with or without extensions/trailing dots) are rejected
+    for dev in [
+        "CON",
+        "con.txt",
+        "src/NUL",
+        "sub/prn.log",
+        "aux.rs",
+        "com1",
+        "COM9.json",
+        "lpt1.txt",
+        "LPT9.",
+    ] {
+        assert!(
+            is_windows_reserved_device_name(dev.rsplit('/').next().unwrap()),
+            "'{}' should be recognized as reserved DOS device",
+            dev
+        );
+        assert!(
+            matches!(
+                WorkspaceCap::validate_relative_components(dev),
+                Err(WorkspaceError::InvalidPath { .. })
+            ),
+            "expected InvalidPath for reserved DOS device '{}'",
+            dev
+        );
+    }
+
+    // 4. NTFS Alternate Data Streams (`:`) in relative components are rejected
+    for ads in ["file.txt:secret", "src/main.rs:$DATA", "dir:stream/a.txt"] {
+        assert!(
+            matches!(
+                WorkspaceCap::validate_relative_components(ads),
+                Err(WorkspaceError::InvalidPath { .. })
+            ),
+            "expected InvalidPath for NTFS ADS '{}'",
+            ads
+        );
+    }
+
+    // 5. Case-insensitive credential environment variable stripping
+    for secret_var in [
+        "harness_api_key",
+        "Harness_Api_Key",
+        "openai_api_key",
+        "Anthropic_Api_Key",
+        "github_token",
+        "my_custom_secret",
+        "db_password",
+    ] {
+        assert!(
+            is_blacklisted_env_var(secret_var),
+            "mixed-case secret env var '{}' must be stripped",
+            secret_var
+        );
+    }
+    assert!(!is_blacklisted_env_var("SystemRoot"));
+    assert!(!is_blacklisted_env_var("PATH"));
+    assert!(!is_blacklisted_env_var("COMSPEC"));
+
+    // 6. Windows shell resolution order: HARNESS_SHELL -> Git Bash -> pwsh -> powershell -> cmd.exe
+    let (sh1, args1) = resolve_windows_shell_with_env(
+        "cargo test",
+        Some(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+        None,
+        None,
+        |_| false,
+    );
+    assert_eq!(sh1, r"C:\Program Files\PowerShell\7\pwsh.exe");
+    assert_eq!(
+        args1,
+        vec![
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "cargo test"
+        ]
+    );
+
+    let (sh2, args2) = resolve_windows_shell_with_env(
+        "echo hi",
+        None,
+        Some(OsStr::new(r"C:\Tools;C:\Git\bin")),
+        None,
+        |p| p == Path::new(r"C:\Git\bin\bash.exe"),
+    );
+    assert!(sh2.ends_with("bash.exe"));
+    assert_eq!(args2, vec!["-c", "echo hi"]);
+
+    let (sh3, args3) = resolve_windows_shell_with_env(
+        "dir",
+        None,
+        Some(OsStr::new(r"C:\Windows\System32")),
+        Some(r"C:\Windows\System32\cmd.exe"),
+        |_| false,
+    );
+    assert_eq!(sh3, r"C:\Windows\System32\cmd.exe");
+    assert_eq!(args3, vec!["/D", "/S", "/C", "dir"]);
+}
+

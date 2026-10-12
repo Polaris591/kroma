@@ -14,11 +14,15 @@ use crate::session::SessionJournal;
 use crate::workspace::{WorkspaceCap, WorkspaceError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -312,10 +316,7 @@ impl SnapshotStore {
 
     pub fn load_revision(&self, id: &RevisionId) -> Result<WorkspaceRevision, RevisionError> {
         let path = self.revision_path(id);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)
+        let mut file = open_store_file_no_symlink(&path)
             .map_err(|_| RevisionError::UnknownRevision(id.as_str().to_string()))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
@@ -355,11 +356,7 @@ impl SnapshotStore {
     /// Read the unrecovered restore intent journal, if one is present.
     pub fn pending_restore(&self) -> Result<Option<RestoreIntent>, RevisionError> {
         let path = self.intent_path();
-        let mut file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)
-        {
+        let mut file = match open_store_file_no_symlink(&path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -646,12 +643,7 @@ impl SnapshotStore {
 
         let tmp_path = dir.join(format!(".{}.tmp-{}", sha256, Uuid::new_v4()));
         let write_result = (|| -> Result<(), RevisionError> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(&tmp_path)?;
+            let mut file = create_new_store_file_no_symlink(&tmp_path, 0o600)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             Ok(())
@@ -766,13 +758,9 @@ impl SnapshotStore {
 
     pub fn read_blob(&self, sha256: &str) -> Result<Vec<u8>, RevisionError> {
         let path = self.blob_path(sha256);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)
-            .map_err(|e| {
-                RevisionError::InvalidStore(format!("cannot read snapshot blob {}: {}", sha256, e))
-            })?;
+        let mut file = open_store_file_no_symlink(&path).map_err(|e| {
+            RevisionError::InvalidStore(format!("cannot read snapshot blob {}: {}", sha256, e))
+        })?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         if sha256_hex64(&bytes) != sha256 {
@@ -797,7 +785,7 @@ impl SnapshotStore {
         if depth > MAX_SNAPSHOT_DEPTH {
             return Ok(());
         }
-        let rel_str = rel.to_string_lossy().to_string();
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
         let (_, entries) = match workspace.read_dir_no_symlink(&rel_str) {
             Ok(v) => v,
             Err(WorkspaceError::SensitivePath { .. }) => return Ok(()),
@@ -810,7 +798,7 @@ impl SnapshotStore {
             } else {
                 rel.join(&entry.name)
             };
-            let child_str = child.to_string_lossy().to_string();
+            let child_str = child.to_string_lossy().replace('\\', "/");
 
             if entry.is_symlink {
                 skipped.insert(child_str);
@@ -860,16 +848,84 @@ impl SnapshotStore {
             let sha256 = sha256_hex64(&bytes);
             self.store_blob(&sha256, &bytes)?;
             *total_bytes += size;
+            #[cfg(unix)]
+            let mode = (meta.mode() & 0o7777) as u32;
+            #[cfg(windows)]
+            let mode = if meta.permissions().readonly() {
+                0o444
+            } else {
+                0o644
+            };
             tracked.insert(
                 child_str,
                 TrackedFile {
                     sha256,
-                    mode: (meta.mode() & 0o7777) as u32,
+                    mode,
                     size,
                 },
             );
         }
         Ok(())
+    }
+}
+
+fn open_store_file_no_symlink(path: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let sym = fs::symlink_metadata(path)?;
+        if crate::workspace::is_windows_reparse_point(&sym) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to open reparse point in snapshot store",
+            ));
+        }
+        let f = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(path)?;
+        let opened_meta = f.metadata()?;
+        if crate::workspace::is_windows_reparse_point(&opened_meta) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to open reparse point in snapshot store",
+            ));
+        }
+        Ok(f)
+    }
+}
+
+fn create_new_store_file_no_symlink(path: &Path, mode: u32) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        let _ = mode;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
     }
 }
 
@@ -885,52 +941,98 @@ impl SnapshotStore {
 /// traversed. Only the final component is chmod-ed: pre-existing ancestors (e.g. `/tmp`) keep their
 /// own permissions and are never touched.
 pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
-    // Lexically normalize (resolving `.` / `..`) and split into (anchor, components). Every
-    // intermediate component is re-opened with `O_NOFOLLOW`, so it is always a real directory and
-    // lexical `..` resolution matches what the filesystem would do.
-    let mut absolute = false;
-    let mut components: Vec<std::ffi::OsString> = Vec::new();
-    for component in dir.components() {
-        match component {
-            Component::RootDir => {
-                absolute = true;
-                components.clear();
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                components.pop();
-            }
-            other => components.push(other.as_os_str().to_os_string()),
-        }
-    }
-    if components.is_empty() {
-        return Err(RevisionError::InvalidStore(format!(
-            "snapshot store path '{}' has no directory component",
-            dir.display()
-        )));
-    }
-    let anchor = if absolute { Path::new("/") } else { Path::new(".") };
-    let mut handle = open_real_dir(anchor)?;
-    for (index, name) in components.iter().enumerate() {
-        let name_c = CString::new(name.as_bytes()).map_err(|_| {
-            RevisionError::InvalidStore("snapshot store path contains a NUL byte".to_string())
-        })?;
-        let rc = unsafe { libc::mkdirat(handle.as_raw_fd(), name_c.as_ptr(), 0o700) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(err.into());
+    #[cfg(unix)]
+    {
+        // Lexically normalize (resolving `.` / `..`) and split into (anchor, components). Every
+        // intermediate component is re-opened with `O_NOFOLLOW`, so it is always a real directory and
+        // lexical `..` resolution matches what the filesystem would do.
+        let mut absolute = false;
+        let mut components: Vec<std::ffi::OsString> = Vec::new();
+        for component in dir.components() {
+            match component {
+                Component::RootDir => {
+                    absolute = true;
+                    components.clear();
+                }
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    components.pop();
+                }
+                other => components.push(other.as_os_str().to_os_string()),
             }
         }
-        handle = open_dir_at(handle.as_raw_fd(), &name_c)?;
-        if index + 1 == components.len() {
-            handle.set_permissions(fs::Permissions::from_mode(0o700))?;
+        if components.is_empty() {
+            return Err(RevisionError::InvalidStore(format!(
+                "snapshot store path '{}' has no directory component",
+                dir.display()
+            )));
         }
+        let anchor = if absolute { Path::new("/") } else { Path::new(".") };
+        let mut handle = open_real_dir(anchor)?;
+        for (index, name) in components.iter().enumerate() {
+            let name_c = CString::new(name.as_bytes()).map_err(|_| {
+                RevisionError::InvalidStore("snapshot store path contains a NUL byte".to_string())
+            })?;
+            let rc = unsafe { libc::mkdirat(handle.as_raw_fd(), name_c.as_ptr(), 0o700) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(err.into());
+                }
+            }
+            handle = open_dir_at(handle.as_raw_fd(), &name_c)?;
+            if index + 1 == components.len() {
+                handle.set_permissions(fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(windows)]
+    {
+        let mut cur = PathBuf::new();
+        let mut has_normal = false;
+        for component in dir.components() {
+            match component {
+                Component::Prefix(p) => cur.push(p.as_os_str()),
+                Component::RootDir => cur.push(component.as_os_str()),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    cur.pop();
+                }
+                Component::Normal(part) => {
+                    has_normal = true;
+                    cur.push(part);
+                    match fs::symlink_metadata(&cur) {
+                        Ok(meta) => {
+                            if crate::workspace::is_windows_reparse_point(&meta) || !meta.is_dir() {
+                                return Err(RevisionError::InvalidStore(format!(
+                                    "snapshot store path '{}' is not a real directory",
+                                    cur.display()
+                                )));
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            fs::create_dir(&cur)?;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                    let _ = crate::workspace::open_windows_handle_no_reparse(&cur, &cur, Some(true))
+                        .map_err(|e| RevisionError::InvalidStore(e.to_string()))?;
+                }
+            }
+        }
+        if !has_normal {
+            return Err(RevisionError::InvalidStore(format!(
+                "snapshot store path '{}' has no directory component",
+                dir.display()
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Open `path` as a directory without ever following a final symlink.
+#[cfg(unix)]
 fn open_real_dir(path: &Path) -> Result<File, RevisionError> {
     let handle = OpenOptions::new()
         .read(true)
@@ -941,6 +1043,7 @@ fn open_real_dir(path: &Path) -> Result<File, RevisionError> {
 }
 
 /// `openat` a child directory of an already-verified directory descriptor, refusing symlinks.
+#[cfg(unix)]
 fn open_dir_at(parent_fd: RawFd, name: &CString) -> Result<File, RevisionError> {
     let fd = unsafe {
         libc::openat(
@@ -958,6 +1061,7 @@ fn open_dir_at(parent_fd: RawFd, name: &CString) -> Result<File, RevisionError> 
 }
 
 /// `fstat` the open descriptor and reject anything that is not a directory.
+#[cfg(unix)]
 fn verify_is_real_dir(handle: &File, display: &str) -> Result<(), RevisionError> {
     let meta = handle.metadata()?;
     if !meta.is_dir() {
@@ -980,13 +1084,9 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Revisi
     tmp_name.push(format!(".tmp-{}", Uuid::new_v4()));
     let tmp_path = dir.join(&tmp_name);
     let write_result = (|| -> Result<(), RevisionError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&tmp_path)?;
+        let mut file = create_new_store_file_no_symlink(&tmp_path, mode)?;
         file.write_all(bytes)?;
+        #[cfg(unix)]
         file.set_permissions(fs::Permissions::from_mode(mode))?;
         file.sync_all()?;
         Ok(())
@@ -1004,9 +1104,17 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Revisi
 }
 
 fn sync_dir(dir: &Path) -> Result<(), RevisionError> {
-    let handle = File::open(dir)?;
-    handle.sync_all()?;
-    Ok(())
+    #[cfg(unix)]
+    {
+        let handle = File::open(dir)?;
+        handle.sync_all()?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        Ok(())
+    }
 }
 
 fn compute_revision_id(tracked: &BTreeMap<String, TrackedFile>) -> RevisionId {
@@ -1084,36 +1192,97 @@ pub(crate) fn stat_live_entry(workspace: &WorkspaceCap, rel: &str) -> Result<Liv
     if SensitivePathGuard::is_sensitive(&norm) {
         return Ok(LiveEntryStat::Absent);
     }
-    let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
-        Ok(v) => v,
-        Err(WorkspaceError::NotFound { .. }) => return Ok(LiveEntryStat::Absent),
-        Err(WorkspaceError::SymlinkBlocked { .. }) => return classify_blocked_parent(workspace, &norm),
-        Err(WorkspaceError::SensitivePath { .. }) | Err(WorkspaceError::InvalidPath { .. }) => {
-            return Ok(LiveEntryStat::Absent)
+    #[cfg(unix)]
+    {
+        let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
+            Ok(v) => v,
+            Err(WorkspaceError::NotFound { .. }) => return Ok(LiveEntryStat::Absent),
+            Err(WorkspaceError::SymlinkBlocked { .. }) => {
+                return classify_blocked_parent(workspace, &norm)
+            }
+            Err(WorkspaceError::SensitivePath { .. }) | Err(WorkspaceError::InvalidPath { .. }) => {
+                return Ok(LiveEntryStat::Absent)
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let c_leaf = CString::new(leaf.as_bytes()).map_err(|_| {
+            RevisionError::InvalidStore("file name contains a NUL byte".to_string())
+        })?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::fstatat(
+                parent_dir.as_raw_fd(),
+                c_leaf.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(LiveEntryStat::Absent);
+            }
+            return Err(err.into());
         }
-        Err(e) => return Err(e.into()),
-    };
-    let c_leaf = CString::new(leaf.as_bytes())
-        .map_err(|_| RevisionError::InvalidStore("file name contains a NUL byte".to_string()))?;
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::fstatat(
-            parent_dir.as_raw_fd(),
-            c_leaf.as_ptr(),
-            &mut stat,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(LiveEntryStat::Absent);
-        }
-        return Err(err.into());
+        Ok(stat_kind(&stat))
     }
-    Ok(stat_kind(&stat))
+    #[cfg(windows)]
+    {
+        let mut cur = workspace.root().to_path_buf();
+        if let Some(parent) = norm.parent() {
+            for comp in parent.components() {
+                let Component::Normal(part) = comp else { continue };
+                if part.is_empty() {
+                    continue;
+                }
+                cur.push(part);
+                match fs::symlink_metadata(&cur) {
+                    Ok(meta) => {
+                        if crate::workspace::is_windows_reparse_point(&meta) {
+                            return Ok(LiveEntryStat::NonRegular);
+                        }
+                        if !meta.is_dir() {
+                            return Ok(LiveEntryStat::Absent);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(LiveEntryStat::Absent);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        let Some(leaf) = norm.file_name() else {
+            return Ok(LiveEntryStat::Absent);
+        };
+        cur.push(leaf);
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) => {
+                if crate::workspace::is_windows_reparse_point(&meta) {
+                    Ok(LiveEntryStat::NonRegular)
+                } else if meta.is_dir() {
+                    Ok(LiveEntryStat::Directory)
+                } else if meta.is_file() {
+                    let mode = if meta.permissions().readonly() {
+                        0o444
+                    } else {
+                        0o644
+                    };
+                    Ok(LiveEntryStat::Regular {
+                        mode,
+                        size: meta.len(),
+                    })
+                } else {
+                    Ok(LiveEntryStat::NonRegular)
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LiveEntryStat::Absent),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
+#[cfg(unix)]
 fn stat_kind(stat: &libc::stat) -> LiveEntryStat {
     match stat.st_mode & libc::S_IFMT {
         libc::S_IFREG => LiveEntryStat::Regular {
@@ -1127,6 +1296,7 @@ fn stat_kind(stat: &libc::stat) -> LiveEntryStat {
 
 /// Distinguish "the path is genuinely absent" (an ancestor is a plain file blocking traversal)
 /// from "an ancestor is a symlink" (an external entry we must never silently follow).
+#[cfg(unix)]
 fn classify_blocked_parent(
     workspace: &WorkspaceCap,
     norm: &Path,
@@ -1175,6 +1345,16 @@ fn classify_blocked_parent(
     Ok(LiveEntryStat::Absent)
 }
 
+#[cfg(unix)]
+fn is_eisdir_error(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EISDIR)
+}
+
+#[cfg(windows)]
+fn is_eisdir_error(_e: &std::io::Error) -> bool {
+    false
+}
+
 /// Full live state of a path: absent / directory / non-regular, or a regular file with its content
 /// hash and permission bits. A regular file larger than the snapshot cap is reported by size
 /// rather than hashed in full, since it can never equal a tracked entry.
@@ -1206,7 +1386,7 @@ pub(crate) fn live_entry_state(workspace: &WorkspaceCap, rel: &str) -> Result<Li
                 match file.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => hasher.update(&buf[..n]),
-                    Err(e) if e.raw_os_error() == Some(libc::EISDIR) => {
+                    Err(e) if is_eisdir_error(&e) => {
                         return Ok(LiveEntryState::Directory)
                     }
                     Err(e) => return Err(e.into()),
@@ -1357,49 +1537,83 @@ pub(crate) fn remove_tracked_file(
             rel
         )));
     }
-    let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
-        Ok(v) => v,
-        Err(WorkspaceError::NotFound { .. }) => return Ok(false),
-        Err(e) => return Err(e.into()),
-    };
-    let c_leaf = CString::new(leaf.as_bytes())
-        .map_err(|_| RevisionError::InvalidStore("file name contains a NUL byte".to_string()))?;
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::fstatat(
-            parent_dir.as_raw_fd(),
-            c_leaf.as_ptr(),
-            &mut stat,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(false);
+    #[cfg(unix)]
+    {
+        let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
+            Ok(v) => v,
+            Err(WorkspaceError::NotFound { .. }) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        let c_leaf = CString::new(leaf.as_bytes()).map_err(|_| {
+            RevisionError::InvalidStore("file name contains a NUL byte".to_string())
+        })?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::fstatat(
+                parent_dir.as_raw_fd(),
+                c_leaf.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(false);
+            }
+            return Err(err.into());
         }
-        return Err(err.into());
-    }
-    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
-        if !force {
-            return Ok(false);
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            if !force {
+                return Ok(false);
+            }
+            drop(parent_dir);
+            remove_path_force(workspace, rel)?;
+            return Ok(true);
         }
+        let rc = unsafe { libc::unlinkat(parent_dir.as_raw_fd(), c_leaf.as_ptr(), 0) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(false);
+            }
+            return Err(err.into());
+        }
+        let _ = parent_dir.sync_all();
         drop(parent_dir);
-        remove_path_force(workspace, rel)?;
-        return Ok(true);
+        prune_empty_ancestors(workspace, &norm)?;
+        Ok(true)
     }
-    let rc = unsafe { libc::unlinkat(parent_dir.as_raw_fd(), c_leaf.as_ptr(), 0) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(false);
+    #[cfg(windows)]
+    {
+        match stat_live_entry(workspace, rel)? {
+            LiveEntryStat::Absent => return Ok(false),
+            LiveEntryStat::Directory | LiveEntryStat::NonRegular => {
+                if !force {
+                    return Ok(false);
+                }
+                remove_path_force(workspace, rel)?;
+                return Ok(true);
+            }
+            LiveEntryStat::Regular { .. } => {}
         }
-        return Err(err.into());
+        let target = workspace.root().join(&norm);
+        if let Ok(meta) = fs::symlink_metadata(&target) {
+            if meta.permissions().readonly() {
+                let mut perms = meta.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                perms.set_readonly(false);
+                let _ = fs::set_permissions(&target, perms);
+            }
+        }
+        match fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        }
+        prune_empty_ancestors(workspace, &norm)?;
+        Ok(true)
     }
-    let _ = parent_dir.sync_all();
-    drop(parent_dir);
-    prune_empty_ancestors(workspace, &norm)?;
-    Ok(true)
 }
 
 /// Best-effort removal of directories the mutation created that are now empty. Stops at the first
@@ -1416,6 +1630,7 @@ fn prune_empty_ancestors(workspace: &WorkspaceCap, norm: &Path) -> Result<(), Re
             }
         }
     }
+    #[cfg(unix)]
     while let Some(child) = dirs.pop() {
         let parent_rel = if dirs.is_empty() {
             ".".to_string()
@@ -1434,6 +1649,15 @@ fn prune_empty_ancestors(workspace: &WorkspaceCap, norm: &Path) -> Result<(), Re
             break;
         }
     }
+    #[cfg(windows)]
+    while !dirs.is_empty() {
+        let rel_dir = dirs.join("/");
+        dirs.pop();
+        let target_dir = workspace.root().join(&rel_dir);
+        if fs::remove_dir(&target_dir).is_err() {
+            break;
+        }
+    }
     Ok(())
 }
 
@@ -1447,14 +1671,67 @@ fn remove_path_force(workspace: &WorkspaceCap, rel: &str) -> Result<(), Revision
             rel
         )));
     }
-    let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
-        Ok(v) => v,
-        Err(WorkspaceError::NotFound { .. }) => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    remove_entry_at(parent_dir.as_raw_fd(), &leaf)
+    #[cfg(unix)]
+    {
+        let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
+            Ok(v) => v,
+            Err(WorkspaceError::NotFound { .. }) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        remove_entry_at(parent_dir.as_raw_fd(), &leaf)
+    }
+    #[cfg(windows)]
+    {
+        let _ = match workspace.open_parent_dir_no_symlink(&norm, false) {
+            Ok(v) => v,
+            Err(WorkspaceError::NotFound { .. }) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        remove_entry_windows(&workspace.root().join(&norm))
+    }
 }
 
+#[cfg(windows)]
+fn remove_entry_windows(target: &Path) -> Result<(), RevisionError> {
+    let meta = match fs::symlink_metadata(target) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if meta.permissions().readonly() {
+        let mut perms = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        let _ = fs::set_permissions(target, perms);
+    }
+    if crate::workspace::is_windows_reparse_point(&meta) {
+        // Never recurse into a junction or directory symlink; remove only the reparse point itself.
+        if fs::remove_file(target).is_err() {
+            let _ = fs::remove_dir(target);
+        }
+        return Ok(());
+    }
+    if meta.is_dir() {
+        for entry in fs::read_dir(target)? {
+            let entry = entry?;
+            remove_entry_windows(&entry.path())?;
+        }
+        match fs::remove_dir(target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    } else {
+        match fs::remove_file(target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn remove_entry_at(dir_fd: RawFd, name: &OsStr) -> Result<(), RevisionError> {
     let c_name = CString::new(name.as_bytes())
         .map_err(|_| RevisionError::InvalidStore("entry name contains a NUL byte".to_string()))?;
@@ -1505,6 +1782,7 @@ fn remove_entry_at(dir_fd: RawFd, name: &OsStr) -> Result<(), RevisionError> {
 /// Empty a directory through its own FD. Entries are listed via `/proc/self/fd/<fd>` and removed
 /// with `unlinkat` relative to that FD, so a concurrently swapped ancestor symlink cannot redirect
 /// the deletion outside the directory already opened.
+#[cfg(unix)]
 fn remove_dir_entries(dir_fd: RawFd) -> Result<(), RevisionError> {
     let proc_path = PathBuf::from(format!("/proc/self/fd/{}", dir_fd));
     for entry in fs::read_dir(&proc_path)? {

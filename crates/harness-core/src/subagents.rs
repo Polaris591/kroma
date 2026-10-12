@@ -862,7 +862,7 @@ impl IsolatedWorktree {
                 for comp in parent_rel.components() {
                     if let Component::Normal(part) = comp {
                         cur_anc.push(part);
-                        let anc_str = cur_anc.to_string_lossy().to_string();
+                        let anc_str = cur_anc.to_string_lossy().replace('\\', "/");
                         match stat_live_entry(parent_workspace, &anc_str)? {
                             LiveEntryStat::Absent | LiveEntryStat::Directory => {}
                             LiveEntryStat::Regular { .. }

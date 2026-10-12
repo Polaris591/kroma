@@ -13,9 +13,13 @@ use crate::prompt::sha256_hex64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::DirBuilder;
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -189,23 +193,50 @@ impl SessionJournal {
         session_dir: impl AsRef<Path>,
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, SessionError> {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(session_dir.as_ref())?;
-        // F-08: the session store holds structured transcripts, so keep it user-private (0700).
-        fs::set_permissions(session_dir.as_ref(), fs::Permissions::from_mode(0o700))?;
+        #[cfg(unix)]
+        {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(session_dir.as_ref())?;
+            // F-08: the session store holds structured transcripts, so keep it user-private (0700).
+            fs::set_permissions(session_dir.as_ref(), fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(windows)]
+        {
+            fs::create_dir_all(session_dir.as_ref())?;
+        }
         let session_id = Uuid::new_v4().to_string();
         let path = session_dir.as_ref().join(format!("{}.wal.jsonl", session_id));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .read(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)?;
-        acquire_wal_lock(&file)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        let file = {
+            let f = OpenOptions::new()
+                .create_new(true)
+                .append(true)
+                .read(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&path)?;
+            acquire_wal_lock(&f)?;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+            f
+        };
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            let f = OpenOptions::new()
+                .create_new(true)
+                .append(true)
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&path)?;
+            acquire_wal_lock(&f)?;
+            f
+        };
         let mut journal = Self {
             path,
             session_id: session_id.clone(),
@@ -237,7 +268,7 @@ impl SessionJournal {
         // F-01: never open a symlink, directory, special file or oversized file as a WAL. A bare
         // `--resume <path>` must not be able to damage an unrelated file.
         let sym_meta = fs::symlink_metadata(&path)?;
-        if sym_meta.file_type().is_symlink() {
+        if crate::workspace::is_symlink_or_reparse(&sym_meta) {
             return Err(SessionError::Invalid(format!(
                 "refusing to open a symlink as a session WAL: {}",
                 path.display()
@@ -250,18 +281,33 @@ impl SessionJournal {
             )));
         }
 
-        // `O_NOFOLLOW` closes the symlink-swap window between `symlink_metadata` and `open`.
+        // `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT` closes the symlink-swap window between `symlink_metadata` and `open`.
+        #[cfg(unix)]
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .append(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)?;
+        #[cfg(windows)]
+        let mut file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .append(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&path)?
+        };
         acquire_wal_lock(&file)?;
 
         // Re-check the opened handle itself (fstat) so a raced replacement cannot slip through.
         let opened_meta = file.metadata()?;
-        if !opened_meta.file_type().is_file() {
+        if !opened_meta.file_type().is_file() || crate::workspace::is_symlink_or_reparse(&opened_meta) {
             return Err(SessionError::Invalid(
                 "session WAL is not a regular file".into(),
             ));
@@ -270,6 +316,7 @@ impl SessionJournal {
         // inode. If a concurrent rename/symlink swap replaced the path in the window between the
         // check and the open, `(st_dev, st_ino)` differ and we must refuse rather than operate on
         // (and possibly truncate) a file we never validated.
+        #[cfg(unix)]
         if (sym_meta.dev(), sym_meta.ino()) != (opened_meta.dev(), opened_meta.ino()) {
             return Err(SessionError::Invalid(
                 "session WAL changed identity between stat and open".into(),
@@ -410,6 +457,7 @@ impl SessionJournal {
             file.sync_all()?;
         }
         // F-01/F-08: set 0600 on the open FD itself (`fchmod`), never by path (`chmod`).
+        #[cfg(unix)]
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         Ok(Self {
             path,
@@ -529,7 +577,7 @@ impl SessionJournal {
     pub fn peek_workspace_root(path: impl AsRef<Path>) -> Result<PathBuf, SessionError> {
         let path = path.as_ref();
         let sym_meta = fs::symlink_metadata(path)?;
-        if sym_meta.file_type().is_symlink() || !sym_meta.file_type().is_file() {
+        if crate::workspace::is_symlink_or_reparse(&sym_meta) || !sym_meta.file_type().is_file() {
             return Err(SessionError::Invalid(
                 "session WAL candidate is not a regular file".into(),
             ));
@@ -539,18 +587,43 @@ impl SessionJournal {
                 "session WAL candidate size out of bounds".into(),
             ));
         }
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
-        let opened_meta = file.metadata()?;
-        if !opened_meta.file_type().is_file()
-            || (sym_meta.dev(), sym_meta.ino()) != (opened_meta.dev(), opened_meta.ino())
-        {
-            return Err(SessionError::Invalid(
-                "session WAL candidate changed identity".into(),
-            ));
-        }
+        #[cfg(unix)]
+        let file = {
+            let f = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)?;
+            let opened_meta = f.metadata()?;
+            if !opened_meta.file_type().is_file()
+                || (sym_meta.dev(), sym_meta.ino()) != (opened_meta.dev(), opened_meta.ino())
+            {
+                return Err(SessionError::Invalid(
+                    "session WAL candidate changed identity".into(),
+                ));
+            }
+            f
+        };
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            let f = OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(path)?;
+            let opened_meta = f.metadata()?;
+            if !opened_meta.file_type().is_file()
+                || crate::workspace::is_symlink_or_reparse(&opened_meta)
+            {
+                return Err(SessionError::Invalid(
+                    "session WAL candidate changed identity".into(),
+                ));
+            }
+            f
+        };
         let mut reader = BufReader::new(file.take(MAX_WAL_LINE_BYTES as u64));
         let mut first_line = Vec::new();
         let n = reader.read_until(b'\n', &mut first_line)?;
@@ -986,23 +1059,68 @@ impl SessionJournal {
 
 impl Drop for SessionJournal {
     fn drop(&mut self) {
-        // Explicitly release the `flock` on the open file description before closing the FD so a
-        // concurrent thread between `fork()` and `execve()` cannot keep the lock alive until exec.
+        #[cfg(unix)]
         unsafe {
+            // Explicitly release the `flock` on the open file description before closing the FD so a
+            // concurrent thread between `fork()` and `execve()` cannot keep the lock alive until exec.
             let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+            let mut overlapped: OVERLAPPED = std::mem::zeroed();
+            overlapped.Anonymous.Anonymous.Offset = u32::MAX - 1;
+            overlapped.Anonymous.Anonymous.OffsetHigh = u32::MAX;
+            let _ = UnlockFileEx(self.file.as_raw_handle() as HANDLE, 0, 1, 0, &mut overlapped);
         }
     }
 }
 
-/// Take a non-blocking exclusive `flock` so two processes cannot append to the same WAL.
-/// The lock is tied to the open file description, so it must be held on the handle that the
-/// `SessionJournal` retains for the lifetime of the session.
+/// Take a non-blocking exclusive `flock` (Unix) or `LockFileEx` (Windows) so two processes cannot
+/// append to the same WAL. The lock is tied to the open file description / handle, so it must be
+/// held on the handle that the `SessionJournal` retains for the lifetime of the session.
 fn acquire_wal_lock(file: &File) -> Result<(), SessionError> {
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        return Err(SessionError::Invalid("session WAL is locked by another process".into()));
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            return Err(SessionError::Invalid(
+                "session WAL is locked by another process".into(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+        };
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.Anonymous.Anonymous.Offset = u32::MAX - 1;
+        overlapped.Anonymous.Anonymous.OffsetHigh = u32::MAX;
+        let ok = unsafe {
+            LockFileEx(
+                file.as_raw_handle() as HANDLE,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            return Err(SessionError::Invalid(
+                "session WAL is locked by another process".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn calculate_hash(seq: u64, prev_hash: &str, payload: &WalPayload) -> Result<String, SessionError> {
@@ -1201,6 +1319,16 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
+    fn create_test_symlink(src: &Path, dst: &Path) {
+        std::os::unix::fs::symlink(src, dst).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn create_test_symlink(src: &Path, dst: &Path) {
+        std::os::windows::fs::symlink_file(src, dst).unwrap();
+    }
+
     #[test]
     fn symlink_wal_is_rejected_and_target_untouched() {
         let dir = tempdir();
@@ -1210,7 +1338,7 @@ mod tests {
         let real = dir.join("real.wal.jsonl");
         fs::rename(&wal_path, &real).unwrap();
         let link = dir.join("link.wal.jsonl");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        create_test_symlink(&real, &link);
         let before = fs::read(&real).unwrap();
 
         assert!(
@@ -1236,7 +1364,7 @@ mod tests {
         let before = crate::prompt::sha256_hex64(&original);
 
         let link = dir.join("link.wal.jsonl");
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        create_test_symlink(&outside, &link);
 
         assert!(
             SessionJournal::open(&link).is_err(),

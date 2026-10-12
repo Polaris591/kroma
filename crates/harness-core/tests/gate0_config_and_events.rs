@@ -4,6 +4,7 @@ use harness_core::tool::policy::PolicyMode;
 use harness_core::tool::registry::ToolRegistry;
 use harness_core::types::{EditDiagKind, EditMatchTier, RunId, RunStatus, TerminalReason, ToolCallId};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use uuid::Uuid;
@@ -246,7 +247,10 @@ fn test_event_logger_0600_permissions_and_resilient_degradation() {
         .unwrap();
 
     let meta = fs::metadata(logger.log_path()).unwrap();
+    #[cfg(unix)]
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    #[cfg(not(unix))]
+    assert!(meta.is_file());
     assert!(!logger.is_degraded());
 
     // Test resilient degradation when state directory is not writable (e.g. points inside a regular file)

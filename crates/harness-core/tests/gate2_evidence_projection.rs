@@ -733,7 +733,10 @@ async fn test_gate1_o1_o6_polish_items_are_verified() {
     let symlink_root = root.join("symlink-store");
     let target = root.join("symlink-target");
     fs::create_dir_all(&target).unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&target, &symlink_root).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&target, &symlink_root).unwrap();
     let symlink_store = SnapshotStore::new(&symlink_root);
     assert!(
         symlink_store.ensure_layout().is_err(),
@@ -749,17 +752,20 @@ async fn test_gate1_o1_o6_polish_items_are_verified() {
     dotted_store.ensure_layout().unwrap();
     let blobs = dotted_root.join("snapshots").join("blobs");
     assert!(blobs.is_dir(), "`..` must be resolved lexically");
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(
-        fs::metadata(&blobs).unwrap().permissions().mode() & 0o777,
-        0o700,
-        "the store directory must be user-private"
-    );
-    assert_ne!(
-        fs::metadata(&dotted_root).unwrap().permissions().mode() & 0o777,
-        0o700,
-        "pre-existing ancestors must keep their own permissions"
-    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&blobs).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the store directory must be user-private"
+        );
+        assert_ne!(
+            fs::metadata(&dotted_root).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "pre-existing ancestors must keep their own permissions"
+        );
+    }
 
     // ---- O4: revision records are ordered by branch depth, not append order ----
     let o4_root = temp_root("o4");

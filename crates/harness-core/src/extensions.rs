@@ -960,24 +960,6 @@ pub struct CommandHookOutcome {
     pub stdout: String,
 }
 
-/// Sweep a hook's whole process group so no background grandchild can keep the inherited
-/// stdout/stderr pipe FDs open after the direct child exits.
-#[cfg(unix)]
-fn sweep_process_group(pgid: i32) {
-    if pgid > 1 {
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-        }
-        std::thread::sleep(HOOK_KILL_GRACE);
-        unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn sweep_process_group(_pgid: i32) {}
-
 impl CommandHookRunner {
     pub fn new(argv: Vec<String>) -> Self {
         Self {
@@ -991,7 +973,7 @@ impl CommandHookRunner {
         self
     }
 
-    /// Run the hook synchronously with a hard deadline, then sweep the process group.
+    /// Run the hook synchronously with a hard deadline, then sweep the process group / Windows Job Object.
     ///
     /// Synchronous on purpose: it keeps hook semantics identical under the async engine (which
     /// calls this through `spawn_blocking`) and under direct unit tests, with no runtime required.
@@ -1015,16 +997,12 @@ impl CommandHookRunner {
             .env_clear()
             .envs(crate::env::build_sanitized_env())
             .env("HARNESS_HOOK_EVENT", event.as_str());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
+        crate::process_group::ChildProcessGroup::configure_std_command(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
             HookError::Failed(hook_name.clone(), format!("failed to spawn hook: {}", e))
         })?;
-        let pgid = child.id() as i32;
+        let proc_group = crate::process_group::ChildProcessGroup::from_std_child(&child);
 
         // Feed the JSON context on stdin from a helper thread so a hook that ignores stdin cannot
         // deadlock the parent on a full pipe.
@@ -1082,7 +1060,7 @@ impl CommandHookRunner {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 Err(e) => {
-                    sweep_process_group(pgid);
+                    proc_group.sweep_sync(HOOK_KILL_GRACE);
                     return Err(HookError::Failed(
                         hook_name,
                         format!("failed to wait for hook: {}", e),
@@ -1091,9 +1069,9 @@ impl CommandHookRunner {
             }
         };
 
-        // Sweep the process group on *every* exit path. A background grandchild that inherited
+        // Sweep the process group / Job Object on *every* exit path. A background grandchild that inherited
         // stdout/stderr would otherwise keep the pipe FDs open and hang the drain below.
-        sweep_process_group(pgid);
+        proc_group.sweep_sync(HOOK_KILL_GRACE);
 
         if timed_out {
             let _ = child.kill();
@@ -1554,7 +1532,7 @@ impl SubtreeContextTracker {
         }
         for comp in &comps[..comps.len() - 1] {
             current.push(comp.as_os_str());
-            let text = current.to_string_lossy().to_string();
+            let text = current.to_string_lossy().replace('\\', "/");
             if !text.is_empty() && text != "." {
                 dirs.push(text);
             }
@@ -1625,7 +1603,7 @@ impl SubtreeContextTracker {
     fn candidate_dirs(workspace: &WorkspaceCap, rel_path: &str) -> Vec<String> {
         let mut dirs = Self::ancestor_dirs(rel_path);
         if let Ok(normalized) = WorkspaceCap::validate_relative_components(rel_path) {
-            let text = normalized.to_string_lossy().to_string();
+            let text = normalized.to_string_lossy().replace('\\', "/");
             if !text.is_empty()
                 && text != "."
                 && !dirs.contains(&text)

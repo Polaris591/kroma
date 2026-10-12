@@ -13,3 +13,8 @@ regex.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+native-tls.workspace = true
+tokio-native-tls.workspace = true

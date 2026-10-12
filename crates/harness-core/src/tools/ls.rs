@@ -62,7 +62,7 @@ pub fn execute_ls(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOutp
             );
         }
     };
-    let rel_str = norm_rel.to_string_lossy().to_string();
+    let rel_str = norm_rel.to_string_lossy().replace('\\', "/");
 
     if norm_rel.components().any(|c| {
         matches!(c, std::path::Component::Normal(os) if is_skipped_dir_name(&os.to_string_lossy()))

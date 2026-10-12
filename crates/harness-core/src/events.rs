@@ -5,6 +5,7 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -230,6 +231,22 @@ pub fn resolve_default_state_dir() -> PathBuf {
                 .join("runs");
         }
     }
+    if cfg!(windows) {
+        if let Ok(local_appdata) = std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA")) {
+            if !local_appdata.trim().is_empty() {
+                return PathBuf::from(local_appdata).join("harness").join("runs");
+            }
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !profile.trim().is_empty() {
+                return PathBuf::from(profile)
+                    .join("AppData")
+                    .join("Local")
+                    .join("harness")
+                    .join("runs");
+            }
+        }
+    }
     if let Ok(home) = std::env::var("HOME") {
         if !home.trim().is_empty() {
             return PathBuf::from(home)
@@ -315,13 +332,25 @@ impl EventLogger {
 
     fn open_log_file(state_dir: &Path, log_path: &Path) -> std::io::Result<File> {
         fs::create_dir_all(state_dir)?;
-        let f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(log_path)?;
-        let _ = fs::set_permissions(log_path, fs::Permissions::from_mode(0o600));
-        Ok(f)
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            opts.mode(0o600);
+            let f = opts.open(log_path)?;
+            let _ = fs::set_permissions(log_path, fs::Permissions::from_mode(0o600));
+            Ok(f)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+            opts.open(log_path)
+        }
     }
 
     pub fn log(&mut self, payload: EventPayload) -> Result<EventSeq, EventLogError> {

@@ -739,7 +739,6 @@ async fn test_worker_merge_detects_concurrent_parent_conflict_and_preserves_pare
         "excluded target/ directory must not be copied into parent workspace"
     );
 
-    #[cfg(unix)]
     {
         let mut wt_symlink = IsolatedWorktree::materialize(
             "sub-symlink",
@@ -749,8 +748,15 @@ async fn test_worker_merge_detects_concurrent_parent_conflict_and_preserves_pare
             state_dir.join("worktrees/wt-sub-symlink"),
         )
         .unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(
             "/etc/passwd",
+            wt_symlink.root().join("src/allowed/evil_link.rs"),
+        )
+        .unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(
+            r"C:\Windows\System32\drivers\etc\hosts",
             wt_symlink.root().join("src/allowed/evil_link.rs"),
         )
         .unwrap();

@@ -8,6 +8,7 @@ pub mod events;
 pub mod extensions;
 pub mod loop_guard;
 pub mod messages;
+pub mod process_group;
 pub mod prompt;
 pub mod provider;
 pub mod revision;

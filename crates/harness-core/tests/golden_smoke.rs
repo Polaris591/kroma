@@ -383,7 +383,10 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
     {
         let (ws, state) = setup_sample_repo();
         fs::write(ws.join(".env.example"), "DB_PASSWORD=placeholder\n").unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(ws.join(".env"), ws.join("env_link")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(ws.join(".env"), ws.join("env_link")).unwrap();
         let summary = run_scenario(
             &ws,
             &state,

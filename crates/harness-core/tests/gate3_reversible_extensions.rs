@@ -37,13 +37,27 @@ use harness_core::tools::ToolExecutionOutput;
 use harness_core::types::{EffectClass, ErrorCode, RunStatus, ToolCallId};
 use harness_core::workspace::WorkspaceCap;
 use std::fs;
-use std::os::unix::fs::symlink;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use uuid::Uuid;
+
+fn symlink(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        if src.as_ref().is_dir() {
+            std::os::windows::fs::symlink_dir(src, dst)
+        } else {
+            std::os::windows::fs::symlink_file(src, dst)
+        }
+    }
+}
 
 fn temp_root(tag: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("harness-gate3-{}-{}", tag, Uuid::new_v4()));

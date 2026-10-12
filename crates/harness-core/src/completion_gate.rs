@@ -1,8 +1,9 @@
 //! Completion verification gate and bounded failure localization.
 
 use crate::env::{CompletionGate, CompletionGateContext, GateOutcome};
+use crate::process_group::ChildProcessGroup;
 use crate::tool::output_buffer::{HeadTailBuffer, StreamLineCollector};
-use crate::tools::bash::{cleanup_process_group_after_exit, PIPE_DRAIN_TIMEOUT};
+use crate::tools::bash::PIPE_DRAIN_TIMEOUT;
 use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::path::Path;
@@ -111,9 +112,9 @@ impl CompletionGate for WorkspaceCompletionGate {
                 .env("CI", "true")
                 .env("NO_COLOR", "1")
                 .kill_on_drop(true);
-            // Verification is arbitrary project code. Give it its own process group so timeout
-            // cleanup can terminate descendants, and use the same secret-env filtering as `bash`.
-            command.process_group(0);
+            // Verification is arbitrary project code. Give it its own process group / Windows Job Object
+            // so timeout cleanup can terminate descendants, and use the same secret-env filtering as `bash`.
+            ChildProcessGroup::configure_tokio_command(&mut command);
 
             let mut child = match command.spawn() {
                 Ok(child) => child,
@@ -121,7 +122,7 @@ impl CompletionGate for WorkspaceCompletionGate {
                     feedback: format!("verification command could not execute ({}): {}", display_argv(&argv), err),
                 }),
             };
-            let pgid = child.id().unwrap_or(0) as i32;
+            let proc_group = ChildProcessGroup::from_tokio_child(&child);
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
 
@@ -139,19 +140,19 @@ impl CompletionGate for WorkspaceCompletionGate {
                     let _ = child_exited_tx.send(true);
                     let _ = stdout_task.await;
                     let _ = stderr_task.await;
-                    cleanup_process_group_after_exit(pgid).await;
+                    proc_group.cleanup_after_exit().await;
                     return Ok(GateOutcome::Rejected {
                         feedback: format!("verification command failed ({}): {}", display_argv(&argv), err),
                     });
                 }
                 Err(_) => {
                     let _ = child_exited_tx.send(true);
-                    kill_process_group(pgid);
+                    proc_group.terminate_immediately();
                     let _ = child.start_kill();
                     let _ = child.wait().await;
                     let _ = stdout_task.await;
                     let _ = stderr_task.await;
-                    cleanup_process_group_after_exit(pgid).await;
+                    proc_group.cleanup_after_exit().await;
                     return Ok(GateOutcome::Rejected {
                         feedback: format!("verification timed out after {} seconds: {}", self.timeout.as_secs(), display_argv(&argv)),
                     });
@@ -160,11 +161,11 @@ impl CompletionGate for WorkspaceCompletionGate {
 
             // The leader has exited: give each collector up to 200ms to reach EOF (or flush the last
             // partial line), then unconditionally sweep any lingering background descendants in
-            // `-pgid` so a test suite cannot leave orphan processes behind after the gate returns.
+            // the process group / Job Object so a test suite cannot leave orphan processes behind after the gate returns.
             let _ = child_exited_tx.send(true);
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            cleanup_process_group_after_exit(pgid).await;
+            proc_group.cleanup_after_exit().await;
 
             let stdout_text = finalize_stream(stdout_buf);
             let stderr_text = finalize_stream(stderr_buf);
@@ -267,13 +268,6 @@ where
 fn finalize_stream(buffer: Arc<Mutex<HeadTailBuffer>>) -> String {
     let mut guard = buffer.lock().unwrap();
     std::mem::replace(&mut *guard, HeadTailBuffer::new(0, 0, 1, 0, None)).finalize().0
-}
-
-fn kill_process_group(pgid: i32) {
-    if pgid > 1 {
-        // The group was created specifically for this verification command (`process_group(0)`).
-        unsafe { let _ = libc::kill(-pgid, libc::SIGKILL); }
-    }
 }
 
 fn display_argv(argv: &[String]) -> String { argv.join(" ") }

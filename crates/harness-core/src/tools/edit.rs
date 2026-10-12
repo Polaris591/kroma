@@ -6,8 +6,6 @@ use crate::types::{EditDiagKind, EditMatchTier, ErrorCode};
 use crate::workspace::{InodeMutationLock, WorkspaceCap};
 use serde::Deserialize;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
 use std::time::Instant;
 
 pub const MAX_EDITS_PER_CALL: usize = 16;
@@ -153,7 +151,7 @@ pub async fn execute_edit(
             );
         }
     };
-    let rel_str = norm_rel.to_string_lossy().to_string();
+    let rel_str = norm_rel.to_string_lossy().replace('\\', "/");
 
     let (parent_dir, file_name) = match workspace.open_parent_dir_no_symlink(&norm_rel, false) {
         Ok(res) => res,
@@ -169,11 +167,11 @@ pub async fn execute_edit(
         }
     };
 
-    // F-07: key the mutation lock off the already-open parent directory FD + leaf file name
+    // F-07: key the mutation lock off the already-open parent directory handle + leaf file name
     // (matching `execute_write`), and acquire the lock BEFORE opening the target file so
     // concurrent `write`/`edit` calls on the same path are strictly serialized.
     let (_lock_key, _guard) = match inode_locks
-        .acquire_for_fd(parent_dir.as_raw_fd(), Some(file_name.as_os_str()))
+        .acquire_for_file(&parent_dir, Some(file_name.as_os_str()))
         .await
     {
         Ok(g) => g,
@@ -489,7 +487,17 @@ pub async fn execute_edit(
     }
     final_bytes.extend_from_slice(&new_body_bytes);
 
-    let mode = sym_meta.permissions().mode();
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        sym_meta.permissions().mode()
+    };
+    #[cfg(windows)]
+    let mode = if sym_meta.permissions().readonly() {
+        0o444
+    } else {
+        0o644
+    };
     if let Err((code, msg)) = atomic_write_at(&parent_dir, &file_name, &final_bytes, mode, false) {
         return ToolExecutionOutput::error(
             code,

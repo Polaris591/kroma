@@ -7,14 +7,17 @@ use crate::provider::{ModelProvider, ProviderCompletion, ProviderError, Provider
 use crate::tool::definition::ToolDefinition;
 use crate::types::ToolCallId;
 use serde_json::{json, Value};
+#[cfg(unix)]
 use std::ffi::{c_char, c_int, c_long, c_void, CString};
 use std::fmt;
 use std::future::Future;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::TcpStream;
@@ -24,6 +27,11 @@ const MAX_HTTP_HEADER_LINE_BYTES: usize = 16 * 1024;
 const MAX_HTTP_HEADERS_COUNT: usize = 128;
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
+/// F-05: `HARNESS_INSECURE_TLS=1` is a dangerous debugging escape hatch. Warn exactly once so the
+/// operator cannot miss it, instead of silently accepting unverified certificates.
+static INSECURE_TLS_WARNED: std::sync::Once = std::sync::Once::new();
+
+#[cfg(unix)]
 #[link(name = "ssl")]
 #[link(name = "crypto")]
 extern "C" {
@@ -50,30 +58,39 @@ extern "C" {
     fn SSL_get_error(ssl: *const c_void, ret_code: c_int) -> c_int;
 }
 
+#[cfg(unix)]
 const SSL_VERIFY_NONE: c_int = 0x00;
-
-/// F-05: `HARNESS_INSECURE_TLS=1` is a dangerous debugging escape hatch. Warn exactly once so the
-/// operator cannot miss it, instead of silently accepting unverified certificates.
-static INSECURE_TLS_WARNED: std::sync::Once = std::sync::Once::new();
+#[cfg(unix)]
 const SSL_VERIFY_PEER: c_int = 0x01;
+#[cfg(unix)]
 const X509_V_OK: c_long = 0;
+#[cfg(unix)]
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
+#[cfg(unix)]
 const TLSEXT_NAMETYPE_HOST_NAME: c_long = 0;
+#[cfg(unix)]
 const SSL_ERROR_WANT_READ: c_int = 2;
+#[cfg(unix)]
 const SSL_ERROR_WANT_WRITE: c_int = 3;
+#[cfg(unix)]
 const SSL_ERROR_SYSCALL: c_int = 5;
+#[cfg(unix)]
 const SSL_ERROR_ZERO_RETURN: c_int = 6;
 
+#[cfg(unix)]
 struct OpenSslStream {
     ctx: *mut c_void,
     ssl: *mut c_void,
     async_fd: AsyncFd<std::net::TcpStream>,
 }
 
+#[cfg(unix)]
 // Safety: Each OpenSslStream owns a dedicated SSL* and SSL_CTX* accessed exclusively by &mut self.
 unsafe impl Send for OpenSslStream {}
+#[cfg(unix)]
 unsafe impl Sync for OpenSslStream {}
 
+#[cfg(unix)]
 impl Drop for OpenSslStream {
     fn drop(&mut self) {
         unsafe {
@@ -88,6 +105,7 @@ impl Drop for OpenSslStream {
     }
 }
 
+#[cfg(unix)]
 impl OpenSslStream {
     async fn connect(tcp: TcpStream, host: &str) -> io::Result<Self> {
         let std_tcp = tcp.into_std()?;
@@ -202,6 +220,7 @@ impl OpenSslStream {
     }
 }
 
+#[cfg(unix)]
 impl AsyncRead for OpenSslStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -250,6 +269,7 @@ impl AsyncRead for OpenSslStream {
     }
 }
 
+#[cfg(unix)]
 impl AsyncWrite for OpenSslStream {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -305,9 +325,92 @@ impl AsyncWrite for OpenSslStream {
     }
 }
 
+#[cfg(windows)]
+struct SchannelTlsStream {
+    inner: tokio_native_tls::TlsStream<TcpStream>,
+}
+
+#[cfg(windows)]
+impl SchannelTlsStream {
+    async fn connect(tcp: TcpStream, host: &str) -> io::Result<Self> {
+        let clean_host = host.trim_start_matches('[').trim_end_matches(']');
+        let mut builder = native_tls::TlsConnector::builder();
+        if std::env::var("HARNESS_INSECURE_TLS").as_deref() == Ok("1") {
+            INSECURE_TLS_WARNED.call_once(|| {
+                eprintln!(
+                    "[SECURITY WARNING] HARNESS_INSECURE_TLS=1 is enabled: TLS certificate verification is DISABLED. Never use this outside local debugging."
+                );
+            });
+            builder.danger_accept_invalid_certs(true);
+            builder.danger_accept_invalid_hostnames(true);
+        }
+        if let Ok(ca_bundle) = std::env::var("HARNESS_CA_BUNDLE") {
+            let pem_bytes = std::fs::read(&ca_bundle).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("failed to read HARNESS_CA_BUNDLE '{}': {}", ca_bundle, e),
+                )
+            })?;
+            let cert = native_tls::Certificate::from_pem(&pem_bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid PEM in HARNESS_CA_BUNDLE '{}': {}", ca_bundle, e),
+                )
+            })?;
+            builder.add_root_certificate(cert);
+        }
+        let connector = builder
+            .build()
+            .map_err(|e| io::Error::other(format!("Windows Schannel TLS init failed: {}", e)))?;
+        let async_connector = tokio_native_tls::TlsConnector::from(connector);
+        let stream = async_connector.connect(clean_host, tcp).await.map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("TLS handshake failed: {}", e),
+            )
+        })?;
+        Ok(Self { inner: stream })
+    }
+}
+
+#[cfg(windows)]
+impl AsyncRead for SchannelTlsStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+#[cfg(windows)]
+impl AsyncWrite for SchannelTlsStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(unix)]
+type PlatformTlsStream = OpenSslStream;
+#[cfg(windows)]
+type PlatformTlsStream = SchannelTlsStream;
+
 enum MaybeTlsStream {
     Plain(TcpStream),
-    Tls(OpenSslStream),
+    Tls(PlatformTlsStream),
 }
 
 impl AsyncRead for MaybeTlsStream {
@@ -954,8 +1057,11 @@ impl ChatCompletionsClient {
                     retry_after: None,
                 }
             })?;
-            match tokio::time::timeout(tls_to, OpenSslStream::connect(tcp, &self.endpoint.host))
-                .await
+            match tokio::time::timeout(
+                tls_to,
+                PlatformTlsStream::connect(tcp, &self.endpoint.host),
+            )
+            .await
             {
                 Ok(Ok(tls)) => MaybeTlsStream::Tls(tls),
                 Ok(Err(e)) => {

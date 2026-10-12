@@ -92,15 +92,11 @@ pub async fn execute_bash(
     }
     let timeout_duration = Duration::from_secs(timeout_sec).min(budget.max_run_duration);
 
-    let shell_bin = if Path::new("/bin/bash").exists() {
-        "/bin/bash"
-    } else {
-        "/bin/sh"
-    };
+    let (shell_bin, shell_args) =
+        crate::process_group::resolve_shell_invocation(&args.command);
 
-    let mut cmd = Command::new(shell_bin);
-    cmd.arg("-c")
-        .arg(&args.command)
+    let mut cmd = Command::new(&shell_bin);
+    cmd.args(&shell_args)
         .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -108,9 +104,7 @@ pub async fn execute_bash(
         .env_clear()
         .envs(collect_sanitized_env());
 
-    // Put child process into its own Unix process group (PGID = child PID)
-    #[cfg(unix)]
-    cmd.process_group(0);
+    crate::process_group::ChildProcessGroup::configure_tokio_command(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -123,7 +117,7 @@ pub async fn execute_bash(
         }
     };
 
-    let pgid = child.id().unwrap_or(0) as i32;
+    let proc_group = crate::process_group::ChildProcessGroup::from_tokio_child(&child);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -330,7 +324,7 @@ pub async fn execute_bash(
                 }
                 .to_string(),
             );
-            terminate_process_group(pgid, &mut child, grace_period).await;
+            proc_group.terminate_gracefully(&mut child, grace_period).await;
         }
     }
 
@@ -340,9 +334,9 @@ pub async fn execute_bash(
     let _ = stdout_task.await;
     let _ = stderr_task.await;
 
-    // If the leader exited normally, sweep any lingering background processes in `-pgid`
+    // If the leader exited normally, sweep any lingering background processes in the process group / Job Object
     if matches!(trigger, StopTrigger::NormalExit(_)) {
-        cleanup_process_group_after_exit(pgid).await;
+        proc_group.cleanup_after_exit().await;
     }
 
     let buf_inner = {
@@ -357,7 +351,7 @@ pub async fn execute_bash(
         trigger = StopTrigger::OutputFloodCap;
         exit_code = None;
         terminated_by = Some("OutputFloodCap".to_string());
-        terminate_process_group(pgid, &mut child, grace_period).await;
+        proc_group.terminate_gracefully(&mut child, grace_period).await;
     }
 
     let (body_output, truncated) = buf_inner.finalize();
@@ -416,67 +410,3 @@ pub async fn execute_bash(
     }
 }
 
-pub(crate) async fn cleanup_process_group_after_exit(pgid: i32) {
-    #[cfg(unix)]
-    if pgid > 1 {
-        let alive = unsafe { libc::kill(-pgid, 0) == 0 };
-        if alive {
-            unsafe {
-                libc::kill(-pgid, libc::SIGTERM);
-            }
-            let deadline = Instant::now() + Duration::from_millis(100);
-            while Instant::now() < deadline {
-                if unsafe { libc::kill(-pgid, 0) != 0 } {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            if unsafe { libc::kill(-pgid, 0) == 0 } {
-                unsafe {
-                    libc::kill(-pgid, libc::SIGKILL);
-                }
-                for _ in 0..5 {
-                    if unsafe { libc::kill(-pgid, 0) != 0 } {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            }
-        }
-    }
-}
-
-async fn terminate_process_group(
-    pgid: i32,
-    child: &mut tokio::process::Child,
-    grace_period: Duration,
-) {
-    #[cfg(unix)]
-    if pgid > 1 {
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-        }
-    }
-
-    if tokio::time::timeout(grace_period, child.wait())
-        .await
-        .is_err()
-    {
-        #[cfg(unix)]
-        if pgid > 1 {
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
-            }
-        }
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-    } else {
-        // Even if the leader exited on SIGTERM, ensure any remaining processes in -pgid are cleaned up
-        #[cfg(unix)]
-        if pgid > 1 {
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
-            }
-        }
-    }
-}
