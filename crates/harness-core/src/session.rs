@@ -67,6 +67,10 @@ pub struct SessionCheckpoint {
     /// written before Gate 1 readable.
     #[serde(default)]
     pub workspace_revision_id: Option<String>,
+    /// Ancestor directories whose `AGENTS.md`/`CLAUDE.md` JIT guidance was already injected on this
+    /// branch (Gate 3). `serde(default)` keeps earlier WALs readable.
+    #[serde(default)]
+    pub subtree_dirs: Vec<String>,
 }
 
 /// Append-only record binding a captured `WorkspaceRevision` to the WAL entry that was active when
@@ -128,6 +132,8 @@ enum WalPayload {
         reasoning_blocks_sha256: String,
         #[serde(default)]
         workspace_revision_id: Option<String>,
+        #[serde(default)]
+        subtree_dirs: Vec<String>,
     },
     /// A workspace revision snapshot was captured at `turn` (Gate 1).
     RevisionCaptured {
@@ -367,8 +373,8 @@ impl SessionJournal {
                     }
                     completion_resolution_leaf_ids.push(leaf_id);
                 }
-                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id } => {
-                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id });
+                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs } => {
+                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs });
                 }
                 WalPayload::RevisionCaptured { leaf_id, turn, revision_id, parent_revision_id, changed_paths, tracked_file_count, captured_at_ms } => {
                     if !revision_id.starts_with("r-") {
@@ -804,10 +810,12 @@ impl SessionJournal {
             last_touched,
             reasoning_blocks_sha256,
             None,
+            Vec::new(),
         )
     }
 
-    /// Checkpoint variant that also binds the workspace revision captured before this turn (Gate 1).
+    /// Checkpoint variant that also binds the workspace revision captured before this turn (Gate 1)
+    /// and the ancestor directories whose JIT guidance is already in context (Gate 3).
     pub fn checkpoint_with_revision(
         &mut self,
         turn: usize,
@@ -815,8 +823,11 @@ impl SessionJournal {
         mut last_touched: Vec<FileTouch>,
         reasoning_blocks_sha256: impl Into<String>,
         workspace_revision_id: Option<String>,
+        mut subtree_dirs: Vec<String>,
     ) -> Result<(), SessionError> {
         last_touched.sort_by(|a, b| a.path.cmp(&b.path));
+        subtree_dirs.sort();
+        subtree_dirs.dedup();
         let checkpoint = SessionCheckpoint {
             leaf_id: self.leaf_id.clone(),
             turn,
@@ -824,6 +835,7 @@ impl SessionJournal {
             last_touched,
             reasoning_blocks_sha256: reasoning_blocks_sha256.into(),
             workspace_revision_id,
+            subtree_dirs,
         };
         self.append_payload(WalPayload::Checkpoint {
             leaf_id: checkpoint.leaf_id.clone(),
@@ -832,6 +844,7 @@ impl SessionJournal {
             last_touched: checkpoint.last_touched.clone(),
             reasoning_blocks_sha256: checkpoint.reasoning_blocks_sha256.clone(),
             workspace_revision_id: checkpoint.workspace_revision_id.clone(),
+            subtree_dirs: checkpoint.subtree_dirs.clone(),
         })?;
         self.checkpoints.push(checkpoint);
         Ok(())

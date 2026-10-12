@@ -12,6 +12,16 @@ pub trait ExecutionEnv: Send + Sync {
     fn state_dir(&self) -> &Path;
 }
 
+/// Sanitized child-process environment shared by every host-side spawn the harness performs
+/// (supervised `bash`, command hooks, and the completion gate).
+///
+/// Strips `HARNESS_*`, provider credentials and any `*_API_KEY` / `*_SECRET` / `*_TOKEN` /
+/// `*_PASSWORD` / `*_CREDENTIAL*` variable, so a project-supplied hook can never read the model
+/// credentials out of the environment it inherits.
+pub fn build_sanitized_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    crate::tools::bash::collect_sanitized_env()
+}
+
 /// Default local host environment backed by `WorkspaceCap` and Unix process groups.
 #[derive(Debug, Clone)]
 pub struct LocalHostEnv {

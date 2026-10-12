@@ -4,6 +4,7 @@ pub mod context_projector;
 pub mod completion_gate;
 pub mod env;
 pub mod events;
+pub mod extensions;
 pub mod loop_guard;
 pub mod messages;
 pub mod prompt;

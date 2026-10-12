@@ -1,7 +1,7 @@
 pub mod approval_ui;
 
 use approval_ui::TtyApprovalUi;
-use harness_core::agent_loop::{ build_default_runtime, AgentRunConfig, AgentRunner };
+use harness_core::agent_loop::{ build_runtime_with_registry, AgentRunConfig, AgentRunner };
 use harness_core::budget::BudgetConfig;
 use harness_core::completion_gate::{configured_timeout, parse_command_argv, WorkspaceCompletionGate};
 use harness_core::env::{AllowAllGate, ExecutionEnv, LocalHostEnv, SharedCompletionGate};
@@ -11,7 +11,12 @@ use harness_core::revision::{RestoreResult, RevisionId, SnapshotStore};
 use harness_core::session::SessionJournal;
 use harness_core::workspace::WorkspaceCap;
 use harness_core::provider::chat_completions::{ ChatCompletionsClient, ChatCompletionsConfig };
+use harness_core::extensions::{
+    discover_skills, CommandObserverHook, CommandPolicyHook, ExtensionManifest, ScopedExtension,
+    SubtreeContextTracker,
+};
 use harness_core::tool::policy::{ PolicyEngine, PolicyMode };
+use harness_core::tool::registry::ToolRegistry;
 use harness_core::types::RunStatus;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -41,6 +46,16 @@ pub struct CliArgs {
     pub force_restore: bool,
     /// List the workspace revisions captured for the session.
     pub list_revisions: bool,
+    /// Gate 3: discover and print the `.agents/skills/*/SKILL.md` catalog, then exit.
+    pub list_skills: bool,
+    /// Gate 3: pre-activate a named `.agents/skills/<name>/SKILL.md` in the initial context.
+    pub skill: Option<String>,
+    /// Gate 3: command-backed fail-closed `PolicyHook` attached to `PreToolUse`.
+    pub policy_hook: Option<String>,
+    /// Gate 3: command-backed fail-open `ObserverHook` attached to `PostToolUse`.
+    pub observer_hook: Option<String>,
+    /// Gate 3: disable automatic JIT subtree `AGENTS.md`/`CLAUDE.md` loading.
+    pub no_subtree_context: bool,
 }
 
 impl CliArgs {
@@ -87,6 +102,11 @@ where
     let mut restore_rev: Option<String> = None;
     let mut force_restore = false;
     let mut list_revisions = false;
+    let mut list_skills = false;
+    let mut skill: Option<String> = None;
+    let mut policy_hook: Option<String> = None;
+    let mut observer_hook: Option<String> = None;
+    let mut no_subtree_context = false;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -169,6 +189,39 @@ where
             "--list-revisions" => {
                 list_revisions = true;
             }
+            "--list-skills" => {
+                list_skills = true;
+            }
+            "--skill" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --skill <NAME>".to_string())?;
+                if val.trim().is_empty() {
+                    return Err("empty value for --skill".to_string());
+                }
+                skill = Some(val.trim().to_string());
+            }
+            "--policy-hook" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --policy-hook <CMD>".to_string())?;
+                if val.trim().is_empty() {
+                    return Err("empty value for --policy-hook".to_string());
+                }
+                policy_hook = Some(val);
+            }
+            "--observer-hook" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --observer-hook <CMD>".to_string())?;
+                if val.trim().is_empty() {
+                    return Err("empty value for --observer-hook".to_string());
+                }
+                observer_hook = Some(val);
+            }
+            "--no-subtree-context" => {
+                no_subtree_context = true;
+            }
             "--tool-filter" => {
                 let val = iter
                     .next()
@@ -220,7 +273,8 @@ where
     } else if force_restore {
         return Err("--force-restore requires --undo or --restore-rev".to_string());
     }
-    if !management && task.is_none() {
+    // `--list-skills` is a standalone inspection action: it needs a workspace but no task.
+    if !management && !list_skills && task.is_none() {
         return Err("missing required --task <prompt>".to_string());
     }
 
@@ -271,6 +325,11 @@ where
         restore_rev,
         force_restore,
         list_revisions,
+        list_skills,
+        skill,
+        policy_hook,
+        observer_hook,
+        no_subtree_context,
     })
 }
 
@@ -483,6 +542,64 @@ fn reconcile_store_with_wal(journal: &mut SessionJournal, store: &SnapshotStore)
 
 fn snapshot_store_for(state_dir: &Path) -> SnapshotStore {
     SnapshotStore::new(state_dir.join("snapshots"))
+}
+
+/// Gate 3: `--list-skills` discovers the workspace skill catalog and exits without a provider call.
+fn run_list_skills(cli: &CliArgs) -> ExitCode {
+    let workspace = match WorkspaceCap::new(&cli.workspace) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("error: failed to initialize workspace capability: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    let skills = discover_skills(&workspace);
+    if skills.is_empty() {
+        println!(
+            "no skills found; add a definition at {}/<name>/SKILL.md",
+            harness_core::extensions::SKILL_DIR
+        );
+        return ExitCode::SUCCESS;
+    }
+    println!("skills for {} ({} discovered):", cli.workspace.display(), skills.len());
+    for skill in &skills {
+        println!("  {}\n      path: {}", skill.name, skill.path);
+        if !skill.description.is_empty() {
+            println!("      {}", skill.description);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Gate 3: build the command-backed hooks declared on the CLI as a single operator-trusted
+/// extension. Mounting them through the same registry as any other extension means they are
+/// removed by exactly the same `unregister_extension` path.
+fn build_cli_extension(cli: &CliArgs) -> Result<Option<ScopedExtension>, String> {
+    if cli.policy_hook.is_none() && cli.observer_hook.is_none() {
+        return Ok(None);
+    }
+    let mut manifest = ExtensionManifest::operator_trusted("cli-hooks", "--policy-hook/--observer-hook");
+    let mut ext = ScopedExtension::new(manifest.clone());
+    if let Some(raw) = cli.policy_hook.as_deref() {
+        let argv = parse_command_argv(raw)?;
+        if argv.is_empty() {
+            return Err("empty --policy-hook command".to_string());
+        }
+        manifest.capabilities.push("policy_hook".to_string());
+        ext.policy_hooks
+            .push(Arc::new(CommandPolicyHook::new("cli-policy-hook", argv)));
+    }
+    if let Some(raw) = cli.observer_hook.as_deref() {
+        let argv = parse_command_argv(raw)?;
+        if argv.is_empty() {
+            return Err("empty --observer-hook command".to_string());
+        }
+        manifest.capabilities.push("observer_hook".to_string());
+        ext.observer_hooks
+            .push(Arc::new(CommandObserverHook::new("cli-observer-hook", argv)));
+    }
+    ext.manifest = manifest;
+    Ok(Some(ext))
 }
 
 /// Bind a completed `--restore-rev` into the session WAL so `latest_revision_id()` and
@@ -795,6 +912,13 @@ Options:
   --no-verify               Disable the completion verification gate entirely
   --tool-filter <CSV>       Benchmarking ablation filter (e.g. read,edit,write,bash)
 
+Extensions / Hooks / Skills (Gate 3):
+  --list-skills             Discover and print .agents/skills/*/SKILL.md, then exit
+  --skill <NAME>            Pre-activate a named skill in the initial untrusted context
+  --policy-hook <CMD>       Fail-closed PreToolUse policy hook (non-zero exit or timeout denies)
+  --observer-hook <CMD>     Fail-open PostToolUse observer hook (failures are logged, never block)
+  --no-subtree-context      Disable automatic JIT subtree AGENTS.md/CLAUDE.md loading
+
 Workspace Revision Management (requires --resume):
   --undo                    Restore the workspace and session leaf to the previous turn's revision
   --restore-rev <REV_ID>    Restore the workspace to a specific captured revision
@@ -840,6 +964,41 @@ async fn main() -> ExitCode {
         return run_revision_management(&cli, &state_dir);
     }
 
+    // Gate 3: skill discovery is a standalone inspection action.
+    if cli.list_skills {
+        return run_list_skills(&cli);
+    }
+
+    // Gate 3: fail fast on an unknown `--skill` before requiring provider credentials, so the
+    // operator gets an actionable list instead of an unrelated API-key error.
+    if let Some(ref skill_name) = cli.skill {
+        match WorkspaceCap::new(&cli.workspace) {
+            Ok(cap) => {
+                let catalog = discover_skills(&cap);
+                if !catalog.iter().any(|s| s.name == *skill_name) {
+                    let discovered = if catalog.is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        catalog
+                            .iter()
+                            .map(|s| s.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    eprintln!(
+                        "error: --skill unknown skill '{}'; discovered: {}",
+                        skill_name, discovered
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: failed to initialize workspace capability: {}", e);
+                return ExitCode::from(2);
+            }
+        }
+    }
+
     let api_key = match std::env::var("HARNESS_API_KEY") {
         Ok(k) if !k.trim().is_empty() => k,
         _ => {
@@ -882,7 +1041,18 @@ async fn main() -> ExitCode {
 
     // Freeze the workspace orientation block (AGENTS.md/CLAUDE.md + sorted top-level entries)
     // into the static system prefix before `env` is moved into the tool runtime.
-    let prompt_builder = PromptBuilder::default().with_workspace_context(env.workspace());
+    let mut prompt_builder = PromptBuilder::default().with_workspace_context(env.workspace());
+    if let Some(ref skill_name) = cli.skill {
+        prompt_builder = match prompt_builder.with_activated_skill(env.workspace(), skill_name) {
+            Ok(pb) => pb,
+            Err(e) => {
+                eprintln!("error: --skill {}", e);
+                return ExitCode::from(2);
+            }
+        };
+    }
+    // Gate 3: the workspace skill catalog is discovered once and shared by `activate_skill`.
+    let workspace_skills = discover_skills(env.workspace());
 
     let session = if let Some(path) = cli.resume.as_ref() {
         let mut journal = match SessionJournal::open(path) {
@@ -944,7 +1114,45 @@ async fn main() -> ExitCode {
     let approval_ui = Arc::new(TtyApprovalUi::new());
     let policy_engine = PolicyEngine::new(cli.policy_mode, approval_ui);
 
-    let runtime = build_default_runtime(env, policy_engine, budget, cli.tool_filter);
+    // Gate 3: the registry carries the reversible extension mount points, the workspace skill
+    // catalog, and the CLI-declared hooks.
+    let registry = ToolRegistry::new(cli.tool_filter.clone()).with_workspace_skills(workspace_skills);
+    match build_cli_extension(&cli) {
+        Ok(Some(ext)) => {
+            let name = ext.manifest.name.clone();
+            match registry.register_extension(ext) {
+                Ok(id) => {
+                    let _ = logger.log(EventPayload::ExtensionChanged {
+                        extension_id: id.as_str().to_string(),
+                        action: "registered".to_string(),
+                    });
+                    if !cli.quiet {
+                        eprintln!("[harness] mounted extension: {}", name);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: failed to mount hook extension: {}", e);
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return ExitCode::from(2);
+        }
+    }
+
+    // Gate 3: subtree JIT context. A `--fork` rewind abandons the branch whose subtree guidance is
+    // no longer in context, so the loaded-directory set is only restored on a plain `--resume`.
+    let mut subtree_tracker = SubtreeContextTracker::new(!cli.no_subtree_context);
+    if cli.fork_turn.is_none() {
+        if let Some(checkpoint) = session.latest_active_checkpoint() {
+            subtree_tracker.restore_loaded_dirs(checkpoint.subtree_dirs.clone());
+        }
+    }
+
+    let runtime = build_runtime_with_registry(registry, env, policy_engine, budget);
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -968,6 +1176,7 @@ async fn main() -> ExitCode {
         .with_prompt_builder(prompt_builder)
         .with_session_journal(session)
         .with_snapshot_store(snapshot_store)
+        .with_subtree_context(subtree_tracker)
         .with_completion_gate(build_completion_gate(gate_choice))
         .with_completion_gate_max_retries(max_gate_retries);
     let (summary, _logger) = runner.run(logger).await;

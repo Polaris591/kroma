@@ -26,6 +26,7 @@ pub struct RegisteredTool {
 
 pub fn builtin_tool_registrations() -> Vec<RegisteredTool> {
     vec![
+        crate::extensions::activate_skill_registration(),
         RegisteredTool {
             definition: ToolDefinition {
                 name: "bash".to_string(),

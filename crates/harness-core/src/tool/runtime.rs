@@ -1,5 +1,8 @@
 use crate::budget::BudgetConfig;
 use crate::env::SharedExecutionEnv;
+use crate::extensions::{
+    execute_activate_skill, CustomToolContext, HookContext, HookEvaluation,
+};
 use crate::loop_guard::MAX_EDIT_FAILURE_STREAK;
 use crate::messages::{ToolCall, ToolResultMessage, ToolResultMeta};
 use crate::prompt::sha256_hex16;
@@ -96,12 +99,22 @@ impl ToolRuntime {
         true
     }
 
+    /// The currently mounted hook engine (Gate 3). Rebuilt from the registry on every call so a
+    /// live `unregister_extension` is reflected immediately.
+    pub fn hook_engine(&self) -> crate::extensions::HookEngine {
+        self.registry.hook_engine()
+    }
+
     /// Execute a single tool call through the full security, policy, approval, TOCTOU, and ACI pipeline.
+    ///
+    /// Returns the tool result, the policy decision label, and every Gate 3 hook evaluation that
+    /// contributed to the outcome (for `HookEvaluated` telemetry).
     pub async fn execute_call(
         &self,
         call: &ToolCall,
+        turn: usize,
         cancel_rx: watch::Receiver<bool>,
-    ) -> (ToolResultMessage, String) {
+    ) -> (ToolResultMessage, String, Vec<HookEvaluation>) {
         let policy_mode = self.policy_engine.mode();
         let registered = match self.registry.lookup_for_dispatch(&call.name, policy_mode) {
             Ok(r) => r,
@@ -118,6 +131,7 @@ impl ToolRuntime {
                 return (
                     Self::into_message(call, out),
                     "deny_policy_hidden".to_string(),
+                    Vec::new(),
                 );
             }
             Err(ToolLookupError::FilteredOut(_)) => {
@@ -129,6 +143,7 @@ impl ToolRuntime {
                 return (
                     Self::into_message(call, out),
                     "deny_tool_filter".to_string(),
+                    Vec::new(),
                 );
             }
             Err(ToolLookupError::UnknownTool(_)) => {
@@ -137,9 +152,43 @@ impl ToolRuntime {
                     format!("unknown tool '{}'", call.name),
                     ToolResultMeta::default(),
                 );
-                return (Self::into_message(call, out), "deny_unknown".to_string());
+                return (Self::into_message(call, out), "deny_unknown".to_string(), Vec::new());
             }
         };
+
+        // Gate 3: PreToolUse policy hooks run BEFORE the kernel policy engine and are fail-closed.
+        // A hook may only ever restrict; the kernel `PolicyEngine::evaluate` below is evaluated
+        // independently, so a hook can never turn a kernel denial into an allow.
+        let hook_engine = self.hook_engine();
+        let mut hook_evaluations: Vec<HookEvaluation> = Vec::new();
+        if !hook_engine.is_empty() {
+            let hook_ctx = HookContext::for_tool(
+                turn,
+                self.env.workspace().root().to_path_buf(),
+                &call.name,
+                call.call_id.as_str(),
+                &call.raw_arguments,
+            );
+            let pre = hook_engine
+                .evaluate_policy(crate::extensions::HookEvent::PreToolUse, &hook_ctx)
+                .await;
+            hook_evaluations.extend(pre.evaluations().iter().cloned());
+            if let Some(reason) = pre.reason() {
+                let out = ToolExecutionOutput::error(
+                    ErrorCode::PolicyDenied,
+                    format!("policy hook denied '{}': {}", call.name, reason),
+                    ToolResultMeta {
+                        relative_path: Self::extract_relative_path(&call.raw_arguments),
+                        ..Default::default()
+                    },
+                );
+                return (
+                    Self::into_message(call, out),
+                    "deny_policy_hook".to_string(),
+                    hook_evaluations,
+                );
+            }
+        }
 
         let rel_path_opt = Self::extract_relative_path(&call.raw_arguments);
         let mut is_sensitive = false;
@@ -177,7 +226,7 @@ impl ToolRuntime {
                                 ..Default::default()
                             },
                         );
-                        return (Self::into_message(call, out), "deny_path_escape".to_string());
+                        return (Self::into_message(call, out), "deny_path_escape".to_string(), hook_evaluations);
                     }
                 }
             }
@@ -208,7 +257,7 @@ impl ToolRuntime {
                         ..Default::default()
                     },
                 );
-                return (Self::into_message(call, out), format!("deny:{}", reason));
+                return (Self::into_message(call, out), format!("deny:{}", reason), hook_evaluations);
             }
             PolicyCheckResult::Ask => {
                 let compute_target_sha = |rel: &str| -> Option<String> {
@@ -266,7 +315,7 @@ impl ToolRuntime {
                             ..Default::default()
                         },
                     );
-                    return (Self::into_message(call, out), "ask_cancelled".to_string());
+                    return (Self::into_message(call, out), "ask_cancelled".to_string(), hook_evaluations);
                 }
 
                 let pe = self.policy_engine.clone();
@@ -293,7 +342,7 @@ impl ToolRuntime {
                                 ..Default::default()
                             },
                         );
-                        return (Self::into_message(call, out), "ask_cancelled".to_string());
+                        return (Self::into_message(call, out), "ask_cancelled".to_string(), hook_evaluations);
                     }
                 };
 
@@ -315,7 +364,7 @@ impl ToolRuntime {
                                 ..Default::default()
                             },
                         );
-                        return (Self::into_message(call, out), "ask_denied".to_string());
+                        return (Self::into_message(call, out), "ask_denied".to_string(), hook_evaluations);
                     }
                     ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => {
                         // Secondary SHA-256 TOCTOU check after user approval wait
@@ -338,6 +387,7 @@ impl ToolRuntime {
                                     return (
                                         Self::into_message(call, out),
                                         "toctou_stale".to_string(),
+                                        hook_evaluations,
                                     );
                                 }
                                 // Inject verified SHA-256 / if_not_exists so execute_edit/execute_write re-verifies under InodeMutationLock
@@ -404,6 +454,10 @@ impl ToolRuntime {
             "ls" => execute_ls(self.env.workspace(), &effective_raw_args),
             "find" => execute_find(self.env.workspace(), &effective_raw_args),
             "grep" => execute_grep(self.env.workspace(), &effective_raw_args),
+            // Gate 3: on-demand skill activation, read-only and visible under every policy mode.
+            "activate_skill" => {
+                execute_activate_skill(&self.registry.skills(), &effective_raw_args)
+            }
             // `recall_evidence` is dispatched by the agent loop, which owns the live transcript and
             // the evidence store. Reaching the runtime directly means no transcript was available.
             "recall_evidence" => ToolExecutionOutput::error(
@@ -411,14 +465,46 @@ impl ToolRuntime {
                 "recall_evidence must be dispatched by the agent loop against the live session transcript".to_string(),
                 ToolResultMeta::default(),
             ),
-            other => ToolExecutionOutput::error(
-                ErrorCode::UnknownTool,
-                format!("unknown tool '{}'", other),
-                ToolResultMeta::default(),
-            ),
+            // Gate 3: an extension-provided tool. It already passed the same registry lookup,
+            // `--tool-filter`, kernel `PolicyEngine` and approval pipeline as every kernel tool.
+            other => match self.registry.extension_handler(other) {
+                Some(handler) => handler.execute(
+                    &effective_raw_args,
+                    &CustomToolContext {
+                        workspace: self.env.workspace(),
+                    },
+                ),
+                None => ToolExecutionOutput::error(
+                    ErrorCode::UnknownTool,
+                    format!("unknown tool '{}'", other),
+                    ToolResultMeta::default(),
+                ),
+            },
         };
 
-        (Self::into_message(call, exec_out), decision_label)
+        // Gate 3: PostToolUse observer hooks are fail-open telemetry; they never change the result.
+        if !hook_engine.is_empty() {
+            let mut post_ctx = HookContext::for_tool(
+                turn,
+                self.env.workspace().root().to_path_buf(),
+                &call.name,
+                call.call_id.as_str(),
+                &call.raw_arguments,
+            );
+            post_ctx.relative_path = exec_out.meta.relative_path.clone();
+            post_ctx.outcome = Some(if exec_out.outcome.is_success() {
+                "success".to_string()
+            } else {
+                "error".to_string()
+            });
+            hook_evaluations.extend(
+                hook_engine
+                    .run_observers(crate::extensions::HookEvent::PostToolUse, &post_ctx)
+                    .await,
+            );
+        }
+
+        (Self::into_message(call, exec_out), decision_label, hook_evaluations)
     }
 
     fn build_approval_diff_preview(tool_name: &str, rel_path: &str, raw_args: &str) -> String {

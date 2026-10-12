@@ -58,6 +58,51 @@ impl PromptBuilder {
         &self.system_prompt
     }
 
+    /// Gate 3: pre-activate a named `.agents/skills/<name>/SKILL.md` into the initial untrusted
+    /// workspace context (bounded and fenced), exactly like `--skill <name>` on the CLI.
+    ///
+    /// A missing skill is a hard error so the operator never believes a skill was loaded when it
+    /// was not; the body is sanitized with the same fence-escape rules as `AGENTS.md`.
+    pub fn with_activated_skill(
+        mut self,
+        workspace: &WorkspaceCap,
+        name: &str,
+    ) -> Result<Self, String> {
+        let catalog = crate::extensions::discover_skills(workspace);
+        let skill = catalog
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| {
+                format!(
+                    "unknown skill '{}'; discovered: {}",
+                    name,
+                    if catalog.is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        catalog
+                            .iter()
+                            .map(|e| e.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                )
+            })?;
+        let attrs = format!(
+            " name=\"{}\"",
+            escape_fence_attribute(&skill.name)
+        );
+        self.system_prompt.push_str("\n\n");
+        self.system_prompt.push_str(UNTRUSTED_CONTEXT_BANNER);
+        self.system_prompt.push_str("\n\n");
+        self.system_prompt.push_str(&fence_untrusted(
+            "untrusted_skill_context",
+            &attrs,
+            &skill.body,
+            crate::extensions::SKILL_BODY_MAX_BYTES,
+        ));
+        Ok(self)
+    }
+
     /// Deterministically append a bounded workspace orientation block to the system prompt:
     /// the first 2 KiB of `AGENTS.md` (falling back to `CLAUDE.md`) when it is a regular,
     /// non-symlink file, followed by a sorted list of up to 40 top-level entry names (first 1 KiB).
@@ -190,10 +235,18 @@ fn workspace_top_level_listing(workspace: &WorkspaceCap) -> Option<String> {
     Some(joined[..cut].to_string())
 }
 
+/// Every fence tag the harness emits around untrusted repository data. A hostile body containing
+/// any of these names has all of its angle brackets escaped so it cannot forge a closing tag.
+pub const UNTRUSTED_FENCE_TAGS: &[&str] = &[
+    "untrusted_workspace_context",
+    "untrusted_skill_context",
+    "untrusted_subtree_context",
+];
+
 /// Escape newlines, backslashes, angle brackets, C0/C1 control characters, DEL, Unicode line
 /// separators, and Unicode bidirectional controls so untrusted names cannot forge prompt lines
 /// or break out of `<untrusted_workspace_context>` (F-03).
-fn escape_control_chars(name: &str) -> String {
+pub fn escape_control_chars(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
         let cp = ch as u32;
@@ -221,9 +274,9 @@ fn escape_control_chars(name: &str) -> String {
     out
 }
 
-/// Sanitize untrusted workspace doc body so it cannot forge closing `<untrusted_workspace_context>`
-/// tags or inject C0/C1/Bidi control sequences while preserving normal newlines and tabs.
-fn sanitize_untrusted_doc(doc: &str) -> String {
+/// Sanitize untrusted workspace doc body so it cannot forge closing fence tags or inject
+/// C0/C1/Bidi control sequences while preserving normal newlines and tabs.
+pub fn sanitize_untrusted_doc(doc: &str) -> String {
     let mut out = String::with_capacity(doc.len());
     for ch in doc.chars() {
         let cp = ch as u32;
@@ -244,10 +297,41 @@ fn sanitize_untrusted_doc(doc: &str) -> String {
             _ => out.push(ch),
         }
     }
-    // Neutralize any closing/opening `<untrusted_workspace_context` tag attempt (case-insensitive)
+    // Neutralize any closing/opening fence-tag attempt (case-insensitive). Escaping every angle
+    // bracket in the body is the only way to guarantee a hostile `</tag>` cannot terminate the
+    // fence early, so it is done unconditionally once any known tag name appears.
     let lower = out.to_ascii_lowercase();
-    if lower.contains("untrusted_workspace_context") {
+    if UNTRUSTED_FENCE_TAGS.iter().any(|tag| lower.contains(tag)) {
         out = out.replace('<', "&lt;").replace('>', "&gt;");
+    }
+    out
+}
+
+/// Wrap an untrusted body in a paired `<tag attrs> ... </tag>` fence.
+///
+/// The body is control/Bidi escaped and any embedded fence-tag attempt is neutralized, then the
+/// *inner* payload is truncated to `max_body_bytes` before the closing tag is appended, so a
+/// truncated body can never swallow the closing boundary.
+pub fn fence_untrusted(tag: &str, attrs: &str, body: &str, max_body_bytes: usize) -> String {
+    let sanitized = sanitize_untrusted_doc(body);
+    let cut = crate::tool::output_buffer::floor_char_boundary(&sanitized, max_body_bytes);
+    format!(
+        "<{}{}>\n{}\n</{}>",
+        tag,
+        attrs,
+        &sanitized[..cut],
+        tag
+    )
+}
+
+/// Escape a value that will be interpolated into a fence tag's double-quoted attribute.
+pub fn escape_fence_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in escape_control_chars(value).chars() {
+        match ch {
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
     }
     out
 }

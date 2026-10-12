@@ -67,13 +67,14 @@ async fn test_workspace_boundary_blocks_parent_traversal_absolute_and_external_s
     let (_tx, rx) = watch::channel(false);
 
     // 1. Absolute path blocked
-    let (res_abs, _) = runtime
+    let (res_abs, _, _) = runtime
         .execute_call(
             &ToolCall {
                 call_id: ToolCallId::new("c1"),
                 name: "read".into(),
                 raw_arguments: format!("{{\"path\":\"{}\"}}", outside_secret.display()),
             },
+            0,
             rx.clone(),
         )
         .await;
@@ -85,13 +86,14 @@ async fn test_workspace_boundary_blocks_parent_traversal_absolute_and_external_s
     );
 
     // 2. `..` traversal blocked
-    let (res_dots, _) = runtime
+    let (res_dots, _, _) = runtime
         .execute_call(
             &ToolCall {
                 call_id: ToolCallId::new("c2"),
                 name: "read".into(),
                 raw_arguments: r#"{"path":"../outside/secret.txt"}"#.into(),
             },
+            0,
             rx.clone(),
         )
         .await;
@@ -109,13 +111,14 @@ async fn test_workspace_boundary_blocks_parent_traversal_absolute_and_external_s
         } else {
             r#"{"path":"escape_link.txt","content":"overwrite"}"#
         };
-        let (res_sym, _) = runtime
+        let (res_sym, _, _) = runtime
             .execute_call(
                 &ToolCall {
                     call_id: ToolCallId::new("c3"),
                     name: tool.into(),
                     raw_arguments: args.into(),
                 },
+                0,
                 rx.clone(),
             )
             .await;
@@ -128,13 +131,14 @@ async fn test_workspace_boundary_blocks_parent_traversal_absolute_and_external_s
     }
 
     // 4. Sensitive `.env` blocked in non-interactive mode, while `.env.example` is allowed
-    let (res_env, _) = runtime
+    let (res_env, _, _) = runtime
         .execute_call(
             &ToolCall {
                 call_id: ToolCallId::new("c4"),
                 name: "read".into(),
                 raw_arguments: r#"{"path":".env"}"#.into(),
             },
+            0,
             rx.clone(),
         )
         .await;
@@ -145,13 +149,14 @@ async fn test_workspace_boundary_blocks_parent_traversal_absolute_and_external_s
         }
     );
 
-    let (res_example, _) = runtime
+    let (res_example, _, _) = runtime
         .execute_call(
             &ToolCall {
                 call_id: ToolCallId::new("c5"),
                 name: "read".into(),
                 raw_arguments: r#"{"path":".env.example"}"#.into(),
             },
+            0,
             rx.clone(),
         )
         .await;
@@ -159,13 +164,14 @@ async fn test_workspace_boundary_blocks_parent_traversal_absolute_and_external_s
     assert!(res_example.content.contains("SECRET_KEY=example"));
 
     // 5. Intra-workspace symlink pointing to `.env` is blocked with SensitivePathBlocked
-    let (res_sym_env, _) = runtime
+    let (res_sym_env, _, _) = runtime
         .execute_call(
             &ToolCall {
                 call_id: ToolCallId::new("c6"),
                 name: "read".into(),
                 raw_arguments: r#"{"path":"readme_link.txt"}"#.into(),
             },
+            0,
             rx,
         )
         .await;

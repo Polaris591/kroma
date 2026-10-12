@@ -69,13 +69,33 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
     let names: Vec<&str> = all_defs.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["bash", "edit", "find", "grep", "ls", "read", "recall_evidence", "write"]
+        vec![
+            "activate_skill",
+            "bash",
+            "edit",
+            "find",
+            "grep",
+            "ls",
+            "read",
+            "recall_evidence",
+            "write"
+        ]
     );
 
     // Under ReadOnly policy, edit/write/bash are physically hidden from schema AND rejected by dispatcher
     let ro_defs = reg.visible_definitions(PolicyMode::ReadOnly);
     let ro_names: Vec<&str> = ro_defs.iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(ro_names, vec!["find", "grep", "ls", "read", "recall_evidence"]);
+    assert_eq!(
+        ro_names,
+        vec![
+            "activate_skill",
+            "find",
+            "grep",
+            "ls",
+            "read",
+            "recall_evidence"
+        ]
+    );
     assert!(reg.lookup_for_dispatch("edit", PolicyMode::ReadOnly).is_err());
     assert!(reg.lookup_for_dispatch("write", PolicyMode::ReadOnly).is_err());
     assert!(reg.lookup_for_dispatch("bash", PolicyMode::ReadOnly).is_err());
@@ -94,10 +114,10 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
     assert!(filtered.lookup_for_dispatch("grep", PolicyMode::Ask).is_err());
 
     // Non-interactive PolicyEngine hides tools that would be automatically denied:
-    // - Non-interactive Ask: hides bash, edit, write -> only find, grep, ls, read, recall_evidence
-    // - Non-interactive AllowWrite: hides bash -> edit, find, grep, ls, read, recall_evidence, write
-    // - Non-interactive AllowShell: hides edit, write -> bash, find, grep, ls, read, recall_evidence
-    // - Non-interactive FullAutonomous: exposes all 8 tools
+    // - Non-interactive Ask: hides bash, edit, write -> activate_skill, find, grep, ls, read, recall_evidence
+    // - Non-interactive AllowWrite: hides bash -> activate_skill, edit, find, grep, ls, read, recall_evidence, write
+    // - Non-interactive AllowShell: hides edit, write -> activate_skill, bash, find, grep, ls, read, recall_evidence
+    // - Non-interactive FullAutonomous: exposes all 9 tools
     use harness_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine};
     use std::sync::Arc;
 
@@ -109,7 +129,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         .collect();
     assert_eq!(
         ask_non_tty,
-        vec!["find", "grep", "ls", "read", "recall_evidence"]
+        vec!["activate_skill", "find", "grep", "ls", "read", "recall_evidence"]
     );
 
     let pe_aw = PolicyEngine::new(
@@ -123,7 +143,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         .collect();
     assert_eq!(
         aw_non_tty,
-        vec!["edit", "find", "grep", "ls", "read", "recall_evidence", "write"]
+        vec!["activate_skill", "edit", "find", "grep", "ls", "read", "recall_evidence", "write"]
     );
 
     let pe_as = PolicyEngine::new(
@@ -137,7 +157,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         .collect();
     assert_eq!(
         as_non_tty,
-        vec!["bash", "find", "grep", "ls", "read", "recall_evidence"]
+        vec!["activate_skill", "bash", "find", "grep", "ls", "read", "recall_evidence"]
     );
 
     let pe_full = PolicyEngine::new(
@@ -151,7 +171,17 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         .collect();
     assert_eq!(
         full_non_tty,
-        vec!["bash", "edit", "find", "grep", "ls", "read", "recall_evidence", "write"]
+        vec![
+            "activate_skill",
+            "bash",
+            "edit",
+            "find",
+            "grep",
+            "ls",
+            "read",
+            "recall_evidence",
+            "write"
+        ]
     );
 }
 

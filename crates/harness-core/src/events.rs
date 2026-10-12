@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-pub const EVENT_SCHEMA_VERSION: &str = "0.7.0";
+pub const EVENT_SCHEMA_VERSION: &str = "0.8.0";
 
 #[derive(Debug, Error)]
 pub enum EventLogError {
@@ -102,6 +102,27 @@ pub enum EventPayload {
         tool_name: String,
         guard_kind: String,
         signature: String,
+    },
+    /// A Gate 3 hook was evaluated. `hook_kind` is `policy` or `observer`; `outcome` is one of
+    /// `allow` | `deny` | `ok` | `failed_open` | `timeout` | `panicked`.
+    HookEvaluated {
+        hook_id: String,
+        hook_kind: String,
+        event: String,
+        outcome: String,
+        duration_ms: u64,
+        message: Option<String>,
+    },
+    /// A Gate 3 extension was mounted or unmounted. `action` is `registered` or `unregistered`.
+    ExtensionChanged {
+        extension_id: String,
+        action: String,
+    },
+    /// Gate 3: ancestor-directory `AGENTS.md`/`CLAUDE.md` guidance was injected into a tool result.
+    SubtreeContextLoaded {
+        directory: String,
+        file_name: String,
+        bytes: usize,
     },
     RunTerminated {
         status: RunStatus,
@@ -354,6 +375,45 @@ impl EventLogger {
                     eprintln!(
                         "⏪ [revision] restored {} ({} written, {} removed)",
                         revision_id, restored_files, removed_files
+                    );
+                }
+                EventPayload::HookEvaluated {
+                    hook_id,
+                    hook_kind,
+                    event,
+                    outcome,
+                    duration_ms,
+                    message,
+                } => {
+                    if outcome != "allow" && outcome != "ok" {
+                        eprintln!(
+                            "🪝 [{}-hook:{}] {} -> {} ({}ms){}",
+                            hook_kind,
+                            hook_id,
+                            event,
+                            outcome,
+                            duration_ms,
+                            message
+                                .as_ref()
+                                .map(|m| format!(" | {}", m))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
+                EventPayload::ExtensionChanged {
+                    extension_id,
+                    action,
+                } => {
+                    eprintln!("🧩 [extension] {} {}", action, extension_id);
+                }
+                EventPayload::SubtreeContextLoaded {
+                    directory,
+                    file_name,
+                    bytes,
+                } => {
+                    eprintln!(
+                        "📄 [subtree-context] {}/{} ({}B)",
+                        directory, file_name, bytes
                     );
                 }
                 EventPayload::RunTerminated {

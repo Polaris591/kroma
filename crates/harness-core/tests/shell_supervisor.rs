@@ -235,7 +235,7 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
     let policy = PolicyEngine::new(PolicyMode::Ask, Arc::new(NonInteractiveApprovalHandler));
     let runtime = build_default_runtime(env, policy, budget.clone(), None);
     let (_tx3, rx3) = watch::channel(false);
-    let (deny_msg, _) = runtime
+    let (deny_msg, _, _) = runtime
         .execute_call(
             &ToolCall {
                 call_id: ToolCallId::new("call_unauth"),
@@ -245,6 +245,7 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
                 })
                 .to_string(),
             },
+            0,
             rx3,
         )
         .await;

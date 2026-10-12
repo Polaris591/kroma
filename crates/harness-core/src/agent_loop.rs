@@ -15,6 +15,9 @@ use crate::provider::{
     validate_assistant_turn_batch, ModelProvider, ProviderRequest,
 };
 use crate::revision::{RevisionId, SnapshotStore};
+use crate::extensions::{
+    is_subtree_context_tool, HookContext, HookEvaluation, SubtreeContextTracker,
+};
 use crate::tool::runtime::ToolRuntime;
 use crate::tools::recall_evidence::execute_recall_evidence;
 use crate::types::{ErrorCode, RunId, RunStatus, TerminalReason};
@@ -86,6 +89,8 @@ pub struct AgentRunner {
     /// Set when the current tool batch executed a `bash` (`SideEffect`) call, whose file writes are
     /// invisible to the per-tool `modified_file` flag and must still be snapshotted (O1).
     batch_ran_side_effect: bool,
+    /// Gate 3: ancestor `AGENTS.md`/`CLAUDE.md` directories already injected into this branch.
+    subtree_tracker: SubtreeContextTracker,
 }
 
 impl AgentRunner {
@@ -112,6 +117,7 @@ impl AgentRunner {
             current_revision_id: None,
             batch_mutated: false,
             batch_ran_side_effect: false,
+            subtree_tracker: SubtreeContextTracker::default(),
         }
     }
 
@@ -152,7 +158,41 @@ impl AgentRunner {
         self
     }
 
-    pub async fn run(mut self, mut logger: EventLogger) -> (RunSummary, EventLogger) {
+    /// Attach the Gate 3 subtree JIT context tracker (already seeded from the session checkpoint
+    /// when the run resumes an existing branch).
+    pub fn with_subtree_context(mut self, tracker: SubtreeContextTracker) -> Self {
+        self.subtree_tracker = tracker;
+        self
+    }
+
+    /// Run the agent loop, then emit fail-open `RunCompleted` observer hooks (Gate 3).
+    ///
+    /// The observers run after the loop terminates on *every* exit path, because the wrapper sees
+    /// the final summary rather than the ~30 internal `finish_run` returns.
+    pub async fn run(self, logger: EventLogger) -> (RunSummary, EventLogger) {
+        let hooks = self.tool_runtime.hook_engine();
+        let workspace_root = self.tool_runtime.env().workspace().root().to_path_buf();
+        let (summary, mut logger) = self.run_inner(logger).await;
+        if !hooks.is_empty() {
+            let ctx = HookContext::new(summary.turns_used, workspace_root);
+            for evaluation in hooks
+                .run_observers(crate::extensions::HookEvent::RunCompleted, &ctx)
+                .await
+            {
+                let _ = logger.log(EventPayload::HookEvaluated {
+                    hook_id: evaluation.hook_id,
+                    hook_kind: evaluation.hook_kind,
+                    event: evaluation.event,
+                    outcome: evaluation.outcome,
+                    duration_ms: evaluation.duration_ms,
+                    message: evaluation.message,
+                });
+            }
+        }
+        (summary, logger)
+    }
+
+    async fn run_inner(mut self, mut logger: EventLogger) -> (RunSummary, EventLogger) {
         let mut budget_tracker = match BudgetTracker::new(self.config.budget.clone()) {
             Ok(b) => b,
             Err(e) => {
@@ -531,6 +571,58 @@ impl AgentRunner {
 
             // If model stopped with no tool calls, run CompletionGate if files were modified (§3.2 V6-07)
             if tool_calls.is_empty() {
+                // Gate 3: `PreCompletion` policy hooks run before the completion gate. A denial is
+                // fail-closed and is treated exactly like a gate rejection, so the model must keep
+                // working instead of the run silently finishing.
+                let pre_completion_denial = {
+                    let hooks = self.tool_runtime.hook_engine();
+                    if hooks.is_empty() {
+                        None
+                    } else {
+                        let ctx = HookContext::new(
+                            current_turn,
+                            self.tool_runtime.env().workspace().root().to_path_buf(),
+                        );
+                        let outcome = hooks
+                            .evaluate_policy(crate::extensions::HookEvent::PreCompletion, &ctx)
+                            .await;
+                        Self::log_hook_evaluations(&mut logger, outcome.evaluations());
+                        outcome.reason().map(|r| r.to_string())
+                    }
+                };
+                if let Some(reason) = pre_completion_denial {
+                    gate_failure_count = gate_failure_count.saturating_add(1);
+                    let mut mod_list: Vec<String> = modified_files_set.iter().cloned().collect();
+                    mod_list.sort();
+                    if gate_failure_count >= self.completion_gate_max_retries {
+                        return self.finish_run(
+                            TerminalReason::ProviderProtocolError(format!(
+                                "PreCompletion policy hook denied completion {} times (max retries={}): {}",
+                                gate_failure_count, self.completion_gate_max_retries, reason
+                            )),
+                            &budget_tracker, &projector, mod_list, last_assistant_text,
+                            transcript, logger,
+                        );
+                    }
+                    self.record_transcript_item(
+                        &mut transcript,
+                        TranscriptItem::User(UserMessage {
+                            content: format!(
+                                "[PreCompletion policy hook denied completion, attempt {}/{}]: {}\nAddress the denial before finishing.",
+                                gate_failure_count, self.completion_gate_max_retries, reason
+                            ),
+                        }),
+                        current_turn.saturating_add(1),
+                    );
+                    if let Some(err) = self.session_persist_error.clone() {
+                        return self.finish_run(
+                            TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                            &budget_tracker, &projector, mod_list, last_assistant_text,
+                            transcript, logger,
+                        );
+                    }
+                    continue;
+                }
                 if !modified_files_set.is_empty() {
                     let mut mod_list: Vec<String> = modified_files_set.iter().cloned().collect();
                     mod_list.sort();
@@ -756,6 +848,30 @@ impl AgentRunner {
                     last_assistant_text, transcript, logger,
                 );
             }
+
+            // Gate 3: `TurnCompleted` observers are fail-open telemetry and never affect control flow.
+            {
+                let hooks = self.tool_runtime.hook_engine();
+                if !hooks.is_empty() {
+                    let ctx = HookContext::new(
+                        current_turn,
+                        self.tool_runtime.env().workspace().root().to_path_buf(),
+                    );
+                    for evaluation in hooks
+                        .run_observers(crate::extensions::HookEvent::TurnCompleted, &ctx)
+                        .await
+                    {
+                        let _ = logger.log(EventPayload::HookEvaluated {
+                            hook_id: evaluation.hook_id,
+                            hook_kind: evaluation.hook_kind,
+                            event: evaluation.event,
+                            outcome: evaluation.outcome,
+                            duration_ms: evaluation.duration_ms,
+                            message: evaluation.message,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -927,7 +1043,7 @@ impl AgentRunner {
         let reasoning_hash = serde_json::to_vec(&reasoning)
             .map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes)))
             .unwrap_or_default();
-        if let Err(err) = journal.checkpoint_with_revision(absolute_turn, projector.last_pinned_baseline_end(), last_touched, reasoning_hash, workspace_revision_id) {
+        if let Err(err) = journal.checkpoint_with_revision(absolute_turn, projector.last_pinned_baseline_end(), last_touched, reasoning_hash, workspace_revision_id, self.subtree_tracker.loaded_dirs()) {
             self.session_persist_error = Some(err.to_string());
         }
     }
@@ -1041,6 +1157,7 @@ impl AgentRunner {
                 }
 
                 // Spawn concurrent execution with Semaphore(8)
+                let batch_turn = budget_tracker.turns_used();
                 let mut join_handles = Vec::with_capacity(tasks_to_run.len());
                 for (local_i, call, _sig, rel_path) in tasks_to_run {
                     let sem = Arc::clone(&semaphore);
@@ -1049,18 +1166,21 @@ impl AgentRunner {
                     let call_for_task = call.clone();
                     let handle = tokio::spawn(async move {
                         let _permit = sem.acquire_owned().await.ok();
-                        let (msg, decision) = rt.execute_call(&call_for_task, cancel).await;
-                        (local_i, msg, decision)
+                        let (msg, decision, hooks) =
+                            rt.execute_call(&call_for_task, batch_turn, cancel).await;
+                        (local_i, msg, decision, hooks)
                     });
                     join_handles.push((local_i, call, rel_path, handle));
                 }
 
                 let mut decisions: Vec<Option<String>> = vec![None; ro_end - idx];
+                let mut hook_reports: Vec<Vec<HookEvaluation>> = vec![Vec::new(); ro_end - idx];
                 for (local_i, call, rel_path, handle) in join_handles {
                     match handle.await {
-                        Ok((resolved_i, msg, decision)) => {
+                        Ok((resolved_i, msg, decision, hooks)) => {
                             pre_resolved[resolved_i] = Some(msg);
                             decisions[resolved_i] = Some(decision);
+                            hook_reports[resolved_i] = hooks;
                         }
                         Err(join_err) => {
                             let code = if join_err.is_cancelled() {
@@ -1092,7 +1212,8 @@ impl AgentRunner {
 
                 for local_i in 0..commit_limit {
                     let call = &tool_calls[idx + local_i];
-                    if let Some(msg) = pre_resolved[local_i].take() {
+                    Self::log_hook_evaluations(logger, &hook_reports[local_i]);
+                    if let Some(mut msg) = pre_resolved[local_i].take() {
                         if let Some(ref dec) = decisions[local_i] {
                             let _ = logger.log(EventPayload::PolicyDecision {
                                 call_id: call.call_id.clone(),
@@ -1127,6 +1248,7 @@ impl AgentRunner {
                             diag_kind: msg.meta.diag_kind,
                             compaction_reread_count: projector.compaction_reread_count(),
                         });
+                        self.apply_subtree_context(&mut msg, logger);
                         self.record_transcript_item(
                             transcript, TranscriptItem::ToolResult(msg),
                             budget_tracker.turns_used(),
@@ -1200,7 +1322,7 @@ impl AgentRunner {
                                 self.tool_runtime.policy_engine().mode(),
                             )
                             .is_ok();
-                    let (mut msg, decision) = if recall_available {
+                    let (mut msg, decision, serial_hook_evaluations) = if recall_available {
                         // Gate 2: resolve the stub's raw evidence against the live projector store
                         // (seeded from the WAL on `--resume`). Read-only, so no approval is needed.
                         let out = execute_recall_evidence(projector, &call.raw_arguments);
@@ -1219,12 +1341,14 @@ impl AgentRunner {
                                 meta: out.meta,
                             },
                             "allow_evidence".to_string(),
+                            Vec::new(),
                         )
                     } else {
                         self.tool_runtime
-                            .execute_call(call, self.cancel_rx.clone())
+                            .execute_call(call, budget_tracker.turns_used(), self.cancel_rx.clone())
                             .await
                     };
+                    Self::log_hook_evaluations(logger, &serial_hook_evaluations);
 
                     // O1: a `bash` call can rewrite the workspace without setting `modified_file`,
                     // so flag the batch for a post-batch revision capture.
@@ -1274,6 +1398,7 @@ impl AgentRunner {
                         compaction_reread_count: projector.compaction_reread_count(),
                     });
 
+                    self.apply_subtree_context(&mut msg, logger);
                     self.record_transcript_item(
                         transcript, TranscriptItem::ToolResult(msg),
                         budget_tracker.turns_used(),
@@ -1285,6 +1410,49 @@ impl AgentRunner {
         }
 
         None
+    }
+
+    /// Emit `HookEvaluated` telemetry for every Gate 3 hook that contributed to a tool call.
+    fn log_hook_evaluations(logger: &mut EventLogger, evaluations: &[HookEvaluation]) {
+        for evaluation in evaluations {
+            let _ = logger.log(EventPayload::HookEvaluated {
+                hook_id: evaluation.hook_id.clone(),
+                hook_kind: evaluation.hook_kind.clone(),
+                event: evaluation.event.clone(),
+                outcome: evaluation.outcome.clone(),
+                duration_ms: evaluation.duration_ms,
+                message: evaluation.message.clone(),
+            });
+        }
+    }
+
+    /// Gate 3: append not-yet-loaded ancestor `AGENTS.md`/`CLAUDE.md` guidance to a tool result.
+    ///
+    /// The guidance is attached to the *current* tool result only; the frozen static prefix and
+    /// every earlier turn stay byte-for-byte unchanged, so the prefix KV cache is preserved.
+    fn apply_subtree_context(&mut self, msg: &mut ToolResultMessage, logger: &mut EventLogger) {
+        if !self.subtree_tracker.is_enabled() || !is_subtree_context_tool(&msg.tool_name) {
+            return;
+        }
+        let Some(rel_path) = msg.meta.relative_path.clone() else {
+            return;
+        };
+        let workspace = self.tool_runtime.env().workspace().clone();
+        let loads = self.subtree_tracker.load_for_path(&workspace, &rel_path);
+        if loads.is_empty() {
+            return;
+        }
+        let mut appended = String::from(msg.content.as_ref());
+        for load in &loads {
+            appended.push_str("\n\n");
+            appended.push_str(&load.rendered);
+            let _ = logger.log(EventPayload::SubtreeContextLoaded {
+                directory: load.directory.clone(),
+                file_name: load.file_name.clone(),
+                bytes: load.bytes,
+            });
+        }
+        msg.content = Arc::from(appended);
     }
 
     fn synthesize_remaining_results(
@@ -1377,5 +1545,16 @@ pub fn build_default_runtime(
     tool_filter: Option<Vec<String>>,
 ) -> ToolRuntime {
     let registry = crate::tool::registry::ToolRegistry::new(tool_filter);
+    ToolRuntime::new(registry, policy_engine, env, budget)
+}
+
+/// Build a runtime from an already-configured registry, so Gate 3 extensions, hooks and skills
+/// mounted on it stay attached to every tool dispatch.
+pub fn build_runtime_with_registry(
+    registry: crate::tool::registry::ToolRegistry,
+    env: SharedExecutionEnv,
+    policy_engine: crate::tool::policy::PolicyEngine,
+    budget: BudgetConfig,
+) -> ToolRuntime {
     ToolRuntime::new(registry, policy_engine, env, budget)
 }
