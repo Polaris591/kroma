@@ -1,0 +1,426 @@
+use crate::budget::BudgetConfig;
+use crate::types::{
+    EditDiagKind, EditMatchTier, EventSeq, RunId, RunStatus, TerminalReason, ToolCallId,
+};
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
+
+pub const EVENT_SCHEMA_VERSION: &str = "0.6.0";
+
+#[derive(Debug, Error)]
+pub enum EventLogError {
+    #[error("strict event logging failed: {0}")]
+    StrictIoFailure(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event_type", content = "payload")]
+pub enum EventPayload {
+    RunStarted {
+        prompt_hash: String,
+        tool_schema_hash: String,
+        static_prefix_bytes: usize,
+        policy: String,
+        budget_config: BudgetConfig,
+    },
+    ModelRequestStarted {
+        turn: usize,
+        attempt: usize,
+        request_body_bytes: usize,
+        message_history_bytes: usize,
+    },
+    ModelRequestCompleted {
+        turn: usize,
+        input_tokens: u64,
+        cached_input_tokens: Option<u64>,
+        uncached_input_tokens: u64,
+        output_tokens: u64,
+        reasoning_tokens: Option<u64>,
+        prefix_cache_hit_ratio: f64,
+        latency_ms: u64,
+        ttft_ms: Option<u64>,
+    },
+    ToolBatchReceived {
+        turn: usize,
+        call_count: usize,
+        call_ids: Vec<ToolCallId>,
+    },
+    PolicyDecision {
+        call_id: ToolCallId,
+        tool_name: String,
+        decision: String,
+        reason: Option<String>,
+    },
+    ToolStarted {
+        call_id: ToolCallId,
+        tool_name: String,
+        args_sha256: String,
+        relative_path: Option<String>,
+    },
+    ToolCompleted {
+        call_id: ToolCallId,
+        tool_name: String,
+        relative_path: Option<String>,
+        duration_ms: u64,
+        truncated: bool,
+        exit_code: Option<i32>,
+        outcome: String,
+        edit_match_tier: Option<EditMatchTier>,
+        diag_kind: Option<EditDiagKind>,
+        compaction_reread_count: u64,
+    },
+    ContextCompacted {
+        before_bytes: usize,
+        after_bytes: usize,
+        compacted_seq_indices: Vec<usize>,
+        pinned_files: Vec<String>,
+    },
+    LoopGuardTriggered {
+        call_id: ToolCallId,
+        tool_name: String,
+        guard_kind: String,
+        signature: String,
+    },
+    RunTerminated {
+        status: RunStatus,
+        terminal_reason: TerminalReason,
+        turns: usize,
+        total_tool_calls: usize,
+        total_input_tokens: u64,
+        total_cached_input_tokens: u64,
+        total_output_tokens: u64,
+        cache_hit_ratio: f64,
+        compaction_reread_count: u64,
+        duration_ms: u64,
+        log_degraded: bool,
+        dropped_events: usize,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticEvent {
+    pub schema_version: String,
+    pub run_id: RunId,
+    pub seq: u64,
+    pub timestamp_ms: u64,
+    #[serde(flatten)]
+    pub event: EventPayload,
+}
+
+/// Resolve the OS user state directory for Harness runs without polluting the target workspace.
+pub fn resolve_default_state_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.trim().is_empty() {
+            return PathBuf::from(xdg).join("harness").join("runs");
+        }
+    }
+    if cfg!(target_os = "macos") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("harness")
+                .join("runs");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("state")
+                .join("harness")
+                .join("runs");
+        }
+    }
+    std::env::temp_dir().join("harness-state").join("runs")
+}
+
+pub struct EventLogger {
+    run_id: RunId,
+    seq: EventSeq,
+    state_dir: PathBuf,
+    log_path: PathBuf,
+    file: Option<File>,
+    strict_log: bool,
+    live_stderr: bool,
+    log_degraded: bool,
+    dropped_events: usize,
+    in_memory_events: Vec<DiagnosticEvent>,
+}
+
+impl EventLogger {
+    pub fn new(
+        run_id: RunId,
+        state_dir_override: Option<PathBuf>,
+        strict_log: bool,
+    ) -> Result<Self, EventLogError> {
+        let state_dir = state_dir_override.unwrap_or_else(resolve_default_state_dir);
+        let log_path = state_dir.join(format!("{}.jsonl", run_id));
+
+        let mut log_degraded = false;
+        let mut file = None;
+
+        match Self::open_log_file(&state_dir, &log_path) {
+            Ok(f) => {
+                file = Some(f);
+            }
+            Err(e) => {
+                let msg = format!(
+                    "failed to open diagnostic log at {}: {}",
+                    log_path.display(),
+                    e
+                );
+                if strict_log {
+                    return Err(EventLogError::StrictIoFailure(msg));
+                }
+                eprintln!("[WARN harness] diagnostic logging degraded: {}", msg);
+                log_degraded = true;
+            }
+        }
+
+        Ok(Self {
+            run_id,
+            seq: EventSeq::new(0),
+            state_dir,
+            log_path,
+            file,
+            strict_log,
+            live_stderr: false,
+            log_degraded,
+            dropped_events: 0,
+            in_memory_events: Vec::new(),
+        })
+    }
+
+    pub fn set_live_stderr(&mut self, live_stderr: bool) {
+        self.live_stderr = live_stderr;
+    }
+
+    pub fn live_stderr(&self) -> bool {
+        self.live_stderr
+    }
+
+    fn open_log_file(state_dir: &Path, log_path: &Path) -> std::io::Result<File> {
+        fs::create_dir_all(state_dir)?;
+        let f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(log_path)?;
+        let _ = fs::set_permissions(log_path, fs::Permissions::from_mode(0o600));
+        Ok(f)
+    }
+
+    pub fn log(&mut self, payload: EventPayload) -> Result<EventSeq, EventLogError> {
+        if self.live_stderr {
+            match &payload {
+                EventPayload::RunStarted {
+                    static_prefix_bytes,
+                    policy,
+                    ..
+                } => {
+                    eprintln!(
+                        "🚀 [harness] Run {} started | policy={} | static_prefix={}B",
+                        self.run_id, policy, static_prefix_bytes
+                    );
+                }
+                EventPayload::ModelRequestStarted {
+                    turn,
+                    attempt,
+                    request_body_bytes,
+                    message_history_bytes,
+                } => {
+                    eprintln!(
+                        "⏳ [turn {}] requesting model (attempt {}, history={}B, body={}B)...",
+                        turn, attempt, message_history_bytes, request_body_bytes
+                    );
+                }
+                EventPayload::ModelRequestCompleted {
+                    turn,
+                    input_tokens,
+                    cached_input_tokens,
+                    output_tokens,
+                    reasoning_tokens,
+                    prefix_cache_hit_ratio,
+                    latency_ms,
+                    ttft_ms,
+                    ..
+                } => {
+                    let ttft = match ttft_ms {
+                        Some(ms) => format!("{}ms", ms),
+                        None => "n/a".to_string(),
+                    };
+                    let cached = match cached_input_tokens {
+                        Some(v) => *v,
+                        None => 0,
+                    };
+                    let think = match reasoning_tokens {
+                        Some(v) => *v,
+                        None => 0,
+                    };
+                    eprintln!(
+                        "🧠 [turn {}] model {}ms | ttft={} | in={} (cached={}, hit={:.1}%) out={} think={}",
+                        turn,
+                        latency_ms,
+                        ttft,
+                        input_tokens,
+                        cached,
+                        prefix_cache_hit_ratio * 100.0,
+                        output_tokens,
+                        think
+                    );
+                }
+                EventPayload::ToolCompleted {
+                    tool_name,
+                    relative_path,
+                    duration_ms,
+                    exit_code,
+                    outcome,
+                    edit_match_tier,
+                    ..
+                } => {
+                    let path = match relative_path {
+                        Some(p) => p.as_str(),
+                        None => "-",
+                    };
+                    let exit = match exit_code {
+                        Some(c) => c.to_string(),
+                        None => "-".to_string(),
+                    };
+                    let tier = match edit_match_tier {
+                        Some(t) => format!("{:?}", t),
+                        None => "-".to_string(),
+                    };
+                    eprintln!(
+                        "🔧 [tool:{}] path=\"{}\" -> {} ({}ms, exit={}, tier={})",
+                        tool_name, path, outcome, duration_ms, exit, tier
+                    );
+                }
+                EventPayload::ContextCompacted {
+                    before_bytes,
+                    after_bytes,
+                    pinned_files,
+                    ..
+                } => {
+                    eprintln!(
+                        "📦 [compact] {}B -> {}B (pinned={:?})",
+                        before_bytes, after_bytes, pinned_files
+                    );
+                }
+                EventPayload::RunTerminated {
+                    status,
+                    terminal_reason,
+                    turns,
+                    total_tool_calls,
+                    total_input_tokens,
+                    total_cached_input_tokens,
+                    total_output_tokens,
+                    cache_hit_ratio,
+                    duration_ms,
+                    ..
+                } => {
+                    eprintln!(
+                        "🏁 [harness] {:?} ({:?}) in {}ms | turns={} tools={} | in={} (cached={}, hit={:.1}%) out={}",
+                        status,
+                        terminal_reason,
+                        duration_ms,
+                        turns,
+                        total_tool_calls,
+                        total_input_tokens,
+                        total_cached_input_tokens,
+                        cache_hit_ratio * 100.0,
+                        total_output_tokens
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let seq = self.seq.next();
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let event = DiagnosticEvent {
+            schema_version: EVENT_SCHEMA_VERSION.to_string(),
+            run_id: self.run_id,
+            seq: seq.0,
+            timestamp_ms,
+            event: payload,
+        };
+
+        if self.in_memory_events.len() < 4096 {
+            self.in_memory_events.push(event.clone());
+        }
+
+        let line = match serde_json::to_string(&event) {
+            Ok(s) => format!("{}\n", s),
+            Err(e) => {
+                return self.handle_write_error(format!("serialization error: {}", e), seq);
+            }
+        };
+
+        if let Some(ref mut f) = self.file {
+            if let Err(e) = f.write_all(line.as_bytes()).and_then(|_| f.flush()) {
+                self.file = None;
+                return self.handle_write_error(
+                    format!("write error on {}: {}", self.log_path.display(), e),
+                    seq,
+                );
+            }
+        } else {
+            return self.handle_write_error(
+                format!("log file {} unavailable", self.log_path.display()),
+                seq,
+            );
+        }
+
+        Ok(seq)
+    }
+
+    fn handle_write_error(
+        &mut self,
+        msg: String,
+        seq: EventSeq,
+    ) -> Result<EventSeq, EventLogError> {
+        let was_degraded = self.log_degraded;
+        self.log_degraded = true;
+        self.dropped_events += 1;
+        if self.strict_log {
+            return Err(EventLogError::StrictIoFailure(msg));
+        }
+        if !was_degraded {
+            eprintln!(
+                "[WARN harness] diagnostic event seq={} not persisted (log_degraded=true): {}",
+                seq.0, msg
+            );
+        }
+        Ok(seq)
+    }
+
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
+    pub fn log_path(&self) -> &Path {
+        &self.log_path
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        self.log_degraded
+    }
+
+    pub fn dropped_events(&self) -> usize {
+        self.dropped_events
+    }
+
+    pub fn events(&self) -> &[DiagnosticEvent] {
+        &self.in_memory_events
+    }
+}
