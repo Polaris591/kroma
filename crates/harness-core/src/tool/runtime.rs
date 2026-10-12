@@ -456,6 +456,11 @@ impl ToolRuntime {
                             }
                         }
                     } => {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            &mut prompt_task,
+                        )
+                        .await;
                         let out = ToolExecutionOutput::error(
                             ErrorCode::NotExecutedCancelled,
                             "NOT_EXECUTED_CANCELLED: cancelled during approval prompt".to_string(),

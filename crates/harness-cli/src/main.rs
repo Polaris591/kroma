@@ -97,6 +97,7 @@ where
     let _bin = iter.next();
 
     let mut surface = CliSurface::Headless;
+    let mut explicit_surface: Option<&'static str> = None;
 
     if let Some(first) = iter.peek() {
         if first == "--help" || first == "-h" || first == "help" {
@@ -108,20 +109,24 @@ where
         match first.as_str() {
             "run" => {
                 iter.next();
+                explicit_surface = Some("run");
             }
             "repl" | "tui" => {
                 iter.next();
                 surface = CliSurface::Repl;
+                explicit_surface = Some("repl");
             }
             "acp" => {
                 iter.next();
                 surface = CliSurface::Acp;
+                explicit_surface = Some("acp");
             }
             "serve" => {
                 iter.next();
                 surface = CliSurface::Serve {
                     listen_addr: "127.0.0.1:7878".to_string(),
                 };
+                explicit_surface = Some("serve");
             }
             _ => {}
         }
@@ -175,12 +180,38 @@ where
                 task = Some(val);
             }
             "--interactive" | "--repl" | "--tui" => {
+                if let Some(prev) = explicit_surface {
+                    if prev != "repl" {
+                        return Err(format!(
+                            "conflicting surface flags: cannot combine '{}' with '{}'",
+                            prev, arg
+                        ));
+                    }
+                }
                 surface = CliSurface::Repl;
+                explicit_surface = Some("repl");
             }
             "--acp" => {
+                if let Some(prev) = explicit_surface {
+                    if prev != "acp" {
+                        return Err(format!(
+                            "conflicting surface flags: cannot combine '{}' with '--acp'",
+                            prev
+                        ));
+                    }
+                }
                 surface = CliSurface::Acp;
+                explicit_surface = Some("acp");
             }
-            "--serve" | "--listen" => {
+            "--serve" => {
+                if let Some(prev) = explicit_surface {
+                    if prev != "serve" {
+                        return Err(format!(
+                            "conflicting surface flags: cannot combine '{}' with '--serve'",
+                            prev
+                        ));
+                    }
+                }
                 let val = iter
                     .next()
                     .ok_or_else(|| format!("missing value for {} <ADDR>", arg))?;
@@ -191,6 +222,28 @@ where
                 surface = CliSurface::Serve {
                     listen_addr: trimmed,
                 };
+                explicit_surface = Some("serve");
+            }
+            "--listen" => {
+                if let Some(prev) = explicit_surface {
+                    if prev != "serve" {
+                        return Err(format!(
+                            "--listen <ADDR> is only valid with 'serve' / '--serve' (cannot combine with '{}')",
+                            prev
+                        ));
+                    }
+                }
+                let val = iter
+                    .next()
+                    .ok_or_else(|| format!("missing value for {} <ADDR>", arg))?;
+                let trimmed = val.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(format!("empty value for {}", arg));
+                }
+                surface = CliSurface::Serve {
+                    listen_addr: trimmed,
+                };
+                explicit_surface = Some("serve");
             }
             "--auth-token" => {
                 let val = iter
@@ -398,6 +451,17 @@ where
     // transport rather than requiring `--task` on the command line.
     if surface == CliSurface::Headless && !management && !list_skills && task.is_none() {
         return Err("missing required --task <prompt>".to_string());
+    }
+    if task.is_some() && matches!(surface, CliSurface::Acp | CliSurface::Serve { .. }) {
+        return Err(
+            "--task / --prompt cannot be combined with 'acp' or 'serve' mode; send 'session.prompt' over JSON-RPC instead"
+                .to_string(),
+        );
+    }
+    if output_format == "jsonl" && surface != CliSurface::Headless {
+        return Err(
+            "--output-format jsonl / --jsonl is only supported in headless mode".to_string(),
+        );
     }
 
     if let CliSurface::Serve { ref listen_addr } = surface {
@@ -1203,7 +1267,13 @@ async fn main() -> ExitCode {
         let (surface_name, transport_name) = match &cli.surface {
             CliSurface::Repl => ("repl", "tty"),
             CliSurface::Acp => ("acp", "stdio"),
-            CliSurface::Serve { .. } => ("serve", "tcp"),
+            CliSurface::Serve { listen_addr } => {
+                if harness_core::surface::is_unix_listen_spec(listen_addr) {
+                    ("serve", "unix")
+                } else {
+                    ("serve", "tcp")
+                }
+            }
             CliSurface::Headless => ("headless", "stdio"),
         };
         let mut rt_cfg =
@@ -1214,6 +1284,7 @@ async fn main() -> ExitCode {
         rt_cfg.budget = budget;
         rt_cfg.stream = !cli.no_stream;
         rt_cfg.strict_log = cli.strict_log;
+        rt_cfg.quiet = cli.quiet;
         rt_cfg.tool_filter = cli.tool_filter.clone();
         rt_cfg.resume_session_path = cli.resume.clone();
         rt_cfg.fork_turn = cli.fork_turn;
@@ -1278,7 +1349,8 @@ async fn main() -> ExitCode {
                 let repl = InteractiveRepl::new(dispatcher);
                 let stdin = tokio::io::BufReader::new(tokio::io::stdin());
                 let stdout = tokio::io::stdout();
-                repl.run_io(stdin, stdout).await
+                repl.run_io_with_initial_prompt(stdin, stdout, cli.task.as_deref())
+                    .await
             }
             CliSurface::Acp => {
                 dispatcher
@@ -1289,7 +1361,7 @@ async fn main() -> ExitCode {
                 match HarnessDaemon::bind(listen_addr, dispatcher).await {
                     Ok(daemon) => {
                         if !cli.quiet {
-                            eprintln!("[harness] daemon listening on {}", daemon.local_addr());
+                            eprintln!("[harness] daemon listening on {}", daemon.local_endpoint());
                         }
                         daemon.serve(cancel_rx).await
                     }
@@ -1366,14 +1438,6 @@ async fn main() -> ExitCode {
     if !cli.quiet {
         eprintln!("[harness] session WAL: {}", session.path().display());
     }
-
-    let gate_choice = match choose_completion_gate(&cli, std::env::var("HARNESS_VERIFY_COMMAND").ok()) {
-        Ok(choice) => choice,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            return ExitCode::from(2);
-        }
-    };
 
     let mut run_cfg = AgentRunConfig::new(cli.task.clone().unwrap_or_default(), budget.clone());
     run_cfg.stream = !cli.no_stream;
@@ -1458,8 +1522,6 @@ async fn main() -> ExitCode {
         }
     });
 
-    let max_gate_retries = std::env::var("HARNESS_GATE_MAX_RETRIES")
-        .ok().and_then(|s| s.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(3);
     let snapshot_store = Arc::new(snapshot_store_for(&state_dir));
     if !cli.quiet {
         eprintln!("[harness] workspace revisions: {}", snapshot_store.root().display());
@@ -2232,6 +2294,56 @@ mod tests {
         .unwrap();
         assert_eq!(jsonl.output_format, "jsonl");
         assert_eq!(jsonl.task.as_deref(), Some("inspect"));
+
+        // Conflicting surface flags must be rejected.
+        assert!(parse_cli_args(vec![
+            "harness".into(),
+            "repl".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--listen".into(),
+            "127.0.0.1:7878".into(),
+        ])
+        .is_err());
+
+        // --prompt with acp/serve must be rejected, while --prompt with repl is accepted as initial turn.
+        assert!(parse_cli_args(vec![
+            "harness".into(),
+            "acp".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--prompt".into(),
+            "hello".into(),
+        ])
+        .is_err());
+        let repl_with_prompt = parse_cli_args(vec![
+            "harness".into(),
+            "repl".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--prompt".into(),
+            "initial turn".into(),
+        ])
+        .unwrap();
+        assert_eq!(repl_with_prompt.surface, CliSurface::Repl);
+        assert_eq!(repl_with_prompt.task.as_deref(), Some("initial turn"));
+
+        // Unix domain socket --listen is accepted without requiring --auth-token.
+        let serve_unix = parse_cli_args(vec![
+            "harness".into(),
+            "serve".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--listen".into(),
+            "unix:///tmp/harness-test.sock".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            serve_unix.surface,
+            CliSurface::Serve {
+                listen_addr: "unix:///tmp/harness-test.sock".into()
+            }
+        );
     }
 }
 

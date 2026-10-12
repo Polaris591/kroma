@@ -2025,6 +2025,14 @@ impl AgentRunner {
                             }
                         }
                     } => {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            &mut prompt_task,
+                        )
+                        .await;
+                        for approval_ev in self.tool_runtime.policy_engine().drain_approval_events() {
+                            let _ = logger.log(approval_ev);
+                        }
                         return (
                             ToolExecutionOutput::error(
                                 ErrorCode::NotExecutedCancelled,
@@ -2035,6 +2043,9 @@ impl AgentRunner {
                         );
                     }
                 };
+                for approval_ev in self.tool_runtime.policy_engine().drain_approval_events() {
+                    let _ = logger.log(approval_ev);
+                }
                 if *self.cancel_rx.borrow() {
                     return (
                         ToolExecutionOutput::error(

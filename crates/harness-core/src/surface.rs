@@ -297,34 +297,60 @@ impl RpcApprovalBroker {
     /// Close the approval channel (e.g. on client EOF/disconnect). Any in-flight or subsequent
     /// approval request fails closed with `ApprovalDecision::Deny`.
     pub fn close(&self) {
-        let mut guard = self.inner.lock().unwrap();
-        guard.closed = true;
-        let drained: Vec<(String, PendingApprovalSlot)> =
-            std::mem::take(&mut guard.pending).into_iter().collect();
-        for (req_id, slot) in drained {
-            let _ = slot
-                .tx
-                .send((ApprovalDecision::Deny, "deny_disconnect".to_string()));
-            guard.recorded_events.push(EventPayload::ApprovalResolved {
-                request_id: req_id,
-                decision: "deny_disconnect".to_string(),
-            });
+        let mut resolved_ids = Vec::new();
+        {
+            let mut guard = self.inner.lock().unwrap();
+            guard.closed = true;
+            let drained: Vec<(String, PendingApprovalSlot)> =
+                std::mem::take(&mut guard.pending).into_iter().collect();
+            for (req_id, slot) in drained {
+                let _ = slot
+                    .tx
+                    .send((ApprovalDecision::Deny, "deny_disconnect".to_string()));
+                guard.recorded_events.push(EventPayload::ApprovalResolved {
+                    request_id: req_id.clone(),
+                    decision: "deny_disconnect".to_string(),
+                });
+                resolved_ids.push(req_id);
+            }
+        }
+        for req_id in resolved_ids {
+            self.emit_notification(JsonRpcNotification::new(
+                "approval/resolved",
+                json!({
+                    "request_id": req_id,
+                    "decision": "deny_disconnect",
+                }),
+            ));
         }
     }
 
     /// Cancel all currently pending approval prompts (invoked by `session.cancel`).
     pub fn cancel_all_pending(&self) {
-        let mut guard = self.inner.lock().unwrap();
-        let drained: Vec<(String, PendingApprovalSlot)> =
-            std::mem::take(&mut guard.pending).into_iter().collect();
-        for (req_id, slot) in drained {
-            let _ = slot
-                .tx
-                .send((ApprovalDecision::Deny, "deny_cancelled".to_string()));
-            guard.recorded_events.push(EventPayload::ApprovalResolved {
-                request_id: req_id,
-                decision: "deny_cancelled".to_string(),
-            });
+        let mut resolved_ids = Vec::new();
+        {
+            let mut guard = self.inner.lock().unwrap();
+            let drained: Vec<(String, PendingApprovalSlot)> =
+                std::mem::take(&mut guard.pending).into_iter().collect();
+            for (req_id, slot) in drained {
+                let _ = slot
+                    .tx
+                    .send((ApprovalDecision::Deny, "deny_cancelled".to_string()));
+                guard.recorded_events.push(EventPayload::ApprovalResolved {
+                    request_id: req_id.clone(),
+                    decision: "deny_cancelled".to_string(),
+                });
+                resolved_ids.push(req_id);
+            }
+        }
+        for req_id in resolved_ids {
+            self.emit_notification(JsonRpcNotification::new(
+                "approval/resolved",
+                json!({
+                    "request_id": req_id,
+                    "decision": "deny_cancelled",
+                }),
+            ));
         }
     }
 
@@ -373,6 +399,10 @@ impl RpcApprovalBroker {
                     target_id
                 ));
             };
+            guard.recorded_events.push(EventPayload::ApprovalResolved {
+                request_id: target_id.clone(),
+                decision: canonical.clone(),
+            });
             let _ = slot.tx.send((decision, canonical.clone()));
             target_id
         };
@@ -487,50 +517,74 @@ impl ApprovalHandler for RpcApprovalBroker {
 
         let deadline = Instant::now() + timeout;
         let poll_slice = Duration::from_millis(20);
-        loop {
+        let wait_for_decision = || loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                let mut guard = self.inner.lock().unwrap();
-                guard.pending.remove(&request_id);
-                guard.recorded_events.push(EventPayload::ApprovalResolved {
-                    request_id: request_id.clone(),
-                    decision: "deny_timeout".to_string(),
-                });
+                let removed = {
+                    let mut guard = self.inner.lock().unwrap();
+                    let was_pending = guard.pending.remove(&request_id).is_some();
+                    if was_pending {
+                        guard.recorded_events.push(EventPayload::ApprovalResolved {
+                            request_id: request_id.clone(),
+                            decision: "deny_timeout".to_string(),
+                        });
+                    }
+                    was_pending
+                };
+                if removed {
+                    self.emit_notification(JsonRpcNotification::new(
+                        "approval/resolved",
+                        json!({
+                            "request_id": request_id,
+                            "decision": "deny_timeout",
+                        }),
+                    ));
+                }
                 return ApprovalDecision::Deny;
             }
             let wait_for = remaining.min(poll_slice);
             match rx.recv_timeout(wait_for) {
                 Ok((decision, canonical)) => {
                     let mut guard = self.inner.lock().unwrap();
-                    guard.pending.remove(&request_id);
-                    guard.recorded_events.push(EventPayload::ApprovalResolved {
-                        request_id,
-                        decision: canonical,
-                    });
+                    if guard.pending.remove(&request_id).is_some() {
+                        guard.recorded_events.push(EventPayload::ApprovalResolved {
+                            request_id,
+                            decision: canonical,
+                        });
+                    }
                     return decision;
                 }
                 Err(std_mpsc::RecvTimeoutError::Disconnected) => {
                     let mut guard = self.inner.lock().unwrap();
-                    guard.pending.remove(&request_id);
-                    guard.recorded_events.push(EventPayload::ApprovalResolved {
-                        request_id,
-                        decision: "deny_disconnect".to_string(),
-                    });
+                    if guard.pending.remove(&request_id).is_some() {
+                        guard.recorded_events.push(EventPayload::ApprovalResolved {
+                            request_id,
+                            decision: "deny_disconnect".to_string(),
+                        });
+                    }
                     return ApprovalDecision::Deny;
                 }
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {
                     let closed = self.inner.lock().unwrap().closed;
                     if closed {
                         let mut guard = self.inner.lock().unwrap();
-                        guard.pending.remove(&request_id);
-                        guard.recorded_events.push(EventPayload::ApprovalResolved {
-                            request_id,
-                            decision: "deny_disconnect".to_string(),
-                        });
+                        if guard.pending.remove(&request_id).is_some() {
+                            guard.recorded_events.push(EventPayload::ApprovalResolved {
+                                request_id,
+                                decision: "deny_disconnect".to_string(),
+                            });
+                        }
                         return ApprovalDecision::Deny;
                     }
                 }
             }
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(wait_for_decision)
+            }
+            _ => wait_for_decision(),
         }
     }
 
@@ -563,6 +617,7 @@ pub struct HarnessRuntimeConfig {
     pub transport_name: String,
     pub auth_token: Option<String>,
     pub approval_timeout: Duration,
+    pub quiet: bool,
 }
 
 impl HarnessRuntimeConfig {
@@ -593,6 +648,7 @@ impl HarnessRuntimeConfig {
             transport_name: "stdio".to_string(),
             auth_token: None,
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+            quiet: false,
         }
     }
 
@@ -603,7 +659,9 @@ impl HarnessRuntimeConfig {
     }
 
     pub fn with_auth_token(mut self, token: Option<String>) -> Self {
-        self.auth_token = token;
+        self.auth_token = token
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
         self
     }
 
@@ -647,12 +705,23 @@ struct RuntimeEngineInner {
     workspace_skills: Vec<SkillEntry>,
     mounted_extensions: Vec<ExtensionId>,
     status: Mutex<SessionStatusSnapshot>,
-    active_cancel_tx: Mutex<Option<watch::Sender<bool>>>,
+    active_cancel: Mutex<Option<(watch::Sender<bool>, watch::Receiver<bool>)>>,
     in_flight: AtomicBool,
     shutting_down: AtomicBool,
     next_subscriber_id: std::sync::atomic::AtomicU64,
     subscribers: Mutex<Vec<(u64, SubscriberCallback)>>,
     op_lock: AsyncMutex<()>,
+}
+
+struct InFlightPromptGuard {
+    inner: Arc<RuntimeEngineInner>,
+}
+
+impl Drop for InFlightPromptGuard {
+    fn drop(&mut self) {
+        self.inner.in_flight.store(false, Ordering::SeqCst);
+        *self.inner.active_cancel.lock().unwrap() = None;
+    }
 }
 
 /// Unified multi-surface runtime engine and JSON-RPC 2.0 dispatcher.
@@ -669,6 +738,11 @@ impl RpcDispatcher {
         mut config: HarnessRuntimeConfig,
         provider: Arc<dyn ModelProvider>,
     ) -> Result<Self, String> {
+        config.auth_token = config
+            .auth_token
+            .take()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
         let env = Arc::new(
             LocalHostEnv::new(&config.workspace_root, config.state_dir.clone())
                 .map_err(|e| format!("failed to initialize workspace capability: {}", e))?,
@@ -740,7 +814,7 @@ impl RpcDispatcher {
             workspace_skills,
             mounted_extensions,
             status: Mutex::new(initial_snapshot),
-            active_cancel_tx: Mutex::new(None),
+            active_cancel: Mutex::new(None),
             in_flight: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             next_subscriber_id: std::sync::atomic::AtomicU64::new(1),
@@ -1000,24 +1074,71 @@ impl RpcDispatcher {
         }))
     }
 
+    fn ensure_active_cancel_receiver(&self) -> watch::Receiver<bool> {
+        let mut guard = self.inner.active_cancel.lock().unwrap();
+        if let Some((_, ref rx)) = *guard {
+            return rx.clone();
+        }
+        let (tx, rx) = watch::channel(false);
+        *guard = Some((tx, rx.clone()));
+        rx
+    }
+
     async fn rpc_session_new(&self, params: &Value) -> Result<Value, JsonRpcError> {
-        let _guard = self.inner.op_lock.lock().await;
+        if self.inner.in_flight.load(Ordering::SeqCst) {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot start a new session while a prompt is in flight; cancel or await completion first",
+            ));
+        }
+        let Ok(_guard) = self.inner.op_lock.try_lock() else {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot start a new session while another session operation is in progress",
+            ));
+        };
+        let sessions_dir = self.inner.config.state_dir.join("sessions");
         let journal = if let Some(resume_str) = params.get("resume").and_then(Value::as_str) {
-            let path = PathBuf::from(resume_str);
-            let mut j = SessionJournal::open(&path).map_err(|e| {
+            let raw_path = PathBuf::from(resume_str);
+            let canon_sessions = sessions_dir
+                .canonicalize()
+                .unwrap_or_else(|_| sessions_dir.clone());
+            let canon_target = raw_path.canonicalize().map_err(|e| {
                 JsonRpcError::new(
                     JSONRPC_INVALID_PARAMS,
-                    format!("failed to open session WAL {}: {}", path.display(), e),
+                    format!("failed to resolve session WAL {}: {}", raw_path.display(), e),
                 )
             })?;
+            if !canon_target.starts_with(&canon_sessions) {
+                return Err(JsonRpcError::new(
+                    JSONRPC_INVALID_PARAMS,
+                    format!(
+                        "session WAL {} is outside the session store {}",
+                        raw_path.display(),
+                        sessions_dir.display()
+                    ),
+                ));
+            }
+            let mut j = SessionJournal::open(&canon_target).map_err(|e| {
+                JsonRpcError::new(
+                    JSONRPC_INVALID_PARAMS,
+                    format!("failed to open session WAL {}: {}", raw_path.display(), e),
+                )
+            })?;
+            if j.workspace_root() != self.inner.env.workspace().root() {
+                return Err(JsonRpcError::new(
+                    JSONRPC_INVALID_PARAMS,
+                    format!(
+                        "session WAL belongs to workspace {}, not {}",
+                        j.workspace_root().display(),
+                        self.inner.env.workspace().root().display()
+                    ),
+                ));
+            }
             let _ = self.inner.snapshot_store.reconcile_with_wal(&mut j);
             j
         } else {
-            SessionJournal::create(
-                self.inner.config.state_dir.join("sessions"),
-                self.inner.env.workspace().root(),
-            )
-            .map_err(|e| {
+            SessionJournal::create(sessions_dir, self.inner.env.workspace().root()).map_err(|e| {
                 JsonRpcError::new(
                     JSONRPC_INTERNAL_ERROR,
                     format!("failed to create session WAL: {}", e),
@@ -1056,7 +1177,30 @@ impl RpcDispatcher {
             })?
             .to_string();
 
-        let _guard = self.inner.op_lock.lock().await;
+        if self.inner.shutting_down.load(Ordering::SeqCst) {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "runtime is shutting down",
+            ));
+        }
+
+        let Ok(_guard) = self.inner.op_lock.try_lock() else {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "a session prompt or mutation is already in flight",
+            ));
+        };
+        if self.inner.in_flight.swap(true, Ordering::SeqCst) {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "a session prompt is already in flight",
+            ));
+        }
+        let _in_flight_guard = InFlightPromptGuard {
+            inner: Arc::clone(&self.inner),
+        };
+        let cancel_rx = self.ensure_active_cancel_receiver();
+
         let session_path = self.session_path();
         let mut journal = SessionJournal::open(&session_path).map_err(|e| {
             JsonRpcError::new(
@@ -1124,10 +1268,6 @@ impl RpcDispatcher {
         )
         .with_predictive_check(self.inner.config.predictive_check);
 
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        *self.inner.active_cancel_tx.lock().unwrap() = Some(cancel_tx);
-        self.inner.in_flight.store(true, Ordering::SeqCst);
-
         let mut runner = AgentRunner::new(
             run_cfg,
             Arc::clone(&self.inner.provider),
@@ -1152,8 +1292,7 @@ impl RpcDispatcher {
 
         let (summary, _logger) = runner.run(logger).await;
 
-        self.inner.in_flight.store(false, Ordering::SeqCst);
-        *self.inner.active_cancel_tx.lock().unwrap() = None;
+        drop(_in_flight_guard);
 
         if let Ok(reopened) = SessionJournal::open(&session_path) {
             self.update_snapshot_from_journal(&reopened);
@@ -1226,8 +1365,8 @@ impl RpcDispatcher {
 
     async fn rpc_session_cancel(&self) -> Result<Value, JsonRpcError> {
         let had_active = {
-            let guard = self.inner.active_cancel_tx.lock().unwrap();
-            if let Some(ref tx) = *guard {
+            let guard = self.inner.active_cancel.lock().unwrap();
+            if let Some((ref tx, _)) = *guard {
                 let _ = tx.send(true);
                 true
             } else {
@@ -1287,7 +1426,18 @@ impl RpcDispatcher {
                 )
             })? as usize;
 
-        let _guard = self.inner.op_lock.lock().await;
+        if self.inner.in_flight.load(Ordering::SeqCst) {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot fork session while a prompt is in flight; cancel or await completion first",
+            ));
+        }
+        let Ok(_guard) = self.inner.op_lock.try_lock() else {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot fork session while another session operation is in progress",
+            ));
+        };
         let path = self.session_path();
         let mut journal = SessionJournal::open(&path).map_err(|e| {
             JsonRpcError::new(
@@ -1361,7 +1511,18 @@ impl RpcDispatcher {
             .get("force")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let _guard = self.inner.op_lock.lock().await;
+        if self.inner.in_flight.load(Ordering::SeqCst) {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot undo workspace revision while a prompt is in flight; cancel or await completion first",
+            ));
+        }
+        let Ok(_guard) = self.inner.op_lock.try_lock() else {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot undo workspace revision while another session operation is in progress",
+            ));
+        };
         let path = self.session_path();
         let mut journal = SessionJournal::open(&path).map_err(|e| {
             JsonRpcError::new(
@@ -1424,7 +1585,18 @@ impl RpcDispatcher {
         let target = RevisionId::parse(raw_rev)
             .map_err(|e| JsonRpcError::new(JSONRPC_INVALID_PARAMS, e.to_string()))?;
 
-        let _guard = self.inner.op_lock.lock().await;
+        if self.inner.in_flight.load(Ordering::SeqCst) {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot restore workspace revision while a prompt is in flight; cancel or await completion first",
+            ));
+        }
+        let Ok(_guard) = self.inner.op_lock.try_lock() else {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot restore workspace revision while another session operation is in progress",
+            ));
+        };
         let path = self.session_path();
         let mut journal = SessionJournal::open(&path).map_err(|e| {
             JsonRpcError::new(
@@ -1624,7 +1796,6 @@ impl RpcDispatcher {
     }
 
     async fn rpc_evidence_recall(&self, params: &Value) -> Result<Value, JsonRpcError> {
-        let _guard = self.inner.op_lock.lock().await;
         let path = self.session_path();
         let journal = SessionJournal::open(&path).map_err(|e| {
             JsonRpcError::new(
@@ -1801,33 +1972,20 @@ impl RpcDispatcher {
     }
 
     /// Serve newline-delimited JSON-RPC 2.0 over a bidirectional async stream (`harness acp` stdio
-    /// or `harness serve` TCP connection).
+    /// or `harness serve` TCP/Unix connection).
     ///
     /// Long-running `session.prompt` / `session.start` / `acp.prompt` requests are spawned onto a
     /// background task so the stream loop continues processing incoming `approval.pending`,
     /// `approval.respond`, `session.cancel`, and `session.status` frames while a prompt is in
-    /// flight. If the client stream reaches EOF while an approval is pending, the approval broker
-    /// immediately closes and fails closed (`ApprovalDecision::Deny`).
+    /// flight. If an authenticated client stream exits (EOF, frame error, or HTTP/CSRF abort) while
+    /// an approval is pending or a prompt is in flight, the approval broker immediately closes and
+    /// fails closed (`ApprovalDecision::Deny`) and any active run is cancelled.
     pub async fn serve_stream<R, W>(&self, reader: R, mut writer: W) -> Result<(), String>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        self.inner.approval_broker.reopen();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
-
-        let out_tx_notes = out_tx.clone();
-        let sub_id = self.inner.next_subscriber_id.fetch_add(1, Ordering::SeqCst);
-        self.inner.subscribers.lock().unwrap().push((
-            sub_id,
-            Arc::new(move |note| {
-                if let Ok(serialized) = serde_json::to_string(note) {
-                    out_tx_notes.send(serialized).is_ok()
-                } else {
-                    true
-                }
-            }),
-        ));
 
         let writer_task = tokio::spawn(async move {
             while let Some(line) = out_rx.recv().await {
@@ -1845,15 +2003,40 @@ impl RpcDispatcher {
 
         let mut buf_reader = BufReader::new(reader);
         let mut connection_authenticated = self.inner.config.auth_token.is_none();
+        let mut sub_id: Option<u64> = None;
         let mut in_flight_prompts = Vec::new();
+
+        let activate_authenticated_stream = |sub_id_slot: &mut Option<u64>| {
+            if sub_id_slot.is_none() {
+                self.inner.approval_broker.reopen();
+                let out_tx_notes = out_tx.clone();
+                let id = self
+                    .inner
+                    .next_subscriber_id
+                    .fetch_add(1, Ordering::SeqCst);
+                self.inner.subscribers.lock().unwrap().push((
+                    id,
+                    Arc::new(move |note| {
+                        if let Ok(serialized) = serde_json::to_string(note) {
+                            out_tx_notes.send(serialized).is_ok()
+                        } else {
+                            true
+                        }
+                    }),
+                ));
+                *sub_id_slot = Some(id);
+            }
+        };
+
+        if connection_authenticated {
+            activate_authenticated_stream(&mut sub_id);
+        }
 
         loop {
             let line_opt = read_bounded_jsonrpc_line(&mut buf_reader, MAX_RPC_FRAME_BYTES).await;
             let line = match line_opt {
                 Ok(Some(l)) => l,
                 Ok(None) => {
-                    // Client disconnected (EOF): fail-closed any pending approval immediately!
-                    self.inner.approval_broker.close();
                     break;
                 }
                 Err(frame_err) => {
@@ -1912,6 +2095,7 @@ impl RpcDispatcher {
                     .unwrap_or("");
                 if constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
                     connection_authenticated = true;
+                    activate_authenticated_stream(&mut sub_id);
                 } else {
                     let resp = JsonRpcResponse::error(
                         req.id.unwrap_or(Value::Null),
@@ -1934,6 +2118,9 @@ impl RpcDispatcher {
             );
 
             if is_async_prompt {
+                if !self.inner.in_flight.load(Ordering::SeqCst) {
+                    let _ = self.ensure_active_cancel_receiver();
+                }
                 let dispatcher = self.clone();
                 let out_tx_prompt = out_tx.clone();
                 let handle = tokio::spawn(async move {
@@ -1954,14 +2141,20 @@ impl RpcDispatcher {
             }
         }
 
+        if connection_authenticated {
+            self.inner.approval_broker.close();
+            let _ = self.rpc_session_cancel().await;
+        }
         for handle in in_flight_prompts {
             let _ = handle.await;
         }
-        self.inner
-            .subscribers
-            .lock()
-            .unwrap()
-            .retain(|(id, _)| *id != sub_id);
+        if let Some(id) = sub_id {
+            self.inner
+                .subscribers
+                .lock()
+                .unwrap()
+                .retain(|(existing_id, _)| *existing_id != id);
+        }
         drop(out_tx);
         let _ = writer_task.await;
         Ok(())
@@ -1984,11 +2177,13 @@ fn looks_like_http_request(trimmed: &str) -> bool {
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
+    if a.is_empty() || b.is_empty() {
         return false;
     }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
+    let ha = sha256_hex64(a);
+    let hb = sha256_hex64(b);
+    let mut diff = if a.len() == b.len() { 0u8 } else { 1u8 };
+    for (&x, &y) in ha.as_bytes().iter().zip(hb.as_bytes().iter()) {
         diff |= x ^ y;
     }
     diff == 0
@@ -2041,18 +2236,50 @@ async fn read_bounded_jsonrpc_line<R: AsyncBufRead + Unpin>(
     }
 }
 
-/// Validate a `harness serve` TCP listen address against the Gate 6 security policy.
+/// Validated listen endpoint for `harness serve` (loopback/token-guarded TCP or local `0600` Unix
+/// domain socket).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonListenEndpoint {
+    Tcp(SocketAddr),
+    Unix(PathBuf),
+}
+
+pub fn is_unix_listen_spec(listen_addr: &str) -> bool {
+    let trimmed = listen_addr.trim();
+    trimmed.starts_with("unix://")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("./")
+        || trimmed.ends_with(".sock")
+}
+
+/// Validate a `harness serve` listen endpoint (`127.0.0.1:<PORT>`, `unix:///path/to/sock`, or
+/// `/path/to/harness.sock`) against the Gate 6 security policy.
 ///
-/// Non-loopback bind addresses (`0.0.0.0`, LAN IPs, `[::]`) are strictly rejected unless a
+/// Non-loopback TCP bind addresses (`0.0.0.0`, LAN IPs, `[::]`) are strictly rejected unless a
 /// non-empty `--auth-token` is configured.
-pub fn validate_daemon_listen_addr(
+pub fn validate_daemon_listen_endpoint(
     listen_addr: &str,
     auth_token: Option<&str>,
-) -> Result<SocketAddr, String> {
+) -> Result<DaemonListenEndpoint, String> {
     let trimmed = listen_addr.trim();
     if trimmed.is_empty() {
         return Err("empty listen address for harness serve".to_string());
     }
+    if is_unix_listen_spec(trimmed) {
+        #[cfg(not(unix))]
+        {
+            return Err("Unix domain sockets are only supported on Unix platforms".to_string());
+        }
+        #[cfg(unix)]
+        {
+            let raw_path = trimmed.strip_prefix("unix://").unwrap_or(trimmed).trim();
+            if raw_path.is_empty() || raw_path.ends_with('/') {
+                return Err(format!("invalid Unix domain socket path '{}'", listen_addr));
+            }
+            return Ok(DaemonListenEndpoint::Unix(PathBuf::from(raw_path)));
+        }
+    }
+
     let normalized = if let Some(port_str) = trimmed.strip_prefix("localhost:") {
         format!("127.0.0.1:{}", port_str)
     } else {
@@ -2086,80 +2313,231 @@ pub fn validate_daemon_listen_addr(
         ));
     }
 
-    Ok(addr)
+    Ok(DaemonListenEndpoint::Tcp(addr))
 }
 
-/// Local TCP JSON-RPC 2.0 daemon (`harness serve`).
+/// Validate a `harness serve` listen address against the Gate 6 security policy.
+pub fn validate_daemon_listen_addr(
+    listen_addr: &str,
+    auth_token: Option<&str>,
+) -> Result<SocketAddr, String> {
+    match validate_daemon_listen_endpoint(listen_addr, auth_token)? {
+        DaemonListenEndpoint::Tcp(addr) => Ok(addr),
+        DaemonListenEndpoint::Unix(_) => Ok(SocketAddr::from(([127, 0, 0, 1], 0))),
+    }
+}
+
+enum DaemonListenerKind {
+    Tcp(TcpListener),
+    #[cfg(unix)]
+    Unix {
+        listener: tokio::net::UnixListener,
+        path: PathBuf,
+    },
+}
+
+/// Local TCP or Unix Domain Socket JSON-RPC 2.0 daemon (`harness serve`).
 pub struct HarnessDaemon {
-    listener: TcpListener,
+    listener: DaemonListenerKind,
     local_addr: SocketAddr,
+    unix_path: Option<PathBuf>,
     dispatcher: RpcDispatcher,
 }
 
 impl HarnessDaemon {
-    /// Validate security policy and bind the TCP listener.
+    /// Validate security policy and bind the TCP or Unix domain socket listener.
     pub async fn bind(listen_addr: &str, dispatcher: RpcDispatcher) -> Result<Self, String> {
-        let addr = validate_daemon_listen_addr(listen_addr, dispatcher.auth_token())?;
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("failed to bind TCP listener on {}: {}", addr, e))?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| format!("failed to query local address: {}", e))?;
-        Ok(Self {
-            listener,
-            local_addr,
-            dispatcher,
-        })
+        match validate_daemon_listen_endpoint(listen_addr, dispatcher.auth_token())? {
+            DaemonListenEndpoint::Tcp(addr) => {
+                let listener = TcpListener::bind(addr)
+                    .await
+                    .map_err(|e| format!("failed to bind TCP listener on {}: {}", addr, e))?;
+                let local_addr = listener
+                    .local_addr()
+                    .map_err(|e| format!("failed to query local address: {}", e))?;
+                Ok(Self {
+                    listener: DaemonListenerKind::Tcp(listener),
+                    local_addr,
+                    unix_path: None,
+                    dispatcher,
+                })
+            }
+            DaemonListenEndpoint::Unix(path) => {
+                #[cfg(not(unix))]
+                {
+                    let _ = path;
+                    Err("Unix domain sockets are only supported on Unix platforms".to_string())
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Some(parent) = path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                format!(
+                                    "failed to create parent directory for Unix socket {}: {}",
+                                    path.display(),
+                                    e
+                                )
+                            })?;
+                        }
+                    }
+                    if path.exists() {
+                        let meta = std::fs::symlink_metadata(&path).map_err(|e| {
+                            format!("failed to inspect existing path {}: {}", path.display(), e)
+                        })?;
+                        if meta.is_dir() {
+                            return Err(format!(
+                                "Unix socket path {} is a directory",
+                                path.display()
+                            ));
+                        }
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    let listener = tokio::net::UnixListener::bind(&path).map_err(|e| {
+                        format!(
+                            "failed to bind Unix domain socket on {}: {}",
+                            path.display(),
+                            e
+                        )
+                    })?;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .map_err(|e| {
+                            format!(
+                                "failed to set 0600 permissions on Unix socket {}: {}",
+                                path.display(),
+                                e
+                            )
+                        })?;
+                    Ok(Self {
+                        listener: DaemonListenerKind::Unix {
+                            listener,
+                            path: path.clone(),
+                        },
+                        local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                        unix_path: Some(path),
+                        dispatcher,
+                    })
+                }
+            }
+        }
     }
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
+    pub fn unix_socket_path(&self) -> Option<&Path> {
+        self.unix_path.as_deref()
+    }
+
+    pub fn local_endpoint(&self) -> String {
+        if let Some(ref p) = self.unix_path {
+            format!("unix://{}", p.display())
+        } else {
+            self.local_addr.to_string()
+        }
+    }
+
     pub fn dispatcher(&self) -> &RpcDispatcher {
         &self.dispatcher
     }
 
-    /// Accept and serve JSON-RPC 2.0 TCP connections until `cancel_rx` fires or `shutdown` RPC is
-    /// invoked.
+    /// Accept and serve JSON-RPC 2.0 connections (TCP or Unix domain socket) until `cancel_rx`
+    /// fires or `shutdown` RPC is invoked.
     pub async fn serve(self, mut cancel_rx: watch::Receiver<bool>) -> Result<(), String> {
         let conn_semaphore = Arc::new(Semaphore::new(MAX_DAEMON_CONNECTIONS));
-        loop {
-            if *cancel_rx.borrow() || self.dispatcher.is_shutting_down() {
-                break;
-            }
-            tokio::select! {
-                accept_res = self.listener.accept() => {
-                    match accept_res {
-                        Ok((stream, _peer)) => {
-                            let Ok(permit) = conn_semaphore.clone().try_acquire_owned() else {
-                                drop(stream);
-                                continue;
-                            };
-                            let dispatcher = self.dispatcher.clone();
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                let _ = Self::handle_tcp_stream(dispatcher, stream).await;
-                            });
-                        }
-                        Err(e) => {
-                            return Err(format!("TCP accept error: {}", e));
-                        }
-                    }
-                }
-                _ = async {
-                    loop {
-                        if *cancel_rx.borrow() {
-                            break;
-                        }
-                        if cancel_rx.changed().await.is_err() {
-                            std::future::pending::<()>().await;
-                        }
-                    }
-                } => {
+        let Self {
+            listener,
+            dispatcher,
+            ..
+        } = self;
+
+        match listener {
+            DaemonListenerKind::Tcp(tcp_listener) => loop {
+                if *cancel_rx.borrow() || dispatcher.is_shutting_down() {
                     break;
                 }
+                tokio::select! {
+                    accept_res = tcp_listener.accept() => {
+                        match accept_res {
+                            Ok((stream, _peer)) => {
+                                let Ok(permit) = conn_semaphore.clone().try_acquire_owned() else {
+                                    drop(stream);
+                                    continue;
+                                };
+                                let disp = dispatcher.clone();
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    let _ = Self::handle_tcp_stream(disp, stream).await;
+                                });
+                            }
+                            Err(e) => {
+                                return Err(format!("TCP accept error: {}", e));
+                            }
+                        }
+                    }
+                    _ = async {
+                        loop {
+                            if *cancel_rx.borrow() {
+                                break;
+                            }
+                            if cancel_rx.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    } => {
+                        break;
+                    }
+                }
+            },
+            #[cfg(unix)]
+            DaemonListenerKind::Unix {
+                listener: unix_listener,
+                path,
+            } => {
+                let mut res = Ok(());
+                loop {
+                    if *cancel_rx.borrow() || dispatcher.is_shutting_down() {
+                        break;
+                    }
+                    tokio::select! {
+                        accept_res = unix_listener.accept() => {
+                            match accept_res {
+                                Ok((stream, _peer)) => {
+                                    let Ok(permit) = conn_semaphore.clone().try_acquire_owned() else {
+                                        drop(stream);
+                                        continue;
+                                    };
+                                    let disp = dispatcher.clone();
+                                    tokio::spawn(async move {
+                                        let _permit = permit;
+                                        let (r, w) = stream.into_split();
+                                        let _ = disp.serve_stream(r, w).await;
+                                    });
+                                }
+                                Err(e) => {
+                                    res = Err(format!("Unix socket accept error: {}", e));
+                                    break;
+                                }
+                            }
+                        }
+                        _ = async {
+                            loop {
+                                if *cancel_rx.borrow() {
+                                    break;
+                                }
+                                if cancel_rx.changed().await.is_err() {
+                                    std::future::pending::<()>().await;
+                                }
+                            }
+                        } => {
+                            break;
+                        }
+                    }
+                }
+                let _ = std::fs::remove_file(&path);
+                return res;
             }
         }
         Ok(())
@@ -2686,7 +3064,22 @@ impl InteractiveRepl {
     }
 
     /// Drive the interactive REPL loop over arbitrary async buffered reader and writer streams.
-    pub async fn run_io<R, W>(&self, mut reader: R, mut writer: W) -> Result<(), String>
+    pub async fn run_io<R, W>(&self, reader: R, writer: W) -> Result<(), String>
+    where
+        R: AsyncBufRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        self.run_io_with_initial_prompt(reader, writer, None).await
+    }
+
+    /// Drive the interactive REPL loop, optionally executing an initial `--prompt`/`--task` as Turn
+    /// 1 before entering the interactive input loop.
+    pub async fn run_io_with_initial_prompt<R, W>(
+        &self,
+        mut reader: R,
+        mut writer: W,
+        initial_prompt: Option<&str>,
+    ) -> Result<(), String>
     where
         R: AsyncBufRead + Unpin,
         W: AsyncWrite + Unpin,
@@ -2697,6 +3090,20 @@ impl InteractiveRepl {
             .await
             .map_err(|e| e.to_string())?;
         writer.flush().await.map_err(|e| e.to_string())?;
+
+        if let Some(prompt) = initial_prompt.map(str::trim).filter(|s| !s.is_empty()) {
+            let step = self.handle_line(prompt).await?;
+            if !step.output.is_empty() {
+                writer
+                    .write_all(step.output.as_bytes())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                writer.flush().await.map_err(|e| e.to_string())?;
+            }
+            if step.should_exit {
+                return Ok(());
+            }
+        }
 
         loop {
             writer

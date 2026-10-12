@@ -1,6 +1,8 @@
+use harness_core::events::EventPayload;
 use harness_core::tool::policy::{ApprovalDecision, ApprovalHandler, ApprovalRequest};
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// F-06: set by the CLI's Ctrl-C handler so an in-flight approval prompt stops waiting for input
 /// and denies instead of blocking the runtime until the user happens to press a key.
@@ -37,6 +39,8 @@ pub fn sanitize_terminal_text(s: &str) -> String {
 
 pub struct TtyApprovalUi {
     interactive_tty: bool,
+    next_seq: AtomicUsize,
+    recorded_events: Mutex<Vec<EventPayload>>,
 }
 
 impl Default for TtyApprovalUi {
@@ -52,11 +56,43 @@ impl TtyApprovalUi {
         let interactive_tty = unsafe {
             libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDERR_FILENO) == 1
         };
-        Self { interactive_tty }
+        Self {
+            interactive_tty,
+            next_seq: AtomicUsize::new(1),
+            recorded_events: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn with_tty_override(interactive_tty: bool) -> Self {
-        Self { interactive_tty }
+        Self {
+            interactive_tty,
+            next_seq: AtomicUsize::new(1),
+            recorded_events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record_requested(&self, tool_name: &str) -> String {
+        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        let req_id = format!("tty-apr-{:04}", seq);
+        self.recorded_events
+            .lock()
+            .unwrap()
+            .push(EventPayload::ApprovalRequested {
+                request_id: req_id.clone(),
+                tool_name: tool_name.to_string(),
+                surface: "headless".to_string(),
+            });
+        req_id
+    }
+
+    fn record_resolved(&self, req_id: String, decision: &str) {
+        self.recorded_events
+            .lock()
+            .unwrap()
+            .push(EventPayload::ApprovalResolved {
+                request_id: req_id,
+                decision: decision.to_string(),
+            });
     }
 
     pub fn format_prompt_banner(req: &ApprovalRequest) -> String {
@@ -110,13 +146,16 @@ impl ApprovalHandler for TtyApprovalUi {
         if !self.interactive_tty {
             return ApprovalDecision::Deny;
         }
+        let req_id = self.record_requested(&req.tool_name);
         if APPROVAL_CANCELLED.load(Ordering::SeqCst) {
+            self.record_resolved(req_id, "deny_cancelled");
             return ApprovalDecision::Deny;
         }
 
         let banner = Self::format_prompt_banner(req);
         let mut stderr = io::stderr();
         if stderr.write_all(banner.as_bytes()).is_err() || stderr.flush().is_err() {
+            self.record_resolved(req_id, "deny_io_error");
             return ApprovalDecision::Deny;
         }
 
@@ -126,6 +165,7 @@ impl ApprovalHandler for TtyApprovalUi {
         let mut raw_bytes: Vec<u8> = Vec::with_capacity(64);
         loop {
             if APPROVAL_CANCELLED.load(Ordering::SeqCst) {
+                self.record_resolved(req_id, "deny_cancelled");
                 return ApprovalDecision::Deny;
             }
             let mut pfd = libc::pollfd {
@@ -139,6 +179,7 @@ impl ApprovalHandler for TtyApprovalUi {
                 if err.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
+                self.record_resolved(req_id, "deny_io_error");
                 return ApprovalDecision::Deny;
             }
             if rc == 0 {
@@ -151,6 +192,7 @@ impl ApprovalHandler for TtyApprovalUi {
                 if err.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
+                self.record_resolved(req_id, "deny_io_error");
                 return ApprovalDecision::Deny;
             }
             if n == 0 || b[0] == b'\n' {
@@ -164,10 +206,23 @@ impl ApprovalHandler for TtyApprovalUi {
         let line = String::from_utf8_lossy(&raw_bytes);
 
         match line.trim().to_ascii_lowercase().as_str() {
-            "y" | "yes" => ApprovalDecision::AllowOnce,
-            "a" | "all" => ApprovalDecision::AllowCategoryForRun,
-            _ => ApprovalDecision::Deny,
+            "y" | "yes" => {
+                self.record_resolved(req_id, "approve_once");
+                ApprovalDecision::AllowOnce
+            }
+            "a" | "all" => {
+                self.record_resolved(req_id, "approve_session");
+                ApprovalDecision::AllowCategoryForRun
+            }
+            _ => {
+                self.record_resolved(req_id, "deny");
+                ApprovalDecision::Deny
+            }
         }
+    }
+
+    fn drain_events(&self) -> Vec<EventPayload> {
+        std::mem::take(&mut *self.recorded_events.lock().unwrap())
     }
 }
 
@@ -230,5 +285,7 @@ mod tests {
             "a cancelled approval must not block (took {:?})",
             elapsed
         );
+        let events = ui.drain_events();
+        assert_eq!(events.len(), 2, "expected ApprovalRequested + ApprovalResolved: {:?}", events);
     }
 }

@@ -21,7 +21,8 @@ use harness_core::revision::SnapshotStore;
 use harness_core::session::SessionJournal;
 use harness_core::surface::{
     validate_daemon_listen_addr, HarnessDaemon, HarnessRuntimeConfig, InteractiveRepl,
-    JsonRpcRequest, JsonRpcResponse, RpcDispatcher, JSONRPC_UNAUTHORIZED,
+    JsonRpcRequest, JsonRpcResponse, RpcDispatcher, JSONRPC_INVALID_REQUEST, JSONRPC_PARSE_ERROR,
+    JSONRPC_UNAUTHORIZED, MAX_RPC_FRAME_BYTES,
 };
 use harness_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
 use harness_core::tool::registry::ToolRegistry;
@@ -374,9 +375,87 @@ async fn test_acp_stdio_initialize_prompt_event_stream_and_evidence_recall() {
 
     // Verify WAL latest_revision_id matches the baseline revision after undo.
     let baseline_rev = revs[0]["revision_id"].as_str().unwrap();
+    let post_edit_rev = revs[1]["revision_id"].as_str().unwrap();
     let journal = SessionJournal::open(dispatcher.session_path()).unwrap();
     assert_eq!(journal.latest_revision_id().as_deref(), Some(baseline_rev));
     drop(journal);
+
+    // 5b. `revision.restore` (restore back to the post-edit revision, then undo again)
+    send_rpc(
+        &mut client_write,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 51,
+            "method": "revision.restore",
+            "params": { "revision_id": post_edit_rev }
+        }),
+    )
+    .await;
+    let restore_resp = read_until_response(&mut client_lines, 51, &mut notifications).await;
+    assert!(
+        restore_resp.is_ok(),
+        "revision.restore failed: {:?}",
+        restore_resp.error
+    );
+    assert_eq!(
+        fs::read_to_string(ws.join("app.rs")).unwrap(),
+        "pub fn version() -> u32 {\n    2\n}\n"
+    );
+
+    // 5c. `skills.list`, `session.new`, `session.start`, `acp.prompt`
+    send_rpc(
+        &mut client_write,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 52,
+            "method": "skills.list",
+            "params": {}
+        }),
+    )
+    .await;
+    let skills_resp = read_until_response(&mut client_lines, 52, &mut notifications).await;
+    assert!(skills_resp.is_ok());
+
+    send_rpc(
+        &mut client_write,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 53,
+            "method": "session.new",
+            "params": {}
+        }),
+    )
+    .await;
+    let new_resp = read_until_response(&mut client_lines, 53, &mut notifications).await;
+    assert!(new_resp.is_ok());
+
+    send_rpc(
+        &mut client_write,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 54,
+            "method": "session.start",
+            "params": { "prompt": "Start turn via session.start" }
+        }),
+    )
+    .await;
+    let start_resp = read_until_response(&mut client_lines, 54, &mut notifications).await;
+    assert!(start_resp.is_ok());
+    assert_eq!(start_resp.result.unwrap()["status"], "completed");
+
+    send_rpc(
+        &mut client_write,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 55,
+            "method": "acp.prompt",
+            "params": { "prompt": "Follow-up turn via acp.prompt" }
+        }),
+    )
+    .await;
+    let acp_prompt_resp = read_until_response(&mut client_lines, 55, &mut notifications).await;
+    assert!(acp_prompt_resp.is_ok());
+    assert_eq!(acp_prompt_resp.result.unwrap()["status"], "completed");
 
     // 6. `shutdown`
     send_rpc(
@@ -533,17 +612,25 @@ async fn test_rpc_approval_pause_and_resume_approve_and_deny_and_disconnect_fail
         "denied write must not create denied.txt"
     );
 
-    // --- Sub-case C: Client disconnect / channel close fails closed ---
+    // --- Sub-case C: Client stream disconnect over `serve_stream` fails closed ---
+    let (client_io_c, server_io_c) = tokio::io::duplex(64 * 1024);
+    let (server_read_c, server_write_c) = tokio::io::split(server_io_c);
+    let (client_read_c, mut client_write_c) = tokio::io::split(client_io_c);
     let disp_c = dispatcher.clone();
-    let prompt_c = tokio::spawn(async move {
+    let server_task_c = tokio::spawn(async move {
         disp_c
-            .handle_request(JsonRpcRequest::new(
-                30,
-                "session.prompt",
-                json!({ "prompt": "Create disconnected.txt" }),
-            ))
+            .serve_stream(server_read_c, server_write_c)
             .await
+            .unwrap();
     });
+
+    client_write_c
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"session.prompt\",\"params\":{\"prompt\":\"Create disconnected.txt\"}}\n",
+        )
+        .await
+        .unwrap();
+    client_write_c.flush().await.unwrap();
 
     loop {
         let note = tokio::time::timeout(Duration::from_secs(3), note_rx.recv())
@@ -555,14 +642,112 @@ async fn test_rpc_approval_pause_and_resume_approve_and_deny_and_disconnect_fail
         }
     }
 
-    // Simulate client disconnect by closing the approval broker without approving.
-    dispatcher.approval_broker().close();
+    // Drop the client DuplexStream while the approval is pending!
+    drop(client_write_c);
+    drop(client_read_c);
 
-    let res_c = prompt_c.await.unwrap();
-    assert!(res_c.is_ok());
+    tokio::time::timeout(Duration::from_secs(3), server_task_c)
+        .await
+        .expect("serve_stream did not exit promptly after client disconnect")
+        .unwrap();
     assert!(
         !ws.join("disconnected.txt").exists(),
         "disconnect during approval must fail closed and never write disconnected.txt"
+    );
+    assert!(
+        dispatcher.approval_broker().pending_requests().is_empty(),
+        "pending approvals must be cleared after client disconnect"
+    );
+
+    // --- Sub-case D: `approve_session` caches tool category for subsequent calls in same session ---
+    let step_d = Arc::new(AtomicUsize::new(0));
+    let step_d_c = Arc::clone(&step_d);
+    let provider_d = FnProvider::new(move |_req| {
+        let n = step_d_c.fetch_add(1, Ordering::SeqCst);
+        match n {
+            0 => Ok(assistant_tools(vec![(
+                "call_write_s1",
+                "write",
+                json!({ "path": "s1.txt", "content": "one\n" }),
+            )])),
+            1 => Ok(assistant_tools(vec![(
+                "call_write_s2",
+                "write",
+                json!({ "path": "s2.txt", "content": "two\n" }),
+            )])),
+            _ => Ok(assistant_stop("Both session-approved writes done.")),
+        }
+    });
+    let cfg_d = HarnessRuntimeConfig::new(&ws, state.join("session-approve"), PolicyMode::Ask)
+        .with_surface("acp", "stdio")
+        .with_approval_timeout(Duration::from_secs(5));
+    let disp_d = RpcDispatcher::new(cfg_d, provider_d).unwrap();
+    let mut note_rx_d = disp_d.subscribe_notifications();
+    let disp_d_run = disp_d.clone();
+    let prompt_d = tokio::spawn(async move {
+        disp_d_run
+            .handle_request(JsonRpcRequest::new(
+                40,
+                "session.prompt",
+                json!({ "prompt": "Write s1.txt and s2.txt" }),
+            ))
+            .await
+    });
+    let req_id_d = loop {
+        let note = tokio::time::timeout(Duration::from_secs(3), note_rx_d.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if note.method == "approval/requested" {
+            break note.params["request_id"].as_str().unwrap().to_string();
+        }
+    };
+    let resp_d_approve = disp_d
+        .handle_request(JsonRpcRequest::new(
+            41,
+            "approval.respond",
+            json!({ "request_id": req_id_d, "decision": "approve_session" }),
+        ))
+        .await;
+    assert!(resp_d_approve.is_ok());
+    // Second write (`s2.txt`) must succeed automatically without a second approval prompt!
+    let res_d = tokio::time::timeout(Duration::from_secs(3), prompt_d)
+        .await
+        .expect("second write should auto-approve under approve_session")
+        .unwrap();
+    assert!(res_d.is_ok());
+    assert_eq!(fs::read_to_string(ws.join("s1.txt")).unwrap(), "one\n");
+    assert_eq!(fs::read_to_string(ws.join("s2.txt")).unwrap(), "two\n");
+
+    // --- Sub-case E: Approval timeout fails closed ---
+    let step_e = Arc::new(AtomicUsize::new(0));
+    let step_e_c = Arc::clone(&step_e);
+    let provider_e = FnProvider::new(move |_req| {
+        let n = step_e_c.fetch_add(1, Ordering::SeqCst);
+        match n {
+            0 => Ok(assistant_tools(vec![(
+                "call_write_timeout",
+                "write",
+                json!({ "path": "timeout.txt", "content": "never\n" }),
+            )])),
+            _ => Ok(assistant_stop("Timed out write denied.")),
+        }
+    });
+    let cfg_e = HarnessRuntimeConfig::new(&ws, state.join("timeout-state"), PolicyMode::Ask)
+        .with_surface("acp", "stdio")
+        .with_approval_timeout(Duration::from_millis(60));
+    let disp_e = RpcDispatcher::new(cfg_e, provider_e).unwrap();
+    let res_e = disp_e
+        .handle_request(JsonRpcRequest::new(
+            50,
+            "session.prompt",
+            json!({ "prompt": "Write timeout.txt" }),
+        ))
+        .await;
+    assert!(res_e.is_ok());
+    assert!(
+        !ws.join("timeout.txt").exists(),
+        "approval timeout must fail closed and never create timeout.txt"
     );
 
     let _ = fs::remove_dir_all(&root);
@@ -847,7 +1032,7 @@ async fn test_interactive_repl_slash_commands_and_multiturn_session() {
     );
     assert!(st.output.contains("mutations: 1"));
 
-    // 6. `/revisions`
+    // 6. `/revisions` and `/diff`
     let revs = repl.handle_line("/revisions").await.unwrap();
     assert!(
         revs.output.contains("revisions (3 captured):"),
@@ -855,8 +1040,25 @@ async fn test_interactive_repl_slash_commands_and_multiturn_session() {
         revs.output
     );
     assert!(revs.output.contains("note.txt"));
+    let diff = repl.handle_line("/diff").await.unwrap();
+    assert!(diff.output.contains("note.txt"));
 
-    // 7. `/undo`
+    // Capture the current revision ID from `session.status` so we can `/restore` to it after `/undo`.
+    let post_edit_rev = repl
+        .dispatcher()
+        .handle_request(JsonRpcRequest::new(90, "session.status", json!({})))
+        .await
+        .result
+        .unwrap()["latest_revision_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 6b. `/inspect`
+    let inspect = repl.handle_line("/inspect latest").await.unwrap();
+    assert!(inspect.output.contains("note.txt"));
+
+    // 7. `/undo`, `/restore`, `/fork`, `/clear`
     let undo = repl.handle_line("/undo").await.unwrap();
     assert!(undo.output.contains("restored workspace to"));
     assert_eq!(
@@ -865,9 +1067,41 @@ async fn test_interactive_repl_slash_commands_and_multiturn_session() {
         "/undo in REPL must restore note.txt"
     );
 
-    // 8. `/quit`
-    let quit = repl.handle_line("/quit").await.unwrap();
-    assert!(quit.should_exit);
+    let restore = repl
+        .handle_line(&format!("/restore {}", post_edit_rev))
+        .await
+        .unwrap();
+    assert!(restore.output.contains("restored workspace to"));
+    assert_eq!(
+        fs::read_to_string(ws.join("note.txt")).unwrap(),
+        "line 1\nline 2\n",
+        "/restore in REPL must restore note.txt to edited state"
+    );
+
+    let fork_out = repl.handle_line("/fork 1").await.unwrap();
+    assert!(fork_out.output.contains("forked session at turn 1"));
+
+    let clear_out = repl.handle_line("/clear").await.unwrap();
+    assert!(clear_out.output.contains("started new session"));
+
+    // 8. Verify `run_io_with_initial_prompt` executes the initial `--prompt` as Turn 1 before interactive `/status` and `/quit`.
+    let mut out_buf = Vec::new();
+    let input_cursor = std::io::Cursor::new(b"/status\n/quit\n".to_vec());
+    repl.run_io_with_initial_prompt(
+        BufReader::new(input_cursor),
+        &mut out_buf,
+        Some("Initial prompt turn"),
+    )
+    .await
+    .unwrap();
+    let rendered = String::from_utf8(out_buf).unwrap();
+    assert!(
+        rendered.contains("Inspected note.txt."),
+        "expected initial prompt output in rendered stream: {}",
+        rendered
+    );
+    assert!(rendered.contains("turn_count: 1"));
+    assert!(rendered.contains("Session closed."));
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -986,3 +1220,399 @@ async fn test_cross_surface_parity_headless_vs_rpc_produce_identical_wal_and_rev
 
     let _ = fs::remove_dir_all(&root);
 }
+
+/// Test 6: Verify that on a token-protected daemon:
+/// - Unauthenticated TCP clients receive zero `harness/event` or `approval/requested` notifications.
+/// - Unauthenticated `session.prompt`, `revision.undo`, and `approval.respond` are rejected with
+///   `JSONRPC_UNAUTHORIZED`.
+/// - Disconnecting an unauthenticated client does NOT close `approval_broker` or cancel an
+///   authenticated session's pending approval.
+/// - Disconnecting an authenticated client during an in-flight `session.prompt` immediately cancels
+///   the active run.
+/// - HTTP/CSRF request lines (`POST / HTTP/1.1`) and oversized (>4 MiB) frames are rejected and
+///   close the stream.
+#[tokio::test]
+async fn test_unauthenticated_probe_isolation_and_disconnect_cancellation_and_protocol_guards() {
+    let root = temp_root("unauth-isolation");
+    let ws = root.join("ws");
+    let state = root.join("state");
+    fs::create_dir_all(&ws).unwrap();
+    fs::create_dir_all(&state).unwrap();
+
+    let step = Arc::new(AtomicUsize::new(0));
+    let step_c = Arc::clone(&step);
+    let provider = FnProvider::new(move |_req| {
+        let n = step_c.fetch_add(1, Ordering::SeqCst);
+        match n {
+            0 => Ok(assistant_tools(vec![(
+                "call_write_protected",
+                "write",
+                json!({ "path": "protected.txt", "content": "ok\n" }),
+            )])),
+            _ => Ok(assistant_stop("Protected write completed.")),
+        }
+    });
+
+    let cfg = HarnessRuntimeConfig::new(&ws, &state, PolicyMode::Ask)
+        .with_surface("serve", "tcp")
+        .with_auth_token(Some("tok-guard-999".to_string()))
+        .with_approval_timeout(Duration::from_secs(5));
+    let dispatcher = RpcDispatcher::new(cfg, provider).unwrap();
+    let daemon = HarnessDaemon::bind("127.0.0.1:0", dispatcher.clone())
+        .await
+        .unwrap();
+    let addr = daemon.local_addr();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let daemon_task = tokio::spawn(async move {
+        let _ = daemon.serve(cancel_rx).await;
+    });
+
+    // Connect an unauthenticated eavesdropper/probe client first.
+    let unauth_stream = TcpStream::connect(addr).await.unwrap();
+    let (unauth_r, mut unauth_w) = unauth_stream.into_split();
+    let mut unauth_lines = BufReader::new(unauth_r).lines();
+
+    // Unauthenticated `session.prompt`, `revision.undo`, and `approval.respond` must all return JSONRPC_UNAUTHORIZED.
+    for (id, method, params) in [
+        (1, "session.prompt", json!({ "prompt": "hi" })),
+        (2, "revision.undo", json!({})),
+        (
+            3,
+            "approval.respond",
+            json!({ "request_id": "apr-0001", "decision": "approve_once" }),
+        ),
+    ] {
+        let line = format!(
+            "{}\n",
+            json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+        );
+        unauth_w.write_all(line.as_bytes()).await.unwrap();
+        unauth_w.flush().await.unwrap();
+        let raw = unauth_lines.next_line().await.unwrap().unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&raw).unwrap();
+        assert_eq!(resp.error.unwrap().code, JSONRPC_UNAUTHORIZED);
+    }
+
+    // Connect an authenticated client and start a prompt that triggers `approval/requested`.
+    let auth_stream = TcpStream::connect(addr).await.unwrap();
+    let (auth_r, mut auth_w) = auth_stream.into_split();
+    let mut auth_lines = BufReader::new(auth_r).lines();
+
+    auth_w
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"session.prompt\",\"params\":{\"auth_token\":\"tok-guard-999\",\"prompt\":\"Write protected.txt\"}}\n",
+        )
+        .await
+        .unwrap();
+    auth_w.flush().await.unwrap();
+
+    // Wait for `approval/requested` on the authenticated stream.
+    let req_id = loop {
+        let line = tokio::time::timeout(Duration::from_secs(3), auth_lines.next_line())
+            .await
+            .expect("timed out waiting for approval/requested on auth_stream")
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        if v.get("method").and_then(Value::as_str) == Some("approval/requested") {
+            break v["params"]["request_id"].as_str().unwrap().to_string();
+        }
+    };
+
+    // Unauthenticated client must NOT have received any notifications!
+    let eavesdrop = tokio::time::timeout(Duration::from_millis(80), unauth_lines.next_line()).await;
+    assert!(
+        eavesdrop.is_err(),
+        "unauthenticated client must never receive live event or approval notifications"
+    );
+
+    // Disconnect the unauthenticated client while `auth_stream`'s approval is pending!
+    drop(unauth_w);
+    drop(unauth_lines);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // `auth_stream`'s pending approval must still be alive and resolvable!
+    auth_w
+        .write_all(
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"approval.respond\",\"params\":{{\"request_id\":\"{}\",\"decision\":\"approve_once\"}}}}\n",
+                req_id
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    auth_w.flush().await.unwrap();
+
+    // Wait for the prompt response (id=10) to complete with status=completed.
+    loop {
+        let line = tokio::time::timeout(Duration::from_secs(3), auth_lines.next_line())
+            .await
+            .expect("timed out waiting for approved prompt completion")
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        if v.get("id").and_then(Value::as_i64) == Some(10) {
+            assert_eq!(v["result"]["status"], "completed");
+            break;
+        }
+    }
+    assert_eq!(fs::read_to_string(ws.join("protected.txt")).unwrap(), "ok\n");
+    drop(auth_w);
+
+    // Verify HTTP/CSRF request rejection on TCP socket.
+    {
+        let http_stream = TcpStream::connect(addr).await.unwrap();
+        let (hr, mut hw) = http_stream.into_split();
+        let mut hlines = BufReader::new(hr).lines();
+        hw.write_all(b"POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        hw.flush().await.unwrap();
+        let raw = hlines.next_line().await.unwrap().unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&raw).unwrap();
+        assert_eq!(resp.error.unwrap().code, JSONRPC_INVALID_REQUEST);
+        assert!(hlines.next_line().await.unwrap().is_none());
+    }
+
+    // Verify oversized (>4 MiB) frame rejection.
+    {
+        let (c_io, s_io) = tokio::io::duplex(128 * 1024);
+        let (sr, sw) = tokio::io::split(s_io);
+        let (cr, mut cw) = tokio::io::split(c_io);
+        let disp_over = dispatcher.clone();
+        let srv = tokio::spawn(async move {
+            let _ = disp_over.serve_stream(sr, sw).await;
+        });
+        let writer_handle = tokio::spawn(async move {
+            let chunk = vec![b'a'; 64 * 1024];
+            let mut sent = 0usize;
+            while sent <= MAX_RPC_FRAME_BYTES + 64 * 1024 {
+                if cw.write_all(&chunk).await.is_err() {
+                    break;
+                }
+                sent += chunk.len();
+            }
+            let _ = cw.write_all(b"\n").await;
+        });
+        let mut clines = BufReader::new(cr).lines();
+        let raw = tokio::time::timeout(Duration::from_secs(3), clines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&raw).unwrap();
+        assert_eq!(resp.error.unwrap().code, JSONRPC_PARSE_ERROR);
+        let _ = writer_handle.await;
+        let _ = srv.await;
+    }
+
+    let _ = cancel_tx.send(true);
+    let _ = daemon_task.await;
+
+    // Now verify that dropping an authenticated client socket during an in-flight slow prompt
+    // immediately cancels the active run!
+    let slow_provider = Arc::new(SlowCancellableProvider {
+        delay: Duration::from_secs(10),
+    });
+    let slow_cfg = HarnessRuntimeConfig::new(&ws, state.join("disc-cancel"), PolicyMode::ReadOnly)
+        .with_surface("serve", "tcp");
+    let slow_disp = RpcDispatcher::new(slow_cfg, slow_provider).unwrap();
+    let slow_daemon = HarnessDaemon::bind("127.0.0.1:0", slow_disp.clone())
+        .await
+        .unwrap();
+    let slow_addr = slow_daemon.local_addr();
+    let (slow_cancel_tx, slow_cancel_rx) = watch::channel(false);
+    let slow_task = tokio::spawn(async move {
+        let _ = slow_daemon.serve(slow_cancel_rx).await;
+    });
+
+    let client_sock = TcpStream::connect(slow_addr).await.unwrap();
+    let (cr, mut cw) = client_sock.into_split();
+    cw.write_all(
+        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.prompt\",\"params\":{\"prompt\":\"Long running\"}}\n",
+    )
+    .await
+    .unwrap();
+    cw.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Drop the client connection while the prompt is in flight!
+    drop(cw);
+    drop(cr);
+
+    // Wait briefly and verify via `session.status` that `in_flight` returned to `false`.
+    let mut cancelled_cleanly = false;
+    for _ in 0..30 {
+        let st = slow_disp
+            .handle_request(JsonRpcRequest::new(2, "session.status", json!({})))
+            .await;
+        if st.result.unwrap()["in_flight"] == false {
+            cancelled_cleanly = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        cancelled_cleanly,
+        "client socket disconnect must cancel the in-flight prompt run"
+    );
+
+    let _ = slow_cancel_tx.send(true);
+    let _ = slow_task.await;
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Test 7: Verify `HarnessDaemon` over a Unix domain socket (`unix://...` with `0600` permissions)
+/// and verify worker `spawn_subagent` approval over RPC logs `ApprovalRequested` ->
+/// `ApprovalResolved` strictly before `SubagentSpawned`.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_unix_domain_socket_daemon_0600_permissions_and_worker_subagent_rpc_approval() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_root("unix-daemon");
+    let ws = root.join("ws");
+    let state = root.join("state");
+    fs::create_dir_all(&ws).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(ws.join("mod.rs"), "// base\n").unwrap();
+
+    let sock_path = root.join("harness.sock");
+    let listen_spec = format!("unix://{}", sock_path.display());
+
+    let step = Arc::new(AtomicUsize::new(0));
+    let step_c = Arc::clone(&step);
+    let provider = FnProvider::new(move |_req| {
+        let n = step_c.fetch_add(1, Ordering::SeqCst);
+        match n {
+            // Parent turn 0: spawn a worker subagent.
+            0 => Ok(assistant_tools(vec![(
+                "call_spawn_worker",
+                "spawn_subagent",
+                json!({
+                    "role": "worker",
+                    "task": "Write worker_out.txt",
+                    "allowed_paths": ["worker_out.txt"]
+                }),
+            )])),
+            // Worker child turn 0: write `worker_out.txt`.
+            1 => Ok(assistant_tools(vec![(
+                "worker_write_1",
+                "write",
+                json!({
+                    "path": "worker_out.txt",
+                    "content": "created by worker\n"
+                }),
+            )])),
+            // Worker child turn 1: stop.
+            2 => Ok(assistant_stop("Worker finished writing worker_out.txt.")),
+            // Parent turn 1: stop.
+            _ => Ok(assistant_stop("Parent merged worker output.")),
+        }
+    });
+
+    let cfg = HarnessRuntimeConfig::new(&ws, &state, PolicyMode::Ask)
+        .with_surface("serve", "unix")
+        .with_approval_timeout(Duration::from_secs(5));
+    let dispatcher = RpcDispatcher::new(cfg, provider).unwrap();
+    let daemon = HarnessDaemon::bind(&listen_spec, dispatcher.clone())
+        .await
+        .unwrap();
+    assert_eq!(daemon.unix_socket_path(), Some(sock_path.as_path()));
+
+    // Verify Unix domain socket has strict 0600 permissions!
+    let mode = fs::symlink_metadata(&sock_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "Unix domain socket must be created with 0600 permissions (got {:o})",
+        mode
+    );
+
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let daemon_task = tokio::spawn(async move {
+        daemon.serve(cancel_rx).await.unwrap();
+    });
+
+    let unix_stream = tokio::net::UnixStream::connect(&sock_path).await.unwrap();
+    let (ur, mut uw) = unix_stream.into_split();
+    let mut ulines = BufReader::new(ur).lines();
+
+    // Send `session.prompt` over the Unix domain socket.
+    uw.write_all(
+        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.prompt\",\"params\":{\"prompt\":\"Delegate worker_out.txt\"}}\n",
+    )
+    .await
+    .unwrap();
+    uw.flush().await.unwrap();
+
+    let mut event_order = Vec::new();
+    let mut approved = false;
+    loop {
+        let line = tokio::time::timeout(Duration::from_secs(5), ulines.next_line())
+            .await
+            .expect("timed out on Unix domain socket RPC stream")
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        if v.get("method").and_then(Value::as_str) == Some("approval/requested") && !approved {
+            assert_eq!(v["params"]["tool_name"], "spawn_subagent");
+            let req_id = v["params"]["request_id"].as_str().unwrap();
+            uw.write_all(
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"approval.respond\",\"params\":{{\"request_id\":\"{}\",\"decision\":\"approve_once\"}}}}\n",
+                    req_id
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            uw.flush().await.unwrap();
+            approved = true;
+        } else if v.get("method").and_then(Value::as_str) == Some("harness/event") {
+            if let Some(et) = v["params"]["event_type"].as_str() {
+                event_order.push(et.to_string());
+            }
+        } else if v.get("id").and_then(Value::as_i64) == Some(1) {
+            assert_eq!(v["result"]["status"], "completed");
+            break;
+        }
+    }
+
+    assert!(approved, "worker spawn_subagent must request approval under PolicyMode::Ask");
+    assert_eq!(
+        fs::read_to_string(ws.join("worker_out.txt")).unwrap(),
+        "created by worker\n"
+    );
+
+    // Verify causal ordering: ApprovalRequested & ApprovalResolved MUST precede SubagentSpawned!
+    let pos_req = event_order
+        .iter()
+        .position(|e| e == "ApprovalRequested")
+        .expect("missing ApprovalRequested event");
+    let pos_res = event_order
+        .iter()
+        .position(|e| e == "ApprovalResolved")
+        .expect("missing ApprovalResolved event");
+    let pos_spawn = event_order
+        .iter()
+        .position(|e| e == "SubagentSpawned")
+        .expect("missing SubagentSpawned event");
+    assert!(
+        pos_req < pos_res && pos_res < pos_spawn,
+        "expected ApprovalRequested ({}) < ApprovalResolved ({}) < SubagentSpawned ({}), got {:?}",
+        pos_req,
+        pos_res,
+        pos_spawn,
+        event_order
+    );
+
+    drop(uw);
+    let _ = cancel_tx.send(true);
+    daemon_task.await.unwrap();
+    let _ = fs::remove_dir_all(&root);
+}
+
