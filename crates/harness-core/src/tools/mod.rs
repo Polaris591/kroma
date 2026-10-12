@@ -4,6 +4,7 @@ pub mod find;
 pub mod grep;
 pub mod ls;
 pub mod read;
+pub mod recall_evidence;
 pub mod write;
 
 use crate::messages::{ToolOutcome, ToolResultMeta};

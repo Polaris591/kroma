@@ -1,5 +1,8 @@
 use crate::budget::{BudgetConfig, BudgetTracker};
-use crate::context_projector::{verify_tool_call_pairing, ContextProjector};
+use crate::context_projector::{
+    extract_source_entry_id, verify_tool_call_pairing, CompactionReason, ContextProjector,
+    EvidenceLink,
+};
 use crate::completion_gate::failure_fingerprint;
 use crate::session::{FileTouch, SessionJournal};
 use crate::env::{
@@ -10,12 +13,13 @@ use crate::loop_guard::{LoopGuard, LoopGuardVerdict};
 use crate::messages::{
     ToolCall, ToolOutcome, ToolResultMessage, ToolResultMeta, TranscriptItem, UserMessage,
 };
-use crate::prompt::PromptBuilder;
+use crate::prompt::{sha256_hex64, PromptBuilder};
 use crate::provider::{
     validate_assistant_turn_batch, ModelProvider, ProviderRequest,
 };
 use crate::revision::{RevisionId, SnapshotStore};
 use crate::tool::runtime::ToolRuntime;
+use crate::tools::recall_evidence::execute_recall_evidence;
 use crate::types::{ErrorCode, RunId, RunStatus, TerminalReason};
 use std::collections::HashSet;
 use sha2::Digest;
@@ -82,6 +86,9 @@ pub struct AgentRunner {
     snapshot_store: Option<Arc<SnapshotStore>>,
     current_revision_id: Option<RevisionId>,
     batch_mutated: bool,
+    /// Set when the current tool batch executed a `bash` (`SideEffect`) call, whose file writes are
+    /// invisible to the per-tool `modified_file` flag and must still be snapshotted (O1).
+    batch_ran_side_effect: bool,
 }
 
 impl AgentRunner {
@@ -107,6 +114,7 @@ impl AgentRunner {
             snapshot_store: None,
             current_revision_id: None,
             batch_mutated: false,
+            batch_ran_side_effect: false,
         }
     }
 
@@ -234,6 +242,10 @@ impl AgentRunner {
                 checkpoint.last_touched.into_iter().map(|item| (item.path, item.last_touched_turn))
             );
         }
+        // Gate 2: re-seed the raw-evidence store from the WAL so `recall_evidence` can still resolve
+        // stubs compacted in an earlier process. The WAL keeps the pre-overlay (raw) item for every
+        // entry while `active_entries()` yields the compacted stub, so the raw bytes survive resume.
+        self.seed_evidence_from_journal(&mut projector);
         let mut loop_guard = LoopGuard::new();
         // Reconstruct dirty files from the selected session branch so a resumed run cannot
         // bypass CompletionGate merely because the write happened before this process started.
@@ -622,6 +634,21 @@ impl AgentRunner {
                     }
                 }
 
+                // O1: a verification command can rewrite the workspace (formatters, codegen).
+                // Capture the resulting state so `latest_revision_id()` never drifts from disk.
+                self.capture_workspace_revision(current_turn, "verification", &mut logger);
+                if let Some(err) = self.revision_error.clone() {
+                    return self.finish_run(
+                        TerminalReason::StrictLogFailure(err),
+                        &budget_tracker,
+                        &projector,
+                        modified_files_set.into_iter().collect(),
+                        last_assistant_text,
+                        transcript,
+                        logger,
+                    );
+                }
+
                 let mut mod_list: Vec<String> = modified_files_set.into_iter().collect();
                 mod_list.sort();
                 return self.finish_run(
@@ -661,6 +688,7 @@ impl AgentRunner {
             // Execute tool batch with Read-Only Parallel Sub-Batches (`Semaphore(8)`) + Mutating Barriers,
             // guaranteeing 1:1 `tool_call_id` closure in exact index order (§4.1 V6-06).
             self.batch_mutated = false;
+            self.batch_ran_side_effect = false;
             let batch_abort = self
                 .execute_tool_batch(
                     &tool_calls,
@@ -675,8 +703,10 @@ impl AgentRunner {
 
             debug_assert!(verify_tool_call_pairing(&transcript));
 
-            // Gate 1: a batch that mutated files gets a fresh revision bound to this turn.
-            if self.batch_mutated {
+            // Gate 1: a batch that mutated files — directly via `edit`/`write`, or indirectly via a
+            // `bash` command whose writes the tool cannot report (O1) — gets a fresh revision bound
+            // to this turn.
+            if self.batch_mutated || self.batch_ran_side_effect {
                 self.capture_workspace_revision(absolute_turn, "mutation", &mut logger);
             }
             if let Some(err) = self.revision_error.clone() {
@@ -797,6 +827,40 @@ impl AgentRunner {
         }
     }
 
+    /// Rebuild the `recall_evidence` store from a resumed session WAL (Gate 2).
+    fn seed_evidence_from_journal(&self, projector: &mut ContextProjector) {
+        let Some(journal) = self.session_journal.as_ref() else { return; };
+        let recorded = journal.evidence_links();
+        for (index, entry) in journal.active_entries().iter().enumerate() {
+            let TranscriptItem::ToolResult(active_tr) = &entry.item else { continue; };
+            let Some(sid) = extract_source_entry_id(&active_tr.content) else { continue; };
+            let Some(TranscriptItem::ToolResult(raw_tr)) = journal.raw_entry_item(&entry.id) else {
+                continue;
+            };
+            // Only a genuinely compacted entry (stub shorter than the raw output) has hidden evidence.
+            if raw_tr.content.len() <= active_tr.content.len() {
+                continue;
+            }
+            let link = recorded
+                .iter()
+                .find(|l| l.source_entry_id == sid)
+                .cloned()
+                .unwrap_or_else(|| EvidenceLink {
+                    source_entry_id: sid.clone(),
+                    canonical_index: index,
+                    call_id: raw_tr.call_id.0.clone(),
+                    tool_name: raw_tr.tool_name.clone(),
+                    relative_path: raw_tr.meta.relative_path.clone(),
+                    original_sha256: sha256_hex64(raw_tr.content.as_bytes()),
+                    original_bytes: raw_tr.content.len(),
+                    original_lines: raw_tr.content.lines().count(),
+                    stub_bytes: active_tr.content.len(),
+                    reason: CompactionReason::StepDownArchive,
+                });
+            projector.register_evidence(link, Arc::clone(&raw_tr.content));
+        }
+    }
+
     /// Capture a `WorkspaceRevision`, bind it to the current WAL leaf, and emit telemetry.
     ///
     /// A capture failure is fail-closed: if the store is attached, the run must not continue while
@@ -815,6 +879,15 @@ impl AgentRunner {
         let parent = self.current_revision_id.clone();
         match store.capture_revision(&workspace, parent.as_ref(), wal_entry_id.as_deref(), absolute_turn) {
             Ok(revision) => {
+                // O1: a `bash`/verification command that left the workspace byte-identical must not
+                // append a duplicate `RevisionCaptured` record. Only the baseline capture is always
+                // recorded, so `--undo` always has a starting point.
+                let unchanged = trigger != "baseline"
+                    && self.current_revision_id.as_ref() == Some(&revision.revision_id);
+                if unchanged {
+                    self.current_revision_id = Some(revision.revision_id);
+                    return;
+                }
                 if let Some(journal) = self.session_journal.as_mut() {
                     if let Err(err) = journal.record_revision_capture(
                         absolute_turn,
@@ -857,7 +930,7 @@ impl AgentRunner {
         let absolute_turn = self.session_turn_offset.saturating_add(relative_turn);
         let workspace_revision_id = self.current_revision_id.as_ref().map(|id| id.as_str().to_string());
         let Some(journal) = self.session_journal.as_mut() else { return; };
-        if let Err(err) = journal.sync_projected_transcript(transcript) {
+        if let Err(err) = journal.sync_projected_transcript(transcript, projector.evidence_links()) {
             self.session_persist_error = Some(err.to_string());
             return;
         }
@@ -1137,10 +1210,31 @@ impl AgentRunner {
                         return Some(TerminalReason::StrictLogFailure(e.to_string()));
                     }
 
-                    let (mut msg, decision) = self
-                        .tool_runtime
-                        .execute_call(call, self.cancel_rx.clone())
-                        .await;
+                    let (mut msg, decision) = if call.name == "recall_evidence" {
+                        // Gate 2: resolve the stub's raw evidence against the live projector store
+                        // (seeded from the WAL on `--resume`). Read-only, so no approval is needed.
+                        let out = execute_recall_evidence(projector, &call.raw_arguments);
+                        (
+                            ToolResultMessage {
+                                call_id: call.call_id.clone(),
+                                tool_name: call.name.clone(),
+                                outcome: out.outcome,
+                                content: Arc::from(out.content),
+                                meta: out.meta,
+                            },
+                            "allow_evidence".to_string(),
+                        )
+                    } else {
+                        self.tool_runtime
+                            .execute_call(call, self.cancel_rx.clone())
+                            .await
+                    };
+
+                    // O1: a `bash` call can rewrite the workspace without setting `modified_file`,
+                    // so flag the batch for a post-batch revision capture.
+                    if call.name == "bash" {
+                        self.batch_ran_side_effect = true;
+                    }
 
                     let _ = logger.log(EventPayload::PolicyDecision {
                         call_id: call.call_id.clone(),

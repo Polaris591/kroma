@@ -209,6 +209,40 @@ pub fn builtin_tool_registrations() -> Vec<RegisteredTool> {
         },
         RegisteredTool {
             definition: ToolDefinition {
+                name: "recall_evidence".to_string(),
+                description: "Recall the raw tool output behind a compacted Outline Stub by its source_entry_id (or the original call_id), optionally filtered to a line range or a case-insensitive pattern.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "source_entry_id": {
+                            "type": "string",
+                            "description": "The source_entry_id shown in a [Compacted: ...] stub header, or the original tool call_id."
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Optional 1-based first line of the raw output to return (default 1)."
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Optional 1-based last line to return (capped at start_line + 199)."
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": "Optional case-insensitive substring filter; matching lines are returned with 2 lines of context."
+                        }
+                    },
+                    "required": ["source_entry_id"],
+                    "additionalProperties": false
+                }),
+            },
+            metadata: ToolMetadata {
+                effect_class: EffectClass::ReadOnly,
+                default_timeout_sec: 30,
+                inline_output_cap_bytes: 64 * 1024,
+            },
+        },
+        RegisteredTool {
+            definition: ToolDefinition {
                 name: "write".to_string(),
                 description: "Atomically write or create a workspace file via same-directory random temporary file.".to_string(),
                 parameters: json!({

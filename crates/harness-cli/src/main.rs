@@ -5,7 +5,7 @@ use harness_core::agent_loop::{ build_default_runtime, AgentRunConfig, AgentRunn
 use harness_core::budget::BudgetConfig;
 use harness_core::completion_gate::{configured_timeout, parse_command_argv, WorkspaceCompletionGate};
 use harness_core::env::{AllowAllGate, ExecutionEnv, LocalHostEnv, SharedCompletionGate};
-use harness_core::events::{ resolve_default_state_dir, EventLogger };
+use harness_core::events::{ resolve_default_state_dir, EventLogger, EventPayload };
 use harness_core::prompt::PromptBuilder;
 use harness_core::revision::{RestoreResult, RevisionId, SnapshotStore};
 use harness_core::session::SessionJournal;
@@ -452,6 +452,58 @@ const EXIT_RESTORE_CONFLICT: u8 = 3;
 /// Exit code returned when an interrupted restore left the workspace needing recovery.
 const EXIT_RESTORE_RECOVERY_REQUIRED: u8 = 4;
 
+/// Append the Gate 1 `RevisionRestored` audit event to the run log for a completed restore (O6).
+fn emit_revision_restored(
+    state_dir: &Path,
+    strict_log: bool,
+    revision_id: &RevisionId,
+    restored_files: usize,
+    removed_files: usize,
+) {
+    let run_id = harness_core::types::RunId::new();
+    let Ok(mut logger) = EventLogger::new(run_id, Some(state_dir.to_path_buf()), strict_log) else {
+        return;
+    };
+    let _ = logger.log(EventPayload::RevisionRestored {
+        revision_id: revision_id.as_str().to_string(),
+        restored_files,
+        removed_files,
+    });
+}
+
+/// Reconcile a snapshot manifest that was durably written immediately before a crash that stopped
+/// the WAL `RevisionCaptured` append (O6). Without this the WAL would describe an older workspace
+/// state and a following `--undo` would misreport the live files as external modifications.
+fn reconcile_store_with_wal(journal: &mut SessionJournal, store: &SnapshotStore) {
+    let Ok(Some(newest)) = store.newest_revision() else { return; };
+    let recorded = journal.revision_records();
+    if recorded.iter().any(|r| r.revision_id == newest.revision_id.as_str()) {
+        return;
+    }
+    // Only adopt a manifest that was bound to an entry on the active branch and is at least as new
+    // as the newest recorded revision, so a manifest from an abandoned branch or another session of
+    // the same state directory is never resurrected.
+    let bound_leaf = newest.wal_entry_id.as_deref();
+    let Some(leaf) = bound_leaf else { return; };
+    if !journal.is_entry_on_active_branch(leaf) {
+        return;
+    }
+    if let Some(last) = recorded.last() {
+        if newest.turn_index < last.turn {
+            return;
+        }
+    }
+    let turn = journal.max_active_turn();
+    let parent = recorded.last().map(|r| r.revision_id.clone());
+    let _ = journal.record_revision_capture(
+        turn,
+        newest.revision_id.as_str(),
+        parent.as_deref(),
+        newest.changed_paths.clone(),
+        newest.tracked_files.len(),
+    );
+}
+
 fn snapshot_store_for(state_dir: &Path) -> SnapshotStore {
     SnapshotStore::new(state_dir.join("snapshots"))
 }
@@ -513,6 +565,9 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
         }
     };
     let store = snapshot_store_for(state_dir);
+    // O6: a crash between the snapshot write and the WAL append leaves the store one revision ahead
+    // of the WAL; reconcile before reading `latest_revision_id()` so the two agree.
+    reconcile_store_with_wal(&mut journal, &store);
 
     if cli.list_revisions {
         let records = journal.revision_records();
@@ -650,6 +705,13 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
             for path in &removed_files {
                 println!("  removed  {}", path);
             }
+            emit_revision_restored(
+                state_dir,
+                cli.strict_log,
+                &restored_revision,
+                restored_files.len(),
+                removed_files.len(),
+            );
             if let Some(turn) = rewind_turn {
                 match journal.fork_at_turn(turn) {
                     Ok(leaf) => println!("rewound session transcript to turn {} (leaf {})", turn, leaf),
@@ -1315,6 +1377,84 @@ mod tests {
             undo
         );
         assert_eq!(fs::read_to_string(ws_dir.join("f.txt")).unwrap(), "v1\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// O5/O6: a snapshot manifest written immediately before a crash that stopped the WAL append is
+    /// reconciled on the next `--resume`, and a completed restore emits the `RevisionRestored`
+    /// audit event.
+    #[test]
+    fn test_reconcile_orphan_snapshot_and_emit_revision_restored_event() {
+        use harness_core::messages::{TranscriptItem, UserMessage};
+        use std::fs;
+
+        let root = std::env::temp_dir().join(format!(
+            "harness-cli-reconcile-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ws_dir = root.join("ws");
+        let state_dir = root.join("state");
+        fs::create_dir_all(&ws_dir).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(ws_dir.join("f.txt"), "v0\n").unwrap();
+
+        let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+        let store = SnapshotStore::new(root.join("snapshots"));
+        let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
+        journal
+            .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+            .unwrap();
+        let baseline = store.capture_revision(&workspace, None, None, 0).unwrap();
+        journal
+            .record_revision_capture(
+                0,
+                baseline.revision_id.as_str(),
+                None,
+                baseline.changed_paths.clone(),
+                baseline.tracked_files.len(),
+            )
+            .unwrap();
+
+        // Snapshot written, then the process dies before the WAL `RevisionCaptured` append.
+        fs::write(ws_dir.join("f.txt"), "v1\n").unwrap();
+        let orphan = store
+            .capture_revision(
+                &workspace,
+                Some(&baseline.revision_id),
+                journal.leaf_id(),
+                1,
+            )
+            .unwrap();
+        assert_ne!(orphan.revision_id, baseline.revision_id);
+        assert_eq!(
+            journal.latest_revision_id().as_deref(),
+            Some(baseline.revision_id.as_str()),
+            "the WAL still names the stale revision before reconciliation"
+        );
+
+        reconcile_store_with_wal(&mut journal, &store);
+        assert_eq!(
+            journal.latest_revision_id().as_deref(),
+            Some(orphan.revision_id.as_str()),
+            "reconciliation must adopt the orphaned manifest"
+        );
+        assert_eq!(
+            journal.revision_records().len(),
+            2,
+            "reconciliation must not append a duplicate"
+        );
+        // Reconciling twice is idempotent.
+        reconcile_store_with_wal(&mut journal, &store);
+        assert_eq!(journal.revision_records().len(), 2);
+
+        // A completed restore emits the Gate 1 audit event.
+        emit_revision_restored(&state_dir, false, &baseline.revision_id, 1, 0);
+        let logged = fs::read_dir(&state_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| fs::read_to_string(entry.path()).unwrap_or_default())
+            .any(|body| body.contains("\"RevisionRestored\"") && body.contains("restored_files"));
+        assert!(logged, "a completed restore must be recorded in the run event log");
         let _ = fs::remove_dir_all(root);
     }
 }

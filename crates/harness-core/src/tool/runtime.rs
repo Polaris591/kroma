@@ -88,6 +88,11 @@ impl ToolRuntime {
                 }
             }
         }
+        // `recall_evidence` resolves against the live session transcript, which is owned by the
+        // agent loop, so it must run on the serial barrier where that transcript is reachable.
+        if call.name == "recall_evidence" {
+            return false;
+        }
         true
     }
 
@@ -399,6 +404,13 @@ impl ToolRuntime {
             "ls" => execute_ls(self.env.workspace(), &effective_raw_args),
             "find" => execute_find(self.env.workspace(), &effective_raw_args),
             "grep" => execute_grep(self.env.workspace(), &effective_raw_args),
+            // `recall_evidence` is dispatched by the agent loop, which owns the live transcript and
+            // the evidence store. Reaching the runtime directly means no transcript was available.
+            "recall_evidence" => ToolExecutionOutput::error(
+                ErrorCode::InvalidArguments,
+                "recall_evidence must be dispatched by the agent loop against the live session transcript".to_string(),
+                ToolResultMeta::default(),
+            ),
             other => ToolExecutionOutput::error(
                 ErrorCode::UnknownTool,
                 format!("unknown tool '{}'", other),

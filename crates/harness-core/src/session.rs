@@ -4,6 +4,7 @@
 //! provider reasoning signatures/opaque payloads). It does not promise provider-side KV-cache
 //! hits: those additionally depend on stable wire serialization and provider cache policy.
 
+use crate::context_projector::EvidenceLink;
 use crate::messages::TranscriptItem;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -82,6 +83,7 @@ struct ProjectionOverlay {
     projected_at_leaf_id: String,
     entry_id: String,
     item: TranscriptItem,
+    evidence_links: Vec<EvidenceLink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,8 +103,16 @@ enum WalPayload {
         created_at_ms: u64,
     },
     Append { entry: SessionEntry },
-    /// Append-only projection overlay for compaction changes to an existing event.
-    ProjectionUpdate { projected_at_leaf_id: String, entry_id: String, item: TranscriptItem },
+    /// Append-only projection overlay for compaction changes to an existing event. `evidence_links`
+    /// binds each Outline Stub to the raw evidence it replaced (Gate 2); `serde(default)` keeps
+    /// WALs written before Gate 2 readable.
+    ProjectionUpdate {
+        projected_at_leaf_id: String,
+        entry_id: String,
+        item: TranscriptItem,
+        #[serde(default)]
+        evidence_links: Vec<EvidenceLink>,
+    },
     SetLeaf { leaf_id: String },
     /// Records the final gate result; subsequent file mutations become dirty again.
     CompletionResolved { leaf_id: String, resolution: CompletionResolution },
@@ -332,14 +342,14 @@ impl SessionJournal {
                     leaf_id = Some(entry.id.clone());
                     entries.insert(entry.id.clone(), entry);
                 }
-                WalPayload::ProjectionUpdate { projected_at_leaf_id, entry_id, item } => {
+                WalPayload::ProjectionUpdate { projected_at_leaf_id, entry_id, item, evidence_links: links } => {
                     if !entries.contains_key(&projected_at_leaf_id) {
                         return Err(SessionError::Invalid(format!("projection update references unknown projection leaf {}", projected_at_leaf_id)));
                     }
                     if !entries.contains_key(&entry_id) {
                         return Err(SessionError::Invalid(format!("projection update references unknown entry {}", entry_id)));
                     }
-                    projection_updates.push(ProjectionOverlay { projected_at_leaf_id, entry_id, item });
+                    projection_updates.push(ProjectionOverlay { projected_at_leaf_id, entry_id, item, evidence_links: links });
                 }
                 WalPayload::SetLeaf { leaf_id: selected } => {
                     if !entries.contains_key(&selected) {
@@ -398,6 +408,39 @@ impl SessionJournal {
     pub fn session_id(&self) -> &str { &self.session_id }
     pub fn workspace_root(&self) -> &Path { &self.workspace_root }
     pub fn leaf_id(&self) -> Option<&str> { self.leaf_id.as_deref() }
+
+    /// Evidence links recorded for the active branch, ordered by canonical index (Gate 2).
+    pub fn evidence_links(&self) -> Vec<EvidenceLink> {
+        let depth_map = self.active_depth_map();
+        let mut links: Vec<EvidenceLink> = Vec::new();
+        for update in &self.projection_updates {
+            if !depth_map.contains_key(&update.projected_at_leaf_id) {
+                continue;
+            }
+            for link in &update.evidence_links {
+                if !links.iter().any(|existing| existing.source_entry_id == link.source_entry_id) {
+                    links.push(link.clone());
+                }
+            }
+        }
+        links.sort_by(|a, b| {
+            a.canonical_index
+                .cmp(&b.canonical_index)
+                .then_with(|| a.source_entry_id.cmp(&b.source_entry_id))
+        });
+        links
+    }
+
+    /// The pre-projection (raw) item for an entry, ignoring any append-only compaction overlay.
+    /// `recall_evidence` uses this to recover the raw tool output a stub replaced.
+    pub fn raw_entry_item(&self, entry_id: &str) -> Option<&TranscriptItem> {
+        self.entries.get(entry_id).map(|entry| &entry.item)
+    }
+
+    /// True when `entry_id` is an ancestor of (or equal to) the currently selected leaf.
+    pub fn is_entry_on_active_branch(&self, entry_id: &str) -> bool {
+        self.active_depth_map().contains_key(entry_id)
+    }
 
     /// Read-only header inspection used by `--resume latest` and workspace inference so scanning
     /// candidate WAL files never acquires exclusive write locks, never mutates permissions, and
@@ -588,7 +631,13 @@ impl SessionJournal {
 
     /// Persist compaction-induced changes to the in-memory canonical transcript without rewriting
     /// old WAL bytes. The active projection is materialized by replaying these append-only overlays.
-    pub fn sync_projected_transcript(&mut self, transcript: &[TranscriptItem]) -> Result<(), SessionError> {
+    /// Each overlay also carries the evidence links that bind its Outline Stub back to the raw
+    /// tool output it replaced (Gate 2).
+    pub fn sync_projected_transcript(
+        &mut self,
+        transcript: &[TranscriptItem],
+        evidence_links: &[EvidenceLink],
+    ) -> Result<(), SessionError> {
         let active_entries = self.active_entries();
         if active_entries.len() != transcript.len() {
             return Err(SessionError::Invalid(format!(
@@ -600,17 +649,24 @@ impl SessionJournal {
             if transcript.is_empty() { return Ok(()); }
             return Err(SessionError::Invalid("cannot persist projection without an active leaf".into()));
         };
-        for (entry, item) in active_entries.into_iter().zip(transcript.iter()) {
+        for (index, (entry, item)) in active_entries.into_iter().zip(transcript.iter()).enumerate() {
             if &entry.item != item {
+                let links: Vec<EvidenceLink> = evidence_links
+                    .iter()
+                    .filter(|link| link.canonical_index == index)
+                    .cloned()
+                    .collect();
                 let overlay = ProjectionOverlay {
                     projected_at_leaf_id: projected_at_leaf_id.clone(),
                     entry_id: entry.id.clone(),
                     item: item.clone(),
+                    evidence_links: links.clone(),
                 };
                 self.append_payload(WalPayload::ProjectionUpdate {
                     projected_at_leaf_id: overlay.projected_at_leaf_id.clone(),
                     entry_id: overlay.entry_id.clone(),
                     item: overlay.item.clone(),
+                    evidence_links: links,
                 })?;
                 self.projection_updates.push(overlay);
             }
@@ -750,17 +806,27 @@ impl SessionJournal {
         Ok(())
     }
 
-    /// Workspace revisions captured on the currently selected branch, in WAL append order.
+    /// Workspace revisions captured on the currently selected branch, ordered by the topological
+    /// depth of the leaf they were bound to (root first, deepest descendant last), with WAL append
+    /// order as the tie-breaker. Ordering by depth rather than raw append order means an ancestor
+    /// capture recorded *after* a fork can never shadow a deeper descendant's revision (O4), so
+    /// `latest_revision_id()` always names the workspace state on the active branch.
     pub fn revision_records(&self) -> Vec<RevisionRecord> {
         let depth_map = self.active_depth_map();
-        self.revision_records
+        let mut ordered: Vec<(usize, usize, RevisionRecord)> = self
+            .revision_records
             .iter()
-            .filter(|record| match record.leaf_id.as_deref() {
-                Some(leaf) => depth_map.contains_key(leaf),
-                None => true,
+            .enumerate()
+            .filter_map(|(append_index, record)| {
+                let depth = match record.leaf_id.as_deref() {
+                    Some(leaf) => *depth_map.get(leaf)?,
+                    None => 0,
+                };
+                Some((depth, append_index, record.clone()))
             })
-            .cloned()
-            .collect()
+            .collect();
+        ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        ordered.into_iter().map(|(_, _, record)| record).collect()
     }
 
     /// Revision the workspace is expected to be in right now, per the active branch.
@@ -884,7 +950,7 @@ mod tests {
         if let TranscriptItem::ToolResult(tr) = &mut projected[1] {
             tr.content = Arc::from("<outline stub>");
         }
-        wal.sync_projected_transcript(&projected).unwrap();
+        wal.sync_projected_transcript(&projected, &[]).unwrap();
         let path = wal.path().to_path_buf();
         drop(wal);
         let mut reopened = SessionJournal::open(path).unwrap();

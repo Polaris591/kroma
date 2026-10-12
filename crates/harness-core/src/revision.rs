@@ -583,36 +583,82 @@ impl SnapshotStore {
         sync_dir(&self.root)
     }
 
+    /// Store a content-addressed blob crash-safely (O2).
+    ///
+    /// The bytes are written to a sibling temporary file, `fsync`ed, and then atomically renamed
+    /// onto the CAS path. A crash or `ENOSPC` mid-write therefore leaves at most a stray temporary
+    /// file, never a truncated blob that would poison every future revision that references it.
     fn store_blob(&self, sha256: &str, bytes: &[u8]) -> Result<(), RevisionError> {
         let path = self.blob_path(sha256);
         let dir = path.parent().ok_or_else(|| {
             RevisionError::InvalidStore("blob path has no parent directory".to_string())
         })?;
         ensure_private_dir(dir)?;
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                file.write_all(bytes)?;
-                file.sync_all()?;
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = fs::metadata(&path)?;
-                if existing.len() != bytes.len() as u64 {
+
+        // Idempotent fast path: a completed blob of the right size is already durable.
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+                    return Err(RevisionError::InvalidStore(format!(
+                        "blob {} exists but is not a regular file",
+                        sha256
+                    )));
+                }
+                if meta.len() != bytes.len() as u64 {
                     return Err(RevisionError::InvalidStore(format!(
                         "blob {} already exists with a different size",
                         sha256
                     )));
                 }
-                Ok(())
+                return Ok(());
             }
-            Err(e) => Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
+
+        let tmp_path = dir.join(format!(".{}.tmp-{}", sha256, Uuid::new_v4()));
+        let write_result = (|| -> Result<(), RevisionError> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&tmp_path)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = write_result {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+        if let Err(e) = fs::rename(&tmp_path, &path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
+        sync_dir(dir)
+    }
+
+    /// Sorted paths whose tracked content or mode differs between two revisions (O6).
+    pub fn compare(&self, a: &RevisionId, b: &RevisionId) -> Result<Vec<String>, RevisionError> {
+        let rev_a = self.load_revision(a)?;
+        let rev_b = self.load_revision(b)?;
+        let mut paths: BTreeSet<String> = rev_a.tracked_files.keys().cloned().collect();
+        paths.extend(rev_b.tracked_files.keys().cloned());
+        let mut differing = Vec::new();
+        for path in paths {
+            let left = rev_a.tracked_files.get(&path);
+            let right = rev_b.tracked_files.get(&path);
+            if left != right {
+                differing.push(path);
+            }
+        }
+        Ok(differing)
+    }
+
+    /// Newest revision manifest in the store, ordered by turn then capture time (O6).
+    pub fn newest_revision(&self) -> Result<Option<WorkspaceRevision>, RevisionError> {
+        Ok(self.list_revisions()?.pop())
     }
 
     fn read_blob(&self, sha256: &str) -> Result<Vec<u8>, RevisionError> {
@@ -724,24 +770,26 @@ impl SnapshotStore {
     }
 }
 
+/// Create (if needed) and lock down a private store directory (O3).
+///
+/// `DirBuilder::recursive(true)` returns `Ok` when the path already exists — including when it is
+/// a symlink — so the symlink check must run unconditionally *before* any `chmod`, otherwise
+/// `fs::set_permissions` would follow the link and chmod an attacker-chosen target.
 fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
-    match DirBuilder::new().recursive(true).mode(0o700).create(dir) {
-        Ok(()) => {
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-            Ok(())
+    if let Err(e) = DirBuilder::new().recursive(true).mode(0o700).create(dir) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(e.into());
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let meta = fs::symlink_metadata(dir)?;
-            if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
-                return Err(RevisionError::InvalidStore(format!(
-                    "snapshot store path '{}' is not a real directory",
-                    dir.display()
-                )));
-            }
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
     }
+    let meta = fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return Err(RevisionError::InvalidStore(format!(
+            "snapshot store path '{}' is not a real directory",
+            dir.display()
+        )));
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 
 fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), RevisionError> {

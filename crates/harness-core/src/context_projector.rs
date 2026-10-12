@@ -2,8 +2,10 @@ use crate::budget::BudgetConfig;
 use crate::messages::{
     CacheBreakpoint, CacheBreakpointMarker, ToolResultMessage, TranscriptItem,
 };
+use crate::prompt::sha256_hex64;
 use crate::types::{TerminalReason, ToolCallId};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -11,6 +13,78 @@ pub const MIN_COMPACTABLE_TOOL_BYTES: usize = 1024; // > 1 KiB
 pub const WORKING_SET_PIN_TURNS: usize = 8;
 pub const MAX_OUTLINE_SYMBOLS: usize = 12;
 pub const MAX_OUTLINE_STUB_BYTES: usize = 400;
+/// Why a tool result was replaced by an Outline Stub (Gate 2 evidence provenance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionReason {
+    /// Reclaimed by the high→low watermark Step-Down Compaction.
+    StepDownArchive,
+    /// A later `read` of the same path superseded this output.
+    SupersededRead,
+}
+
+/// Deterministic, replay-stable identifier for the raw evidence behind an Outline Stub.
+///
+/// Built from the canonical transcript index plus the tool `call_id`, both of which survive
+/// `--resume` and `--fork` unchanged for every retained (prefix) item, so the same stub always
+/// carries the same id across processes.
+pub fn source_entry_id(canonical_index: usize, call_id: &str) -> String {
+    format!("ev-{:04}-{}", canonical_index, call_id)
+}
+
+/// Parse the `source_entry_id=<id>` field back out of an Outline Stub header.
+pub fn extract_source_entry_id(content: &str) -> Option<String> {
+    let start = content.find("source_entry_id=")? + "source_entry_id=".len();
+    let rest = &content[start..];
+    let end = rest
+        .find(|c: char| c == ' ' || c == '|' || c == ']' || c == ')' || c == ',')
+        .unwrap_or(rest.len());
+    let id = rest[..end].trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+/// Evidence graph node: binds a compacted Outline Stub to the raw tool output it replaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceLink {
+    pub source_entry_id: String,
+    /// Index of the compacted item inside the canonical transcript.
+    pub canonical_index: usize,
+    pub call_id: String,
+    pub tool_name: String,
+    pub relative_path: Option<String>,
+    pub original_sha256: String,
+    pub original_bytes: usize,
+    pub original_lines: usize,
+    pub stub_bytes: usize,
+    pub reason: CompactionReason,
+}
+
+/// Deterministic per-category byte accounting for the projected request (Gate 2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBudgetBreakdown {
+    /// Bytes of Working-Set-pinned (recently modified file) tool output kept verbatim.
+    pub pinned_working_set_bytes: usize,
+    /// Bytes occupied by the Outline Stubs that replaced archived output.
+    pub compacted_stub_bytes: usize,
+    /// Bytes of the protected recent tail window.
+    pub recent_tail_bytes: usize,
+    /// Total estimated bytes of every projected history item.
+    pub total_projected_bytes: usize,
+    /// Number of raw-evidence pointers available for `recall_evidence`.
+    pub evidence_link_count: usize,
+}
+
+/// Aggregated projection statistics exposed to the runtime and the acceptance tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectionStats {
+    pub budget: ContextBudgetBreakdown,
+    pub compaction_reread_count: u64,
+    pub evidence_link_count: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct CompactionEventRecord {
@@ -42,6 +116,13 @@ pub struct ContextProjector {
     compaction_reread_count: u64,
     last_pinned_baseline_end: usize,
     last_touched_turns: HashMap<String, usize>,
+    /// Raw tool output retained for `recall_evidence`, keyed by `source_entry_id`.
+    evidence: HashMap<String, Arc<str>>,
+    /// `call_id` → `source_entry_id`, so a model may recall by either identifier.
+    evidence_call_index: HashMap<String, String>,
+    /// Deterministic, ordered evidence graph for the current projection.
+    evidence_links: Vec<EvidenceLink>,
+    last_budget: ContextBudgetBreakdown,
 }
 
 impl Default for ContextProjector {
@@ -59,11 +140,66 @@ impl ContextProjector {
             compaction_reread_count: 0,
             last_pinned_baseline_end: 0,
             last_touched_turns: HashMap::new(),
+            evidence: HashMap::new(),
+            evidence_call_index: HashMap::new(),
+            evidence_links: Vec::new(),
+            last_budget: ContextBudgetBreakdown::default(),
         }
     }
 
     pub fn compaction_reread_count(&self) -> u64 {
         self.compaction_reread_count
+    }
+
+    /// Evidence graph for the current projection, ordered by canonical index.
+    pub fn evidence_links(&self) -> &[EvidenceLink] {
+        &self.evidence_links
+    }
+
+    /// Deterministic byte accounting for the last `project` call.
+    pub fn stats(&self) -> ProjectionStats {
+        ProjectionStats {
+            budget: self.last_budget.clone(),
+            compaction_reread_count: self.compaction_reread_count,
+            evidence_link_count: self.evidence_links.len(),
+        }
+    }
+
+    /// Register raw evidence for an Outline Stub (used when seeding from a resumed WAL).
+    pub fn register_evidence(&mut self, link: EvidenceLink, raw: Arc<str>) {
+        if self.evidence.contains_key(&link.source_entry_id) {
+            return;
+        }
+        self.evidence_call_index
+            .insert(link.call_id.clone(), link.source_entry_id.clone());
+        self.evidence.insert(link.source_entry_id.clone(), raw);
+        self.evidence_links.push(link);
+        self.evidence_links.sort_by(|a, b| {
+            a.canonical_index
+                .cmp(&b.canonical_index)
+                .then_with(|| a.source_entry_id.cmp(&b.source_entry_id))
+        });
+    }
+
+    /// Look up raw evidence by `source_entry_id` or by the originating tool `call_id`.
+    pub fn evidence_lookup(&self, id: &str) -> Option<Arc<str>> {
+        if let Some(raw) = self.evidence.get(id) {
+            return Some(Arc::clone(raw));
+        }
+        let canonical = self.evidence_call_index.get(id)?;
+        self.evidence.get(canonical).map(Arc::clone)
+    }
+
+    /// Evidence-graph metadata for `source_entry_id` (or the originating tool `call_id`).
+    pub fn evidence_link(&self, id: &str) -> Option<&EvidenceLink> {
+        let canonical = if self.evidence.contains_key(id) {
+            id
+        } else {
+            self.evidence_call_index.get(id).map(String::as_str)?
+        };
+        self.evidence_links
+            .iter()
+            .find(|link| link.source_entry_id == canonical)
     }
 
     /// Stable index of the append-only pinned baseline prefix. Persisted by the session WAL.
@@ -136,6 +272,9 @@ impl ContextProjector {
             self.projected_items.truncate(canonical.len());
             self.compacted_indices.retain(|&idx| idx < canonical.len());
             self.last_pinned_baseline_end = self.last_pinned_baseline_end.min(canonical.len());
+            // Evidence links for rewound items must go too, so a later append at the same index
+            // cannot inherit a stale pointer.
+            self.evidence_links.retain(|link| link.canonical_index < canonical.len());
         }
         self.refresh_last_touched_from_transcript();
 
@@ -274,6 +413,27 @@ impl ContextProjector {
             },
         ];
 
+        // Deterministic per-category byte accounting (Gate 2). Every projected item lands in
+        // exactly one bucket, so the breakdown is reproducible across fresh runs, `--resume`, and
+        // `--fork` for the same canonical transcript and budget.
+        let durable_last_touched = self.last_touched_turns.clone();
+        let (pinned_indices, _) =
+            compute_working_set_pins(&self.projected_items, current_turn, &durable_last_touched);
+        let mut breakdown = ContextBudgetBreakdown::default();
+        for (idx, item) in self.projected_items.iter().enumerate() {
+            let bytes = item.estimated_bytes();
+            breakdown.total_projected_bytes += bytes;
+            if self.compacted_indices.contains(&idx) {
+                breakdown.compacted_stub_bytes += bytes;
+            } else if idx >= tail_start_idx {
+                breakdown.recent_tail_bytes += bytes;
+            } else if pinned_indices.contains(&idx) {
+                breakdown.pinned_working_set_bytes += bytes;
+            }
+        }
+        breakdown.evidence_link_count = self.evidence_links.len();
+        self.last_budget = breakdown;
+
         Ok(ProjectedContext {
             messages: self.projected_items.clone(),
             breakpoints,
@@ -339,32 +499,84 @@ impl ContextProjector {
                     self.last_pinned_baseline_end = self.last_pinned_baseline_end.max(idx + 1);
                 }
 
-                if let TranscriptItem::ToolResult(ref mut tr) = self.projected_items[idx] {
+                // A later `read` of the same path supersedes this output. Computed from an
+                // immutable borrow so the mutable borrow below stays short-lived.
+                let superseded = match &self.projected_items[idx] {
+                    TranscriptItem::ToolResult(tr) => {
+                        tr.tool_name == "read"
+                            && tr.meta.relative_path.as_deref().is_some_and(|path| {
+                                self.projected_items[idx + 1..].iter().any(|later| {
+                                    matches!(
+                                        later,
+                                        TranscriptItem::ToolResult(t)
+                                            if t.tool_name == "read"
+                                                && t.meta.relative_path.as_deref() == Some(path)
+                                    )
+                                })
+                            })
+                    }
+                    _ => false,
+                };
+
+                let mut raw_evidence: Option<Arc<str>> = None;
+                let mut new_link: Option<EvidenceLink> = None;
+                let mut read_path: Option<String> = None;
+                {
+                    let tr = match &mut self.projected_items[idx] {
+                        TranscriptItem::ToolResult(tr) => tr,
+                        _ => continue,
+                    };
                     if tr.content.len() <= MIN_COMPACTABLE_TOOL_BYTES {
                         continue;
                     }
                     // Compact read-only outputs and large bash outputs (preserving exit code & tail)
                     let old_bytes = tr.content.len();
-                    let stub = build_outline_stub(tr, idx);
+                    let raw: Arc<str> = Arc::clone(&tr.content);
+                    let sid = source_entry_id(idx, &tr.call_id.0);
+                    let reason = if superseded {
+                        CompactionReason::SupersededRead
+                    } else {
+                        CompactionReason::StepDownArchive
+                    };
+                    let stub = build_outline_stub(tr, idx, &sid);
                     let new_bytes = stub.len();
                     if new_bytes < old_bytes {
                         let stub_arc: Arc<str> = Arc::from(stub);
                         tr.content = Arc::clone(&stub_arc);
                         // Synchronize stub to canonical transcript so shared memory is freed (§7.1)
-                        if let Some(TranscriptItem::ToolResult(ref mut canon_tr)) =
-                            canonical.get_mut(idx)
-                        {
+                        if let Some(TranscriptItem::ToolResult(canon_tr)) = canonical.get_mut(idx) {
                             canon_tr.content = stub_arc;
                         }
-                        if let Some(ref rel_path) = tr.meta.relative_path {
-                            if tr.tool_name == "read" {
-                                self.compacted_file_paths.insert(rel_path.clone());
-                            }
-                        }
-                        self.compacted_indices.insert(idx);
-                        compacted_seqs.push(idx);
+                        read_path = if tr.tool_name == "read" {
+                            tr.meta.relative_path.clone()
+                        } else {
+                            None
+                        };
+                        new_link = Some(EvidenceLink {
+                            source_entry_id: sid,
+                            canonical_index: idx,
+                            call_id: tr.call_id.0.clone(),
+                            tool_name: tr.tool_name.clone(),
+                            relative_path: tr.meta.relative_path.clone(),
+                            original_sha256: sha256_hex64(raw.as_bytes()),
+                            original_bytes: old_bytes,
+                            original_lines: raw.lines().count(),
+                            stub_bytes: new_bytes,
+                            reason,
+                        });
+                        raw_evidence = Some(raw);
                         current_bytes = current_bytes.saturating_sub(old_bytes - new_bytes);
                     }
+                }
+                // Retain the raw bytes as retrievable evidence (Gate 2) before they are dropped
+                // from the projected transcript.
+                if let (Some(link), Some(raw)) = (new_link, raw_evidence) {
+                    self.register_evidence(link, raw);
+                    if let Some(path) = read_path {
+                        self.compacted_file_paths.insert(path);
+                    }
+                    self.compacted_indices.insert(idx);
+                    compacted_seqs.push(idx);
                 }
             }
         }
@@ -479,18 +691,25 @@ fn compute_tail_window_start_index(
 }
 
 /// Build an Outline Stub (≤ 400B) containing 16-char SHA256 and top-level symbols with line numbers (§7.1 V6-03).
-pub fn build_outline_stub(tr: &ToolResultMessage, seq_idx: usize) -> String {
+///
+/// The header always carries `source_entry_id=<id>` plus a pointer to `recall_evidence`, so the
+/// model can recover the raw lines that this stub replaced on demand (Gate 2).
+pub fn build_outline_stub(tr: &ToolResultMessage, seq_idx: usize, source_entry_id: &str) -> String {
     let size_kib = (tr.content.len() as f64) / 1024.0;
     let path = tr.meta.relative_path.as_deref().unwrap_or(".");
     let sha = tr.meta.content_sha256.as_deref().unwrap_or("none");
+    let recall_hint = format!(
+        " | source_entry_id={} | call recall_evidence(source_entry_id={}) for the raw lines",
+        source_entry_id, source_entry_id
+    );
 
     if tr.tool_name == "bash" {
         let exit_code = tr.meta.exit_code.unwrap_or(0);
         let tail_lines: Vec<&str> = tr.content.lines().rev().take(15).collect();
         let tail_joined = tail_lines.into_iter().rev().collect::<Vec<_>>().join(" | ");
         let mut stub = format!(
-            "[Compacted: bash(exit_code={}, duration={}ms, {:.1} KiB, seq={}) | Tail: {}]",
-            exit_code, tr.meta.duration_ms, size_kib, seq_idx, tail_joined
+            "[Compacted: bash(exit_code={}, duration={}ms, {:.1} KiB, seq={}){} | Tail: {}]",
+            exit_code, tr.meta.duration_ms, size_kib, seq_idx, recall_hint, tail_joined
         );
         if stub.len() > MAX_OUTLINE_STUB_BYTES {
             let cut = crate::tool::output_buffer::floor_char_boundary(&stub, MAX_OUTLINE_STUB_BYTES - 4);
@@ -509,8 +728,8 @@ pub fn build_outline_stub(tr: &ToolResultMessage, seq_idx: usize) -> String {
     };
 
     let mut stub = format!(
-        "[Compacted: {}({}, lines {}-{}, {:.1} KiB, sha256={}, seq={}) | Outline: {}]",
-        tr.tool_name, path, start_l, end_l, size_kib, sha, seq_idx, outline_str
+        "[Compacted: {}({}, lines {}-{}, {:.1} KiB, sha256={}, seq={}){} | Outline: {}]",
+        tr.tool_name, path, start_l, end_l, size_kib, sha, seq_idx, recall_hint, outline_str
     );
     if stub.len() > MAX_OUTLINE_STUB_BYTES {
         let cut = crate::tool::output_buffer::floor_char_boundary(&stub, MAX_OUTLINE_STUB_BYTES - 4);

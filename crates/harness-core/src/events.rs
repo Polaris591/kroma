@@ -90,6 +90,13 @@ pub enum EventPayload {
         /// `baseline` for the pre-mutation capture, `mutation` for a post-tool-batch capture.
         trigger: String,
     },
+    /// The workspace was rewound to a captured revision by `--undo` / `--restore-rev` / crash
+    /// recovery (Gate 1 audit trail).
+    RevisionRestored {
+        revision_id: String,
+        restored_files: usize,
+        removed_files: usize,
+    },
     LoopGuardTriggered {
         call_id: ToolCallId,
         tool_name: String,
@@ -337,6 +344,16 @@ impl EventLogger {
                         trigger,
                         tracked_file_count,
                         changed_paths.len()
+                    );
+                }
+                EventPayload::RevisionRestored {
+                    revision_id,
+                    restored_files,
+                    removed_files,
+                } => {
+                    eprintln!(
+                        "⏪ [revision] restored {} ({} written, {} removed)",
+                        revision_id, restored_files, removed_files
                     );
                 }
                 EventPayload::RunTerminated {
