@@ -39,7 +39,7 @@ pub const MAX_SNAPSHOT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SNAPSHOT_DEPTH: usize = 32;
 
 /// Build outputs and dependency caches are never part of a reviewable revision.
-const SNAPSHOT_EXCLUDED_DIRS: &[&str] = &[
+pub(crate) const SNAPSHOT_EXCLUDED_DIRS: &[&str] = &[
     ".git", ".hg", ".svn", "target", "node_modules", ".venv", "venv", "__pycache__",
     ".mypy_cache", ".pytest_cache", ".gradle", ".tox", ".next", "dist", "build",
 ];
@@ -260,12 +260,23 @@ impl SnapshotStore {
             &mut total_bytes,
         )?;
 
+        let revision_id = compute_revision_id(&tracked);
+        if let Ok(existing) = self.load_revision(&revision_id) {
+            // Never overwrite an already-persisted revision with a self-parent (`parent == id`)
+            // or strip `wal_entry_id` when an unlinked intermediate capture sees the same tree.
+            if parent_rev == Some(&revision_id)
+                || (wal_entry_id.is_none() && existing.wal_entry_id.is_some())
+            {
+                return Ok(existing);
+            }
+        }
+
         let parent_files = match parent_rev {
             Some(id) => Some(self.load_revision(id)?.tracked_files),
             None => None,
         };
         let revision = WorkspaceRevision {
-            revision_id: compute_revision_id(&tracked),
+            revision_id,
             parent_revision_id: parent_rev.cloned(),
             wal_entry_id: wal_entry_id.map(|s| s.to_string()),
             turn_index,
@@ -281,6 +292,22 @@ impl SnapshotStore {
             0o600,
         )?;
         Ok(revision)
+    }
+
+    /// Remove a temporary revision manifest that has not been bound to any WAL entry (used when
+    /// a Gate 5 worker merge fails post-merge verification and auto-reverts).
+    pub(crate) fn remove_unlinked_revision(&self, id: &RevisionId) -> Result<bool, RevisionError> {
+        let Ok(rev) = self.load_revision(id) else {
+            return Ok(false);
+        };
+        if rev.wal_entry_id.is_some() {
+            return Ok(false);
+        }
+        match fs::remove_file(self.revision_path(id)) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn load_revision(&self, id: &RevisionId) -> Result<WorkspaceRevision, RevisionError> {

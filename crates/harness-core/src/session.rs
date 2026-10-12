@@ -75,6 +75,9 @@ pub struct SessionCheckpoint {
     /// Gate 4 mutation ledger as of this checkpoint. `serde(default)` keeps earlier WALs readable.
     #[serde(default)]
     pub mutations: Vec<MutationRecord>,
+    /// Gate 5 cumulative subagent spawn count on this branch as of this checkpoint.
+    #[serde(default)]
+    pub subagents_spawned: usize,
 }
 
 /// Append-only record binding a captured `WorkspaceRevision` to the WAL entry that was active when
@@ -141,6 +144,9 @@ enum WalPayload {
         /// Gate 4 mutation ledger (branch-scoped). `serde(default)` keeps earlier WALs readable.
         #[serde(default)]
         mutations: Vec<MutationRecord>,
+        /// Gate 5 cumulative subagent spawn count on this branch.
+        #[serde(default)]
+        subagents_spawned: usize,
     },
     /// A workspace revision snapshot was captured at `turn` (Gate 1).
     RevisionCaptured {
@@ -380,8 +386,8 @@ impl SessionJournal {
                     }
                     completion_resolution_leaf_ids.push(leaf_id);
                 }
-                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs, mutations } => {
-                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs, mutations });
+                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs, mutations, subagents_spawned } => {
+                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs, mutations, subagents_spawned });
                 }
                 WalPayload::RevisionCaptured { leaf_id, turn, revision_id, parent_revision_id, changed_paths, tracked_file_count, captured_at_ms } => {
                     if !revision_id.starts_with("r-") {
@@ -829,11 +835,37 @@ impl SessionJournal {
         &mut self,
         turn: usize,
         pinned_baseline_end: usize,
+        last_touched: Vec<FileTouch>,
+        reasoning_blocks_sha256: impl Into<String>,
+        workspace_revision_id: Option<String>,
+        subtree_dirs: Vec<String>,
+        mutations: Vec<MutationRecord>,
+    ) -> Result<(), SessionError> {
+        self.checkpoint_with_subagents(
+            turn,
+            pinned_baseline_end,
+            last_touched,
+            reasoning_blocks_sha256,
+            workspace_revision_id,
+            subtree_dirs,
+            mutations,
+            0,
+        )
+    }
+
+    /// Checkpoint variant that also records the cumulative Gate 5 `subagents_spawned` count on the
+    /// active branch so `--resume` and `--fork` preserve subagent IDs and spawn budgets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_with_subagents(
+        &mut self,
+        turn: usize,
+        pinned_baseline_end: usize,
         mut last_touched: Vec<FileTouch>,
         reasoning_blocks_sha256: impl Into<String>,
         workspace_revision_id: Option<String>,
         mut subtree_dirs: Vec<String>,
         mutations: Vec<MutationRecord>,
+        subagents_spawned: usize,
     ) -> Result<(), SessionError> {
         last_touched.sort_by(|a, b| a.path.cmp(&b.path));
         subtree_dirs.sort();
@@ -847,6 +879,7 @@ impl SessionJournal {
             workspace_revision_id,
             subtree_dirs,
             mutations,
+            subagents_spawned,
         };
         self.append_payload(WalPayload::Checkpoint {
             leaf_id: checkpoint.leaf_id.clone(),
@@ -857,6 +890,7 @@ impl SessionJournal {
             workspace_revision_id: checkpoint.workspace_revision_id.clone(),
             subtree_dirs: checkpoint.subtree_dirs.clone(),
             mutations: checkpoint.mutations.clone(),
+            subagents_spawned: checkpoint.subagents_spawned,
         })?;
         self.checkpoints.push(checkpoint);
         Ok(())
@@ -947,6 +981,16 @@ impl SessionJournal {
         self.last_hash = hash;
         self.next_seq += 1;
         Ok(())
+    }
+}
+
+impl Drop for SessionJournal {
+    fn drop(&mut self) {
+        // Explicitly release the `flock` on the open file description before closing the FD so a
+        // concurrent thread between `fork()` and `execve()` cannot keep the lock alive until exec.
+        unsafe {
+            let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 

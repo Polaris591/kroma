@@ -40,7 +40,7 @@ use crate::provider::ModelProvider;
 use crate::revision::{
     ensure_private_dir, is_ancestor_dir_of, live_entry_state, remove_tracked_file,
     stat_live_entry, write_tracked_file, LiveEntryStat, LiveEntryState, RevisionError, RevisionId,
-    SnapshotStore, TrackedFile, WorkspaceRevision,
+    SnapshotStore, TrackedFile, WorkspaceRevision, SNAPSHOT_EXCLUDED_DIRS,
 };
 use crate::sensitive_paths::SensitivePathGuard;
 use crate::tool::definition::{RegisteredTool, ToolDefinition, ToolMetadata};
@@ -72,8 +72,12 @@ pub const DEFAULT_SUBAGENT_MAX_TOOL_CALLS: usize = 16;
 pub const MAX_SUBAGENT_TOOL_CALLS_CEILING: usize = 32;
 /// Default token budget (input + output) for a single subagent.
 pub const DEFAULT_SUBAGENT_MAX_TOKENS: u64 = 64_000;
+/// Hard ceiling on `max_tokens` for any subagent.
+pub const MAX_SUBAGENT_TOKENS_CEILING: u64 = 512_000;
 /// Default wall-clock timeout in milliseconds for a single subagent.
 pub const DEFAULT_SUBAGENT_TIMEOUT_MS: u64 = 60_000;
+/// Hard ceiling on `timeout_ms` for any subagent.
+pub const MAX_SUBAGENT_TIMEOUT_MS_CEILING: u64 = 300_000;
 /// Maximum number of concurrent subagents in a single `spawn_subagent(tasks=[...])` fan-out.
 pub const MAX_PARALLEL_SUBAGENTS: usize = 4;
 /// Maximum byte length of the inner body of a rendered `<subagent_report>`.
@@ -239,8 +243,8 @@ impl SubagentBudget {
         Self {
             max_turns: self.max_turns.clamp(1, MAX_SUBAGENT_TURNS_CEILING),
             max_tool_calls: self.max_tool_calls.clamp(1, MAX_SUBAGENT_TOOL_CALLS_CEILING),
-            max_tokens: self.max_tokens.max(1),
-            timeout_ms: self.timeout_ms.max(1),
+            max_tokens: self.max_tokens.clamp(1, MAX_SUBAGENT_TOKENS_CEILING),
+            timeout_ms: self.timeout_ms.clamp(1, MAX_SUBAGENT_TIMEOUT_MS_CEILING),
         }
     }
 
@@ -291,12 +295,14 @@ impl SubagentSpec {
     }
 
     pub fn with_allowed_write_globs(mut self, globs: Vec<String>) -> Self {
-        self.allowed_write_globs = Some(globs);
+        self.allowed_write_globs =
+            normalize_and_validate_globs(None, Some(globs.clone())).unwrap_or(Some(globs));
         self
     }
 
     pub fn with_allowed_paths(mut self, paths: Vec<String>) -> Self {
-        self.allowed_write_globs = Some(paths);
+        self.allowed_write_globs =
+            normalize_and_validate_globs(Some(paths.clone()), None).unwrap_or(Some(paths));
         self
     }
 
@@ -516,29 +522,45 @@ pub fn parse_spawn_subagent_specs(raw_args: &str) -> Result<Vec<SubagentSpec>, S
 /// Check whether a workspace-relative path matches at least one entry in `allowed_globs` (either
 /// as an exact file path, a directory prefix anchored at the workspace root, or a glob pattern).
 pub fn is_path_allowed_by_scope(rel_path: &str, allowed_globs: &[String]) -> bool {
-    let norm_path = rel_path
-        .trim()
-        .replace('\\', "/")
-        .trim_start_matches("./")
-        .trim_matches('/')
-        .to_string();
-    if norm_path.is_empty() {
+    let sanitized_rel = rel_path.trim().replace('\\', "/");
+    let Ok(validated_rel) = WorkspaceCap::validate_relative_components(&sanitized_rel) else {
+        return false;
+    };
+    let norm_path = validated_rel.to_string_lossy().replace('\\', "/");
+    if norm_path.is_empty() || norm_path == "." {
         return false;
     }
     for raw_pat in allowed_globs {
-        let pat = raw_pat
+        let trimmed = raw_pat
             .trim()
             .replace('\\', "/")
             .trim_start_matches("./")
             .trim_matches('/')
             .to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "." || trimmed == "*" || trimmed == "**" {
+            return true;
+        }
+        if Path::new(&trimmed)
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::RootDir))
+        {
+            continue;
+        }
+        let mut pat_parts = Vec::new();
+        for comp in Path::new(&trimmed).components() {
+            if let Component::Normal(part) = comp {
+                pat_parts.push(part.to_string_lossy().to_string());
+            }
+        }
+        let pat = pat_parts.join("/");
         if pat.is_empty() {
             continue;
         }
-        if pat == "." || pat == "*" || pat == "**" {
-            return true;
-        }
-        let has_glob_meta = pat.contains('*') || pat.contains('?') || pat.contains('[') || pat.contains('{');
+        let has_glob_meta =
+            pat.contains('*') || pat.contains('?') || pat.contains('[') || pat.contains('{');
         if !has_glob_meta {
             if norm_path == pat || norm_path.starts_with(&format!("{}/", pat)) {
                 return true;
@@ -785,10 +807,21 @@ impl IsolatedWorktree {
         let mut conflicting_paths: BTreeSet<String> = BTreeSet::new();
         let mut reasons: Vec<String> = Vec::new();
 
-        // Any newly created skipped entry in the worker worktree (symlink, sensitive file,
-        // oversized file) is rejected so a worker cannot smuggle non-regular entries.
+        // `IsolatedWorktree::materialize` never copies `base_skipped` entries into the worktree,
+        // so every entry in `worker_skipped` was created during the worker's run. Ignore harmless
+        // excluded build/cache directories (`target`, `node_modules`, etc.) when they are real
+        // directories, and unconditionally flag any symlink, FIFO/special file, sensitive file, or
+        // oversized file (even if its path happened to appear in `base_skipped`).
         for skipped in &worker_skipped {
-            if !base_skipped.contains(skipped.as_str()) {
+            let is_harmless_excluded_dir = Path::new(skipped)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| SNAPSHOT_EXCLUDED_DIRS.contains(&name))
+                && matches!(
+                    stat_live_entry(&self.workspace, skipped)?,
+                    LiveEntryStat::Directory
+                );
+            if !is_harmless_excluded_dir {
                 conflicting_paths.insert(skipped.clone());
                 reasons.push(format!(
                     "worker created disallowed skipped/non-regular/sensitive entry '{}'",
@@ -924,16 +957,12 @@ impl IsolatedWorktree {
             });
         }
 
-        // Ensure the pre-merge state of the parent workspace is captured in the snapshot store so
-        // `--undo` and `revert_on_verify_failure` have an exact pre-merge revision to restore to.
-        let pre_merge_rev = match current_parent_revision {
-            Some(rev_id) if snapshot_store.load_revision(rev_id).is_ok() => rev_id.clone(),
-            _ => {
-                snapshot_store
-                    .capture_revision(parent_workspace, None, None, turn_index)?
-                    .revision_id
-            }
-        };
+        // Always capture a fresh pre-merge revision of the live `parent_workspace` immediately
+        // before applying `removed_files`/`written_entries`, so `revert_on_verify_failure` and
+        // `--undo` restore the exact pre-merge workspace without clobbering un-snapshotted parent files.
+        let pre_merge_rev = snapshot_store
+            .capture_revision(parent_workspace, current_parent_revision, None, turn_index)?
+            .revision_id;
 
         // Apply removals deepest-first, then writes in sorted path order.
         removed_files.sort_by(|a, b| {
@@ -979,7 +1008,7 @@ impl IsolatedWorktree {
             if let Some(gate_output) = failure_feedback {
                 let mut reverted = false;
                 if revert_on_verify_failure {
-                    if let Ok( crate::revision::RestoreResult::Applied { .. }) = snapshot_store
+                    if let Ok(crate::revision::RestoreResult::Applied { .. }) = snapshot_store
                         .restore_revision(
                             parent_workspace,
                             &pre_merge_rev,
@@ -988,6 +1017,9 @@ impl IsolatedWorktree {
                         )
                     {
                         reverted = true;
+                        if merged_revision != pre_merge_rev {
+                            let _ = snapshot_store.remove_unlinked_revision(&merged_revision);
+                        }
                     }
                 }
                 return Ok(WorktreeMergeResult::VerificationFailed {
@@ -1299,19 +1331,43 @@ impl SubagentBackend for ProviderSubagentBackend {
             let prompt_builder =
                 PromptBuilder::new(system_prompt).with_workspace_context(env.workspace());
 
+            let child_run_duration = child_budget.max_run_duration;
             let run_cfg = AgentRunConfig::new(req.spec.task.clone(), child_budget);
             let mut child_logger =
                 EventLogger::new(run_cfg.run_id, Some(req.state_dir.clone()), false)
                     .map_err(|e| format!("failed to create subagent event logger: {}", e))?;
             child_logger.set_live_stderr(false);
 
-            let runner = AgentRunner::new(run_cfg, provider, runtime, req.cancel_rx)
+            let mut parent_cancel = req.cancel_rx;
+            let (child_cancel_tx, child_cancel_rx) = watch::channel(*parent_cancel.borrow());
+            let timer_watcher = tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(child_run_duration) => {
+                        let _ = child_cancel_tx.send(true);
+                    }
+                    _ = async {
+                        loop {
+                            if *parent_cancel.borrow() {
+                                break;
+                            }
+                            if parent_cancel.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    } => {
+                        let _ = child_cancel_tx.send(true);
+                    }
+                }
+            });
+
+            let runner = AgentRunner::new(run_cfg, provider, runtime, child_cancel_rx)
                 .with_prompt_builder(prompt_builder)
                 .with_subtree_context(SubtreeContextTracker::new(true))
                 .with_max_subagents(0)
                 .with_max_total_tokens(Some(req.spec.budget.clamped().max_tokens));
 
             let (summary, _child_logger) = runner.run(child_logger).await;
+            timer_watcher.abort();
             let duration_ms = started.elapsed().as_millis() as u64;
 
             let (relevant_files, findings) =

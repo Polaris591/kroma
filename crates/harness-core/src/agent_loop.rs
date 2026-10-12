@@ -400,11 +400,28 @@ impl AgentRunner {
             if let Some(ref active_revs) = reverted_active_revisions {
                 self.mutation_ledger.prune_reverted_revisions(active_revs);
             }
+            self.subagents_spawned = checkpoint.subagents_spawned;
         }
         // Replay any completed mutating tool result in the active transcript that was persisted
         // after the last checkpoint before an interruption.
         for (idx, item) in transcript.iter().enumerate() {
             if let TranscriptItem::ToolResult(tr) = item {
+                if tr.tool_name == "spawn_subagent" && tr.outcome.is_success() {
+                    // Advance `subagents_spawned` past any `<subagent_report ... id="sub-XXXX">`
+                    // present on the active branch so resumed/forked sessions never reuse IDs.
+                    let mut search_from = 0usize;
+                    while let Some(pos) = tr.content[search_from..].find("id=\"sub-") {
+                        let start = search_from + pos + "id=\"sub-".len();
+                        let digits: String = tr.content[start..]
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect();
+                        if let Ok(parsed_id) = digits.parse::<usize>() {
+                            self.subagents_spawned = self.subagents_spawned.max(parsed_id);
+                        }
+                        search_from = start;
+                    }
+                }
                 if tr.outcome.is_success() && !self.mutation_ledger.has_call_id(tr.call_id.as_str()) {
                     if let Some(MutationTelemetry { spans, .. }) = tr.meta.mutation.clone() {
                         self.mutation_ledger.record_mutation(
@@ -1334,7 +1351,16 @@ impl AgentRunner {
         let reasoning_hash = serde_json::to_vec(&reasoning)
             .map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes)))
             .unwrap_or_default();
-        if let Err(err) = journal.checkpoint_with_revision(absolute_turn, projector.last_pinned_baseline_end(), last_touched, reasoning_hash, workspace_revision_id, self.subtree_tracker.loaded_dirs(), self.mutation_ledger.records().to_vec()) {
+        if let Err(err) = journal.checkpoint_with_subagents(
+            absolute_turn,
+            projector.last_pinned_baseline_end(),
+            last_touched,
+            reasoning_hash,
+            workspace_revision_id,
+            self.subtree_tracker.loaded_dirs(),
+            self.mutation_ledger.records().to_vec(),
+            self.subagents_spawned,
+        ) {
             self.session_persist_error = Some(err.to_string());
         }
     }
@@ -1961,6 +1987,16 @@ impl AgentRunner {
                 );
             }
             PolicyCheckResult::Ask => {
+                if *self.cancel_rx.borrow() {
+                    return (
+                        ToolExecutionOutput::error(
+                            ErrorCode::NotExecutedCancelled,
+                            "spawn_subagent cancelled before approval prompt".to_string(),
+                            ToolResultMeta::default(),
+                        ),
+                        "ask_cancelled".to_string(),
+                    );
+                }
                 let req = ApprovalRequest {
                     tool_name: call.name.clone(),
                     effect_class: effective_effect,
@@ -1971,9 +2007,41 @@ impl AgentRunner {
                     workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
                 };
                 let pe = self.tool_runtime.policy_engine().clone();
-                let decision = tokio::task::spawn_blocking(move || pe.prompt_approval(&req))
-                    .await
-                    .unwrap_or(ApprovalDecision::Deny);
+                let mut approval_cancel_rx = self.cancel_rx.clone();
+                let mut prompt_task =
+                    tokio::task::spawn_blocking(move || pe.prompt_approval(&req));
+                let decision = tokio::select! {
+                    res = &mut prompt_task => res.unwrap_or(ApprovalDecision::Deny),
+                    _ = async {
+                        loop {
+                            if *approval_cancel_rx.borrow() {
+                                break;
+                            }
+                            if approval_cancel_rx.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    } => {
+                        return (
+                            ToolExecutionOutput::error(
+                                ErrorCode::NotExecutedCancelled,
+                                "spawn_subagent approval cancelled by user".to_string(),
+                                ToolResultMeta::default(),
+                            ),
+                            "ask_cancelled".to_string(),
+                        );
+                    }
+                };
+                if *self.cancel_rx.borrow() {
+                    return (
+                        ToolExecutionOutput::error(
+                            ErrorCode::NotExecutedCancelled,
+                            "spawn_subagent approval cancelled by user".to_string(),
+                            ToolResultMeta::default(),
+                        ),
+                        "ask_cancelled".to_string(),
+                    );
+                }
                 match decision {
                     ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => {
                         "ask_approved".to_string()
@@ -2407,6 +2475,10 @@ impl AgentRunner {
                 merge_result,
                 worktree_cleaned_up,
             });
+        }
+
+        if self.snapshot_store.is_none() {
+            self.current_revision_id = in_batch_parent_rev;
         }
 
         let report_text = render_subagent_batch_report(&results);
