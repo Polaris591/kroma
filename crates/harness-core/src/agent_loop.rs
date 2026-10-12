@@ -1752,6 +1752,9 @@ impl AgentRunner {
                             .execute_call(call, budget_tracker.turns_used(), self.cancel_rx.clone())
                             .await
                     };
+                    for approval_ev in self.tool_runtime.policy_engine().drain_approval_events() {
+                        let _ = logger.log(approval_ev);
+                    }
                     Self::log_hook_evaluations(logger, &serial_hook_evaluations);
 
                     // A call denied by a `PreToolUse` policy hook never executed, so it must not

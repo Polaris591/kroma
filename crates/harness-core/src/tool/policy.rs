@@ -100,6 +100,12 @@ pub enum ApprovalDecision {
 pub trait ApprovalHandler: Send + Sync {
     fn request_approval(&self, req: &ApprovalRequest) -> ApprovalDecision;
     fn is_interactive(&self) -> bool;
+
+    /// Gate 6: drain any `ApprovalRequested` / `ApprovalResolved` telemetry events recorded by this
+    /// handler during the most recent approval wait so the runtime logger persists them.
+    fn drain_events(&self) -> Vec<crate::events::EventPayload> {
+        Vec::new()
+    }
 }
 
 /// Non-interactive fail-safe handler: automatically denies any `Ask` prompt without hanging (§2.1).
@@ -223,5 +229,9 @@ impl PolicyEngine {
             allowed.insert(req.tool_name.clone());
         }
         decision
+    }
+
+    pub fn drain_approval_events(&self) -> Vec<crate::events::EventPayload> {
+        self.approval_handler.drain_events()
     }
 }

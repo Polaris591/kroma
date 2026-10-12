@@ -15,6 +15,10 @@ use harness_core::extensions::{
     discover_skills, CommandObserverHook, CommandPolicyHook, ExtensionManifest, ScopedExtension,
     SubtreeContextTracker,
 };
+use harness_core::surface::{
+    validate_daemon_listen_addr, HarnessDaemon, HarnessRuntimeConfig, InteractiveRepl,
+    RpcDispatcher,
+};
 use harness_core::tool::policy::{ PolicyEngine, PolicyMode };
 use harness_core::tool::registry::ToolRegistry;
 use harness_core::types::RunStatus;
@@ -24,8 +28,18 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::watch;
 
+/// Gate 6: explicit runtime surface selected via subcommand or CLI flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliSurface {
+    Headless,
+    Repl,
+    Acp,
+    Serve { listen_addr: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct CliArgs {
+    pub surface: CliSurface,
     pub workspace: PathBuf,
     pub task: Option<String>,
     pub policy_mode: PolicyMode,
@@ -62,6 +76,10 @@ pub struct CliArgs {
     pub predict_cmd: Option<String>,
     /// Gate 5: maximum number of subagent spawns per session (`0` disables `spawn_subagent`).
     pub max_subagents: usize,
+    /// Gate 6: headless output format (`text` or `jsonl`).
+    pub output_format: String,
+    /// Gate 6: optional authentication token for `harness serve`.
+    pub auth_token: Option<String>,
 }
 
 impl CliArgs {
@@ -78,6 +96,8 @@ where
     let mut iter = args.into_iter().peekable();
     let _bin = iter.next();
 
+    let mut surface = CliSurface::Headless;
+
     if let Some(first) = iter.peek() {
         if first == "--help" || first == "-h" || first == "help" {
             return Err(usage_text());
@@ -85,8 +105,25 @@ where
         if first == "--version" || first == "-V" {
             return Err(format!("harness {}", harness_core::version()));
         }
-        if first == "run" {
-            iter.next();
+        match first.as_str() {
+            "run" => {
+                iter.next();
+            }
+            "repl" | "tui" => {
+                iter.next();
+                surface = CliSurface::Repl;
+            }
+            "acp" => {
+                iter.next();
+                surface = CliSurface::Acp;
+            }
+            "serve" => {
+                iter.next();
+                surface = CliSurface::Serve {
+                    listen_addr: "127.0.0.1:7878".to_string(),
+                };
+            }
+            _ => {}
         }
     }
 
@@ -117,6 +154,11 @@ where
     let mut predict_cmd: Option<String> = None;
     let mut max_subagents: usize = harness_core::subagents::DEFAULT_MAX_SUBAGENT_SPAWNS;
     let mut no_subagents = false;
+    let mut output_format = "text".to_string();
+    let mut auth_token: Option<String> = std::env::var("HARNESS_DAEMON_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -126,11 +168,56 @@ where
                     .ok_or_else(|| "missing value for --workspace".to_string())?;
                 workspace = Some(PathBuf::from(val));
             }
-            "--task" | "-t" => {
+            "--task" | "-t" | "--prompt" | "-p" => {
                 let val = iter
                     .next()
-                    .ok_or_else(|| "missing value for --task".to_string())?;
+                    .ok_or_else(|| "missing value for --task/--prompt".to_string())?;
                 task = Some(val);
+            }
+            "--interactive" | "--repl" | "--tui" => {
+                surface = CliSurface::Repl;
+            }
+            "--acp" => {
+                surface = CliSurface::Acp;
+            }
+            "--serve" | "--listen" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| format!("missing value for {} <ADDR>", arg))?;
+                let trimmed = val.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(format!("empty value for {}", arg));
+                }
+                surface = CliSurface::Serve {
+                    listen_addr: trimmed,
+                };
+            }
+            "--auth-token" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --auth-token <TOKEN>".to_string())?;
+                let trimmed = val.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err("empty value for --auth-token".to_string());
+                }
+                auth_token = Some(trimmed);
+            }
+            "--output-format" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --output-format <text|jsonl>".to_string())?;
+                match val.trim() {
+                    "text" | "jsonl" => output_format = val.trim().to_string(),
+                    other => {
+                        return Err(format!(
+                            "unknown --output-format '{}'; expected 'text' or 'jsonl'",
+                            other
+                        ))
+                    }
+                }
+            }
+            "--jsonl" => {
+                output_format = "jsonl".to_string();
             }
             "--policy" => {
                 let val = iter
@@ -307,8 +394,14 @@ where
         return Err("--force-restore requires --undo or --restore-rev".to_string());
     }
     // `--list-skills` is a standalone inspection action: it needs a workspace but no task.
-    if !management && !list_skills && task.is_none() {
+    // Multi-surface interactive/protocol modes (`repl`, `acp`, `serve`) receive prompts over their
+    // transport rather than requiring `--task` on the command line.
+    if surface == CliSurface::Headless && !management && !list_skills && task.is_none() {
         return Err("missing required --task <prompt>".to_string());
+    }
+
+    if let CliSurface::Serve { ref listen_addr } = surface {
+        validate_daemon_listen_addr(listen_addr, auth_token.as_deref())?;
     }
 
     // Resolve `--resume` against the session store first, so `latest`, a bare session id
@@ -345,6 +438,7 @@ where
     }
 
     Ok(CliArgs {
+        surface,
         workspace,
         task,
         policy_mode,
@@ -369,6 +463,8 @@ where
         no_predictive_check,
         predict_cmd,
         max_subagents,
+        output_format,
+        auth_token,
     })
 }
 
@@ -932,12 +1028,24 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
 }
 
 pub fn usage_text() -> String {
-    "\
-Usage: harness run --workspace <DIR> --task <TASK> [OPTIONS]
-
-Options:
-  --workspace <DIR>         Target repository workspace directory
-  --task <TASK>             Coding or analysis task description
+    "Usage: harness run --workspace <DIR> --task <TASK> [OPTIONS]\n\
+       harness repl --workspace <DIR> [OPTIONS]\n\
+       harness acp --workspace <DIR> [OPTIONS]\n\
+       harness serve --workspace <DIR> [--listen 127.0.0.1:<PORT>] [--auth-token <TOKEN>] [OPTIONS]\n\n\
+Surfaces (Gate 6):\n\
+  run                       Headless single-run CLI mode (default)\n\
+  repl | tui | --interactive Interactive multi-turn terminal REPL/TUI\n\
+  acp | --acp               JSON-RPC 2.0 Agent Client Protocol server over stdio\n\
+  serve | --serve <ADDR>    JSON-RPC 2.0 daemon over loopback TCP (or authenticated TCP)\n\
+  --listen <ADDR>           TCP listen address for `harness serve` (default: 127.0.0.1:7878)\n\
+  --auth-token <TOKEN>      Required when binding `harness serve` to a non-loopback address\n\
+  --output-format <FMT>     Headless output format: text | jsonl (default: text)\n\
+  --jsonl                   Shorthand for --output-format jsonl\n\n\
+Options:\n\
+  --workspace <DIR>         Target repository workspace directory\n\
+  --task <TASK>             Coding or analysis task description"
+        .to_string()
+        + "
   --policy <MODE>           Host policy: read-only | ask (default: ask)
   --allow-write             Auto-allow workspace file mutations (edit/write)
   --allow-shell             Auto-allow supervised shell commands (bash)
@@ -987,7 +1095,6 @@ Security Notice:
 
 Exit codes:
   0 success, 1 run failure, 2 invalid invocation, 3 restore conflict, 4 restore recovery required."
-        .to_string()
 }
 
 #[tokio::main]
@@ -1078,6 +1185,129 @@ async fn main() -> ExitCode {
     };
 
     let budget = BudgetConfig::default();
+    let gate_choice = match choose_completion_gate(&cli, std::env::var("HARNESS_VERIFY_COMMAND").ok()) {
+        Ok(choice) => choice,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    let max_gate_retries = std::env::var("HARNESS_GATE_MAX_RETRIES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(3);
+
+    // Gate 6: multi-surface dispatch (`repl`, `acp`, `serve`) through the unified `RpcDispatcher`.
+    if cli.surface != CliSurface::Headless {
+        let (surface_name, transport_name) = match &cli.surface {
+            CliSurface::Repl => ("repl", "tty"),
+            CliSurface::Acp => ("acp", "stdio"),
+            CliSurface::Serve { .. } => ("serve", "tcp"),
+            CliSurface::Headless => ("headless", "stdio"),
+        };
+        let mut rt_cfg =
+            HarnessRuntimeConfig::new(cli.workspace.clone(), state_dir.clone(), cli.policy_mode)
+                .with_surface(surface_name, transport_name)
+                .with_auth_token(cli.auth_token.clone())
+                .with_completion_gate(build_completion_gate(gate_choice));
+        rt_cfg.budget = budget;
+        rt_cfg.stream = !cli.no_stream;
+        rt_cfg.strict_log = cli.strict_log;
+        rt_cfg.tool_filter = cli.tool_filter.clone();
+        rt_cfg.resume_session_path = cli.resume.clone();
+        rt_cfg.fork_turn = cli.fork_turn;
+        rt_cfg.completion_gate_max_retries = max_gate_retries;
+        rt_cfg.predictive_check = !cli.no_predictive_check;
+        rt_cfg.subtree_context_enabled = !cli.no_subtree_context;
+        rt_cfg.max_subagents = cli.max_subagents;
+        rt_cfg.initial_skill = cli.skill.clone();
+        if let Some(raw_pred) = cli.predict_cmd.as_deref() {
+            if cli.policy_mode != PolicyMode::ReadOnly && !cli.no_predictive_check {
+                match parse_command_argv(raw_pred) {
+                    Ok(argv) if !argv.is_empty() => {
+                        rt_cfg.predict_cmd =
+                            Some(Arc::new(WorkspaceCompletionGate::with_auto_detection(
+                                Some(argv),
+                                configured_timeout(),
+                                false,
+                            )));
+                    }
+                    Ok(_) => {
+                        eprintln!("error: empty value for --predict-cmd");
+                        return ExitCode::from(2);
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+        }
+        match build_cli_extension(&cli) {
+            Ok(Some(ext)) => rt_cfg.extensions.push(ext),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+        }
+
+        let dispatcher = match RpcDispatcher::new(rt_cfg, provider) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+        };
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let disp_for_ctrlc = dispatcher.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = cancel_tx.send(true);
+                disp_for_ctrlc.approval_broker().cancel_all_pending();
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    std::process::exit(130);
+                }
+            }
+        });
+
+        let res = match &cli.surface {
+            CliSurface::Repl => {
+                let repl = InteractiveRepl::new(dispatcher);
+                let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+                let stdout = tokio::io::stdout();
+                repl.run_io(stdin, stdout).await
+            }
+            CliSurface::Acp => {
+                dispatcher
+                    .serve_stream(tokio::io::stdin(), tokio::io::stdout())
+                    .await
+            }
+            CliSurface::Serve { listen_addr } => {
+                match HarnessDaemon::bind(listen_addr, dispatcher).await {
+                    Ok(daemon) => {
+                        if !cli.quiet {
+                            eprintln!("[harness] daemon listening on {}", daemon.local_addr());
+                        }
+                        daemon.serve(cancel_rx).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            CliSurface::Headless => unreachable!(),
+        };
+
+        return match res {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                ExitCode::from(1)
+            }
+        };
+    }
+
     let env = match LocalHostEnv::new(&cli.workspace, state_dir.clone()) {
         Ok(e) => Arc::new(e),
         Err(e) => {
@@ -1156,7 +1386,18 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    logger.set_live_stderr(!cli.quiet);
+    logger.set_live_stderr(!cli.quiet && cli.output_format != "jsonl");
+    if cli.output_format == "jsonl" {
+        logger.set_event_sink(Arc::new(|ev| {
+            if let Ok(line) = serde_json::to_string(ev) {
+                println!("{}", line);
+            }
+        }));
+    }
+    let _ = logger.log(EventPayload::SurfaceStarted {
+        surface: "headless".to_string(),
+        transport: cli.output_format.clone(),
+    });
 
     let approval_ui = Arc::new(TtyApprovalUi::new());
     let policy_engine = PolicyEngine::new(cli.policy_mode, approval_ui);
@@ -1904,6 +2145,93 @@ mod tests {
             "not-a-number".into(),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn test_gate6_multi_surface_cli_flags_and_serve_security() {
+        let repl = parse_cli_args(vec![
+            "harness".into(),
+            "repl".into(),
+            "--workspace".into(),
+            "./repo".into(),
+        ])
+        .unwrap();
+        assert_eq!(repl.surface, CliSurface::Repl);
+        assert!(repl.task.is_none());
+
+        let tui = parse_cli_args(vec![
+            "harness".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--interactive".into(),
+        ])
+        .unwrap();
+        assert_eq!(tui.surface, CliSurface::Repl);
+
+        let acp = parse_cli_args(vec![
+            "harness".into(),
+            "acp".into(),
+            "--workspace".into(),
+            "./repo".into(),
+        ])
+        .unwrap();
+        assert_eq!(acp.surface, CliSurface::Acp);
+
+        let serve_loopback = parse_cli_args(vec![
+            "harness".into(),
+            "serve".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            serve_loopback.surface,
+            CliSurface::Serve {
+                listen_addr: "127.0.0.1:0".into()
+            }
+        );
+
+        // Non-loopback bind without --auth-token must be rejected.
+        let non_loopback_err = parse_cli_args(vec![
+            "harness".into(),
+            "serve".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--listen".into(),
+            "0.0.0.0:9000".into(),
+        ])
+        .unwrap_err();
+        assert!(non_loopback_err.contains("non-loopback"));
+
+        // Non-loopback bind with --auth-token is accepted.
+        let serve_authed = parse_cli_args(vec![
+            "harness".into(),
+            "serve".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--listen".into(),
+            "0.0.0.0:9000".into(),
+            "--auth-token".into(),
+            "secret-token-123".into(),
+        ])
+        .unwrap();
+        assert_eq!(serve_authed.auth_token.as_deref(), Some("secret-token-123"));
+
+        let jsonl = parse_cli_args(vec![
+            "harness".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--prompt".into(),
+            "inspect".into(),
+            "--output-format".into(),
+            "jsonl".into(),
+        ])
+        .unwrap();
+        assert_eq!(jsonl.output_format, "jsonl");
+        assert_eq!(jsonl.task.as_deref(), Some("inspect"));
     }
 }
 

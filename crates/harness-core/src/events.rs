@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-pub const EVENT_SCHEMA_VERSION: &str = "0.10.0";
+pub const EVENT_SCHEMA_VERSION: &str = "1.0.0";
+
+pub type EventSink = std::sync::Arc<dyn Fn(&DiagnosticEvent) + Send + Sync>;
 
 #[derive(Debug, Error)]
 pub enum EventLogError {
@@ -168,6 +170,24 @@ pub enum EventPayload {
         conflict_paths: Vec<String>,
         revision_after: Option<String>,
     },
+    /// Gate 6: a runtime surface (`headless`, `repl`, `acp`, `serve`) started on `transport`
+    /// (`stdio`, `tty`, `tcp`, `unix`, `inproc`).
+    SurfaceStarted {
+        surface: String,
+        transport: String,
+    },
+    /// Gate 6: a tool call paused awaiting operator approval on `surface`.
+    ApprovalRequested {
+        request_id: String,
+        tool_name: String,
+        surface: String,
+    },
+    /// Gate 6: a pending approval request was resolved (`approve_once`, `approve_session`,
+    /// `deny`, `deny_timeout`, `deny_disconnect`, `deny_cancelled`).
+    ApprovalResolved {
+        request_id: String,
+        decision: String,
+    },
     RunTerminated {
         status: RunStatus,
         terminal_reason: TerminalReason,
@@ -233,6 +253,7 @@ pub struct EventLogger {
     log_degraded: bool,
     dropped_events: usize,
     in_memory_events: Vec<DiagnosticEvent>,
+    event_sink: Option<EventSink>,
 }
 
 impl EventLogger {
@@ -276,11 +297,16 @@ impl EventLogger {
             log_degraded,
             dropped_events: 0,
             in_memory_events: Vec::new(),
+            event_sink: None,
         })
     }
 
     pub fn set_live_stderr(&mut self, live_stderr: bool) {
         self.live_stderr = live_stderr;
+    }
+
+    pub fn set_event_sink(&mut self, sink: EventSink) {
+        self.event_sink = Some(sink);
     }
 
     pub fn live_stderr(&self) -> bool {
@@ -508,6 +534,28 @@ impl EventLogger {
                         conflict_paths.len()
                     );
                 }
+                EventPayload::SurfaceStarted { surface, transport } => {
+                    eprintln!(
+                        "🌐 [surface] started surface={} transport={}",
+                        surface, transport
+                    );
+                }
+                EventPayload::ApprovalRequested {
+                    request_id,
+                    tool_name,
+                    surface,
+                } => {
+                    eprintln!(
+                        "🔐 [approval:{}] requested tool={} surface={}",
+                        request_id, tool_name, surface
+                    );
+                }
+                EventPayload::ApprovalResolved {
+                    request_id,
+                    decision,
+                } => {
+                    eprintln!("🔐 [approval:{}] resolved -> {}", request_id, decision);
+                }
                 EventPayload::RunTerminated {
                     status,
                     terminal_reason,
@@ -550,6 +598,10 @@ impl EventLogger {
             timestamp_ms,
             event: payload,
         };
+
+        if let Some(ref sink) = self.event_sink {
+            sink(&event);
+        }
 
         if self.in_memory_events.len() < 4096 {
             self.in_memory_events.push(event.clone());

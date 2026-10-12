@@ -35,6 +35,7 @@ pub struct StaticPrefixMetadata {
     pub static_prefix_bytes: usize,
 }
 
+#[derive(Clone)]
 pub struct PromptBuilder {
     system_prompt: String,
 }

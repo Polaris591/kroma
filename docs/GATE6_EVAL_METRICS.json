@@ -1,0 +1,80 @@
+{
+  "gate": "Gate 6 — Multi-Surface Runtime (v1.0.0)",
+  "harness_version": "1.0.0",
+  "event_schema_version": "1.0.0",
+  "acp_protocol_version": "1.0",
+  "jsonrpc_version": "2.0",
+  "surfaces_verified": [
+    {
+      "surface": "headless",
+      "transports": ["text", "jsonl"],
+      "private_session_state": false,
+      "cross_surface_wal_parity": 1.0,
+      "cross_surface_revision_parity": 1.0
+    },
+    {
+      "surface": "repl",
+      "transports": ["tty", "stdio"],
+      "private_session_state": false,
+      "slash_commands_verified": [
+        "/help",
+        "/status",
+        "/revisions",
+        "/diff",
+        "/undo",
+        "/restore",
+        "/skills",
+        "/fork",
+        "/inspect",
+        "/clear",
+        "/quit"
+      ]
+    },
+    {
+      "surface": "acp",
+      "transports": ["stdio"],
+      "stdout_frame_purity": 1.0,
+      "methods_verified": [
+        "initialize",
+        "acp.initialize",
+        "session.new",
+        "session.start",
+        "session.prompt",
+        "acp.prompt",
+        "session.cancel",
+        "session.status",
+        "session.fork",
+        "approval.pending",
+        "approval.respond",
+        "revision.list",
+        "revision.undo",
+        "revision.restore",
+        "evidence.recall",
+        "skills.list",
+        "skills.activate",
+        "shutdown"
+      ]
+    },
+    {
+      "surface": "serve",
+      "transports": ["tcp"],
+      "non_loopback_without_token_rejected": true,
+      "token_auth_constant_time_verified": true,
+      "http_csrf_request_rejected": true,
+      "max_frame_bytes": 4194304,
+      "max_concurrent_connections": 16
+    }
+  ],
+  "approval_broker_contract": {
+    "approve_once_resumes_and_commits": true,
+    "approve_session_caches_category": true,
+    "deny_blocks_execution": true,
+    "client_disconnect_fails_closed": true,
+    "timeout_fails_closed": true
+  },
+  "workspace_test_totals": {
+    "total_passed": 150,
+    "total_failed": 0,
+    "compiler_warnings": 0
+  }
+}

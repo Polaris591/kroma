@@ -14,6 +14,7 @@ pub mod revision;
 pub mod sensitive_paths;
 pub mod session;
 pub mod subagents;
+pub mod surface;
 pub mod tool;
 pub mod tools;
 pub mod types;
