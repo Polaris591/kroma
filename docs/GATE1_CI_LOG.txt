@@ -1,7 +1,7 @@
 ================================================================================
  Harness v0.9.0 - Gate 1 (Workspace Revision / Undo) clean-build + test evidence
 ================================================================================
-Generated: 2026-10-12T19:06:23+08:00
+Generated: 2026-10-12T19:46:34+08:00
 
 --- Toolchain ----------------------------------------------------------------
 rustc 1.85.1 (4eb161250 2025-03-15) (built from a source tarball)
@@ -11,53 +11,57 @@ Linux 6.12.95+deb13-amd64 x86_64
 --- Version agreement --------------------------------------------------------
 Cargo.toml workspace version : version = "0.9.0"
 CLI --version                : harness 0.9.0
+Git tag                      : v0.9.0
 
 --- cargo build --workspace --all-targets (warnings must be zero) ------------
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+   Compiling harness-core v0.9.0 (/opt/harness/crates/harness-core)
+   Compiling harness-cli v0.9.0 (/opt/harness/crates/harness-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.72s
 
 --- cargo test --workspace ---------------------------------------------------
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/main.rs (target/debug/deps/harness-a72510ddc3ee4b9b)
 
-running 7 tests
+running 8 tests
+test approval_ui::tests::escapes_ansi_and_carriage_return_but_keeps_newline_and_tab ... ok
 test approval_ui::tests::cancelled_approval_denies_promptly_without_blocking ... ok
 test approval_ui::tests::escapes_bidi_override ... ok
-test approval_ui::tests::escapes_ansi_and_carriage_return_but_keeps_newline_and_tab ... ok
-test tests::test_completion_gate_selection_honors_shell_authorization ... ok
 test tests::test_cli_flags_and_policy_modes ... ok
+test tests::test_completion_gate_selection_honors_shell_authorization ... ok
 test tests::test_verify_cmd_and_no_verify_flags_parse ... ok
 test tests::test_workspace_revision_management_flags_parse ... ok
+test tests::test_restore_rev_records_revision_so_a_following_undo_stays_in_sync ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running unittests src/lib.rs (target/debug/deps/harness_core-8212ac86934e6a6d)
 
 running 28 tests
 test completion_gate::tests::auto_detects_cargo_workspace_verification ... ok
-test completion_gate::tests::dirty_file_short_circuit_does_not_spawn_an_invalid_command ... ok
 test completion_gate::tests::auto_detected_verification_without_shell_authorization_returns_skipped ... ok
+test completion_gate::tests::dirty_file_short_circuit_does_not_spawn_an_invalid_command ... ok
 test completion_gate::tests::failure_fingerprint_ignores_whitespace_only_differences ... ok
 test completion_gate::tests::failure_fingerprint_ignores_progress_noise_but_keeps_diagnostic_changes ... ok
-test completion_gate::tests::parse_command_argv_preserves_quoted_segments_and_escapes ... ok
 test completion_gate::tests::failing_verification_returns_the_structured_failure_evidence ... ok
+test completion_gate::tests::parse_command_argv_preserves_quoted_segments_and_escapes ... ok
 test context_projector::tests::refresh_last_touched_never_regresses_a_larger_checkpoint_turn ... ok
 test completion_gate::tests::localizer_keeps_head_tail_and_finds_failure_lines ... ok
-test context_projector::tests::resumed_compaction_releases_stale_hot_file_and_keeps_recent_file_pinned ... ok
 test context_projector::tests::working_set_pins_release_files_older_than_the_window_under_a_resume_offset ... ok
-test prompt::tests::workspace_context_skips_sensitive_files ... ok
 test prompt::tests::workspace_context_is_fenced_as_untrusted_and_escapes_filenames ... ok
+test prompt::tests::workspace_context_skips_sensitive_files ... ok
 test revision::tests::diff_paths_reports_added_removed_and_modified_paths_only ... ok
-test revision::tests::revision_id_parse_rejects_traversal_and_accepts_content_addresses ... ok
 test revision::tests::revision_id_is_content_addressed_and_mode_sensitive ... ok
+test revision::tests::revision_id_parse_rejects_traversal_and_accepts_content_addresses ... ok
 test session::tests::approved_completion_clears_dirty_files_until_a_new_mutation ... ok
+test context_projector::tests::resumed_compaction_releases_stale_hot_file_and_keeps_recent_file_pinned ... ok
 test session::tests::non_wal_text_file_is_rejected_without_modification ... ok
 test session::tests::oversized_wal_candidate_is_rejected_without_modification ... ok
 test session::tests::gate_rejections_survive_resume_and_clear_after_resolution ... ok
 test session::tests::single_line_file_without_newline_is_rejected_without_modification ... ok
 test session::tests::symlink_to_external_file_is_rejected_and_target_untouched ... ok
 test session::tests::symlink_wal_is_rejected_and_target_untouched ... ok
-test session::tests::wal_repairs_only_incomplete_trailing_line ... ok
 test session::tests::projection_updates_are_append_only_and_replayed ... ok
+test session::tests::wal_repairs_only_incomplete_trailing_line ... ok
 test session::tests::wal_round_trips_signed_reasoning_and_branching ... ok
 test completion_gate::tests::streaming_capture_keeps_a_bounded_head_and_rolling_tail ... ok
 test completion_gate::tests::gate_200ms_pipe_drain_prevents_grandchild_hang_and_sweeps_pgid ... ok
@@ -68,8 +72,8 @@ test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
 running 4 tests
 test test_loop_guard_repeated_ping_pong_and_edit_streak ... ok
-test test_watermark_step_down_compaction_working_set_pinning_and_outline_stub ... ok
 test test_readonly_parallel_batch_ordering_steering_and_completion_gate ... ok
+test test_watermark_step_down_compaction_working_set_pinning_and_outline_stub ... ok
 test test_15_turns_append_only_prefix_byte_stability ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
@@ -93,7 +97,7 @@ test test_inode_lock_keyed_from_open_fd_serializes_same_file ... ok
 test test_inode_mutation_lock_stability_across_create_rename_and_idle_cleanup ... ok
 test test_nav_tools_under_concurrent_symlink_swap_never_leak_outside_content ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
 
      Running tests/gate0_config_and_events.rs (target/debug/deps/gate0_config_and_events-9d2d19bba2b4c440)
 
@@ -106,14 +110,21 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
      Running tests/gate1_workspace_revision.rs (target/debug/deps/gate1_workspace_revision-ca479b736fe59701)
 
-running 5 tests
+running 12 tests
 test test_capture_then_restore_applies_modified_deleted_and_created_files ... ok
 test test_external_modifications_conflict_and_force_restore_overwrites ... ok
-test test_symlinks_and_sensitive_files_are_never_captured_or_overwritten ... ok
-test test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_state ... ok
+test test_external_symlink_and_mode_change_are_conflicts ... ok
+test test_fork_then_new_mutation_and_cross_branch_restore ... ok
+test test_file_and_directory_kind_swap_restores_in_both_directions ... ok
+test test_nested_new_directory_tree_is_pruned_on_undo ... ok
 test test_agent_loop_persists_revision_ids_and_undo_rewinds_wal_and_workspace ... ok
+test test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_state ... ok
+test test_symlinks_and_sensitive_files_are_never_captured_or_overwritten ... ok
+test test_sequential_undo_across_three_mutating_turns_rewinds_to_the_baseline ... ok
+test test_skipped_large_file_is_preserved_on_restore ... ok
+test test_resumed_run_baseline_survives_undo_rewind ... ok
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
      Running tests/golden_smoke.rs (target/debug/deps/golden_smoke-0ea1fe7a8c2bce83)
 
@@ -129,9 +140,9 @@ test test_base_url_rejects_control_characters_and_whitespace ... ok
 test test_base_url_security_rules ... ok
 test test_bogus_transfer_encoding_is_rejected ... ok
 test test_duplicate_conflicting_content_length_is_rejected ... ok
+test test_agent_loop_zero_side_effects_on_length_truncation_over_sse ... ok
 test test_http_smuggling_dual_te_cl_rejected_and_chunked_error_body_decoded ... ok
 test test_premature_eof_short_body_is_rejected ... ok
-test test_agent_loop_zero_side_effects_on_length_truncation_over_sse ... ok
 test test_mock_http_server_429_retry_after_and_redirect_block ... ok
 test test_chunked_sse_streaming_and_pre_chunk_disconnect_retry_and_oom_guard ... ok
 
@@ -145,14 +156,14 @@ test test_bash_16kib_head_48kib_rolling_tail_and_4mib_spill_file ... ok
 test test_bash_200ms_pipe_drain_timeout_prevents_grandchild_deadlock ... ok
 test test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zero_spawn_on_deny ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
 
      Running tests/sse_contract.rs (target/debug/deps/sse_contract-cb678ab25643ca3d)
 
 running 4 tests
 test test_sse_missing_done_or_truncated_length_rejects_all_tools ... ok
-test test_pre_dispatch_batch_rejects_empty_or_duplicate_call_id ... ok
 test test_sse_multi_block_reasoning_and_indexless_tool_calls_and_unterminated_done ... ok
+test test_pre_dispatch_batch_rejects_empty_or_duplicate_call_id ... ok
 test test_sse_arbitrary_chunking_100_iterations_and_1_byte_splits ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
@@ -171,43 +182,63 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
 
---- Gate 1 test binary (named per invariant) ---------------------------------
-running 5 tests
+--- Gate 1 test binary (named per invariant) --------------------------------
+running 12 tests
+test test_external_symlink_and_mode_change_are_conflicts ... ok
 test test_capture_then_restore_applies_modified_deleted_and_created_files ... ok
-test test_symlinks_and_sensitive_files_are_never_captured_or_overwritten ... ok
-test test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_state ... ok
+test test_file_and_directory_kind_swap_restores_in_both_directions ... ok
+test test_fork_then_new_mutation_and_cross_branch_restore ... ok
 test test_external_modifications_conflict_and_force_restore_overwrites ... ok
 test test_agent_loop_persists_revision_ids_and_undo_rewinds_wal_and_workspace ... ok
+test test_nested_new_directory_tree_is_pruned_on_undo ... ok
+test test_sequential_undo_across_three_mutating_turns_rewinds_to_the_baseline ... ok
+test test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_state ... ok
+test test_symlinks_and_sensitive_files_are_never_captured_or_overwritten ... ok
+test test_resumed_run_baseline_survives_undo_rewind ... ok
+test test_skipped_large_file_is_preserved_on_restore ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-
-
---- End-to-end CLI evidence (local OpenAI-compatible mock, no network) -------
 === E2E: harness 0.9.0 run against a local OpenAI-compatible mock provider ===
   exit=0
-  [harness] session WAL: /tmp/gate1-cli/state3/harness/runs/sessions/2a0eea0d-f229-4ee4-95eb-fcf26cdd4d85.wal.jsonl
-  [harness] workspace revisions: /tmp/gate1-cli/state3/harness/runs/snapshots
-  🚀 [harness] Run 9fb8ee7f-ae9e-42d8-9119-843900e118ec started | policy=allow-write | static_prefix=4020B
-  📸 [revision] turn=0 rev=r-94f630ad7dd853bf6ac540f5b6b69035 trigger=baseline files=1 changed=1
-  ⏳ [turn 1] requesting model (attempt 1, history=51B, body=4071B)...
-  🧠 [turn 1] model 0ms | ttft=0ms | in=10 (cached=0, hit=0.0%) out=5 think=0
-  🔧 [tool:write] path="src/app.rs" -> success (0ms, exit=-, tier=-)
-  📸 [revision] turn=1 rev=r-f7ef24e038a5ea5d9dc8d08087de9a2c trigger=mutation files=1 changed=1
-  ⏳ [turn 2] requesting model (attempt 2, history=352B, body=4372B)...
-  🧠 [turn 2] model 0ms | ttft=0ms | in=12 (cached=0, hit=0.0%) out=2 think=0
-  🏁 [harness] Completed (ModelStop) in 1ms | turns=2 tools=1 | in=22 (cached=0, hit=0.0%) out=7
-  done
-  WAL: /tmp/gate1-cli/state3/harness/runs/sessions/2a0eea0d-f229-4ee4-95eb-fcf26cdd4d85.wal.jsonl
+    [harness] session WAL: /tmp/gate1-cli-v2/state/harness/runs/sessions/1147b197-7f02-4b5c-87ff-83d70c95c419.wal.jsonl
+    [harness] workspace revisions: /tmp/gate1-cli-v2/state/harness/runs/snapshots
+    📸 [revision] turn=0 rev=r-94f630ad7dd853bf6ac540f5b6b69035 trigger=baseline files=1 changed=1
+    🔧 [tool:write] path="src/app.rs" -> success (0ms, exit=-, tier=-)
+    📸 [revision] turn=1 rev=r-f7ef24e038a5ea5d9dc8d08087de9a2c trigger=mutation files=1 changed=1
+    🏁 [harness] Completed (ModelStop) in 1ms | turns=2 tools=1 | in=22 (cached=0, hit=0.0%) out=7
+  WAL: /tmp/gate1-cli-v2/state/harness/runs/sessions/1147b197-7f02-4b5c-87ff-83d70c95c419.wal.jsonl
   workspace file after run: fn main() { println!("hi"); }
 
 === E2E: --list-revisions ===
   exit=0
-  workspace revisions for session 2a0eea0d-f229-4ee4-95eb-fcf26cdd4d85 (2 captured):
+  workspace revisions for session 1147b197-7f02-4b5c-87ff-83d70c95c419 (2 captured):
     turn    0  r-94f630ad7dd853bf6ac540f5b6b69035  files=1 changed=1
           src/app.rs
     turn    1  r-f7ef24e038a5ea5d9dc8d08087de9a2c  files=1 changed=1  <- current
           src/app.rs
-  snapshot store: /tmp/gate1-cli/state3/harness/runs/snapshots
+  snapshot store: /tmp/gate1-cli-v2/state/harness/runs/snapshots
+
+=== E2E: --restore-rev <baseline> records the restored revision in the WAL (expect exit 0) ===
+  exit=0
+  restored workspace to r-94f630ad7dd853bf6ac540f5b6b69035 (1 file(s) written, 0 removed)
+    restored src/app.rs
+  workspace file: fn main() {}
+  --list-revisions now marks the restored revision as current:
+  workspace revisions for session 1147b197-7f02-4b5c-87ff-83d70c95c419 (3 captured):
+    turn    0  r-94f630ad7dd853bf6ac540f5b6b69035  files=1 changed=1
+          src/app.rs
+    turn    1  r-f7ef24e038a5ea5d9dc8d08087de9a2c  files=1 changed=1
+          src/app.rs
+    turn    2  r-94f630ad7dd853bf6ac540f5b6b69035  files=1 changed=1  <- current
+          src/app.rs
+  snapshot store: /tmp/gate1-cli-v2/state/harness/runs/snapshots
+
+=== E2E: --undo right after --restore-rev must NOT report a false conflict (expect exit 0) ===
+  exit=0
+  restored workspace to r-f7ef24e038a5ea5d9dc8d08087de9a2c (1 file(s) written, 0 removed)
+    restored src/app.rs
+  rewound session transcript to turn 1 (leaf a1f4c2fc-1aa4-42fb-86d8-44bfdc55c972)
+  workspace file: fn main() { println!("hi"); }
 
 === E2E: external edit, then --restore-rev <baseline> refuses (expect exit 3) ===
   exit=3
@@ -219,24 +250,26 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
   exit=0
   restored workspace to r-94f630ad7dd853bf6ac540f5b6b69035 (1 file(s) written, 0 removed)
     restored src/app.rs
-  rewound session transcript to turn 0 (leaf 48984b2d-5eb0-41b7-bb2a-c259e3461aa2)
+  rewound session transcript to turn 0 (leaf 6fff6779-bd1e-4d4a-ab05-84012d932eea)
   workspace file: fn main() {}
 
 === E2E: --list-revisions after undo (abandoned branch history retained in the WAL) ===
   exit=0
-  workspace revisions for session 2a0eea0d-f229-4ee4-95eb-fcf26cdd4d85 (1 captured):
+  workspace revisions for session 1147b197-7f02-4b5c-87ff-83d70c95c419 (1 captured):
     turn    0  r-94f630ad7dd853bf6ac540f5b6b69035  files=1 changed=1  <- current
           src/app.rs
-  snapshot store: /tmp/gate1-cli/state3/harness/runs/snapshots
+  snapshot store: /tmp/gate1-cli-v2/state/harness/runs/snapshots
 
 === E2E: WAL payloads proving revision <-> turn linkage ===
-  2 revision_captured {"captured_at_ms": 1791803150974, "changed_paths": ["src/app.rs"], "leaf_id": "48984b2d-5eb0-41b7-bb2a-c259e3461aa2", "parent_revision_id": null, "revision_id": "r-94f630ad7dd853bf6ac540f5b6b69035", "tracked_fi
-  3 checkpoint {"last_touched": [], "leaf_id": "48984b2d-5eb0-41b7-bb2a-c259e3461aa2", "pinned_baseline_end": 0, "reasoning_blocks_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "turn": 1, "works
-  6 revision_captured {"captured_at_ms": 1791803150975, "changed_paths": ["src/app.rs"], "leaf_id": "78aad39b-7d80-4cab-be31-9063230e2218", "parent_revision_id": "r-94f630ad7dd853bf6ac540f5b6b69035", "revision_id": "r-f7ef24e038a5ea
-  7 checkpoint {"last_touched": [{"last_touched_turn": 1, "path": "src/app.rs"}], "leaf_id": "78aad39b-7d80-4cab-be31-9063230e2218", "pinned_baseline_end": 0, "reasoning_blocks_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab
-  10 set_leaf {"leaf_id": "48984b2d-5eb0-41b7-bb2a-c259e3461aa2"}
+   1 revision_captured {"leaf_id": null, "turn": 0, "revision_id": "r-94f630ad7dd853bf6ac540f5b6b69035", "parent_revision_id": null, "changed_paths": ["src/app.rs"], "tracked_file_count": 1, "captured_at_ms": 1791
+   3 checkpoint {"leaf_id": "6fff6779-bd1e-4d4a-ab05-84012d932eea", "turn": 1, "pinned_baseline_end": 0, "last_touched": [], "reasoning_blocks_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f1
+   6 revision_captured {"leaf_id": "a1f4c2fc-1aa4-42fb-86d8-44bfdc55c972", "turn": 1, "revision_id": "r-f7ef24e038a5ea5d9dc8d08087de9a2c", "parent_revision_id": "r-94f630ad7dd853bf6ac540f5b6b69035", "changed_paths
+   7 checkpoint {"leaf_id": "a1f4c2fc-1aa4-42fb-86d8-44bfdc55c972", "turn": 2, "pinned_baseline_end": 0, "last_touched": [{"path": "src/app.rs", "last_touched_turn": 1}], "reasoning_blocks_sha256": "4f53cda
+  10 revision_captured {"leaf_id": "33f31202-ad3a-487a-b308-b2fe974e14f5", "turn": 2, "revision_id": "r-94f630ad7dd853bf6ac540f5b6b69035", "parent_revision_id": "r-f7ef24e038a5ea5d9dc8d08087de9a2c", "changed_paths
+  11 set_leaf {"leaf_id": "a1f4c2fc-1aa4-42fb-86d8-44bfdc55c972"}
+  12 set_leaf {"leaf_id": "6fff6779-bd1e-4d4a-ab05-84012d932eea"}
 
---- WAL checkpoint <-> workspace revision binding ----------------------------
+=== WAL checkpoint <-> workspace revision binding ----------------------------
   seq   3  checkpoint.turn=1  workspace_revision_id=r-94f630ad7dd853bf6ac540f5b6b69035
   seq   7  checkpoint.turn=2  workspace_revision_id=r-f7ef24e038a5ea5d9dc8d08087de9a2c
 
@@ -256,3 +289,13 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
   R6. Gate 1 does not yet implement "undo of an undo" as a first-class operation; it
       is achievable by capturing a new revision after the undo, but there is no
       dedicated redo command.
+  R7. A `bash` tool call that mutates workspace files still reports no `modified_file`
+      and a mutating CompletionGate verification command is still not snapshotted, so
+      the workspace can drift ahead of `latest_revision_id()` for those two paths.
+      Tracked as an open Gate 1 finding (see V090_GATE1_REVIEW_FIX_REPORT.md).
+  R8. `SnapshotStore::store_blob` writes the final blob in place (create_new + write)
+      rather than temp+rename, and `ensure_private_dir` chmods an existing directory by
+      path. Both are open Gate 1 findings (see V090_GATE1_REVIEW_FIX_REPORT.md).
+  R9. No dedicated `RevisionRestored` WAL/audit event and no `SnapshotStore::compare`
+      API yet; the restore is auditable via the appended `revision_captured` +
+      `set_leaf` records.

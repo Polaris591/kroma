@@ -13,13 +13,13 @@ use crate::sensitive_paths::SensitivePathGuard;
 use crate::workspace::{WorkspaceCap, WorkspaceError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
@@ -197,6 +197,10 @@ pub struct RestoreIntent {
     pub target_revision: RevisionId,
     pub parent_revision: Option<RevisionId>,
     pub created_at_ms: u64,
+    /// Whether the interrupted restore was an explicit `--force-restore`, so recovery re-applies
+    /// the same overwrite semantics instead of stalling on an obstructing symlink/directory.
+    #[serde(default)]
+    pub force: bool,
     pub operations: Vec<RestoreOp>,
 }
 
@@ -385,7 +389,7 @@ impl SnapshotStore {
         let mut restored_files = Vec::new();
         let mut removed_files = Vec::new();
         for op in &intent.operations {
-            self.apply_op(workspace, op)?;
+            self.apply_op(workspace, op, intent.force)?;
             match op {
                 RestoreOp::Write { path, .. } => restored_files.push(path.clone()),
                 RestoreOp::Remove { path } => removed_files.push(path.clone()),
@@ -429,40 +433,61 @@ impl SnapshotStore {
         if let Some(exp) = expected.as_ref() {
             affected.extend(exp.tracked_files.keys().cloned());
         }
+        // Paths the target revision deliberately skipped (oversized, symlink, special, sensitive)
+        // carry no recorded content, so they can neither conflict with the target nor be deleted
+        // in its name.
+        let target_skipped: BTreeSet<&str> =
+            target.skipped_paths.iter().map(|s| s.as_str()).collect();
 
         if !force {
-            if let Some(exp) = expected.as_ref() {
-                let mut conflicts = Vec::new();
-                for path in &affected {
-                    let live = live_sha256(workspace, path)?;
-                    let expected_sha = exp.tracked_files.get(path).map(|e| e.sha256.clone());
-                    if live == expected_sha {
-                        continue;
-                    }
-                    let kind = match (&expected_sha, &live) {
-                        (Some(_), Some(_)) => ConflictKind::ModifiedExternally,
-                        (Some(_), None) => ConflictKind::DeletedExternally,
-                        (None, Some(_)) => ConflictKind::CreatedExternally,
-                        (None, None) => continue,
-                    };
+            let mut conflicts = Vec::new();
+            for path in &affected {
+                if target_skipped.contains(path.as_str()) {
+                    continue;
+                }
+                let live = live_entry_state(workspace, path)?;
+                let conflict = match expected.as_ref() {
+                    Some(exp) => classify_conflict_against_expected(exp, &target, path, &live),
+                    None => classify_conflict_against_target(&target, path, &live),
+                };
+                if let Some((kind, expected_sha256, live_sha256)) = conflict {
                     conflicts.push(RevisionConflict {
                         path: path.clone(),
                         kind,
-                        expected_sha256: expected_sha,
-                        live_sha256: live,
-                    });
-                }
-                if !conflicts.is_empty() {
-                    conflicts.sort_by(|a, b| a.path.cmp(&b.path));
-                    return Ok(RestoreResult::Conflict {
-                        target_revision: target.revision_id.clone(),
-                        conflicting_paths: conflicts,
+                        expected_sha256,
+                        live_sha256,
                     });
                 }
             }
+            if !conflicts.is_empty() {
+                conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+                return Ok(RestoreResult::Conflict {
+                    target_revision: target.revision_id.clone(),
+                    conflicting_paths: conflicts,
+                });
+            }
         }
 
-        let mut operations = Vec::new();
+        // Every removal is scheduled before every write, deepest path first, so a path whose kind
+        // changed between revisions (file <-> directory) is vacated before its replacement lands.
+        let mut removals: Vec<String> = Vec::new();
+        for path in &affected {
+            if target.tracked_files.contains_key(path) || target_skipped.contains(path.as_str()) {
+                continue;
+            }
+            if !matches!(stat_live_entry(workspace, path)?, LiveEntryStat::Absent) {
+                removals.push(path.clone());
+            }
+        }
+        removals.sort_by(|a, b| {
+            let depth = |s: &String| s.matches('/').count();
+            depth(b).cmp(&depth(a)).then_with(|| b.cmp(a))
+        });
+
+        let mut operations: Vec<RestoreOp> = removals
+            .into_iter()
+            .map(|path| RestoreOp::Remove { path })
+            .collect();
         for (path, entry) in &target.tracked_files {
             operations.push(RestoreOp::Write {
                 path: path.clone(),
@@ -470,20 +495,13 @@ impl SnapshotStore {
                 mode: entry.mode,
             });
         }
-        for path in &affected {
-            if target.tracked_files.contains_key(path) {
-                continue;
-            }
-            if live_sha256(workspace, path)?.is_some() {
-                operations.push(RestoreOp::Remove { path: path.clone() });
-            }
-        }
 
         let intent = RestoreIntent {
             version: RESTORE_INTENT_VERSION,
             target_revision: target.revision_id.clone(),
             parent_revision: current_expected_rev.cloned(),
             created_at_ms: now_ms(),
+            force,
             operations,
         };
         write_atomic_bytes(&self.intent_path(), &serde_json::to_vec(&intent)?, 0o600)?;
@@ -501,7 +519,7 @@ impl SnapshotStore {
         let mut restored_files = Vec::new();
         let mut removed_files = Vec::new();
         for (index, op) in intent.operations.iter().enumerate() {
-            if let Err(e) = self.apply_op(workspace, op) {
+            if let Err(e) = self.apply_op(workspace, op, force) {
                 return Ok(RestoreResult::RecoveryRequired {
                     target_revision: intent.target_revision.clone(),
                     journal_path: self.intent_path(),
@@ -543,14 +561,14 @@ impl SnapshotStore {
         })
     }
 
-    fn apply_op(&self, workspace: &WorkspaceCap, op: &RestoreOp) -> Result<(), RevisionError> {
+    fn apply_op(&self, workspace: &WorkspaceCap, op: &RestoreOp, force: bool) -> Result<(), RevisionError> {
         match op {
             RestoreOp::Write { path, sha256, mode } => {
                 let bytes = self.read_blob(sha256)?;
-                write_tracked_file(workspace, path, &bytes, *mode)
+                write_tracked_file(workspace, path, &bytes, *mode, force)
             }
             RestoreOp::Remove { path } => {
-                remove_tracked_file(workspace, path)?;
+                remove_tracked_file(workspace, path, force)?;
                 Ok(())
             }
         }
@@ -798,29 +816,263 @@ fn diff_paths(
     changed.into_iter().collect()
 }
 
-/// Hash a live workspace file, treating "absent", "not a regular file", and "symlink" alike: none
-/// of them can be a tracked revision entry, so they never silently satisfy an expected hash.
-fn live_sha256(workspace: &WorkspaceCap, rel: &str) -> Result<Option<String>, RevisionError> {
-    let (_, mut file) = match workspace.open_existing_no_symlink(rel) {
-        Ok(v) => v,
-        Err(WorkspaceError::NotFound { .. })
-        | Err(WorkspaceError::SymlinkBlocked { .. })
-        | Err(WorkspaceError::SensitivePath { .. }) => return Ok(None),
-        Err(WorkspaceError::InvalidPath { .. }) => return Ok(None),
+/// What a workspace path currently is, resolved without following symlinks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveEntryStat {
+    /// The path, or an ancestor needed to reach it, does not exist (including when an ancestor is
+    /// a plain file that blocks directory traversal).
+    Absent,
+    /// A plain regular file.
+    Regular { mode: u32, size: u64 },
+    /// A real directory.
+    Directory,
+    /// A symlink, FIFO, socket, device, or a symlink blocking an ancestor component.
+    NonRegular,
+}
+
+/// [`LiveEntryStat`] plus the content hash of a regular file, for conflict comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LiveEntryState {
+    Absent,
+    Regular { sha256: String, mode: u32, size: u64 },
+    Directory,
+    NonRegular,
+}
+
+/// Inspect a workspace path without following symlinks, classifying absent / regular / directory /
+/// non-regular so a user-created symlink or directory can never masquerade as "unchanged".
+fn stat_live_entry(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryStat, RevisionError> {
+    let norm = match WorkspaceCap::validate_relative_components(rel) {
+        Ok(n) => n,
+        Err(WorkspaceError::InvalidPath { .. }) => return Ok(LiveEntryStat::Absent),
         Err(e) => return Err(e.into()),
     };
-    let mut hasher = sha2::Sha256::new();
-    use sha2::Digest;
-    let mut buf = [0u8; 8192];
-    loop {
-        match file.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => hasher.update(&buf[..n]),
-            Err(e) if e.raw_os_error() == Some(libc::EISDIR) => return Ok(None),
-            Err(e) => return Err(e.into()),
+    if SensitivePathGuard::is_sensitive(&norm) {
+        return Ok(LiveEntryStat::Absent);
+    }
+    let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
+        Ok(v) => v,
+        Err(WorkspaceError::NotFound { .. }) => return Ok(LiveEntryStat::Absent),
+        Err(WorkspaceError::SymlinkBlocked { .. }) => return classify_blocked_parent(workspace, &norm),
+        Err(WorkspaceError::SensitivePath { .. }) | Err(WorkspaceError::InvalidPath { .. }) => {
+            return Ok(LiveEntryStat::Absent)
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let c_leaf = CString::new(leaf.as_bytes())
+        .map_err(|_| RevisionError::InvalidStore("file name contains a NUL byte".to_string()))?;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::fstatat(
+            parent_dir.as_raw_fd(),
+            c_leaf.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(LiveEntryStat::Absent);
+        }
+        return Err(err.into());
+    }
+    Ok(stat_kind(&stat))
+}
+
+fn stat_kind(stat: &libc::stat) -> LiveEntryStat {
+    match stat.st_mode & libc::S_IFMT {
+        libc::S_IFREG => LiveEntryStat::Regular {
+            mode: (stat.st_mode & 0o7777) as u32,
+            size: stat.st_size.max(0) as u64,
+        },
+        libc::S_IFDIR => LiveEntryStat::Directory,
+        _ => LiveEntryStat::NonRegular,
+    }
+}
+
+/// Distinguish "the path is genuinely absent" (an ancestor is a plain file blocking traversal)
+/// from "an ancestor is a symlink" (an external entry we must never silently follow).
+fn classify_blocked_parent(
+    workspace: &WorkspaceCap,
+    norm: &Path,
+) -> Result<LiveEntryStat, RevisionError> {
+    let Some(parent) = norm.parent() else {
+        return Ok(LiveEntryStat::Absent);
+    };
+    let c_dot = CString::new(".").unwrap();
+    let root_dup = unsafe {
+        libc::openat(
+            workspace.root_dir_fd().as_raw_fd(),
+            c_dot.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root_dup < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut cur = unsafe { File::from_raw_fd(root_dup) };
+    for comp in parent.components() {
+        let Component::Normal(part) = comp else { continue };
+        if part.is_empty() {
+            continue;
+        }
+        let c_part = CString::new(part.as_bytes()).map_err(|_| {
+            RevisionError::InvalidStore("directory component contains a NUL byte".to_string())
+        })?;
+        let fd = unsafe {
+            libc::openat(
+                cur.as_raw_fd(),
+                c_part.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            return Ok(match err.raw_os_error() {
+                // `O_NOFOLLOW` reports ELOOP for a symlink component.
+                Some(libc::ELOOP) => LiveEntryStat::NonRegular,
+                // A plain file (or other non-directory) simply means the leaf cannot exist.
+                _ => LiveEntryStat::Absent,
+            });
+        }
+        cur = unsafe { File::from_raw_fd(fd) };
+    }
+    Ok(LiveEntryStat::Absent)
+}
+
+/// Full live state of a path: absent / directory / non-regular, or a regular file with its content
+/// hash and permission bits. A regular file larger than the snapshot cap is reported by size
+/// rather than hashed in full, since it can never equal a tracked entry.
+fn live_entry_state(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryState, RevisionError> {
+    match stat_live_entry(workspace, rel)? {
+        LiveEntryStat::Absent => Ok(LiveEntryState::Absent),
+        LiveEntryStat::Directory => Ok(LiveEntryState::Directory),
+        LiveEntryStat::NonRegular => Ok(LiveEntryState::NonRegular),
+        LiveEntryStat::Regular { mode, size } => {
+            if size > MAX_SNAPSHOT_FILE_BYTES {
+                return Ok(LiveEntryState::Regular {
+                    sha256: format!("oversize:{}", size),
+                    mode,
+                    size,
+                });
+            }
+            let (_, mut file) = match workspace.open_existing_no_symlink(rel) {
+                Ok(v) => v,
+                Err(WorkspaceError::NotFound { .. })
+                | Err(WorkspaceError::SymlinkBlocked { .. })
+                | Err(WorkspaceError::SensitivePath { .. })
+                | Err(WorkspaceError::InvalidPath { .. }) => return Ok(LiveEntryState::Absent),
+                Err(e) => return Err(e.into()),
+            };
+            let mut hasher = sha2::Sha256::new();
+            use sha2::Digest;
+            let mut buf = [0u8; 8192];
+            loop {
+                match file.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => hasher.update(&buf[..n]),
+                    Err(e) if e.raw_os_error() == Some(libc::EISDIR) => {
+                        return Ok(LiveEntryState::Directory)
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Ok(LiveEntryState::Regular {
+                sha256: crate::prompt::hex_encode(&hasher.finalize()),
+                mode,
+                size,
+            })
         }
     }
-    Ok(Some(crate::prompt::hex_encode(&hasher.finalize())))
+}
+
+/// True when `path` is a real directory that legitimately holds tracked files of `rev` (for
+/// example `foo` when `foo/bar.txt` is tracked). Such a directory is expected, not external work.
+fn is_ancestor_dir_of(rev: &WorkspaceRevision, path: &str) -> bool {
+    let prefix = format!("{}/", path);
+    rev.tracked_files.keys().any(|candidate| candidate.starts_with(&prefix))
+}
+
+fn classify_conflict_against_expected(
+    expected: &WorkspaceRevision,
+    target: &WorkspaceRevision,
+    path: &str,
+    live: &LiveEntryState,
+) -> Option<(ConflictKind, Option<String>, Option<String>)> {
+    if expected.skipped_paths.iter().any(|p| p == path) {
+        return None;
+    }
+    match expected.tracked_files.get(path) {
+        Some(entry) => match live {
+            LiveEntryState::Absent => Some((
+                ConflictKind::DeletedExternally,
+                Some(entry.sha256.clone()),
+                None,
+            )),
+            LiveEntryState::Directory | LiveEntryState::NonRegular => Some((
+                ConflictKind::ModifiedExternally,
+                Some(entry.sha256.clone()),
+                None,
+            )),
+            LiveEntryState::Regular { sha256, mode, .. } => {
+                if sha256 != &entry.sha256 || (mode & 0o7777) != (entry.mode & 0o7777) {
+                    Some((
+                        ConflictKind::ModifiedExternally,
+                        Some(entry.sha256.clone()),
+                        Some(sha256.clone()),
+                    ))
+                } else {
+                    None
+                }
+            }
+        },
+        // The path is only in the target revision: anything already there is external work.
+        None => match live {
+            LiveEntryState::Absent => None,
+            LiveEntryState::Directory if is_ancestor_dir_of(expected, path) => None,
+            LiveEntryState::Directory | LiveEntryState::NonRegular => {
+                Some((ConflictKind::CreatedExternally, None, None))
+            }
+            LiveEntryState::Regular { sha256, mode, .. } => {
+                match target.tracked_files.get(path) {
+                    Some(want)
+                        if &want.sha256 == sha256 && (want.mode & 0o7777) == (mode & 0o7777) =>
+                    {
+                        None
+                    }
+                    _ => Some((ConflictKind::CreatedExternally, None, Some(sha256.clone()))),
+                }
+            }
+        },
+    }
+}
+
+fn classify_conflict_against_target(
+    target: &WorkspaceRevision,
+    path: &str,
+    live: &LiveEntryState,
+) -> Option<(ConflictKind, Option<String>, Option<String>)> {
+    let entry = target.tracked_files.get(path)?;
+    match live {
+        LiveEntryState::Absent => None,
+        LiveEntryState::Directory | LiveEntryState::NonRegular => Some((
+            ConflictKind::ModifiedExternally,
+            Some(entry.sha256.clone()),
+            None,
+        )),
+        LiveEntryState::Regular { sha256, mode, .. } => {
+            if sha256 != &entry.sha256 || (mode & 0o7777) != (entry.mode & 0o7777) {
+                Some((
+                    ConflictKind::ModifiedExternally,
+                    Some(entry.sha256.clone()),
+                    Some(sha256.clone()),
+                ))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn write_tracked_file(
@@ -828,6 +1080,7 @@ fn write_tracked_file(
     rel: &str,
     bytes: &[u8],
     mode: u32,
+    force: bool,
 ) -> Result<(), RevisionError> {
     let norm = WorkspaceCap::validate_relative_components(rel)?;
     if SensitivePathGuard::is_sensitive(&norm) {
@@ -835,6 +1088,16 @@ fn write_tracked_file(
             "refusing to restore sensitive path '{}'",
             rel
         )));
+    }
+    if force {
+        // A symlink, directory, or special file parked on the target path would make `renameat`
+        // fail and wedge the restore in `RecoveryRequired`; an explicit force clears it first.
+        match stat_live_entry(workspace, rel)? {
+            LiveEntryStat::Absent | LiveEntryStat::Regular { .. } => {}
+            LiveEntryStat::Directory | LiveEntryStat::NonRegular => {
+                remove_path_force(workspace, rel)?
+            }
+        }
     }
     let (parent_dir, leaf) = workspace.open_parent_dir_no_symlink(&norm, true)?;
     crate::tools::write::atomic_write_at(&parent_dir, &leaf, bytes, mode, false).map_err(
@@ -844,18 +1107,29 @@ fn write_tracked_file(
     )
 }
 
-/// Unlink a tracked file through its parent directory FD, and only when the leaf is still a plain
-/// regular file: a symlink, directory, or special file swapped into the path is never deleted.
-fn remove_tracked_file(workspace: &WorkspaceCap, rel: &str) -> Result<bool, RevisionError> {
+/// Unlink a tracked file through its parent directory FD. Without `force` only a plain regular file
+/// is removed: a symlink, directory, or special file swapped into the path is external work and is
+/// never deleted. With `force` the obstructing entry itself is removed, then any directories the
+/// mutation created that are now empty are pruned so an undone nested tree leaves nothing behind.
+fn remove_tracked_file(
+    workspace: &WorkspaceCap,
+    rel: &str,
+    force: bool,
+) -> Result<bool, RevisionError> {
     let norm = WorkspaceCap::validate_relative_components(rel)?;
+    if SensitivePathGuard::is_sensitive(&norm) {
+        return Err(RevisionError::InvalidStore(format!(
+            "refusing to delete sensitive path '{}'",
+            rel
+        )));
+    }
     let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
         Ok(v) => v,
         Err(WorkspaceError::NotFound { .. }) => return Ok(false),
         Err(e) => return Err(e.into()),
     };
-    let c_leaf = CString::new(leaf.as_bytes()).map_err(|_| {
-        RevisionError::InvalidStore("file name contains a NUL byte".to_string())
-    })?;
+    let c_leaf = CString::new(leaf.as_bytes())
+        .map_err(|_| RevisionError::InvalidStore("file name contains a NUL byte".to_string()))?;
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     let rc = unsafe {
         libc::fstatat(
@@ -873,7 +1147,12 @@ fn remove_tracked_file(workspace: &WorkspaceCap, rel: &str) -> Result<bool, Revi
         return Err(err.into());
     }
     if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
-        return Ok(false);
+        if !force {
+            return Ok(false);
+        }
+        drop(parent_dir);
+        remove_path_force(workspace, rel)?;
+        return Ok(true);
     }
     let rc = unsafe { libc::unlinkat(parent_dir.as_raw_fd(), c_leaf.as_ptr(), 0) };
     if rc != 0 {
@@ -884,7 +1163,125 @@ fn remove_tracked_file(workspace: &WorkspaceCap, rel: &str) -> Result<bool, Revi
         return Err(err.into());
     }
     let _ = parent_dir.sync_all();
+    drop(parent_dir);
+    prune_empty_ancestors(workspace, &norm)?;
     Ok(true)
+}
+
+/// Best-effort removal of directories the mutation created that are now empty. Stops at the first
+/// directory that still holds an entry, so a user's added file keeps its ancestors intact.
+fn prune_empty_ancestors(workspace: &WorkspaceCap, norm: &Path) -> Result<(), RevisionError> {
+    let mut dirs: Vec<String> = Vec::new();
+    if let Some(parent) = norm.parent() {
+        for comp in parent.components() {
+            if let Component::Normal(part) = comp {
+                let part = part.to_string_lossy().to_string();
+                if !part.is_empty() {
+                    dirs.push(part);
+                }
+            }
+        }
+    }
+    while let Some(child) = dirs.pop() {
+        let parent_rel = if dirs.is_empty() {
+            ".".to_string()
+        } else {
+            dirs.join("/")
+        };
+        let (_, dir) = match workspace.open_dir_no_symlink(&parent_rel) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let Ok(c_child) = CString::new(child.as_bytes()) else {
+            break;
+        };
+        let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), c_child.as_ptr(), libc::AT_REMOVEDIR) };
+        if rc != 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Delete a path whatever it is (symlink, regular file, or directory tree), resolved relative to
+/// its already-open parent directory and never following symlinks.
+fn remove_path_force(workspace: &WorkspaceCap, rel: &str) -> Result<(), RevisionError> {
+    let norm = WorkspaceCap::validate_relative_components(rel)?;
+    if SensitivePathGuard::is_sensitive(&norm) {
+        return Err(RevisionError::InvalidStore(format!(
+            "refusing to delete sensitive path '{}'",
+            rel
+        )));
+    }
+    let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
+        Ok(v) => v,
+        Err(WorkspaceError::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    remove_entry_at(parent_dir.as_raw_fd(), &leaf)
+}
+
+fn remove_entry_at(dir_fd: RawFd, name: &OsStr) -> Result<(), RevisionError> {
+    let c_name = CString::new(name.as_bytes())
+        .map_err(|_| RevisionError::InvalidStore("entry name contains a NUL byte".to_string()))?;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstatat(dir_fd, c_name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(());
+        }
+        return Err(err.into());
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        let rc = unsafe { libc::unlinkat(dir_fd, c_name.as_ptr(), 0) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(());
+            }
+            return Err(err.into());
+        }
+        return Ok(());
+    }
+    let child_fd = unsafe {
+        libc::openat(
+            dir_fd,
+            c_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if child_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let result = remove_dir_entries(child_fd);
+    unsafe { libc::close(child_fd) };
+    result?;
+    let rc = unsafe { libc::unlinkat(dir_fd, c_name.as_ptr(), libc::AT_REMOVEDIR) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(());
+        }
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+/// Empty a directory through its own FD. Entries are listed via `/proc/self/fd/<fd>` and removed
+/// with `unlinkat` relative to that FD, so a concurrently swapped ancestor symlink cannot redirect
+/// the deletion outside the directory already opened.
+fn remove_dir_entries(dir_fd: RawFd) -> Result<(), RevisionError> {
+    let proc_path = PathBuf::from(format!("/proc/self/fd/{}", dir_fd));
+    for entry in fs::read_dir(&proc_path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == OsStr::new(".") || name == OsStr::new("..") {
+            continue;
+        }
+        remove_entry_at(dir_fd, &name)?;
+    }
+    Ok(())
 }
 
 fn now_ms() -> u64 {

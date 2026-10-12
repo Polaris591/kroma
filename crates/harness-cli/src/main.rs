@@ -456,6 +456,42 @@ fn snapshot_store_for(state_dir: &Path) -> SnapshotStore {
     SnapshotStore::new(state_dir.join("snapshots"))
 }
 
+/// Bind a completed `--restore-rev` into the session WAL so `latest_revision_id()` and
+/// `--list-revisions` describe the workspace that is actually on disk. Without this, a later
+/// `--undo` would treat the freshly restored files as external modifications and refuse.
+fn record_restored_revision(
+    journal: &mut SessionJournal,
+    store: &SnapshotStore,
+    restored_revision: &RevisionId,
+    restored_files: &[String],
+    removed_files: &[String],
+    expected: Option<&RevisionId>,
+) -> Result<(), String> {
+    let (changed_paths, tracked_file_count) = match store.load_revision(restored_revision) {
+        Ok(manifest) => (manifest.changed_paths.clone(), manifest.tracked_files.len()),
+        Err(_) => {
+            let mut paths: Vec<String> = restored_files
+                .iter()
+                .chain(removed_files.iter())
+                .cloned()
+                .collect();
+            paths.sort();
+            paths.dedup();
+            (paths, restored_files.len())
+        }
+    };
+    let turn = journal.max_active_turn();
+    journal
+        .record_revision_capture(
+            turn,
+            restored_revision.as_str(),
+            expected.map(|e| e.as_str()),
+            changed_paths,
+            tracked_file_count,
+        )
+        .map_err(|e| e.to_string())
+}
+
 /// Execute `--list-revisions` / `--undo` / `--restore-rev` without contacting a model provider.
 fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
     let Some(session_path) = cli.resume.as_ref() else {
@@ -490,8 +526,13 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
             journal.session_id(),
             records.len()
         );
-        for record in &records {
-            let marker = if Some(record.revision_id.clone()) == current {
+        // Only the newest record whose revision matches the live workspace is "current"; an older
+        // record can carry the same content address (e.g. after `--restore-rev` re-records it).
+        let current_index = records
+            .iter()
+            .rposition(|record| Some(&record.revision_id) == current.as_ref());
+        for (index, record) in records.iter().enumerate() {
+            let marker = if Some(index) == current_index {
                 "  <- current"
             } else {
                 ""
@@ -620,6 +661,19 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
                         return ExitCode::from(1);
                     }
                 }
+            } else if let Err(e) = record_restored_revision(
+                &mut journal,
+                &store,
+                &restored_revision,
+                &restored_files,
+                &removed_files,
+                expected.as_ref(),
+            ) {
+                eprintln!(
+                    "error: workspace restored to {} but the session WAL could not record it: {}",
+                    restored_revision, e
+                );
+                return ExitCode::from(1);
             }
             ExitCode::SUCCESS
         }
@@ -1171,6 +1225,97 @@ mod tests {
         // Read-only policy never enables verification.
         let ro = parse_cli_args(base_cli(vec!["--policy".into(), "read-only".into()])).unwrap();
         assert_eq!(choose_completion_gate(&ro, None).unwrap(), CompletionGateChoice::Disabled);
+    }
+
+    /// `--restore-rev` must bind the restored revision into the WAL, so a following `--undo`
+    /// compares against the revision that is actually on disk instead of reporting a false conflict.
+    #[test]
+    fn test_restore_rev_records_revision_so_a_following_undo_stays_in_sync() {
+        use harness_core::messages::{TranscriptItem, UserMessage};
+        use std::fs;
+
+        let root = std::env::temp_dir().join(format!(
+            "harness-cli-restore-rev-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ws_dir = root.join("ws");
+        fs::create_dir_all(&ws_dir).unwrap();
+        fs::write(ws_dir.join("f.txt"), "v0\n").unwrap();
+
+        let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+        let store = SnapshotStore::new(root.join("snapshots"));
+        let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
+
+        journal
+            .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+            .unwrap();
+        let r0 = store.capture_revision(&workspace, None, None, 0).unwrap();
+        journal
+            .record_revision_capture(0, r0.revision_id.as_str(), None, r0.changed_paths.clone(), r0.tracked_files.len())
+            .unwrap();
+
+        fs::write(ws_dir.join("f.txt"), "v1\n").unwrap();
+        journal
+            .append_item(1, TranscriptItem::User(UserMessage { content: "turn 1".into() }))
+            .unwrap();
+        let r1 = store
+            .capture_revision(&workspace, Some(&r0.revision_id), None, 1)
+            .unwrap();
+        journal
+            .record_revision_capture(1, r1.revision_id.as_str(), Some(r0.revision_id.as_str()), r1.changed_paths.clone(), r1.tracked_files.len())
+            .unwrap();
+
+        // `--restore-rev r0`: the expected revision is the session's latest recorded one.
+        let restored = store
+            .restore_revision(&workspace, &r0.revision_id, Some(&r1.revision_id), false)
+            .unwrap();
+        let (restored_files, removed_files) = match &restored {
+            RestoreResult::Applied { restored_files, removed_files, .. } => {
+                (restored_files.clone(), removed_files.clone())
+            }
+            other => panic!("expected Applied, got {:?}", other),
+        };
+        record_restored_revision(
+            &mut journal,
+            &store,
+            &r0.revision_id,
+            &restored_files,
+            &removed_files,
+            Some(&r1.revision_id),
+        )
+        .unwrap();
+        assert_eq!(
+            journal.latest_revision_id().as_deref(),
+            Some(r0.revision_id.as_str()),
+            "--restore-rev must leave the WAL describing the restored workspace"
+        );
+
+        // A following `--undo` now compares r1 against the on-disk r0 and must apply cleanly.
+        let records = journal.revision_records();
+        let current = records.last().unwrap().clone();
+        let previous = records
+            .iter()
+            .rev()
+            .find(|record| record.revision_id != current.revision_id)
+            .unwrap()
+            .clone();
+        assert_eq!(current.revision_id, r0.revision_id.as_str());
+        assert_eq!(previous.revision_id, r1.revision_id.as_str());
+        let undo = store
+            .restore_revision(
+                &workspace,
+                &RevisionId::parse(&previous.revision_id).unwrap(),
+                Some(&RevisionId::parse(&current.revision_id).unwrap()),
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(undo, RestoreResult::Applied { .. }),
+            "--undo after --restore-rev must not report a false conflict: {:?}",
+            undo
+        );
+        assert_eq!(fs::read_to_string(ws_dir.join("f.txt")).unwrap(), "v1\n");
+        let _ = fs::remove_dir_all(root);
     }
 }
 

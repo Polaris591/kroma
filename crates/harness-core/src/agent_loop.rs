@@ -121,6 +121,11 @@ impl AgentRunner {
     }
 
     pub fn with_session_journal(mut self, journal: SessionJournal) -> Self {
+        // Gate 1: a resumed session must continue the revision chain the WAL already recorded, so
+        // the next capture's `parent_revision_id` links to the workspace state on disk.
+        self.current_revision_id = journal
+            .latest_revision_id()
+            .and_then(|id| RevisionId::parse(&id).ok());
         self.session_journal = Some(journal);
         self
     }
@@ -202,19 +207,21 @@ impl AgentRunner {
         }
         let task_turn = if is_new_session { 0 } else { 1 };
         let initial_task_item = TranscriptItem::User(UserMessage { content: self.config.task.clone() });
-        self.record_transcript_item(&mut transcript, initial_task_item, task_turn);
-        if let Some(err) = self.session_persist_error.clone() {
-            return self.finish_run(
-                TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
-            );
-        }
-        // Gate 1: capture the pre-mutation workspace state so the first turn can be undone.
+        // Gate 1: capture the pre-mutation workspace state BEFORE the new `UserMessage` becomes the
+        // WAL leaf, so `--undo` after this resumed turn rewinds to the same leaf the baseline was
+        // recorded at and cannot evict the baseline revision from the active branch.
         let baseline_turn = self.session_turn_offset;
         self.capture_workspace_revision(baseline_turn, "baseline", &mut logger);
         if let Some(err) = self.revision_error.clone() {
             return self.finish_run(
                 TerminalReason::StrictLogFailure(err),
+                &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
+            );
+        }
+        self.record_transcript_item(&mut transcript, initial_task_item, task_turn);
+        if let Some(err) = self.session_persist_error.clone() {
+            return self.finish_run(
+                TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
                 &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
             );
         }
