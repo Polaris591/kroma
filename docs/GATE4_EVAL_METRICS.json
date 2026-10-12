@@ -1,6 +1,11 @@
 {
   "artifact": "gate4-predictive-validation-and-attribution-eval",
   "blueprint": "docs/v1_blueprint/IMPLEMENTATION_GATES_AND_EVAL.md#gate-4--predictive-validation",
+  "environment": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rustc_target": "unix"
+  },
   "framing": "candidate_attribution",
   "generated_by": "crates/harness-core/tests/gate4_predictive_attribution.rs::test_gate4_eval_corpus_metrics_and_artifact_generation",
   "harness_version": "0.12.0",
@@ -9,9 +14,9 @@
     "false_positive_rollback_rate": 0.0,
     "false_positive_warnings": 0,
     "labeled_scenarios": 6,
-    "mean_validation_overhead_ms": 0.03216666666666666,
+    "mean_validation_overhead_ms": 0.03716666666666667,
     "rolled_back_files": 0,
-    "top1_attribution_precision": 0.8333333333333334,
+    "top1_attribution_precision": 1.0,
     "top2_attribution_recall": 1.0,
     "total_scenarios": 8,
     "validation_calls": 6
@@ -19,7 +24,7 @@
   "notes": [
     "Metrics are measured on a synthetic corpus with known injection points; the blueprint requires synthetic ground truth for attribution precision/recall.",
     "Attribution is always emitted as `candidate_attribution`; no run claims root-cause certainty and nothing is auto-rolled back on a warning.",
-    "rust_symbol_rename_break_in_caller_file is the one scenario where top-1 is not the injected fault: the failing anchor is in a file the model never edited, so the engine falls back to recency and the rename is recovered at rank 2. Raising that to rank 1 needs the reproduce/revert evidence step the blueprint describes, not a bigger heuristic.",
+    "Cross-file symbol rename breaks (`rust_symbol_rename_break_in_caller_file`) are recovered at rank 1 via `removed_symbols` / `added_symbols` cross-file symbol attribution and can be confirmed via `AttributionEngine::verify_candidate_with_snapshot`.",
     "mean_validation_overhead_ms covers only the in-process structural check (no process spawn).",
     "false_positive_rollback_rate is structurally 0.0: the predictive check is advisory and never mutates the workspace."
   ],
@@ -50,6 +55,18 @@
       "anchors": 1,
       "candidates": [
         {
+          "confidence": 0.679,
+          "line_range": [
+            3,
+            5
+          ],
+          "mutation_id": "mut-0001",
+          "rationale": "diagnostic symbol `compute` in src/caller.rs matches a symbol modified in src/api.rs (turn 1)",
+          "relative_path": "src/api.rs",
+          "tool_name": "edit",
+          "turn": 1
+        },
+        {
           "confidence": 0.45,
           "line_range": [
             1,
@@ -60,24 +77,12 @@
           "relative_path": "src/unrelated.rs",
           "tool_name": "edit",
           "turn": 2
-        },
-        {
-          "confidence": 0.385,
-          "line_range": [
-            3,
-            5
-          ],
-          "mutation_id": "mut-0001",
-          "rationale": "turn 1 modified src/api.rs with no matching diagnostic path",
-          "relative_path": "src/api.rs",
-          "tool_name": "edit",
-          "turn": 1
         }
       ],
       "expected_mutation_id": "mut-0001",
       "scenario": "rust_symbol_rename_break_in_caller_file",
-      "top1_hit": false,
-      "top1_mutation_id": "mut-0002",
+      "top1_hit": true,
+      "top1_mutation_id": "mut-0001",
       "top2_hit": true
     },
     {
@@ -148,24 +153,11 @@
     },
     {
       "anchors": 0,
-      "candidates": [
-        {
-          "confidence": 0.45,
-          "line_range": [
-            1,
-            3
-          ],
-          "mutation_id": "mut-0001",
-          "rationale": "no parseable diagnostic anchor; recent mutation in turn 1 (recency only)",
-          "relative_path": "src/clean.rs",
-          "tool_name": "edit",
-          "turn": 1
-        }
-      ],
+      "candidates": [],
       "expected_mutation_id": null,
       "scenario": "clean_edit_no_errors",
       "top1_hit": null,
-      "top1_mutation_id": "mut-0001",
+      "top1_mutation_id": null,
       "top2_hit": null
     },
     {

@@ -102,11 +102,11 @@ cannot break out of the fence.
 | 只在确定语言/项目工具存在时跑轻量 parser/lint | **Met** | `language_name` gate; unknown extensions return `status="skipped"` with a reason and emit **no** `PredictiveCheck` event |
 | baseline tests 与 after tests 使用相同命令/版本/环境 | **Met** | Gate 4 adds no new test command: attribution consumes the existing `WorkspaceCompletionGate` output; `--predict-cmd` reuses `WorkspaceCompletionGate` (same `env_clear()`, `CI=true`, `NO_COLOR=1`, 180s timeout, process-group cleanup) |
 | 失败归因先标记 candidate，不直接判定 root cause | **Met** | `framing == "candidate_attribution"` asserted in tests and in the rendered block; block text says "These are CANDIDATES, not a confirmed root cause" |
-| 需要时用 revert/reapply 或缩小 patch 进行验证 | **Met (partially automated)** | Each candidate carries `revision_before`, and the smoke test proves `--restore-rev <revision_before>` actually rewinds the workspace. Automated replay/shrink is deliberately **not** implemented — see §5 |
-| 自动回滚必须能关闭，且永远不能绕过用户对高风险副作用的审批 | **Met** | There is no auto-rollback at all; `--no-predictive-check` disables the check; the attribution path only writes prompt text and events |
+| 需要时用 revert/reapply 或缩小 patch 进行验证 | **Met** | Each candidate carries `revision_before`, and `AttributionEngine::verify_candidate_with_snapshot` temporarily reverts to `revision_before`, runs a verification probe, boosts candidate confidence when the failure resolves on revert, and unconditionally restores `current_revision` |
+| 自动回滚必须能关闭，且永远不能绕过用户对高风险副作用的审批 | **Met** | There is no auto-rollback at all; `--no-predictive-check` disables both structural checks and `--predict-cmd`; `--policy read-only` also disables `--predict-cmd`; the attribution path only writes prompt text and events |
 | 是否在首次修复前抓住新增语法错误 | **Met** | Live smoke: the unbalanced `write` produced a warning block before any test ran; `--predict-cmd` surfaced the compile failure on the same turn as the breaking edit |
-| Attribution Precision / Recall（已知注入点合成任务） | **Met** | 8-scenario corpus: `top1_attribution_precision = 0.8333` (5/6 labelled), `top2_attribution_recall = 1.0` (6/6) |
-| 误报造成的错误回滚率 | **Met** | `false_positive_rollback_rate = 0.0`; 5 valid-but-tricky probe files produce 0 warnings and 0 byte changes; 50 real repository files validate clean |
+| Attribution Precision / Recall（已知注入点合成任务） | **Met** | 8-scenario corpus: `top1_attribution_precision = 1.0` (6/6 labelled, including cross-file symbol rename break), `top2_attribution_recall = 1.0` (6/6), 0 false-positive candidates on clean output |
+| 误报造成的错误回滚率 | **Met** | `false_positive_rollback_rate = 0.0`; 5 valid-but-tricky probe files (including Rust `br"\"`, JS regex literals, and nested `${...}` template literals) produce 0 warnings and 0 byte changes; 50 real repository files validate clean |
 | 额外执行时间和成本 | **Met** | `mean_validation_overhead_ms ≈ 0.029` per file (in-process, no spawn); `--predict-cmd` is opt-in and capped at `MAX_PREDICT_CMD_RUNS = 8` |
 
 ---
@@ -121,12 +121,15 @@ cannot break out of the fence.
 | 4 | `test_completion_gate_failure_emits_ranked_candidate_attribution_linked_to_evidence_and_revisions` | a failing gate ranks turn 2's `src/b.rs` mutation top-1 (0.98), the clean turn-1 edit is not ranked above it, the block carries `recall_evidence(source_entry_id=ev-…)` and `--restore-rev r-…`, `FailureAttributed` telemetry matches, the named revision loads, and the model repairs the attributed file so the gate then approves |
 | 5 | `test_attribution_disambiguates_multiple_edits_by_file_line_and_symbol` | same-turn multi-file edits are separated by line range and by symbol; an unrelated failure stays in the recency band; `added_identifiers` / `top_level_symbol_names` / `language_name` behave |
 | 6 | `test_fork_rewind_prunes_future_mutations_from_ledger` | ledger pruning, id monotonicity after `restore`, WAL branch selection (`--fork 1` drops the off-branch checkpoint), and the runner's `prune_after_turn` safety net |
-| 7 | `test_gate4_eval_corpus_metrics_and_artifact_generation` | 8-scenario corpus → metrics; regenerates `docs/GATE4_EVAL_METRICS.json` |
+| 7 | `test_gate4_eval_corpus_metrics_and_artifact_generation` | 8-scenario corpus → `top1_attribution_precision == 1.0`, `top2_attribution_recall == 1.0`, 0 candidates on clean output; verifies/regenerates `docs/GATE4_EVAL_METRICS.json` |
+| 8 | `test_scanner_edge_cases_eof_transitions_rust_raw_byte_strings_js_regex_and_templates` | EOF unclosed strings/block comments, Rust `br"\"` / `cr"\"` raw byte/C strings, JS/TS regex literals (`/[(]/`, `/\{/`, `/"/`, `/https?:\/\//`) and `${...}` template interpolations |
+| 9 | `test_multi_span_attribution_windows_paths_and_revert_reapply_verification` | multi-span mutations attribute the matching span's line range; colon-containing paths + Windows drive letters + URL port rejection; `verify_candidate_with_snapshot` revert/reapply verification |
+| 10 | `test_bash_changed_paths_backfill_predict_cmd_and_restore_rev_pruning` | read-only `bash` does not pollute `MutationLedger`; mutating `bash` backfills `changed_paths` from `WorkspaceRevision`; `--predict-cmd` attributes `bash` mutations and is skipped under `--no-predictive-check` |
 
 Plus 8 unit tests in `attribution.rs` (scanner acceptance/rejection, JSON/TOML, anchor parsing,
 ranking, pruning).
 
-Workspace total: **134 passed / 0 failed / 0 warnings** across 15 test binaries plus doc-tests.
+Workspace total: **137 passed / 0 failed / 0 warnings** across 15 test binaries plus doc-tests.
 
 ---
 

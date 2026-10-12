@@ -16,9 +16,9 @@
 
 use harness_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
 use harness_core::attribution::{
-    added_identifiers, language_name, parse_diagnostic_anchors, top_level_symbol_names,
-    AttributionEngine, MutationLedger, MutatedFileSpan, PredictiveValidator,
-    CANDIDATE_ATTRIBUTION_FRAMING,
+    added_identifiers, language_name, parse_diagnostic_anchors, removed_identifiers,
+    top_level_symbol_names, AttributionEngine, MutationLedger, MutatedFileSpan,
+    PredictiveValidator, CANDIDATE_ATTRIBUTION_FRAMING,
 };
 use harness_core::budget::BudgetConfig;
 use harness_core::env::{
@@ -584,6 +584,7 @@ fn test_attribution_disambiguates_multiple_edits_by_file_line_and_symbol() {
             start_line: start,
             end_line: end,
             added_symbols: symbols.iter().map(|s| s.to_string()).collect(),
+            removed_symbols: Vec::new(),
             summary: format!("edit {} lines {}-{}", path, start, end),
         }
     }
@@ -670,6 +671,7 @@ fn test_fork_rewind_prunes_future_mutations_from_ledger() {
                 start_line: 1,
                 end_line: 2,
                 added_symbols: Vec::new(),
+                removed_symbols: Vec::new(),
                 summary: String::new(),
             }],
         }
@@ -765,6 +767,7 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
             start_line: start,
             end_line: end,
             added_symbols: symbols.iter().map(|s| s.to_string()).collect(),
+            removed_symbols: Vec::new(),
             summary: format!("edit {} lines {}-{}", path, start, end),
         }
     }
@@ -781,15 +784,17 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
     });
 
     // 2. Rust symbol rename break in a *caller* file the model never touched, alongside a later
-    //    unrelated edit. A path-based engine can only recover this at rank 2 — reported honestly.
+    //    unrelated edit. Cross-file removed/renamed symbol matching ranks the rename at #1.
     let mut ledger = MutationLedger::new();
+    let mut rename_span = span("src/api.rs", 3, 5, &["compute_v2"]);
+    rename_span.removed_symbols = vec!["compute".to_string()];
     ledger.record_mutation(
         1,
         "edit",
         "c1",
         None,
         None,
-        vec![span("src/api.rs", 3, 5, &["compute_v2"])],
+        vec![rename_span],
     );
     ledger.record_mutation(2, "edit", "c2", None, None, vec![span("src/unrelated.rs", 1, 2, &[])]);
     out.push(CorpusScenario {
@@ -926,15 +931,25 @@ fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
     }
 
     assert_eq!(labeled, 6, "six scenarios carry a known injection point");
-    assert!(
-        top1_hits >= 5,
-        "top-1 precision regressed: {}/{}",
+    assert_eq!(
+        top1_hits, labeled,
+        "every labeled scenario (including cross-file symbol rename) must rank #1: {}/{}",
         top1_hits,
         labeled
     );
     assert_eq!(
         top2_hits, labeled,
         "every injected fault must be recovered within the top 2 candidates"
+    );
+    // Clean output produces 0 false-positive candidates.
+    let clean_res = results
+        .iter()
+        .find(|r| r["scenario"] == "clean_edit_no_errors")
+        .unwrap();
+    assert!(
+        clean_res["candidates"].as_array().unwrap().is_empty(),
+        "empty failure output must produce zero candidates: {:?}",
+        clean_res
     );
     let top1_precision = top1_hits as f64 / labeled as f64;
     let top2_recall = top2_hits as f64 / labeled as f64;
@@ -944,8 +959,8 @@ fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
     let probe_root = temp_root("fp-probe");
     let probe_ws = WorkspaceCap::new(&probe_root).unwrap();
     let probes: [(&str, &str); 5] = [
-        ("a.rs", "pub fn f<'a>(x: &'a str) -> &'a str {\n    let s = \"} { ) ]\";\n    let r = r#\"{ \"x\" }\"#;\n    let c = '}';\n    // } } }\n    /* } { */\n    x\n}\n"),
-        ("b.js", "const t = `{ [ } ]`;\nfunction f() { return `${t}`; }\n"),
+        ("a.rs", "pub fn f<'a>(x: &'a str) -> &'a str {\n    let s = \"} { ) ]\";\n    let r = r#\"{ \"x\" }\"#;\n    let br = br\"\\\";\n    let c = '}';\n    // } } }\n    /* } { */\n    x\n}\n"),
+        ("b.js", "const t = `{ [ } ]`;\nconst rx = /[(]/;\nfunction f() { return `${t} ${`nested {`}`; }\n"),
         ("c.ts", "type T = { a: string };\nconst v: T = { a: '{' };\n"),
         ("d.py", "def f():\n    s = \"\"\"{\n}\n\"\"\"\n    return s  # } {\n"),
         ("e.go", "package main\n\nfunc main() {\n\tb := `raw { }`\n\t_ = b\n}\n"),
@@ -995,6 +1010,11 @@ fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
         "generated_by": "crates/harness-core/tests/gate4_predictive_attribution.rs::test_gate4_eval_corpus_metrics_and_artifact_generation",
         "blueprint": "docs/v1_blueprint/IMPLEMENTATION_GATES_AND_EVAL.md#gate-4--predictive-validation",
         "framing": CANDIDATE_ATTRIBUTION_FRAMING,
+        "environment": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "rustc_target": std::env::consts::FAMILY,
+        },
         "metrics": {
             "labeled_scenarios": labeled,
             "total_scenarios": scenarios.len(),
@@ -1011,16 +1031,27 @@ fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
         "notes": [
             "Metrics are measured on a synthetic corpus with known injection points; the blueprint requires synthetic ground truth for attribution precision/recall.",
             "Attribution is always emitted as `candidate_attribution`; no run claims root-cause certainty and nothing is auto-rolled back on a warning.",
-            "rust_symbol_rename_break_in_caller_file is the one scenario where top-1 is not the injected fault: the failing anchor is in a file the model never edited, so the engine falls back to recency and the rename is recovered at rank 2. Raising that to rank 1 needs the reproduce/revert evidence step the blueprint describes, not a bigger heuristic.",
+            "Cross-file symbol rename breaks (`rust_symbol_rename_break_in_caller_file`) are recovered at rank 1 via `removed_symbols` / `added_symbols` cross-file symbol attribution and can be confirmed via `AttributionEngine::verify_candidate_with_snapshot`.",
             "mean_validation_overhead_ms covers only the in-process structural check (no process spawn).",
             "false_positive_rollback_rate is structurally 0.0: the predictive check is advisory and never mutates the workspace."
         ],
     });
     let metrics_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/GATE4_EVAL_METRICS.json");
-    fs::write(&metrics_path, serde_json::to_string_pretty(&artifact).unwrap())
-        .unwrap_or_else(|e| panic!("failed to write {}: {}", metrics_path.display(), e));
-    eprintln!("[gate4-eval] wrote {}", metrics_path.display());
+    if std::env::var("HARNESS_WRITE_EVAL_METRICS").ok().as_deref() == Some("1")
+        || !metrics_path.exists()
+    {
+        fs::write(&metrics_path, serde_json::to_string_pretty(&artifact).unwrap())
+            .unwrap_or_else(|e| panic!("failed to write {}: {}", metrics_path.display(), e));
+        eprintln!("[gate4-eval] wrote {}", metrics_path.display());
+    } else {
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metrics_path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["metrics"]["top1_attribution_precision"].as_f64(),
+            Some(1.0)
+        );
+    }
 
     // The evidence graph parses the diagnostic anchors for every non-empty failure output.
     for scenario in &scenarios {
@@ -1036,3 +1067,329 @@ fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
 
     let _ = fs::remove_dir_all(&probe_root);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Test 7 — Gemini review regression suite: scanner edge cases, revert/reapply verification,
+//          bash changed_paths backfill, --predict-cmd policy & revision sync, --restore-rev pruning
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn test_scanner_edge_cases_eof_transitions_rust_raw_byte_strings_js_regex_and_templates() {
+    let validator = PredictiveValidator::new(true);
+
+    // 1. EOF state transitions must report unclosed strings and block comments.
+    for unclosed_str in [
+        ("src/a.rs", "let x = \""),
+        ("src/a.rs", "let x = r#\""),
+        ("src/a.rs", "let x = \"hello\\"),
+        ("app.py", "x = \"\"\""),
+    ] {
+        let report = validator.validate_content(unclosed_str.0, unclosed_str.1);
+        assert!(
+            report.issues.iter().any(|i| i.kind == "unclosed_string"),
+            "expected unclosed_string on {:?}, got {:?}",
+            unclosed_str,
+            report.issues
+        );
+    }
+    for unclosed_comment in [
+        ("src/a.rs", "/*"),
+        ("src/a.rs", "/* outer /* inner */"),
+        ("src/a.c", "/* unclosed at eof"),
+    ] {
+        let report = validator.validate_content(unclosed_comment.0, unclosed_comment.1);
+        assert!(
+            report.issues.iter().any(|i| i.kind == "unclosed_block_comment"),
+            "expected unclosed_block_comment on {:?}, got {:?}",
+            unclosed_comment,
+            report.issues
+        );
+    }
+
+    // 2. Rust raw byte strings (`br"\"`, `br#"..."#`) and C-strings (`cr"\"`, `c"..."`).
+    let rust_raw_bytes = r##"
+pub fn raw_bytes() {
+    let a = br"\";
+    let b = br#"raw "(" byte"#;
+    let c = cr"\";
+    let d = cr#"raw "{" cstr"#;
+    let e = b"escaped \"(";
+    let f = c"escaped \"{";
+    let _ = (a, b, c, d, e, f);
+}
+"##;
+    let report = validator.validate_content("src/lib.rs", rust_raw_bytes);
+    assert!(
+        report.issues.is_empty(),
+        "valid Rust raw byte/C strings must not false-positive: {:?}",
+        report.issues
+    );
+
+    // 3. JS/TS regex literals and nested template literal `${...}` interpolations.
+    let valid_js = r#"
+const r1 = /[(]/;
+const r2 = /\{/;
+const r3 = /"/;
+function check(u, foo) {
+    if (/https?:\/\//.test(u)) {
+        const s = `${foo(`{`)}`;
+        return s;
+    }
+    return /a\/b/i;
+}
+"#;
+    let report = validator.validate_content("src/app.ts", valid_js);
+    assert!(
+        report.issues.is_empty(),
+        "valid JS/TS regexes and nested template literals must not false-positive: {:?}",
+        report.issues
+    );
+
+    // Unbalanced delimiter inside `${...}` interpolation MUST be caught.
+    let broken_tpl = "const s = `${foo((1)}`;\n";
+    let report = validator.validate_content("src/app.ts", broken_tpl);
+    assert!(
+        report.issues.iter().any(|i| i.kind == "unclosed_delimiter"),
+        "unbalanced '(' inside ${{...}} must be reported: {:?}",
+        report.issues
+    );
+}
+
+#[test]
+fn test_multi_span_attribution_windows_paths_and_revert_reapply_verification() {
+    // 1. Multi-span mutation reports the matching span's path and line range.
+    let mut ledger = MutationLedger::new();
+    ledger.record_mutation(
+        1,
+        "edit",
+        "call_multi",
+        Some("ev-0001-call_multi".to_string()),
+        None,
+        vec![
+            MutatedFileSpan {
+                relative_path: "src/lib.rs".to_string(),
+                start_line: 1,
+                end_line: 3,
+                added_symbols: Vec::new(),
+                removed_symbols: Vec::new(),
+                summary: "edit src/lib.rs lines 1-3".to_string(),
+            },
+            MutatedFileSpan {
+                relative_path: "src/lib.rs".to_string(),
+                start_line: 100,
+                end_line: 110,
+                added_symbols: Vec::new(),
+                removed_symbols: Vec::new(),
+                summary: "edit src/lib.rs lines 100-110".to_string(),
+            },
+        ],
+    );
+    let report = AttributionEngine::attribute_failure(
+        &ledger,
+        "error[E0308]: mismatched types\n  --> .\\src\\lib.rs:105:5\n",
+        "completion_gate",
+        3,
+    );
+    let top = report.top().expect("top candidate");
+    assert_eq!(top.line_range, Some((100, 110)));
+    assert!(report.render_for_model().unwrap().contains("src/lib.rs:100-110"));
+
+    // 2. Colon-containing paths, Windows drive letters, and URL port rejection.
+    let anchors = parse_diagnostic_anchors(
+        "http://127.0.0.1:8080/health failed at /tmp/run:1/src/lib.rs:42:5\n  --> C:\\src\\win.rs:12\n",
+    );
+    assert_eq!(anchors.len(), 2, "{:?}", anchors);
+    assert_eq!(anchors[0].file_path, "/tmp/run:1/src/lib.rs");
+    assert_eq!(anchors[0].line, Some(42));
+    assert_eq!(anchors[1].file_path, "C:\\src\\win.rs");
+    assert_eq!(anchors[1].line, Some(12));
+
+    // 3. `removed_identifiers` extracts renamed-away identifiers.
+    assert_eq!(
+        removed_identifiers("pub fn compute() -> u32", "pub fn compute_v2() -> u32", 8),
+        vec!["compute".to_string()]
+    );
+
+    // 4. `verify_candidate_with_snapshot` temporarily reverts to `revision_before`, runs the
+    //    probe, boosts confidence when the revert resolves the failure, and restores the tree.
+    let root = temp_root("verify-revert");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    let ws = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+
+    fs::write(ws_dir.join("lib.rs"), "pub fn compute() -> u32 { 1 }\n").unwrap();
+    let rev_before = store.capture_revision(&ws, None, None, 0).unwrap().revision_id;
+
+    fs::write(ws_dir.join("lib.rs"), "pub fn compute_v2() -> u32 { 1 }\n").unwrap();
+    let rev_after = store
+        .capture_revision(&ws, Some(&rev_before), None, 1)
+        .unwrap()
+        .revision_id;
+
+    let mut ledger = MutationLedger::new();
+    ledger.record_mutation(
+        1,
+        "edit",
+        "call_rename",
+        Some("ev-0001-call_rename".to_string()),
+        Some(rev_before.clone()),
+        vec![MutatedFileSpan {
+            relative_path: "lib.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            added_symbols: vec!["compute_v2".to_string()],
+            removed_symbols: vec!["compute".to_string()],
+            summary: "edit lib.rs lines 1-1".to_string(),
+        }],
+    );
+    ledger.backfill_revision_after(1, Some(rev_after.clone()));
+
+    let mut report = AttributionEngine::attribute_failure(
+        &ledger,
+        "error[E0425]: cannot find function `compute` in this scope\n  --> caller.rs:4:5\n",
+        "completion_gate",
+        3,
+    );
+    let pre_conf = report.candidates[0].confidence;
+    let verification = AttributionEngine::verify_candidate_with_snapshot(
+        &store,
+        &ws,
+        &mut report.candidates[0],
+        &rev_after,
+        |_ws| {
+            // Probe checks whether `pub fn compute(` is present on disk.
+            fs::read_to_string(ws_dir.join("lib.rs"))
+                .unwrap()
+                .contains("pub fn compute()")
+        },
+    )
+    .expect("revert/reapply verification succeeds");
+    assert!(verification.failure_resolved_on_revert);
+    assert!(report.candidates[0].confidence > pre_conf);
+    assert!(report.candidates[0].rationale.contains("verified via revert/reapply"));
+    // Working tree is restored back to `rev_after` (`compute_v2`).
+    assert!(
+        fs::read_to_string(ws_dir.join("lib.rs"))
+            .unwrap()
+            .contains("compute_v2")
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn test_bash_changed_paths_backfill_predict_cmd_and_restore_rev_pruning() {
+    let root = temp_root("bash-predict-restore");
+    let ws_dir = root.join("ws");
+    let state_dir = root.join("state");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(ws_dir.join("a.rs"), "pub fn a() -> u32 { 1 }\n").unwrap();
+
+    let store = Arc::new(SnapshotStore::new(root.join("snapshots")));
+    let journal = SessionJournal::create(state_dir.join("sessions"), &ws_dir).unwrap();
+    let wal_path = journal.path().to_path_buf();
+
+    let predict_gate = Arc::new(
+        harness_core::completion_gate::WorkspaceCompletionGate::with_auto_detection(
+            Some(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "if [ -f b.rs ]; then echo 'error[E0425]: cannot find value `bad_bash` in this scope'; echo '  --> b.rs:1:21'; exit 1; fi; exit 0".to_string(),
+            ]),
+            std::time::Duration::from_secs(5),
+            false,
+        ),
+    );
+
+    // Turn 1: read-only `bash` (`true`) changes 0 files and must NOT pollute `MutationLedger`.
+    // Turn 2: mutating `bash` writes `b.rs`; its `changed_paths` (`["b.rs"]`) must be backfilled
+    //         into the `MutationRecord`, and `--predict-cmd` rejects and attributes `mut-0001` (`b.rs`)!
+    let provider = Arc::new(FakeProvider::new(vec![
+        tool_turn("call_ro_bash", "bash", r#"{"command":"true"}"#),
+        tool_turn(
+            "call_mut_bash",
+            "bash",
+            r#"{"command":"printf 'pub fn b() -> u32 { bad_bash }\n' > b.rs"}"#,
+        ),
+        stop_turn("done"),
+    ]));
+    let env = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
+    let policy = PolicyEngine::new(
+        PolicyMode::FullAutonomous,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    let budget = BudgetConfig::default();
+    let runtime = build_default_runtime(env, policy, budget.clone(), None);
+    let cfg = AgentRunConfig::new("run bash and predict-cmd", budget);
+    let logger = EventLogger::new(cfg.run_id, Some(state_dir.clone()), false).unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .with_session_journal(journal)
+        .with_snapshot_store(store.clone())
+        .with_predictive_command(predict_gate)
+        .run(logger)
+        .await;
+    assert_eq!(summary.status, RunStatus::Completed);
+
+    let journal = SessionJournal::open(&wal_path).unwrap();
+    let cp = journal.latest_active_checkpoint().unwrap();
+    // Only the mutating `bash` call is in the ledger (`call_ro_bash` was dropped because 0 files changed),
+    // and `b.rs` was backfilled from `WorkspaceRevision.changed_paths`!
+    assert_eq!(cp.mutations.len(), 1, "{:?}", cp.mutations);
+    assert_eq!(cp.mutations[0].call_id, "call_mut_bash");
+    assert_eq!(cp.mutations[0].mutation_id, "mut-0001");
+    assert_eq!(cp.mutations[0].touched_paths(), vec!["b.rs"]);
+
+    // And the `--predict-cmd` rejection message attributed `mut-0001` (`b.rs`)!
+    let predict_msg = summary
+        .transcript
+        .iter()
+        .find_map(|item| match item {
+            TranscriptItem::User(u) if u.content.contains("[Predictive check failed") => {
+                Some(u.content.clone())
+            }
+            _ => None,
+        })
+        .expect("predict-cmd feedback injected into transcript");
+    assert!(predict_msg.contains("mut-0001") && predict_msg.contains("b.rs"), "{}", predict_msg);
+
+    // Verify `--predict-cmd` is NEVER executed when `--no-predictive-check` is active.
+    let marker_file = root.join("predict_should_not_exist.marker");
+    let no_run_gate = Arc::new(
+        harness_core::completion_gate::WorkspaceCompletionGate::with_auto_detection(
+            Some(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("touch {} && exit 1", marker_file.display()),
+            ]),
+            std::time::Duration::from_secs(5),
+            false,
+        ),
+    );
+    let env2 = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
+    let policy2 = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let budget2 = BudgetConfig::default();
+    let runtime2 = build_default_runtime(env2, policy2, budget2.clone(), None)
+        .with_predictive_check(false);
+    let provider2 = Arc::new(FakeProvider::new(vec![
+        tool_turn("call_w", "write", r#"{"path":"c.rs","content":"pub fn c() {}\n"}"#),
+        stop_turn("done"),
+    ]));
+    let cfg2 = AgentRunConfig::new("no predictive check", budget2);
+    let logger2 = EventLogger::new(cfg2.run_id, Some(state_dir.clone()), false).unwrap();
+    let (_tx2, rx2) = watch::channel(false);
+    let (summary2, _) = AgentRunner::new(cfg2, provider2, runtime2, rx2)
+        .with_predictive_command(no_run_gate)
+        .run(logger2)
+        .await;
+    assert_eq!(summary2.status, RunStatus::Completed);
+    assert!(
+        !marker_file.exists(),
+        "--predict-cmd must not run when predictive_check is disabled"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+

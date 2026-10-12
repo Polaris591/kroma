@@ -95,19 +95,24 @@ impl PredictiveReport {
     }
 
     pub fn summary(&self) -> PredictiveSummary {
+        let safe_path = crate::prompt::escape_control_chars(&self.path);
         let summary = if self.issues.is_empty() {
             match &self.skipped_reason {
-                Some(reason) => format!("{} (not checked: {})", self.path, reason),
-                None => format!("{} clean", self.path),
+                Some(reason) => format!(
+                    "{} (not checked: {})",
+                    safe_path,
+                    crate::prompt::escape_control_chars(reason)
+                ),
+                None => format!("{} clean", safe_path),
             }
         } else {
             format!(
                 "{}: {} structural issue(s); first at line {} col {} ({})",
-                self.path,
+                safe_path,
                 self.issues.len(),
                 self.issues[0].line,
                 self.issues[0].column,
-                self.issues[0].message
+                crate::prompt::escape_control_chars(&self.issues[0].message)
             )
         };
         PredictiveSummary {
@@ -126,28 +131,31 @@ impl PredictiveReport {
         if self.issues.is_empty() {
             return None;
         }
-        let mut out = String::new();
-        out.push_str(&format!(
-            "<predictive_validation status=\"warning\" path=\"{}\" language=\"{}\" issues=\"{}\">\n",
+        let attrs = format!(
+            " status=\"warning\" path=\"{}\" language=\"{}\" issues=\"{}\"",
             escape_fence_attribute(&self.path),
             escape_fence_attribute(&self.language),
             self.issues.len()
-        ));
-        out.push_str(
+        );
+        let mut body = String::from(
             "advisory only — the change WAS applied and was NOT rolled back. Confirm with a real \
              build/test before relying on it.\n",
         );
         for issue in &self.issues {
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "- line {} col {}: {} ({})\n",
                 issue.line,
                 issue.column,
-                sanitize_untrusted_doc(&issue.message),
+                sanitize_untrusted_doc(&crate::prompt::escape_control_chars(&issue.message)),
                 escape_fence_attribute(&issue.kind)
             ));
         }
-        out.push_str("</predictive_validation>");
-        Some(out)
+        Some(crate::prompt::fence_untrusted(
+            "predictive_validation",
+            &attrs,
+            body.trim_end(),
+            ATTRIBUTION_BLOCK_MAX_BYTES,
+        ))
     }
 }
 
@@ -485,14 +493,76 @@ enum ScanState {
         open_col: usize,
         multiline: bool,
     },
+    /// JS/TS regex literal `/…/flags`.
+    Regex {
+        in_class: bool,
+        open_line: usize,
+        open_col: usize,
+    },
+}
+
+fn is_js_regex_start(prev_sig_char: Option<char>, prev_word: &str) -> bool {
+    if matches!(
+        prev_word,
+        "return"
+            | "typeof"
+            | "void"
+            | "delete"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "throw"
+            | "yield"
+            | "await"
+            | "case"
+            | "else"
+            | "do"
+    ) {
+        return true;
+    }
+    match prev_sig_char {
+        None => true,
+        Some(ch) => matches!(
+            ch,
+            '(' | ',' | '=' | ':' | '[' | '!' | '&' | '|' | '?' | '{' | '}' | ';' | '~' | '^'
+                | '+' | '-' | '*' | '%' | '<' | '>'
+        ),
+    }
+}
+
+fn has_closing_regex_slash_on_line(chars: &[char], start: usize) -> bool {
+    let mut j = start + 1;
+    let mut in_class = false;
+    while j < chars.len() {
+        let ch = chars[j];
+        if ch == '\n' || ch == '\r' {
+            return false;
+        }
+        if ch == '\\' {
+            j += 2;
+            continue;
+        }
+        if ch == '[' && !in_class {
+            in_class = true;
+        } else if ch == ']' && in_class {
+            in_class = false;
+        } else if ch == '/' && !in_class {
+            return true;
+        }
+        j += 1;
+    }
+    false
 }
 
 fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
     let chars: Vec<char> = content.chars().collect();
     let n = chars.len();
     let mut issues: Vec<PredictiveIssue> = Vec::new();
-    let mut stack: Vec<(char, usize, usize)> = Vec::new();
+    // `(delim, open_line, open_col, resume_template_open_pos)`
+    let mut stack: Vec<(char, usize, usize, Option<(usize, usize)>)> = Vec::new();
     let mut state = ScanState::Normal;
+    let mut prev_sig_char: Option<char> = None;
+    let mut prev_word = String::new();
     let mut i = 0usize;
     let mut line = 1usize;
     let mut col = 1usize;
@@ -539,17 +609,58 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                     continue;
                 }
                 advance!(1);
-                if i >= n && depth >= 1 {
+            }
+            ScanState::Regex { in_class, open_line, open_col } => {
+                if c == '\\' {
+                    advance!(2);
+                    continue;
+                }
+                if c == '\n' {
                     issues.push(PredictiveIssue {
                         line: open_line,
                         column: open_col,
-                        kind: "unclosed_block_comment".to_string(),
-                        message: "unterminated block comment /*".to_string(),
+                        kind: "unclosed_string".to_string(),
+                        message: "unterminated regex literal starting with /".to_string(),
                     });
+                    state = ScanState::Normal;
+                    advance!(1);
+                    continue;
                 }
+                if c == '[' && !in_class {
+                    state = ScanState::Regex { in_class: true, open_line, open_col };
+                    advance!(1);
+                    continue;
+                }
+                if c == ']' && in_class {
+                    state = ScanState::Regex { in_class: false, open_line, open_col };
+                    advance!(1);
+                    continue;
+                }
+                if c == '/' && !in_class {
+                    state = ScanState::Normal;
+                    prev_sig_char = Some('/');
+                    prev_word.clear();
+                    advance!(1);
+                    continue;
+                }
+                advance!(1);
             }
             ScanState::Str { quote, triple, raw_hashes, escape, open_line, open_col, multiline } => {
                 if escape && c == '\\' {
+                    advance!(2);
+                    continue;
+                }
+                // JS/TS template literal interpolation `${...}`: enter Normal mode and resume the
+                // enclosing template literal when its matching `}` is popped.
+                if quote == '`'
+                    && matches!(lang, CodeLang::JavaScript | CodeLang::TypeScript)
+                    && c == '$'
+                    && chars.get(i + 1) == Some(&'{')
+                {
+                    stack.push(('{', line, col + 1, Some((open_line, open_col))));
+                    state = ScanState::Normal;
+                    prev_sig_char = Some('{');
+                    prev_word.clear();
                     advance!(2);
                     continue;
                 }
@@ -564,6 +675,8 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                 if closes {
                     let consumed = if triple { 3 } else { 1 + raw_hashes.unwrap_or(0) };
                     state = ScanState::Normal;
+                    prev_sig_char = Some(quote);
+                    prev_word.clear();
                     advance!(consumed);
                     continue;
                 }
@@ -575,18 +688,12 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                         message: format!("unterminated string literal starting with {}", quote),
                     });
                     state = ScanState::Normal;
+                    prev_sig_char = None;
+                    prev_word.clear();
                     advance!(1);
                     continue;
                 }
                 advance!(1);
-                if i >= n {
-                    issues.push(PredictiveIssue {
-                        line: open_line,
-                        column: open_col,
-                        kind: "unclosed_string".to_string(),
-                        message: format!("unterminated string literal starting with {}", quote),
-                    });
-                }
             }
             ScanState::Normal => {
                 // Conflict markers are only meaningful at column 1 outside strings/comments.
@@ -621,18 +728,32 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                     advance!(2);
                     continue;
                 }
+                // JS/TS regex literals (`/pattern/flags`) in expression-start position.
+                if matches!(lang, CodeLang::JavaScript | CodeLang::TypeScript)
+                    && c == '/'
+                    && is_js_regex_start(prev_sig_char, &prev_word)
+                    && has_closing_regex_slash_on_line(&chars, i)
+                {
+                    state = ScanState::Regex { in_class: false, open_line: line, open_col: col };
+                    advance!(1);
+                    continue;
+                }
                 // String openers, language by language.
                 if let Some(consumed) = open_string(lang, &chars, i, &mut state, line, col) {
                     advance!(consumed);
                     continue;
                 }
                 if let Some(consumed) = open_char_literal(lang, &chars, i) {
+                    prev_sig_char = Some('\'');
+                    prev_word.clear();
                     advance!(consumed);
                     continue;
                 }
                 match c {
                     '(' | '[' | '{' => {
-                        stack.push((c, line, col));
+                        stack.push((c, line, col, None));
+                        prev_sig_char = Some(c);
+                        prev_word.clear();
                     }
                     ')' | ']' | '}' => {
                         let expected = match c {
@@ -640,10 +761,22 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                             ']' => '[',
                             _ => '{',
                         };
-                        if stack.last().map(|(d, _, _)| *d) == Some(expected) {
-                            stack.pop();
-                        } else if let Some(pos) = stack.iter().rposition(|(d, _, _)| *d == expected) {
-                            for (unclosed, ul, uc) in stack.drain(pos..).rev() {
+                        if stack.last().map(|(d, _, _, _)| *d) == Some(expected) {
+                            let (_, _, _, resume_tpl) = stack.pop().unwrap();
+                            if let Some((tpl_line, tpl_col)) = resume_tpl {
+                                state = ScanState::Str {
+                                    quote: '`',
+                                    triple: false,
+                                    raw_hashes: None,
+                                    escape: true,
+                                    open_line: tpl_line,
+                                    open_col: tpl_col,
+                                    multiline: true,
+                                };
+                            }
+                        } else if let Some(pos) = stack.iter().rposition(|(d, _, _, _)| *d == expected) {
+                            let mut resume_tpl_after = None;
+                            for (unclosed, ul, uc, resume_tpl) in stack.drain(pos..).rev() {
                                 if unclosed != expected {
                                     issues.push(PredictiveIssue {
                                         line: ul,
@@ -654,7 +787,20 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                                             unclosed, c
                                         ),
                                     });
+                                } else {
+                                    resume_tpl_after = resume_tpl;
                                 }
+                            }
+                            if let Some((tpl_line, tpl_col)) = resume_tpl_after {
+                                state = ScanState::Str {
+                                    quote: '`',
+                                    triple: false,
+                                    raw_hashes: None,
+                                    escape: true,
+                                    open_line: tpl_line,
+                                    open_col: tpl_col,
+                                    multiline: true,
+                                };
                             }
                         } else {
                             issues.push(PredictiveIssue {
@@ -664,8 +810,18 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                                 message: format!("unmatched closing '{}'", c),
                             });
                         }
+                        prev_sig_char = Some(c);
+                        prev_word.clear();
                     }
-                    _ => {}
+                    _ => {
+                        if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                            prev_word.push(c);
+                            prev_sig_char = Some(c);
+                        } else if !c.is_whitespace() {
+                            prev_word.clear();
+                            prev_sig_char = Some(c);
+                        }
+                    }
                 }
                 advance!(1);
             }
@@ -673,7 +829,37 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
     }
 
     if issues.len() < MAX_ISSUES_PER_FILE {
-        for (delim, l, cc) in stack.iter().rev().take(MAX_ISSUES_PER_FILE - issues.len()) {
+        match state {
+            ScanState::BlockComment { open_line, open_col, .. } => {
+                issues.push(PredictiveIssue {
+                    line: open_line,
+                    column: open_col,
+                    kind: "unclosed_block_comment".to_string(),
+                    message: "unterminated block comment /*".to_string(),
+                });
+            }
+            ScanState::Str { quote, open_line, open_col, .. } => {
+                issues.push(PredictiveIssue {
+                    line: open_line,
+                    column: open_col,
+                    kind: "unclosed_string".to_string(),
+                    message: format!("unterminated string literal starting with {}", quote),
+                });
+            }
+            ScanState::Regex { open_line, open_col, .. } => {
+                issues.push(PredictiveIssue {
+                    line: open_line,
+                    column: open_col,
+                    kind: "unclosed_string".to_string(),
+                    message: "unterminated regex literal starting with /".to_string(),
+                });
+            }
+            ScanState::Normal | ScanState::LineComment => {}
+        }
+    }
+
+    if issues.len() < MAX_ISSUES_PER_FILE {
+        for (delim, l, cc, _) in stack.iter().rev().take(MAX_ISSUES_PER_FILE - issues.len()) {
             issues.push(PredictiveIssue {
                 line: *l,
                 column: *cc,
@@ -710,27 +896,46 @@ fn open_string(
                 // newline inside one is data, not an unterminated literal.
                 return Some(set('"', false, None, true, true, 1));
             }
-            if c == 'r' || c == 'b' {
-                let (prefix_len, byte) = if c == 'b' && next == Some('r') {
-                    (2usize, true)
-                } else {
-                    (1usize, c == 'b')
+            if matches!(c, 'r' | 'b' | 'c') {
+                // A string prefix cannot be preceded by an identifier character or `'`.
+                if i > 0
+                    && (chars[i - 1].is_alphanumeric()
+                        || chars[i - 1] == '_'
+                        || chars[i - 1] == '\'')
+                {
+                    return None;
+                }
+                let (prefix_len, is_raw) = match (c, next) {
+                    ('b' | 'c', Some('r')) | ('r', Some('b' | 'c')) => (2usize, true),
+                    ('r', _) => (1usize, true),
+                    ('b' | 'c', _) => (1usize, false),
+                    _ => return None,
                 };
                 let after_prefix = i + prefix_len;
-                if byte && chars.get(after_prefix) == Some(&'"') {
-                    return Some(set('"', false, None, true, true, prefix_len + 1));
+                if chars.get(after_prefix) == Some(&'"') {
+                    return Some(set(
+                        '"',
+                        false,
+                        if is_raw { Some(0) } else { None },
+                        !is_raw,
+                        true,
+                        prefix_len + 1,
+                    ));
                 }
-                if chars.get(after_prefix) == Some(&'"') && !byte {
-                    // `r"…"` — a Rust raw string may span lines.
-                    return Some(set('"', false, Some(0), false, true, prefix_len + 1));
-                }
-                if chars.get(after_prefix) == Some(&'#') {
+                if is_raw && chars.get(after_prefix) == Some(&'#') {
                     let mut hashes = 0usize;
                     while chars.get(after_prefix + hashes) == Some(&'#') {
                         hashes += 1;
                     }
                     if chars.get(after_prefix + hashes) == Some(&'"') {
-                        return Some(set('"', false, Some(hashes), false, true, prefix_len + hashes + 1));
+                        return Some(set(
+                            '"',
+                            false,
+                            Some(hashes),
+                            false,
+                            true,
+                            prefix_len + hashes + 1,
+                        ));
                     }
                 }
             }
@@ -861,6 +1066,8 @@ pub struct MutatedFileSpan {
     pub start_line: usize,
     pub end_line: usize,
     pub added_symbols: Vec<String>,
+    #[serde(default)]
+    pub removed_symbols: Vec<String>,
     pub summary: String,
 }
 
@@ -917,11 +1124,16 @@ impl MutationRecord {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationLedger {
     records: Vec<MutationRecord>,
+    #[serde(default)]
+    next_seq_floor: u64,
 }
 
 impl MutationLedger {
     pub fn new() -> Self {
-        Self { records: Vec::new() }
+        Self {
+            records: Vec::new(),
+            next_seq_floor: 0,
+        }
     }
 
     pub fn records(&self) -> &[MutationRecord] {
@@ -940,8 +1152,18 @@ impl MutationLedger {
         self.records.iter().map(|r| r.turn).max().unwrap_or(0)
     }
 
+    pub fn has_call_id(&self, call_id: &str) -> bool {
+        self.records.iter().any(|r| r.call_id == call_id)
+    }
+
     fn next_seq(&self) -> u64 {
-        self.records.iter().map(|r| r.seq()).max().unwrap_or(0) + 1
+        self.records
+            .iter()
+            .map(|r| r.seq())
+            .max()
+            .unwrap_or(0)
+            .max(self.next_seq_floor)
+            + 1
     }
 
     /// Append a mutation, assigning the deterministic `mut-<seq:04>` id and trimming the oldest
@@ -956,7 +1178,9 @@ impl MutationLedger {
         revision_before: Option<RevisionId>,
         touched_ranges: Vec<MutatedFileSpan>,
     ) -> String {
-        let mutation_id = format!("mut-{:04}", self.next_seq());
+        let seq = self.next_seq();
+        self.next_seq_floor = self.next_seq_floor.max(seq);
+        let mutation_id = format!("mut-{:04}", seq);
         self.records.push(MutationRecord {
             mutation_id: mutation_id.clone(),
             turn,
@@ -976,9 +1200,63 @@ impl MutationLedger {
 
     /// Bind the post-batch revision to every record from `turn` that has not been bound yet.
     pub fn backfill_revision_after(&mut self, turn: u32, revision_after: Option<RevisionId>) {
+        self.backfill_revision_and_paths(turn, revision_after, &[], false);
+    }
+
+    /// Bind the post-batch revision and backfill `changed_paths` into pathless (`bash` / side-effect
+    /// extension) records from `turn`. When `snapshot_store_active` is `true` and `changed_paths`
+    /// is empty, pathless records from `turn` are dropped so read-only `bash` runs (e.g. `cargo test`)
+    /// do not pollute the mutation ledger.
+    pub fn backfill_revision_and_paths(
+        &mut self,
+        turn: u32,
+        revision_after: Option<RevisionId>,
+        changed_paths: &[String],
+        snapshot_store_active: bool,
+    ) {
+        let mut claimed_paths: BTreeSet<String> = BTreeSet::new();
+        for record in &self.records {
+            if record.turn == turn {
+                for span in &record.touched_ranges {
+                    claimed_paths.insert(normalize_rel_path(&span.relative_path));
+                }
+            }
+        }
+        let unclaimed: Vec<String> = changed_paths
+            .iter()
+            .filter(|p| !claimed_paths.contains(&normalize_rel_path(p)))
+            .cloned()
+            .collect();
+        let backfill_paths: &[String] = if !unclaimed.is_empty() {
+            &unclaimed
+        } else {
+            changed_paths
+        };
+
+        if snapshot_store_active && changed_paths.is_empty() {
+            // Reclaim sequence numbers of dropped no-op pathless records if they are at the tail.
+            self.records.retain(|record| !(record.turn == turn && record.touched_ranges.is_empty()));
+            self.next_seq_floor = self.records.iter().map(|r| r.seq()).max().unwrap_or(0);
+        }
+
         for record in self.records.iter_mut() {
-            if record.turn == turn && record.revision_after.is_none() {
-                record.revision_after = revision_after.clone();
+            if record.turn == turn {
+                if record.touched_ranges.is_empty() && !backfill_paths.is_empty() {
+                    record.touched_ranges = backfill_paths
+                        .iter()
+                        .map(|path| MutatedFileSpan {
+                            relative_path: path.clone(),
+                            start_line: 1,
+                            end_line: 1,
+                            added_symbols: Vec::new(),
+                            removed_symbols: Vec::new(),
+                            summary: mutation_summary(&record.tool_name, path, 0, 0),
+                        })
+                        .collect();
+                }
+                if record.revision_after.is_none() {
+                    record.revision_after = revision_after.clone();
+                }
             }
         }
     }
@@ -986,11 +1264,29 @@ impl MutationLedger {
     /// Drop every record from a turn later than `turn`, so a `--fork <TURN>` rewind cannot attribute
     /// a failure to a mutation that only exists on the abandoned branch.
     pub fn prune_after_turn(&mut self, turn: u32) {
+        for record in &self.records {
+            self.next_seq_floor = self.next_seq_floor.max(record.seq());
+        }
         self.records.retain(|record| record.turn <= turn);
+    }
+
+    /// Prune mutations whose `revision_after` is not in `active_revisions` (e.g. after `--restore-rev`
+    /// or an intra-turn `--undo` reverts the workspace to an earlier revision).
+    pub fn prune_reverted_revisions(&mut self, active_revisions: &BTreeSet<String>) {
+        for record in &self.records {
+            self.next_seq_floor = self.next_seq_floor.max(record.seq());
+        }
+        self.records.retain(|record| match &record.revision_after {
+            Some(rev) => active_revisions.contains(rev.as_str()),
+            None => true,
+        });
     }
 
     /// Replace the ledger contents with a restored branch's records (WAL checkpoint restore).
     pub fn restore(&mut self, records: Vec<MutationRecord>) {
+        for record in &records {
+            self.next_seq_floor = self.next_seq_floor.max(record.seq());
+        }
         self.records = records;
         if self.records.len() > MAX_LEDGER_RECORDS {
             let overflow = self.records.len() - MAX_LEDGER_RECORDS;
@@ -1132,13 +1428,14 @@ fn parse_path_line_col(text: &str) -> Option<(String, usize, Option<usize>)> {
             }
             Some((path.trim().to_string(), line, Some(col)))
         }
-        // `path:line`
+        // `path:line` (including paths that contain an earlier `:` such as `C:\src\lib.rs:12` or `dir:1/lib.rs:12`)
         (Some(line), None) => {
-            let path = second?;
-            if path.trim().is_empty() {
+            let (path, _) = text.rsplit_once(':')?;
+            let path = path.trim();
+            if path.is_empty() {
                 return None;
             }
-            Some((path.trim().to_string(), line, None))
+            Some((path.to_string(), line, None))
         }
         _ => None,
     }
@@ -1160,6 +1457,7 @@ fn find_inline_anchor(text: &str) -> Option<(String, usize, Option<usize>)> {
             if !digits.is_empty() {
                 let ln: usize = digits.parse().ok()?;
                 let mut col = None;
+                let mut end_idx = j;
                 if bytes.get(j) == Some(&':') {
                     let mut k = j + 1;
                     let mut col_digits = String::new();
@@ -1169,10 +1467,16 @@ fn find_inline_anchor(text: &str) -> Option<(String, usize, Option<usize>)> {
                     }
                     if !col_digits.is_empty() {
                         col = col_digits.parse().ok();
+                        end_idx = k;
                     }
                 }
-                if let Some(path) = path_before(text, start) {
-                    return Some((path, ln, col));
+                let boundary_ok = end_idx >= bytes.len()
+                    || bytes[end_idx].is_whitespace()
+                    || matches!(bytes[end_idx], ':' | ')' | ',' | ';' | ']' | '"' | '\'');
+                if boundary_ok {
+                    if let Some(path) = path_before(text, start) {
+                        return Some((path, ln, col));
+                    }
                 }
             }
         }
@@ -1185,24 +1489,64 @@ fn find_inline_anchor(text: &str) -> Option<(String, usize, Option<usize>)> {
 fn path_before(text: &str, colon_char_index: usize) -> Option<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut i = colon_char_index;
-    while i > 0 {
-        let c = chars[i - 1];
-        if c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '\\' | '~' | '+' | '@') {
-            i -= 1;
-        } else {
+    loop {
+        while i > 0 {
+            let c = chars[i - 1];
+            if c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '\\' | '~' | '+' | '@') {
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+        // Optional Windows drive letter prefix `C:\` or `C:/`.
+        if i >= 2
+            && chars[i - 1] == ':'
+            && chars[i - 2].is_ascii_alphabetic()
+            && matches!(chars.get(i), Some('/') | Some('\\'))
+            && (i == 2 || !chars[i - 3].is_alphanumeric())
+        {
+            i -= 2;
             break;
         }
+        // Allow `:` inside a directory component (e.g. `/tmp/run:1/src/lib.rs`) when the token
+        // before `:` is part of the same path and not a URL scheme (`http://`).
+        if i >= 2
+            && chars[i - 1] == ':'
+            && !matches!(chars.get(i..i + 2), Some(['/', '/']))
+        {
+            let mut k = i - 1;
+            while k > 0
+                && (chars[k - 1].is_alphanumeric()
+                    || matches!(chars[k - 1], '/' | '.' | '_' | '-' | '\\' | '~' | '+' | '@'))
+            {
+                k -= 1;
+            }
+            if chars[k..i - 1].iter().any(|ch| *ch == '/' || *ch == '\\') {
+                i -= 1;
+                continue;
+            }
+        }
+        break;
     }
     let path: String = chars[i..colon_char_index].iter().collect();
     let path = path.trim().to_string();
+    // Reject URL authority tokens such as `http://127.0.0.1:8080`.
+    if path.starts_with("//") || path.starts_with("\\\\") {
+        return None;
+    }
     // Require a plausible file token: a path separator or a dot-extension, plus no spaces.
     if path.len() < 3 || path.contains(' ') {
         return None;
     }
-    if !path.contains('.') && !path.contains('/') {
+    if !path.contains('.') && !path.contains('/') && !path.contains('\\') {
         return None;
     }
-    if path.starts_with('.') && !path.starts_with("./") && !path.starts_with("../") {
+    if path.starts_with('.')
+        && !path.starts_with("./")
+        && !path.starts_with("../")
+        && !path.starts_with(".\\")
+        && !path.starts_with("..\\")
+    {
         return None;
     }
     Some(path)
@@ -1217,12 +1561,25 @@ fn rust_error_context(lines: &[&str], arrow_idx: usize) -> (Option<String>, Opti
     for candidate in lines.iter().take(arrow_idx).skip(start) {
         let trimmed = candidate.trim();
         if trimmed.starts_with("error") || trimmed.starts_with("warning") {
-            if let Some(open) = trimmed.find('[') {
-                if let Some(close) = trimmed[open + 1..].find(']') {
-                    error_code = Some(trimmed[open + 1..open + 1 + close].to_string());
+            let head = trimmed.split(':').next().unwrap_or(trimmed);
+            if let Some(open) = head.find('[') {
+                if let Some(close) = head[open + 1..].find(']') {
+                    let code = &head[open + 1..open + 1 + close];
+                    if !code.is_empty()
+                        && code
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    {
+                        error_code = Some(code.to_string());
+                    }
                 }
-            } else {
-                error_code = Some("error".to_string());
+            }
+            if error_code.is_none() {
+                error_code = Some(if trimmed.starts_with("warning") {
+                    "warning".to_string()
+                } else {
+                    "error".to_string()
+                });
             }
             excerpt = trimmed.to_string();
             symbol = extract_symbol(trimmed);
@@ -1318,6 +1675,18 @@ pub struct AttributionReport {
     pub candidates: Vec<AttributionCandidate>,
 }
 
+/// Outcome of verifying a candidate mutation by temporarily restoring its `revision_before`
+/// and running a verification probe, then restoring the workspace back to `current_revision`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateVerificationResult {
+    pub mutation_id: String,
+    pub revision_before: RevisionId,
+    pub restored_revision: RevisionId,
+    /// `true` when the failure disappeared (probe returned `true` / passed) at `revision_before`.
+    pub failure_resolved_on_revert: bool,
+    pub rationale_note: String,
+}
+
 impl AttributionReport {
     pub fn top(&self) -> Option<&AttributionCandidate> {
         self.candidates.first()
@@ -1339,24 +1708,31 @@ impl AttributionReport {
              root cause: reproduce the failure before reverting anything.\n",
         );
         for (rank, candidate) in self.candidates.iter().enumerate() {
-            let path = candidate.relative_path.as_deref().unwrap_or("<unattributed>");
+            let raw_path = candidate.relative_path.as_deref().unwrap_or("<unattributed>");
+            let path = crate::prompt::escape_control_chars(raw_path);
             let lines = match candidate.line_range {
                 Some((start, end)) if end >= start && start > 0 => format!("{}:{}-{}", path, start, end),
-                _ => path.to_string(),
+                _ => path,
             };
             body.push_str(&format!(
                 "{}. {} (turn {}, tool `{}`, {}) confidence={:.2}\n",
                 rank + 1,
-                candidate.mutation_id,
+                crate::prompt::escape_control_chars(&candidate.mutation_id),
                 candidate.turn,
-                candidate.tool_name,
+                crate::prompt::escape_control_chars(&candidate.tool_name),
                 lines,
                 candidate.confidence
             ));
-            body.push_str(&format!("   why: {}\n", candidate.rationale));
+            body.push_str(&format!(
+                "   why: {}\n",
+                crate::prompt::escape_control_chars(&candidate.rationale)
+            ));
             let mut pointers = Vec::new();
             if let Some(sid) = &candidate.source_entry_id {
-                pointers.push(format!("raw output: recall_evidence(source_entry_id={})", sid));
+                pointers.push(format!(
+                    "raw output: recall_evidence(source_entry_id={})",
+                    crate::prompt::escape_control_chars(sid)
+                ));
             }
             if let Some(rev) = &candidate.revision_before {
                 pointers.push(format!(
@@ -1377,13 +1753,18 @@ impl AttributionReport {
                 .iter()
                 .take(6)
                 .map(|anchor| {
+                    let safe_file = crate::prompt::escape_control_chars(&anchor.file_path);
                     let location = match (anchor.line, anchor.column) {
-                        (Some(line), Some(col)) => format!("{}:{}:{}", anchor.file_path, line, col),
-                        (Some(line), None) => format!("{}:{}", anchor.file_path, line),
-                        _ => anchor.file_path.clone(),
+                        (Some(line), Some(col)) => format!("{}:{}:{}", safe_file, line, col),
+                        (Some(line), None) => format!("{}:{}", safe_file, line),
+                        _ => safe_file,
                     };
                     match &anchor.error_code {
-                        Some(code) => format!("{} ({})", location, code),
+                        Some(code) => format!(
+                            "{} ({})",
+                            location,
+                            crate::prompt::escape_control_chars(code)
+                        ),
                         None => location,
                     }
                 })
@@ -1410,20 +1791,29 @@ impl AttributionEngine {
         source: &str,
         top_k: usize,
     ) -> AttributionReport {
+        if failure_output.trim().is_empty() {
+            return AttributionReport {
+                framing: CANDIDATE_ATTRIBUTION_FRAMING.to_string(),
+                source: source.to_string(),
+                anchors: Vec::new(),
+                candidates: Vec::new(),
+            };
+        }
         let anchors = parse_diagnostic_anchors(failure_output);
         let latest_turn = ledger.latest_turn();
         let mut candidates: Vec<AttributionCandidate> = Vec::new();
 
         for record in ledger.records() {
-            let mut best: Option<(f64, String)> = None;
+            let mut best: Option<(f64, String, Option<&MutatedFileSpan>)> = None;
             for anchor in &anchors {
-                let (score, rationale) = score_record_against_anchor(record, anchor, latest_turn);
+                let (score, rationale, matched_span) =
+                    score_record_against_anchor(record, anchor, latest_turn);
                 match &best {
-                    Some((best_score, _)) if *best_score >= score => {}
-                    _ => best = Some((score, rationale)),
+                    Some((best_score, _, _)) if *best_score >= score => {}
+                    _ => best = Some((score, rationale, matched_span)),
                 }
             }
-            let (confidence, rationale) = match best {
+            let (confidence, rationale, matched_span) = match best {
                 Some(found) => found,
                 None => {
                     // No diagnostics at all: fall back to pure recency so a resumable ledger still
@@ -1435,19 +1825,20 @@ impl AttributionEngine {
                             "no parseable diagnostic anchor; recent mutation in turn {} (recency only)",
                             record.turn
                         ),
+                        None,
                     )
                 }
             };
             if confidence < 0.20 {
                 continue;
             }
-            let first_span = record.touched_ranges.first();
+            let representative_span = matched_span.or_else(|| record.touched_ranges.first());
             candidates.push(AttributionCandidate {
                 mutation_id: record.mutation_id.clone(),
                 turn: record.turn,
                 tool_name: record.tool_name.clone(),
-                relative_path: first_span.map(|span| span.relative_path.clone()),
-                line_range: first_span.and_then(|span| {
+                relative_path: representative_span.map(|span| span.relative_path.clone()),
+                line_range: representative_span.and_then(|span| {
                     if span.start_line > 0 && span.end_line >= span.start_line {
                         Some((span.start_line, span.end_line))
                     } else {
@@ -1478,6 +1869,87 @@ impl AttributionEngine {
             candidates,
         }
     }
+
+    /// Verify a candidate hypothesis using Gate 1's `SnapshotStore` by temporarily reverting the
+    /// workspace to `candidate.revision_before`, running `probe` (which returns `true` when the
+    /// check passes / the failure is absent), and then unconditionally re-applying
+    /// `current_revision` so the workspace is left in its exact pre-probe state.
+    pub fn verify_candidate_with_snapshot<F>(
+        store: &crate::revision::SnapshotStore,
+        workspace: &WorkspaceCap,
+        candidate: &mut AttributionCandidate,
+        current_revision: &RevisionId,
+        mut probe: F,
+    ) -> Result<CandidateVerificationResult, String>
+    where
+        F: FnMut(&WorkspaceCap) -> bool,
+    {
+        let Some(rev_before) = candidate.revision_before.clone() else {
+            return Err(format!(
+                "candidate {} has no revision_before to revert to",
+                candidate.mutation_id
+            ));
+        };
+        if &rev_before == current_revision {
+            return Err(format!(
+                "candidate {} revision_before {} equals current_revision",
+                candidate.mutation_id, rev_before
+            ));
+        }
+
+        match store
+            .restore_revision(workspace, &rev_before, Some(current_revision), false)
+            .map_err(|e| e.to_string())?
+        {
+            crate::revision::RestoreResult::Applied { .. } => {}
+            other => {
+                return Err(format!(
+                    "temporary revert to {} did not apply cleanly: {:?}",
+                    rev_before, other
+                ));
+            }
+        }
+
+        let passed_on_revert = probe(workspace);
+
+        match store
+            .restore_revision(workspace, current_revision, Some(&rev_before), true)
+            .map_err(|e| e.to_string())?
+        {
+            crate::revision::RestoreResult::Applied { .. } => {}
+            other => {
+                return Err(format!(
+                    "reapply of {} after revert verification failed: {:?}",
+                    current_revision, other
+                ));
+            }
+        }
+
+        let note = if passed_on_revert {
+            candidate.confidence = round3((candidate.confidence + 0.25).min(0.99));
+            let msg = format!(
+                "verified via revert/reapply: reverting to {} resolved the failure (restored back to {})",
+                rev_before, current_revision
+            );
+            candidate.rationale = format!("{}; {}", candidate.rationale, msg);
+            msg
+        } else {
+            let msg = format!(
+                "revert/reapply check: failure still present at {} (restored back to {})",
+                rev_before, current_revision
+            );
+            candidate.rationale = format!("{}; {}", candidate.rationale, msg);
+            msg
+        };
+
+        Ok(CandidateVerificationResult {
+            mutation_id: candidate.mutation_id.clone(),
+            revision_before: rev_before,
+            restored_revision: current_revision.clone(),
+            failure_resolved_on_revert: passed_on_revert,
+            rationale_note: note,
+        })
+    }
 }
 
 fn recency_factor(turn: u32, latest_turn: u32) -> f64 {
@@ -1489,34 +1961,53 @@ fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
 
+fn normalize_rel_path(p: &str) -> String {
+    let mut s = p.replace('\\', "/");
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest.to_string();
+    }
+    s
+}
+
 fn paths_match(anchor_path: &str, span_path: &str) -> bool {
-    let normalize = |p: &str| p.trim_start_matches("./").replace('\\', "/");
-    let a = normalize(anchor_path);
-    let b = normalize(span_path);
+    let a = normalize_rel_path(anchor_path);
+    let b = normalize_rel_path(span_path);
     if a == b {
         return true;
     }
     a.ends_with(&format!("/{}", b)) || b.ends_with(&format!("/{}", a))
 }
 
-fn score_record_against_anchor(
-    record: &MutationRecord,
+fn score_record_against_anchor<'a>(
+    record: &'a MutationRecord,
     anchor: &DiagnosticAnchor,
     latest_turn: u32,
-) -> (f64, String) {
+) -> (f64, String, Option<&'a MutatedFileSpan>) {
     let recency = recency_factor(record.turn, latest_turn);
-    let mut best: Option<(f64, String)> = None;
-    let mut consider = |score: f64, rationale: String| {
+    let mut best: Option<(f64, String, Option<&'a MutatedFileSpan>)> = None;
+    let mut consider = |score: f64, rationale: String, span: Option<&'a MutatedFileSpan>| {
         let score = round3(score);
         match &best {
-            Some((current, _)) if *current >= score => {}
-            _ => best = Some((score, rationale)),
+            Some((current, _, _)) if *current >= score => {}
+            _ => best = Some((score, rationale, span)),
         }
     };
 
     let mut path_matched = false;
     for span in &record.touched_ranges {
         if !paths_match(&anchor.file_path, &span.relative_path) {
+            if let Some(symbol) = &anchor.symbol {
+                if symbol_matches_span(symbol, span) {
+                    consider(
+                        0.62 + 0.08 * recency,
+                        format!(
+                            "diagnostic symbol `{}` in {} matches a symbol modified in {} (turn {})",
+                            symbol, anchor.file_path, span.relative_path, record.turn
+                        ),
+                        Some(span),
+                    );
+                }
+            }
             continue;
         }
         path_matched = true;
@@ -1530,6 +2021,7 @@ fn score_record_against_anchor(
                             "diagnostic anchor {}:{} falls inside the edited span {}-{}",
                             span.relative_path, line, span.start_line, span.end_line
                         ),
+                        Some(span),
                     );
                     continue;
                 }
@@ -1545,6 +2037,7 @@ fn score_record_against_anchor(
                             "diagnostic anchor {}:{} is {} line(s) from the edited span {}-{}",
                             span.relative_path, line, distance, span.start_line, span.end_line
                         ),
+                        Some(span),
                     );
                     continue;
                 }
@@ -1555,9 +2048,10 @@ fn score_record_against_anchor(
                 consider(
                     0.82,
                     format!(
-                        "diagnostic symbol `{}` matches a symbol added by this edit to {}",
+                        "diagnostic symbol `{}` matches a symbol modified by this edit to {}",
                         symbol, span.relative_path
                     ),
+                    Some(span),
                 );
                 continue;
             }
@@ -1568,6 +2062,7 @@ fn score_record_against_anchor(
                 "{} was modified in turn {} and appears in the failure output",
                 span.relative_path, record.turn
             ),
+            Some(span),
         );
     }
 
@@ -1578,10 +2073,10 @@ fn score_record_against_anchor(
         } else {
             format!("turn {} modified {} with no matching diagnostic path", record.turn, paths.join(", "))
         };
-        consider(0.20 + 0.25 * recency, detail);
+        consider(0.20 + 0.25 * recency, detail, None);
     }
 
-    best.unwrap_or((0.20, "unrelated recent mutation".to_string()))
+    best.unwrap_or((0.20, "unrelated recent mutation".to_string(), None))
 }
 
 fn symbol_matches_span(symbol: &str, span: &MutatedFileSpan) -> bool {
@@ -1591,9 +2086,21 @@ fn symbol_matches_span(symbol: &str, span: &MutatedFileSpan) -> bool {
     }
     let last = needle.rsplit("::").next().unwrap_or(needle);
     let last = last.rsplit('.').next().unwrap_or(last);
-    span.added_symbols
-        .iter()
-        .any(|candidate| candidate == needle || candidate == last)
+    let matches_symbol_or_rename = |candidate: &String| -> bool {
+        if candidate == needle || candidate == last {
+            return true;
+        }
+        if last.len() >= 3 && candidate.len() >= 3 {
+            let prefix_last = format!("{}_", last);
+            let prefix_cand = format!("{}_", candidate);
+            if candidate.starts_with(&prefix_last) || last.starts_with(&prefix_cand) {
+                return true;
+            }
+        }
+        false
+    };
+    span.added_symbols.iter().any(matches_symbol_or_rename)
+        || span.removed_symbols.iter().any(matches_symbol_or_rename)
         || span.summary.contains(needle)
 }
 
@@ -1619,6 +2126,24 @@ pub fn added_identifiers(old_text: &str, new_text: &str, max: usize) -> Vec<Stri
     let mut seen = BTreeSet::new();
     for ident in identifiers(new_text) {
         if before.contains(&ident) || !seen.insert(ident.clone()) {
+            continue;
+        }
+        out.push(ident);
+        if out.len() >= max {
+            break;
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Identifiers that appear in `old_text` but not in `new_text`, i.e. names removed or renamed by an `edit`.
+pub fn removed_identifiers(old_text: &str, new_text: &str, max: usize) -> Vec<String> {
+    let after: BTreeSet<String> = identifiers(new_text).into_iter().collect();
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for ident in identifiers(old_text) {
+        if after.contains(&ident) || !seen.insert(ident.clone()) {
             continue;
         }
         out.push(ident);
@@ -1730,6 +2255,30 @@ pub fn added_symbols_for_call(tool_name: &str, raw_arguments: &str, new_content:
     }
 }
 
+/// Convenience: build the `removed_symbols` hint for one `edit` tool call from its raw arguments.
+pub fn removed_symbols_for_call(tool_name: &str, raw_arguments: &str) -> Vec<String> {
+    if tool_name != "edit" {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_arguments) else {
+        return Vec::new();
+    };
+    let mut out: BTreeMap<String, ()> = BTreeMap::new();
+    if let Some(edits) = value.get("edits").and_then(|v| v.as_array()) {
+        for item in edits {
+            let old = item.get("old_text").and_then(|v| v.as_str()).unwrap_or("");
+            let new = item.get("new_text").and_then(|v| v.as_str()).unwrap_or("");
+            for ident in removed_identifiers(old, new, 12) {
+                out.insert(ident, ());
+            }
+        }
+    }
+    let mut names: Vec<String> = out.into_keys().collect();
+    names.sort();
+    names.truncate(16);
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1832,6 +2381,7 @@ fn main() {
                 start_line: 1,
                 end_line: 3,
                 added_symbols: vec![],
+                removed_symbols: vec![],
                 summary: "edit src/a.rs lines 1-3".to_string(),
             }],
         );
@@ -1846,6 +2396,7 @@ fn main() {
                 start_line: 10,
                 end_line: 14,
                 added_symbols: vec!["compute".to_string()],
+                removed_symbols: vec![],
                 summary: "edit src/b.rs lines 10-14".to_string(),
             }],
         );

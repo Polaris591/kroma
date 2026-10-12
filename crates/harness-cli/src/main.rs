@@ -1205,8 +1205,10 @@ async fn main() -> ExitCode {
         .with_completion_gate(build_completion_gate(gate_choice))
         .with_completion_gate_max_retries(max_gate_retries);
     // Gate 4: `--predict-cmd` is an explicit operator authorization, exactly like `--verify-cmd`,
-    // so it runs without needing `--allow-shell`.
+    // so it runs without needing `--allow-shell`. It is skipped when `--policy read-only` or
+    // `--no-predictive-check` is active.
     let runner = match cli.predict_cmd.as_deref() {
+        Some(_) if cli.policy_mode == PolicyMode::ReadOnly || cli.no_predictive_check => runner,
         Some(raw) => match parse_command_argv(raw) {
             Ok(argv) if !argv.is_empty() => {
                 if !cli.quiet {

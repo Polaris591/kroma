@@ -1,6 +1,6 @@
 use crate::attribution::{
-    added_symbols_for_call, language_name, mutation_summary, MutationTelemetry, MutatedFileSpan,
-    PredictiveReport, PredictiveValidator,
+    added_symbols_for_call, language_name, mutation_summary, removed_symbols_for_call,
+    MutationTelemetry, MutatedFileSpan, PredictiveReport, PredictiveValidator,
 };
 use crate::budget::BudgetConfig;
 use crate::env::SharedExecutionEnv;
@@ -644,6 +644,7 @@ impl ToolRuntime {
             start_line,
             end_line,
             added_symbols: added_symbols_for_call(&call.name, raw_args, content.as_deref()),
+            removed_symbols: removed_symbols_for_call(&call.name, raw_args),
             summary: mutation_summary(&call.name, &rel, start_line, end_line),
         };
         out.meta.mutation = Some(MutationTelemetry {

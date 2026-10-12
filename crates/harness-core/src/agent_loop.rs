@@ -291,6 +291,24 @@ impl AgentRunner {
         }
         let task_turn = if is_new_session { 0 } else { 1 };
         let initial_task_item = TranscriptItem::User(UserMessage { content: self.config.task.clone() });
+        // If `--restore-rev` (or an intra-turn `--undo`) reverted the workspace to an earlier
+        // revision on the active branch, compute the surviving revision set before the new baseline
+        // capture appends to `revision_records()`.
+        let reverted_active_revisions = self.session_journal.as_ref().and_then(|journal| {
+            let records = journal.revision_records();
+            let last = records.last()?;
+            let first_idx = records.iter().position(|r| r.revision_id == last.revision_id)?;
+            if first_idx + 1 < records.len() {
+                Some(
+                    records[..=first_idx]
+                        .iter()
+                        .map(|r| r.revision_id.clone())
+                        .collect::<std::collections::BTreeSet<String>>(),
+                )
+            } else {
+                None
+            }
+        });
         // Gate 1: capture the pre-mutation workspace state BEFORE the new `UserMessage` becomes the
         // WAL leaf, so `--undo` after this resumed turn rewinds to the same leaf the baseline was
         // recorded at and cannot evict the baseline revision from the active branch.
@@ -333,6 +351,27 @@ impl AgentRunner {
             self.mutation_ledger.restore(checkpoint.mutations.clone());
             self.mutation_ledger
                 .prune_after_turn(self.session_turn_offset as u32);
+            if let Some(ref active_revs) = reverted_active_revisions {
+                self.mutation_ledger.prune_reverted_revisions(active_revs);
+            }
+        }
+        // Replay any completed mutating tool result in the active transcript that was persisted
+        // after the last checkpoint before an interruption.
+        for (idx, item) in transcript.iter().enumerate() {
+            if let TranscriptItem::ToolResult(tr) = item {
+                if tr.outcome.is_success() && !self.mutation_ledger.has_call_id(tr.call_id.as_str()) {
+                    if let Some(MutationTelemetry { spans, .. }) = tr.meta.mutation.clone() {
+                        self.mutation_ledger.record_mutation(
+                            self.session_turn_offset as u32,
+                            tr.tool_name.clone(),
+                            tr.call_id.as_str().to_string(),
+                            Some(source_entry_id(idx, tr.call_id.as_str())),
+                            self.current_revision_id.clone(),
+                            spans,
+                        );
+                    }
+                }
+            }
         }
         // Gate 2: re-seed the raw-evidence store from the WAL so `recall_evidence` can still resolve
         // stubs compacted in an earlier process. The WAL keeps the pre-overlay (raw) item for every
@@ -866,14 +905,24 @@ impl AgentRunner {
             // Gate 1: a batch that mutated files — directly via `edit`/`write`, or indirectly via a
             // `bash` command whose writes the tool cannot report (O1) — gets a fresh revision bound
             // to this turn.
-            if self.batch_mutated || self.batch_ran_side_effect {
-                self.capture_workspace_revision(absolute_turn, "mutation", &mut logger);
+            let batch_changed_paths = if self.batch_mutated || self.batch_ran_side_effect {
+                self.capture_workspace_revision(absolute_turn, "mutation", &mut logger)
+            } else {
+                Vec::new()
+            };
+            for path in &batch_changed_paths {
+                modified_files_set.insert(path.clone());
+                self.batch_mutated = true;
             }
-            // Gate 4: bind the post-batch revision to every mutation recorded during this batch, so
-            // a candidate can name both the pre-change revision (a safe `--restore-rev` target) and
-            // the state that actually failed.
-            self.mutation_ledger
-                .backfill_revision_after(absolute_turn as u32, self.current_revision_id.clone());
+            // Gate 4: bind the post-batch revision (and any `changed_paths` discovered by the
+            // snapshot store for `bash` / side-effect extension calls) to every mutation recorded
+            // during this batch, dropping read-only `bash` records that changed 0 files.
+            self.mutation_ledger.backfill_revision_and_paths(
+                absolute_turn as u32,
+                self.current_revision_id.clone(),
+                &batch_changed_paths,
+                self.snapshot_store.is_some() && (self.batch_mutated || self.batch_ran_side_effect),
+            );
             if let Some(err) = self.revision_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(err),
@@ -919,7 +968,10 @@ impl AgentRunner {
             // Gate 4: optional `--predict-cmd`. Run once per mutating batch (bounded) so a fast
             // syntax/type check can surface an early failure — with its candidate attribution —
             // before the model spends the rest of the budget on a broken tree.
+            let mut post_batch_updated = false;
             if (self.batch_mutated || self.batch_ran_side_effect)
+                && self.tool_runtime.predictive_check_enabled()
+                && self.tool_runtime.policy_engine().mode() != crate::tool::policy::PolicyMode::ReadOnly
                 && self.predict_cmd.is_some()
                 && self.predict_cmd_runs < MAX_PREDICT_CMD_RUNS
             {
@@ -933,7 +985,21 @@ impl AgentRunner {
                     modified_files: mod_list,
                     turns_used: current_turn,
                 };
-                if let Ok(GateOutcome::Rejected { feedback }) = gate.check(&ctx).await {
+                let check_res = gate.check(&ctx).await;
+                let predict_changed =
+                    self.capture_workspace_revision(absolute_turn, "predict_cmd", &mut logger);
+                if !predict_changed.is_empty() {
+                    modified_files_set.extend(predict_changed);
+                    post_batch_updated = true;
+                }
+                if let Some(err) = self.revision_error.clone() {
+                    return self.finish_run(
+                        TerminalReason::StrictLogFailure(err),
+                        &budget_tracker, &projector, modified_files_set.into_iter().collect(),
+                        last_assistant_text, transcript, logger,
+                    );
+                }
+                if let Ok(GateOutcome::Rejected { feedback }) = check_res {
                     let report = AttributionEngine::attribute_failure(
                         &self.mutation_ledger,
                         &feedback,
@@ -967,6 +1033,7 @@ impl AgentRunner {
                         TranscriptItem::User(UserMessage { content: message }),
                         current_turn.saturating_add(1),
                     );
+                    post_batch_updated = true;
                     if let Some(err) = self.session_persist_error.clone() {
                         return self.finish_run(
                             TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
@@ -978,16 +1045,30 @@ impl AgentRunner {
             }
 
             // §3.2 V6-07: Mid-Run Steering — non-blocking check on `steer_rx.try_recv()` after 1:1 tool closure
+            let pre_steer_len = transcript.len();
             self.drain_steering_messages(
                 &mut transcript,
                 current_turn.saturating_add(1),
             );
+            if transcript.len() != pre_steer_len {
+                post_batch_updated = true;
+            }
             if let Some(err) = self.session_persist_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
                     &budget_tracker, &projector, modified_files_set.into_iter().collect(),
                     last_assistant_text, transcript, logger,
                 );
+            }
+            if post_batch_updated {
+                self.persist_session_checkpoint(&projector, &transcript, current_turn);
+                if let Some(err) = self.session_persist_error.clone() {
+                    return self.finish_run(
+                        TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
+                        &budget_tracker, &projector, modified_files_set.into_iter().collect(),
+                        last_assistant_text, transcript, logger,
+                    );
+                }
             }
 
             // Gate 3: `TurnCompleted` observers are fail-open telemetry and never affect control flow.
@@ -1104,8 +1185,10 @@ impl AgentRunner {
         absolute_turn: usize,
         trigger: &str,
         logger: &mut EventLogger,
-    ) {
-        let Some(store) = self.snapshot_store.clone() else { return; };
+    ) -> Vec<String> {
+        let Some(store) = self.snapshot_store.clone() else {
+            return Vec::new();
+        };
         let workspace = self.tool_runtime.env().workspace().clone();
         let wal_entry_id = self.session_journal.as_ref()
             .and_then(|journal| journal.leaf_id())
@@ -1120,8 +1203,9 @@ impl AgentRunner {
                     && self.current_revision_id.as_ref() == Some(&revision.revision_id);
                 if unchanged {
                     self.current_revision_id = Some(revision.revision_id);
-                    return;
+                    return Vec::new();
                 }
+                let changed_paths = revision.changed_paths.clone();
                 if let Some(journal) = self.session_journal.as_mut() {
                     if let Err(err) = journal.record_revision_capture(
                         absolute_turn,
@@ -1145,12 +1229,14 @@ impl AgentRunner {
                     trigger: trigger.to_string(),
                 });
                 self.current_revision_id = Some(revision.revision_id);
+                changed_paths
             }
             Err(err) => {
                 self.revision_error = Some(format!(
                     "workspace revision capture failed ({}); aborting rather than continuing without undo protection: {}",
                     trigger, err
                 ));
+                Vec::new()
             }
         }
     }
@@ -1570,9 +1656,21 @@ impl AgentRunner {
                         ));
                     }
 
-                    // O1: a `bash` call can rewrite the workspace without setting `modified_file`,
-                    // so flag the batch for a post-batch revision capture.
-                    if call.name == "bash" {
+                    // O1: a `bash` call or a mutating/side-effect extension tool can rewrite the
+                    // workspace without setting `modified_file`, so flag the batch for a post-batch
+                    // revision capture.
+                    let is_side_effect_or_mutating = call.name == "bash"
+                        || self
+                            .tool_runtime
+                            .registry()
+                            .lookup_for_dispatch(&call.name, self.tool_runtime.policy_engine().mode())
+                            .is_ok_and(|reg| {
+                                matches!(
+                                    reg.metadata.effect_class,
+                                    EffectClass::Mutating | EffectClass::SideEffect
+                                )
+                            });
+                    if is_side_effect_or_mutating && msg.outcome.is_success() {
                         self.batch_ran_side_effect = true;
                     }
 
@@ -1692,7 +1790,21 @@ impl AgentRunner {
                 }
             }
             None => {
-                if msg.tool_name == "bash" {
+                let is_side_effect_or_mutating = msg.tool_name == "bash"
+                    || self
+                        .tool_runtime
+                        .registry()
+                        .lookup_for_dispatch(
+                            &msg.tool_name,
+                            self.tool_runtime.policy_engine().mode(),
+                        )
+                        .is_ok_and(|reg| {
+                            matches!(
+                                reg.metadata.effect_class,
+                                EffectClass::Mutating | EffectClass::SideEffect
+                            )
+                        });
+                if is_side_effect_or_mutating {
                     self.mutation_ledger.record_mutation(
                         absolute_turn,
                         msg.tool_name.clone(),
