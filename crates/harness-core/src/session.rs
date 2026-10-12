@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,8 +20,9 @@ use uuid::Uuid;
 const WAL_VERSION: u32 = 1;
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 /// Hard cap on a session WAL file. Bounds how much damage a mis-supplied `--resume` path can do
-/// and keeps recovery memory-bounded (F-01).
-const MAX_WAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// and keeps recovery memory-bounded (F-01). Public so the CLI can reject an oversized explicit
+/// `--resume <path>` before it ever opens the file for writing.
+pub const MAX_WAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// Hard cap on a single WAL line so a corrupt/hostile file cannot force a huge allocation.
 const MAX_WAL_LINE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -195,6 +196,15 @@ impl SessionJournal {
         if !opened_meta.file_type().is_file() {
             return Err(SessionError::Invalid(
                 "session WAL is not a regular file".into(),
+            ));
+        }
+        // F-01: the pre-open `symlink_metadata` snapshot and the opened handle must be the very same
+        // inode. If a concurrent rename/symlink swap replaced the path in the window between the
+        // check and the open, `(st_dev, st_ino)` differ and we must refuse rather than operate on
+        // (and possibly truncate) a file we never validated.
+        if (sym_meta.dev(), sym_meta.ino()) != (opened_meta.dev(), opened_meta.ino()) {
+            return Err(SessionError::Invalid(
+                "session WAL changed identity between stat and open".into(),
             ));
         }
         if opened_meta.len() == 0 {
@@ -848,6 +858,52 @@ mod tests {
             fs::read(&real).unwrap(),
             before,
             "symlink target must be untouched"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// F-01: a `--resume` path that resolves through a symlink to a file outside the session store
+    /// must be refused, and the external target must remain byte-for-byte unchanged.
+    #[test]
+    fn symlink_to_external_file_is_rejected_and_target_untouched() {
+        let dir = tempdir();
+        let outside = dir.join("outside_secret.txt");
+        let original = b"external file contents, must never be touched\n".to_vec();
+        fs::write(&outside, &original).unwrap();
+        let before = crate::prompt::sha256_hex64(&original);
+
+        let link = dir.join("link.wal.jsonl");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        assert!(
+            SessionJournal::open(&link).is_err(),
+            "a symlink to an external file must be rejected"
+        );
+        let after = fs::read(&outside).unwrap();
+        assert_eq!(after, original, "external target must be untouched");
+        assert_eq!(crate::prompt::sha256_hex64(&after), before);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// F-01: a file larger than the WAL cap must be rejected up front (before any read/truncate),
+    /// leaving the original bytes and length unchanged. A sparse file keeps the test cheap.
+    #[test]
+    fn oversized_wal_candidate_is_rejected_without_modification() {
+        let dir = tempdir();
+        let target = dir.join("huge.wal.jsonl");
+        let f = File::create(&target).unwrap();
+        f.set_len(MAX_WAL_FILE_BYTES + 1).unwrap();
+        drop(f);
+        let before_len = fs::metadata(&target).unwrap().len();
+
+        assert!(
+            SessionJournal::open(&target).is_err(),
+            "an oversized WAL candidate must be rejected"
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().len(),
+            before_len,
+            "a rejected oversized WAL must not be truncated or resized"
         );
         let _ = fs::remove_dir_all(dir);
     }

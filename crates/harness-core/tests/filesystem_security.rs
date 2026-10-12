@@ -433,3 +433,92 @@ async fn test_inode_lock_keyed_from_open_fd_serializes_same_file() {
 
     let _ = fs::remove_dir_all(&tmp_root);
 }
+
+/// F-02: concurrent attack. A background thread hammers the workspace, repeatedly swapping a
+/// regular file for a symlink that points at an outside secret (and back), while the foreground
+/// thread loops `grep` / `find` / `ls` / symlink-safe reads. The invariant: the outside secret
+/// must NEVER be surfaced, and no tool may crash or block forever.
+#[test]
+fn test_nav_tools_under_concurrent_symlink_swap_never_leak_outside_content() {
+    use harness_core::tools::find::execute_find;
+    use harness_core::tools::grep::execute_grep;
+    use harness_core::tools::ls::execute_ls;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let tmp_root = std::env::temp_dir().join(format!("harness-f02-race-{}", Uuid::new_v4()));
+    let ws_dir = tmp_root.join("ws");
+    let outside_dir = tmp_root.join("outside");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::create_dir_all(&outside_dir).unwrap();
+    const SECRET: &str = "OUTSIDE_SECRET_RACE_TOKEN";
+    fs::write(outside_dir.join("secret.txt"), format!("{}\n", SECRET)).unwrap();
+    fs::write(ws_dir.join("data.txt"), "benign_inside_content\n").unwrap();
+
+    let cap = Arc::new(WorkspaceCap::new(&ws_dir).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let attacker = {
+        let ws_dir = ws_dir.clone();
+        let outside = outside_dir.join("secret.txt");
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let target = ws_dir.join("data.txt");
+            let mut flip = false;
+            while !stop.load(Ordering::Relaxed) {
+                let _ = fs::remove_file(&target);
+                if flip {
+                    let _ = fs::write(&target, "benign_inside_content\n");
+                } else {
+                    let _ = symlink(&outside, &target);
+                }
+                flip = !flip;
+            }
+            // Leave a benign file behind so cleanup is deterministic.
+            let _ = fs::remove_file(&target);
+            let _ = fs::write(&target, "benign_inside_content\n");
+        })
+    };
+
+    let mut iterations = 0usize;
+    for _ in 0..400 {
+        let grep_out = execute_grep(&cap, r#"{"pattern":"OUTSIDE_SECRET_RACE_TOKEN"}"#);
+        assert!(
+            !grep_out.content.contains(SECRET),
+            "grep leaked outside content under a concurrent swap: {}",
+            grep_out.content
+        );
+
+        let find_out = execute_find(&cap, r#"{"pattern":"*.txt"}"#);
+        assert!(
+            !find_out.content.contains(SECRET),
+            "find leaked outside content under a concurrent swap: {}",
+            find_out.content
+        );
+
+        let ls_out = execute_ls(&cap, r#"{"path":"."}"#);
+        assert!(
+            !ls_out.content.contains(SECRET),
+            "ls leaked outside content under a concurrent swap: {}",
+            ls_out.content
+        );
+
+        // A symlink-safe read must either fail (SymlinkBlocked) or return inside content only.
+        if let Ok((_, mut file)) = cap.open_existing_no_symlink("data.txt") {
+            let mut buf = String::new();
+            use std::io::Read as _;
+            if file.read_to_string(&mut buf).is_ok() {
+                assert!(
+                    !buf.contains(SECRET),
+                    "symlink-safe read leaked outside content: {}",
+                    buf
+                );
+            }
+        }
+        iterations += 1;
+    }
+    assert_eq!(iterations, 400);
+
+    stop.store(true, Ordering::Relaxed);
+    attacker.join().unwrap();
+    let _ = fs::remove_dir_all(&tmp_root);
+}

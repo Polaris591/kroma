@@ -161,7 +161,11 @@ impl ApprovalHandler for TtyApprovalUi {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_terminal_text;
+    use super::{sanitize_terminal_text, TtyApprovalUi, APPROVAL_CANCELLED};
+    use harness_core::tool::policy::{ApprovalDecision, ApprovalHandler, ApprovalRequest};
+    use harness_core::types::EffectClass;
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn escapes_ansi_and_carriage_return_but_keeps_newline_and_tab() {
@@ -180,5 +184,39 @@ mod tests {
         let escaped = sanitize_terminal_text("safe\u{202E}gnp.exe");
         assert!(!escaped.contains('\u{202E}'));
         assert!(escaped.contains("\\x202e"));
+    }
+
+    /// F-06: an already-cancelled approval (e.g. Ctrl-C) must deny immediately instead of blocking
+    /// on a synchronous stdin read. `with_tty_override(true)` forces the interactive path so the
+    /// cancellation short-circuit is actually exercised.
+    #[test]
+    fn cancelled_approval_denies_promptly_without_blocking() {
+        let ui = TtyApprovalUi::with_tty_override(true);
+        let req = ApprovalRequest {
+            tool_name: "bash".into(),
+            effect_class: EffectClass::SideEffect,
+            is_sensitive_path: false,
+            target_path: None,
+            diff_preview: None,
+            command_preview: Some("rm -rf /tmp/x".into()),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+        };
+
+        APPROVAL_CANCELLED.store(true, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        let decision = ui.request_approval(&req);
+        let elapsed = started.elapsed();
+        APPROVAL_CANCELLED.store(false, Ordering::SeqCst);
+
+        assert_eq!(
+            decision,
+            ApprovalDecision::Deny,
+            "a cancelled approval must deny"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "a cancelled approval must not block (took {:?})",
+            elapsed
+        );
     }
 }

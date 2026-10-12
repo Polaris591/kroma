@@ -320,6 +320,15 @@ fn validate_resume_path_candidate(path: &std::path::Path) -> Result<(), String> 
             path.display()
         ));
     }
+    // F-01: reject an oversized explicit path before any open-for-write can occur.
+    if meta.len() > harness_core::session::MAX_WAL_FILE_BYTES {
+        return Err(format!(
+            "--resume path {} is {} bytes, exceeding the {} byte WAL cap",
+            path.display(),
+            meta.len(),
+            harness_core::session::MAX_WAL_FILE_BYTES
+        ));
+    }
     Ok(())
 }
 

@@ -485,3 +485,149 @@ async fn test_http_smuggling_dual_te_cl_rejected_and_chunked_error_body_decoded(
         }
     );
 }
+
+/// F-04: a response carrying two *different* `Content-Length` values is an ambiguous framing and
+/// must be rejected, not silently trusted.
+#[tokio::test]
+async fn test_duplicate_conflicting_content_length_is_rejected() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10\r\nContent-Length: 20\r\n\r\n0123456789";
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let client = ChatCompletionsClient::new(ChatCompletionsConfig {
+        base_url: format!("http://127.0.0.1:{}", addr.port()),
+        api_key: "sk-test".into(),
+        model: "gpt-test".into(),
+        max_retries: 0,
+        reasoning_effort: None,
+    })
+    .unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let res = client
+        .complete(
+            ProviderRequest {
+                system_prompt: "sys".into(),
+                tools: Vec::new(),
+                messages: Vec::new(),
+                stream: false,
+            },
+            &BudgetConfig::default(),
+            rx,
+        )
+        .await;
+    match res {
+        Err(ProviderError::Transport(msg)) => {
+            assert!(
+                msg.contains("conflicting Content-Length"),
+                "unexpected transport error: {}",
+                msg
+            );
+        }
+        other => panic!("conflicting Content-Length must be rejected, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// F-04: a declared `Content-Length` that is not fully delivered (peer closes early) is a premature
+/// EOF and must be rejected, never treated as a complete body.
+#[tokio::test]
+async fn test_premature_eof_short_body_is_rejected() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            // Promise 500 bytes, deliver 50, then drop the connection.
+            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n0123456789012345678901234567890123456789012345678901234567";
+            let _ = sock.write_all(resp.as_bytes()).await;
+            // socket dropped here -> peer closes early
+        }
+    });
+
+    let client = ChatCompletionsClient::new(ChatCompletionsConfig {
+        base_url: format!("http://127.0.0.1:{}", addr.port()),
+        api_key: "sk-test".into(),
+        model: "gpt-test".into(),
+        max_retries: 0,
+        reasoning_effort: None,
+    })
+    .unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let res = client
+        .complete(
+            ProviderRequest {
+                system_prompt: "sys".into(),
+                tools: Vec::new(),
+                messages: Vec::new(),
+                stream: false,
+            },
+            &BudgetConfig::default(),
+            rx,
+        )
+        .await;
+    match res {
+        Err(ProviderError::IncompleteStream(msg)) => {
+            assert!(
+                msg.contains("prematurely"),
+                "unexpected incomplete-stream error: {}",
+                msg
+            );
+        }
+        other => panic!("premature EOF must be rejected, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// F-04: an unknown or multi-valued `Transfer-Encoding` (e.g. `gzip, bogus`) must be rejected
+/// rather than mis-parsed as chunked.
+#[tokio::test]
+async fn test_bogus_transfer_encoding_is_rejected() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: gzip, bogus\r\n\r\n";
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let client = ChatCompletionsClient::new(ChatCompletionsConfig {
+        base_url: format!("http://127.0.0.1:{}", addr.port()),
+        api_key: "sk-test".into(),
+        model: "gpt-test".into(),
+        max_retries: 0,
+        reasoning_effort: None,
+    })
+    .unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let res = client
+        .complete(
+            ProviderRequest {
+                system_prompt: "sys".into(),
+                tools: Vec::new(),
+                messages: Vec::new(),
+                stream: false,
+            },
+            &BudgetConfig::default(),
+            rx,
+        )
+        .await;
+    match res {
+        Err(ProviderError::Transport(msg)) => {
+            assert!(
+                msg.contains("Transfer-Encoding"),
+                "unexpected transport error: {}",
+                msg
+            );
+        }
+        other => panic!("bogus Transfer-Encoding must be rejected, got {:?}", other.map(|_| ())),
+    }
+}
