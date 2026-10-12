@@ -1,6 +1,6 @@
 === Harness v0.10.0 — Gate 2 CI Evidence (post-Gemini-audit final) ===
 
-2026-10-12T20:54:42.959551+08:00
+2026-10-12T20:57:30.556879+08:00
 rustc 1.85.1 (4eb161250 2025-03-15) (built from a source tarball)
 cargo 1.85.1 (d73d2caf9 2024-12-31)
 Linux 6.12.95+deb13-amd64 x86_64
@@ -16,10 +16,10 @@ test approval_ui::tests::escapes_ansi_and_carriage_return_but_keeps_newline_and_
 test approval_ui::tests::escapes_bidi_override ... ok
 test tests::test_cli_flags_and_policy_modes ... ok
 test tests::test_completion_gate_selection_honors_shell_authorization ... ok
-test tests::test_reconcile_orphan_snapshot_and_emit_revision_restored_event ... ok
 test tests::test_verify_cmd_and_no_verify_flags_parse ... ok
 test tests::test_workspace_revision_management_flags_parse ... ok
 test tests::test_restore_rev_records_revision_so_a_following_undo_stays_in_sync ... ok
+test tests::test_reconcile_orphan_snapshot_and_emit_revision_restored_event ... ok
 test tests::test_undo_rebinds_the_wal_when_the_undone_revision_shares_the_rewind_leaf ... ok
 
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
@@ -27,12 +27,12 @@ test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
 running 28 tests
 test completion_gate::tests::auto_detects_cargo_workspace_verification ... ok
+test completion_gate::tests::auto_detected_verification_without_shell_authorization_returns_skipped ... ok
 test completion_gate::tests::dirty_file_short_circuit_does_not_spawn_an_invalid_command ... ok
 test completion_gate::tests::failure_fingerprint_ignores_whitespace_only_differences ... ok
-test completion_gate::tests::auto_detected_verification_without_shell_authorization_returns_skipped ... ok
 test completion_gate::tests::failure_fingerprint_ignores_progress_noise_but_keeps_diagnostic_changes ... ok
-test completion_gate::tests::parse_command_argv_preserves_quoted_segments_and_escapes ... ok
 test completion_gate::tests::failing_verification_returns_the_structured_failure_evidence ... ok
+test completion_gate::tests::parse_command_argv_preserves_quoted_segments_and_escapes ... ok
 test context_projector::tests::refresh_last_touched_never_regresses_a_larger_checkpoint_turn ... ok
 test completion_gate::tests::localizer_keeps_head_tail_and_finds_failure_lines ... ok
 test context_projector::tests::working_set_pins_release_files_older_than_the_window_under_a_resume_offset ... ok
@@ -41,18 +41,18 @@ test prompt::tests::workspace_context_skips_sensitive_files ... ok
 test revision::tests::diff_paths_reports_added_removed_and_modified_paths_only ... ok
 test revision::tests::revision_id_is_content_addressed_and_mode_sensitive ... ok
 test revision::tests::revision_id_parse_rejects_traversal_and_accepts_content_addresses ... ok
+test context_projector::tests::resumed_compaction_releases_stale_hot_file_and_keeps_recent_file_pinned ... ok
 test session::tests::approved_completion_clears_dirty_files_until_a_new_mutation ... ok
 test session::tests::gate_rejections_survive_resume_and_clear_after_resolution ... ok
-test session::tests::non_wal_text_file_is_rejected_without_modification ... ok
 test session::tests::oversized_wal_candidate_is_rejected_without_modification ... ok
-test session::tests::projection_updates_are_append_only_and_replayed ... ok
+test session::tests::non_wal_text_file_is_rejected_without_modification ... ok
 test session::tests::single_line_file_without_newline_is_rejected_without_modification ... ok
 test session::tests::symlink_to_external_file_is_rejected_and_target_untouched ... ok
+test session::tests::projection_updates_are_append_only_and_replayed ... ok
 test session::tests::symlink_wal_is_rejected_and_target_untouched ... ok
-test context_projector::tests::resumed_compaction_releases_stale_hot_file_and_keeps_recent_file_pinned ... ok
 test session::tests::wal_repairs_only_incomplete_trailing_line ... ok
-test session::tests::wal_round_trips_signed_reasoning_and_branching ... ok
 test completion_gate::tests::streaming_capture_keeps_a_bounded_head_and_rolling_tail ... ok
+test session::tests::wal_round_trips_signed_reasoning_and_branching ... ok
 test completion_gate::tests::gate_200ms_pipe_drain_prevents_grandchild_hang_and_sweeps_pgid ... ok
 
 test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
@@ -79,8 +79,8 @@ test test_nav_tools_never_follow_swapped_symlinks_or_escape_the_workspace ... ok
 test test_open_existing_no_symlink_and_atomic_write_at_parent_fd ... ok
 test test_sensitive_path_guard_rules_and_exemptions ... ok
 test test_workspace_boundary_blocks_parent_traversal_absolute_and_external_symlinks ... ok
-test test_inode_mutation_lock_stability_across_create_rename_and_idle_cleanup ... ok
 test test_inode_lock_keyed_from_open_fd_serializes_same_file ... ok
+test test_inode_mutation_lock_stability_across_create_rename_and_idle_cleanup ... ok
 test test_nav_tools_under_concurrent_symlink_swap_never_leak_outside_content ... ok
 
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
@@ -101,9 +101,9 @@ test test_external_modifications_conflict_and_force_restore_overwrites ... ok
 test test_file_and_directory_kind_swap_restores_in_both_directions ... ok
 test test_force_restore_clears_obstructing_symlink_and_directory ... ok
 test test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_state ... ok
+test test_fork_then_new_mutation_and_cross_branch_restore ... ok
 test test_nested_new_directory_tree_is_pruned_on_undo ... ok
 test test_agent_loop_persists_revision_ids_and_undo_rewinds_wal_and_workspace ... ok
-test test_fork_then_new_mutation_and_cross_branch_restore ... ok
 test test_symlinks_and_sensitive_files_are_never_captured_or_overwritten ... ok
 test test_sequential_undo_across_three_mutating_turns_rewinds_to_the_baseline ... ok
 test test_resumed_run_baseline_survives_undo_rewind ... ok
@@ -117,16 +117,16 @@ test test_crash_before_wal_append_is_reconciled ... ok
 test test_evidence_links_select_the_deepest_overlay_like_active_entries ... ok
 test test_fork_rewind_prunes_evidence_and_allows_recompaction_at_the_same_index ... ok
 test test_agent_loop_recalls_evidence_from_an_outline_stub ... ok
-test test_compaction_records_evidence_links_and_budget_breakdown ... ok
 test test_gate1_o1_o6_polish_items_are_verified ... ok
 test test_fork_isolates_evidence_links_across_branches ... ok
+test test_compaction_records_evidence_links_and_budget_breakdown ... ok
 test test_recall_evidence_returns_line_ranges_and_pattern_matches ... ok
-test test_recall_evidence_utf8_patterns_and_byte_cap_line_clipping ... ok
 test test_projection_replay_is_deterministic_across_resume_and_fork ... ok
-test test_recall_evidence_survives_resume ... ok
+test test_recall_evidence_utf8_patterns_and_byte_cap_line_clipping ... ok
 test test_superseded_read_recall_returns_the_earlier_read_bytes ... ok
 test test_resume_restores_compacted_indices_and_budget_breakdown ... ok
 test test_projection_profiles_ab_metrics_and_tool_pairing_invariant ... ok
+test test_recall_evidence_survives_resume ... ok
 
 test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
 
@@ -134,7 +134,7 @@ test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 running 1 test
 test test_golden_smoke_16_end_to_end_scenarios ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
 
 
 running 9 tests
@@ -161,8 +161,8 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 
 running 4 tests
-test test_pre_dispatch_batch_rejects_empty_or_duplicate_call_id ... ok
 test test_sse_missing_done_or_truncated_length_rejects_all_tools ... ok
+test test_pre_dispatch_batch_rejects_empty_or_duplicate_call_id ... ok
 test test_sse_multi_block_reasoning_and_indexless_tool_calls_and_unterminated_done ... ok
 test test_sse_arbitrary_chunking_100_iterations_and_1_byte_splits ... ok
 

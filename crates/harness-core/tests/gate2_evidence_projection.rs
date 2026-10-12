@@ -740,6 +740,27 @@ async fn test_gate1_o1_o6_polish_items_are_verified() {
         "a symlinked snapshot store must be refused, not chmod-ed through"
     );
 
+    // A path containing `..` is lexically normalized, and only the final component is chmod-ed, so
+    // pre-existing ancestors keep their own permissions.
+    let dotted_root = root.join("dotted");
+    fs::create_dir_all(&dotted_root).unwrap();
+    let dotted_store =
+        SnapshotStore::new(dotted_root.join("..").join("dotted").join("snapshots"));
+    dotted_store.ensure_layout().unwrap();
+    let blobs = dotted_root.join("snapshots").join("blobs");
+    assert!(blobs.is_dir(), "`..` must be resolved lexically");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&blobs).unwrap().permissions().mode() & 0o777,
+        0o700,
+        "the store directory must be user-private"
+    );
+    assert_ne!(
+        fs::metadata(&dotted_root).unwrap().permissions().mode() & 0o777,
+        0o700,
+        "pre-existing ancestors must keep their own permissions"
+    );
+
     // ---- O4: revision records are ordered by branch depth, not append order ----
     let o4_root = temp_root("o4");
     let o4_ws = o4_root.join("ws");

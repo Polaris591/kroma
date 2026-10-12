@@ -837,27 +837,31 @@ impl SnapshotStore {
 /// traversed. Only the final component is chmod-ed: pre-existing ancestors (e.g. `/tmp`) keep their
 /// own permissions and are never touched.
 fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
+    // Lexically normalize (resolving `.` / `..`) and split into (anchor, components). Every
+    // intermediate component is re-opened with `O_NOFOLLOW`, so it is always a real directory and
+    // lexical `..` resolution matches what the filesystem would do.
+    let mut absolute = false;
     let mut components: Vec<std::ffi::OsString> = Vec::new();
-    let mut cursor = dir;
-    loop {
-        match cursor.file_name() {
-            Some(name) => {
-                components.push(name.to_os_string());
-                match cursor.parent() {
-                    Some(parent) if !parent.as_os_str().is_empty() => cursor = parent,
-                    _ => break,
-                }
+    for component in dir.components() {
+        match component {
+            Component::RootDir => {
+                absolute = true;
+                components.clear();
             }
-            None => break,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                components.pop();
+            }
+            other => components.push(other.as_os_str().to_os_string()),
         }
     }
-    components.reverse();
     if components.is_empty() {
-        return Err(RevisionError::InvalidStore(
-            "snapshot store path has no directory component".to_string(),
-        ));
+        return Err(RevisionError::InvalidStore(format!(
+            "snapshot store path '{}' has no directory component",
+            dir.display()
+        )));
     }
-    let anchor = if dir.is_absolute() { Path::new("/") } else { Path::new(".") };
+    let anchor = if absolute { Path::new("/") } else { Path::new(".") };
     let mut handle = open_real_dir(anchor)?;
     for (index, name) in components.iter().enumerate() {
         let name_c = CString::new(name.as_bytes()).map_err(|_| {
