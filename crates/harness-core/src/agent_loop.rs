@@ -1,8 +1,5 @@
 use crate::budget::{BudgetConfig, BudgetTracker};
-use crate::context_projector::{
-    extract_source_entry_id, verify_tool_call_pairing, CompactionReason, ContextProjector,
-    EvidenceLink,
-};
+use crate::context_projector::{verify_tool_call_pairing, ContextProjector};
 use crate::completion_gate::failure_fingerprint;
 use crate::session::{FileTouch, SessionJournal};
 use crate::env::{
@@ -13,7 +10,7 @@ use crate::loop_guard::{LoopGuard, LoopGuardVerdict};
 use crate::messages::{
     ToolCall, ToolOutcome, ToolResultMessage, ToolResultMeta, TranscriptItem, UserMessage,
 };
-use crate::prompt::{sha256_hex64, PromptBuilder};
+use crate::prompt::PromptBuilder;
 use crate::provider::{
     validate_assistant_turn_batch, ModelProvider, ProviderRequest,
 };
@@ -234,6 +231,12 @@ impl AgentRunner {
             );
         }
         let mut projector = ContextProjector::new();
+        // Freeze the system-prefix / tool-schema byte split so the Gate 2 budget breakdown can
+        // report them separately instead of one opaque `static_prefix_bytes`.
+        projector.set_prefix_breakdown(
+            static_prefix.system_prompt.len(),
+            static_prefix.tools_json.len(),
+        );
         if let Some(checkpoint) = self.session_journal.as_ref()
             .and_then(SessionJournal::latest_active_checkpoint).cloned()
         {
@@ -636,7 +639,9 @@ impl AgentRunner {
 
                 // O1: a verification command can rewrite the workspace (formatters, codegen).
                 // Capture the resulting state so `latest_revision_id()` never drifts from disk.
-                self.capture_workspace_revision(current_turn, "verification", &mut logger);
+                // The capture must carry the *absolute* session turn: `current_turn` restarts at 1
+                // on `--resume`, which would misorder revision records against the restored turns.
+                self.capture_workspace_revision(absolute_turn, "verification", &mut logger);
                 if let Some(err) = self.revision_error.clone() {
                     return self.finish_run(
                         TerminalReason::StrictLogFailure(err),
@@ -830,35 +835,7 @@ impl AgentRunner {
     /// Rebuild the `recall_evidence` store from a resumed session WAL (Gate 2).
     fn seed_evidence_from_journal(&self, projector: &mut ContextProjector) {
         let Some(journal) = self.session_journal.as_ref() else { return; };
-        let recorded = journal.evidence_links();
-        for (index, entry) in journal.active_entries().iter().enumerate() {
-            let TranscriptItem::ToolResult(active_tr) = &entry.item else { continue; };
-            let Some(sid) = extract_source_entry_id(&active_tr.content) else { continue; };
-            let Some(TranscriptItem::ToolResult(raw_tr)) = journal.raw_entry_item(&entry.id) else {
-                continue;
-            };
-            // Only a genuinely compacted entry (stub shorter than the raw output) has hidden evidence.
-            if raw_tr.content.len() <= active_tr.content.len() {
-                continue;
-            }
-            let link = recorded
-                .iter()
-                .find(|l| l.source_entry_id == sid)
-                .cloned()
-                .unwrap_or_else(|| EvidenceLink {
-                    source_entry_id: sid.clone(),
-                    canonical_index: index,
-                    call_id: raw_tr.call_id.0.clone(),
-                    tool_name: raw_tr.tool_name.clone(),
-                    relative_path: raw_tr.meta.relative_path.clone(),
-                    original_sha256: sha256_hex64(raw_tr.content.as_bytes()),
-                    original_bytes: raw_tr.content.len(),
-                    original_lines: raw_tr.content.lines().count(),
-                    stub_bytes: active_tr.content.len(),
-                    reason: CompactionReason::StepDownArchive,
-                });
-            projector.register_evidence(link, Arc::clone(&raw_tr.content));
-        }
+        journal.seed_projector_evidence(projector);
     }
 
     /// Capture a `WorkspaceRevision`, bind it to the current WAL leaf, and emit telemetry.
@@ -1210,10 +1187,29 @@ impl AgentRunner {
                         return Some(TerminalReason::StrictLogFailure(e.to_string()));
                     }
 
-                    let (mut msg, decision) = if call.name == "recall_evidence" {
+                    // `recall_evidence` resolves against the live session transcript, which the
+                    // agent loop owns. It is still resolved through the registry so `--policy` and
+                    // `--tool-filter` hide/deny it exactly like every other tool (a filtered-out
+                    // call falls through to the runtime, which returns `deny_tool_filter`).
+                    let recall_available = call.name == "recall_evidence"
+                        && self
+                            .tool_runtime
+                            .registry()
+                            .lookup_for_dispatch(
+                                "recall_evidence",
+                                self.tool_runtime.policy_engine().mode(),
+                            )
+                            .is_ok();
+                    let (mut msg, decision) = if recall_available {
                         // Gate 2: resolve the stub's raw evidence against the live projector store
                         // (seeded from the WAL on `--resume`). Read-only, so no approval is needed.
                         let out = execute_recall_evidence(projector, &call.raw_arguments);
+                        // Evidence-recovery success-rate telemetry for the Gate 2 evaluation.
+                        if out.outcome.is_success() {
+                            projector.record_recall_hit();
+                        } else {
+                            projector.record_recall_miss();
+                        }
                         (
                             ToolResultMessage {
                                 call_id: call.call_id.clone(),

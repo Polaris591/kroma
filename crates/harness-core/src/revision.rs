@@ -10,14 +10,15 @@
 
 use crate::prompt::sha256_hex64;
 use crate::sensitive_paths::SensitivePathGuard;
+use crate::session::SessionJournal;
 use crate::workspace::{WorkspaceCap, WorkspaceError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CString, OsStr};
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -661,6 +662,60 @@ impl SnapshotStore {
         Ok(self.list_revisions()?.pop())
     }
 
+    /// Adopt a snapshot manifest that was durably written immediately before a crash that stopped
+    /// the WAL `RevisionCaptured` append (O6).
+    ///
+    /// Only a manifest bound to the *current* WAL leaf is eligible. Picking the global max
+    /// `turn_index` instead would let another session — or an abandoned branch sharing the same
+    /// state directory — that ever reached a higher turn shadow this branch's unrecorded capture.
+    /// Manifests that are already recorded are ignored, and an undone/abandoned revision is still
+    /// recorded while its manifest is bound to a leaf that is no longer current, so this can never
+    /// resurrect a revision that `--undo` / `--fork` moved away from.
+    ///
+    /// Returns the adopted revision id when a manifest was reconciled.
+    pub fn reconcile_with_wal(
+        &self,
+        journal: &mut SessionJournal,
+    ) -> Result<Option<String>, RevisionError> {
+        let Some(leaf) = journal.leaf_id().map(|id| id.to_string()) else {
+            return Ok(None);
+        };
+        let recorded = journal.revision_records();
+        let candidate = self
+            .list_revisions()?
+            .into_iter()
+            .filter(|revision| revision.wal_entry_id.as_deref() == Some(leaf.as_str()))
+            .filter(|revision| {
+                !recorded
+                    .iter()
+                    .any(|r| r.revision_id == revision.revision_id.as_str())
+            })
+            .filter(|revision| {
+                recorded
+                    .last()
+                    .is_none_or(|last| revision.turn_index >= last.turn)
+            })
+            .max_by_key(|revision| (revision.turn_index, revision.timestamp_ms));
+        let Some(newest) = candidate else { return Ok(None); };
+        let turn = journal.max_active_turn();
+        let parent = recorded.last().map(|r| r.revision_id.clone());
+        journal
+            .record_revision_capture(
+                turn,
+                newest.revision_id.as_str(),
+                parent.as_deref(),
+                newest.changed_paths.clone(),
+                newest.tracked_files.len(),
+            )
+            .map_err(|e| {
+                RevisionError::InvalidStore(format!(
+                    "failed to record the reconciled revision in the session WAL: {}",
+                    e
+                ))
+            })?;
+        Ok(Some(newest.revision_id.as_str().to_string()))
+    }
+
     fn read_blob(&self, sha256: &str) -> Result<Vec<u8>, RevisionError> {
         let path = self.blob_path(sha256);
         let mut file = OpenOptions::new()
@@ -772,23 +827,93 @@ impl SnapshotStore {
 
 /// Create (if needed) and lock down a private store directory (O3).
 ///
-/// `DirBuilder::recursive(true)` returns `Ok` when the path already exists — including when it is
-/// a symlink — so the symlink check must run unconditionally *before* any `chmod`, otherwise
-/// `fs::set_permissions` would follow the link and chmod an attacker-chosen target.
+/// Create `dir` as a real, symlink-free directory at mode 0700.
+///
+/// `DirBuilder::recursive(true)` follows symlinked ancestors, and path-based `fs::set_permissions`
+/// is a `chmod` that follows them too — so a symlinked store path (or a symlinked ancestor swapped
+/// in between the check and the chmod) could redirect the chmod to an attacker-chosen target.
+/// Instead every component is created with `mkdirat` on the *verified* parent descriptor and then
+/// re-opened with `O_NOFOLLOW | O_DIRECTORY`, so a symlinked component is refused rather than
+/// traversed. Only the final component is chmod-ed: pre-existing ancestors (e.g. `/tmp`) keep their
+/// own permissions and are never touched.
 fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
-    if let Err(e) = DirBuilder::new().recursive(true).mode(0o700).create(dir) {
-        if e.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(e.into());
+    let mut components: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = dir;
+    loop {
+        match cursor.file_name() {
+            Some(name) => {
+                components.push(name.to_os_string());
+                match cursor.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => cursor = parent,
+                    _ => break,
+                }
+            }
+            None => break,
         }
     }
-    let meta = fs::symlink_metadata(dir)?;
-    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+    components.reverse();
+    if components.is_empty() {
+        return Err(RevisionError::InvalidStore(
+            "snapshot store path has no directory component".to_string(),
+        ));
+    }
+    let anchor = if dir.is_absolute() { Path::new("/") } else { Path::new(".") };
+    let mut handle = open_real_dir(anchor)?;
+    for (index, name) in components.iter().enumerate() {
+        let name_c = CString::new(name.as_bytes()).map_err(|_| {
+            RevisionError::InvalidStore("snapshot store path contains a NUL byte".to_string())
+        })?;
+        let rc = unsafe { libc::mkdirat(handle.as_raw_fd(), name_c.as_ptr(), 0o700) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(err.into());
+            }
+        }
+        handle = open_dir_at(handle.as_raw_fd(), &name_c)?;
+        if index + 1 == components.len() {
+            handle.set_permissions(fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
+/// Open `path` as a directory without ever following a final symlink.
+fn open_real_dir(path: &Path) -> Result<File, RevisionError> {
+    let handle = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    verify_is_real_dir(&handle, &path.display().to_string())?;
+    Ok(handle)
+}
+
+/// `openat` a child directory of an already-verified directory descriptor, refusing symlinks.
+fn open_dir_at(parent_fd: RawFd, name: &CString) -> Result<File, RevisionError> {
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let handle = unsafe { File::from_raw_fd(fd) };
+    verify_is_real_dir(&handle, &name.to_string_lossy())?;
+    Ok(handle)
+}
+
+/// `fstat` the open descriptor and reject anything that is not a directory.
+fn verify_is_real_dir(handle: &File, display: &str) -> Result<(), RevisionError> {
+    let meta = handle.metadata()?;
+    if !meta.is_dir() {
         return Err(RevisionError::InvalidStore(format!(
             "snapshot store path '{}' is not a real directory",
-            dir.display()
+            display
         )));
     }
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
@@ -802,7 +927,7 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Revisi
     let mut tmp_name = name.to_os_string();
     tmp_name.push(format!(".tmp-{}", Uuid::new_v4()));
     let tmp_path = dir.join(&tmp_name);
-    {
+    let write_result = (|| -> Result<(), RevisionError> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -812,8 +937,17 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Revisi
         file.write_all(bytes)?;
         file.set_permissions(fs::Permissions::from_mode(mode))?;
         file.sync_all()?;
+        Ok(())
+    })();
+    // A failed write/chmod/fsync must not leave a stray `.tmp-<uuid>` behind (matching `store_blob`).
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
     }
-    fs::rename(&tmp_path, path)?;
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
     sync_dir(dir)
 }
 

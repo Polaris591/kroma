@@ -228,7 +228,7 @@ pub fn builtin_tool_registrations() -> Vec<RegisteredTool> {
                         },
                         "pattern": {
                             "type": "string",
-                            "description": "Optional case-insensitive substring filter; matching lines are returned with 2 lines of context."
+                            "description": "Optional case-insensitive substring filter; matching lines are returned with 2 lines of context, clamped to start_line..=end_line when given."
                         }
                     },
                     "required": ["source_entry_id"],

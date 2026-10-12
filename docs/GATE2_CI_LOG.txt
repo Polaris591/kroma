@@ -1,36 +1,35 @@
-=== Harness v0.10.0 — Gate 2 CI Evidence (2026-10-12T20:19:50+08:00) ===
+=== Harness v0.10.0 — Gate 2 CI Evidence (post-Gemini-audit final) ===
 
+2026-10-12T20:54:42.959551+08:00
 rustc 1.85.1 (4eb161250 2025-03-15) (built from a source tarball)
 cargo 1.85.1 (d73d2caf9 2024-12-31)
 Linux 6.12.95+deb13-amd64 x86_64
 
 --- cargo build --workspace --all-targets (must be 0 warnings) ---
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+warning lines: 0
 
 --- cargo test --workspace ---
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
-     Running unittests src/main.rs (target/debug/deps/harness-ac263022518676e7)
-
-running 9 tests
+running 10 tests
 test approval_ui::tests::cancelled_approval_denies_promptly_without_blocking ... ok
-test approval_ui::tests::escapes_bidi_override ... ok
 test approval_ui::tests::escapes_ansi_and_carriage_return_but_keeps_newline_and_tab ... ok
-test tests::test_completion_gate_selection_honors_shell_authorization ... ok
+test approval_ui::tests::escapes_bidi_override ... ok
 test tests::test_cli_flags_and_policy_modes ... ok
+test tests::test_completion_gate_selection_honors_shell_authorization ... ok
+test tests::test_reconcile_orphan_snapshot_and_emit_revision_restored_event ... ok
 test tests::test_verify_cmd_and_no_verify_flags_parse ... ok
 test tests::test_workspace_revision_management_flags_parse ... ok
-test tests::test_reconcile_orphan_snapshot_and_emit_revision_restored_event ... ok
 test tests::test_restore_rev_records_revision_so_a_following_undo_stays_in_sync ... ok
+test tests::test_undo_rebinds_the_wal_when_the_undone_revision_shares_the_rewind_leaf ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-     Running unittests src/lib.rs (target/debug/deps/harness_core-5e74347460b7a291)
 
 running 28 tests
 test completion_gate::tests::auto_detects_cargo_workspace_verification ... ok
 test completion_gate::tests::dirty_file_short_circuit_does_not_spawn_an_invalid_command ... ok
-test completion_gate::tests::auto_detected_verification_without_shell_authorization_returns_skipped ... ok
 test completion_gate::tests::failure_fingerprint_ignores_whitespace_only_differences ... ok
+test completion_gate::tests::auto_detected_verification_without_shell_authorization_returns_skipped ... ok
 test completion_gate::tests::failure_fingerprint_ignores_progress_noise_but_keeps_diagnostic_changes ... ok
 test completion_gate::tests::parse_command_argv_preserves_quoted_segments_and_escapes ... ok
 test completion_gate::tests::failing_verification_returns_the_structured_failure_evidence ... ok
@@ -42,23 +41,22 @@ test prompt::tests::workspace_context_skips_sensitive_files ... ok
 test revision::tests::diff_paths_reports_added_removed_and_modified_paths_only ... ok
 test revision::tests::revision_id_is_content_addressed_and_mode_sensitive ... ok
 test revision::tests::revision_id_parse_rejects_traversal_and_accepts_content_addresses ... ok
-test context_projector::tests::resumed_compaction_releases_stale_hot_file_and_keeps_recent_file_pinned ... ok
+test session::tests::approved_completion_clears_dirty_files_until_a_new_mutation ... ok
 test session::tests::gate_rejections_survive_resume_and_clear_after_resolution ... ok
 test session::tests::non_wal_text_file_is_rejected_without_modification ... ok
 test session::tests::oversized_wal_candidate_is_rejected_without_modification ... ok
-test session::tests::approved_completion_clears_dirty_files_until_a_new_mutation ... ok
+test session::tests::projection_updates_are_append_only_and_replayed ... ok
 test session::tests::single_line_file_without_newline_is_rejected_without_modification ... ok
 test session::tests::symlink_to_external_file_is_rejected_and_target_untouched ... ok
 test session::tests::symlink_wal_is_rejected_and_target_untouched ... ok
+test context_projector::tests::resumed_compaction_releases_stale_hot_file_and_keeps_recent_file_pinned ... ok
 test session::tests::wal_repairs_only_incomplete_trailing_line ... ok
-test session::tests::projection_updates_are_append_only_and_replayed ... ok
 test session::tests::wal_round_trips_signed_reasoning_and_branching ... ok
 test completion_gate::tests::streaming_capture_keeps_a_bounded_head_and_rolling_tail ... ok
 test completion_gate::tests::gate_200ms_pipe_drain_prevents_grandchild_hang_and_sweeps_pgid ... ok
 
 test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
 
-     Running tests/context_cache_stability.rs (target/debug/deps/context_cache_stability-e50da2b4bf36d430)
 
 running 4 tests
 test test_loop_guard_repeated_ping_pong_and_edit_streak ... ok
@@ -68,7 +66,6 @@ test test_15_turns_append_only_prefix_byte_stability ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
-     Running tests/edit_diagnostics.rs (target/debug/deps/edit_diagnostics-583bbac375a37576)
 
 running 2 tests
 test test_edit_tier1_tier2_bom_crlf_and_unchanged_lines_preservation ... ok
@@ -76,7 +73,6 @@ test test_edit_three_mismatch_diagnostics_and_all_or_none_rollback ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/filesystem_security.rs (target/debug/deps/filesystem_security-947b53ff2598b89e)
 
 running 7 tests
 test test_nav_tools_never_follow_swapped_symlinks_or_escape_the_workspace ... ok
@@ -87,9 +83,8 @@ test test_inode_mutation_lock_stability_across_create_rename_and_idle_cleanup ..
 test test_inode_lock_keyed_from_open_fd_serializes_same_file ... ok
 test test_nav_tools_under_concurrent_symlink_swap_never_leak_outside_content ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
 
-     Running tests/gate0_config_and_events.rs (target/debug/deps/gate0_config_and_events-aa47240c81dc72a5)
 
 running 3 tests
 test test_budget_config_defaults_and_validation ... ok
@@ -98,61 +93,63 @@ test test_tool_registry_ascii_order_and_policy_visibility ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/gate1_workspace_revision.rs (target/debug/deps/gate1_workspace_revision-d0bd866cac958b86)
 
 running 13 tests
 test test_external_symlink_and_mode_change_are_conflicts ... ok
-test test_external_modifications_conflict_and_force_restore_overwrites ... ok
 test test_capture_then_restore_applies_modified_deleted_and_created_files ... ok
+test test_external_modifications_conflict_and_force_restore_overwrites ... ok
 test test_file_and_directory_kind_swap_restores_in_both_directions ... ok
 test test_force_restore_clears_obstructing_symlink_and_directory ... ok
-test test_nested_new_directory_tree_is_pruned_on_undo ... ok
 test test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_state ... ok
-test test_fork_then_new_mutation_and_cross_branch_restore ... ok
-test test_sequential_undo_across_three_mutating_turns_rewinds_to_the_baseline ... ok
-test test_symlinks_and_sensitive_files_are_never_captured_or_overwritten ... ok
+test test_nested_new_directory_tree_is_pruned_on_undo ... ok
 test test_agent_loop_persists_revision_ids_and_undo_rewinds_wal_and_workspace ... ok
-test test_skipped_large_file_is_preserved_on_restore ... ok
+test test_fork_then_new_mutation_and_cross_branch_restore ... ok
+test test_symlinks_and_sensitive_files_are_never_captured_or_overwritten ... ok
+test test_sequential_undo_across_three_mutating_turns_rewinds_to_the_baseline ... ok
 test test_resumed_run_baseline_survives_undo_rewind ... ok
+test test_skipped_large_file_is_preserved_on_restore ... ok
 
 test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
-     Running tests/gate2_evidence_projection.rs (target/debug/deps/gate2_evidence_projection-fed774af93c71685)
 
-running 7 tests
+running 14 tests
 test test_crash_before_wal_append_is_reconciled ... ok
-test test_gate1_o1_o6_polish_items_are_verified ... ok
-test test_recall_evidence_returns_line_ranges_and_pattern_matches ... ok
+test test_evidence_links_select_the_deepest_overlay_like_active_entries ... ok
+test test_fork_rewind_prunes_evidence_and_allows_recompaction_at_the_same_index ... ok
 test test_agent_loop_recalls_evidence_from_an_outline_stub ... ok
 test test_compaction_records_evidence_links_and_budget_breakdown ... ok
+test test_gate1_o1_o6_polish_items_are_verified ... ok
+test test_fork_isolates_evidence_links_across_branches ... ok
+test test_recall_evidence_returns_line_ranges_and_pattern_matches ... ok
+test test_recall_evidence_utf8_patterns_and_byte_cap_line_clipping ... ok
 test test_projection_replay_is_deterministic_across_resume_and_fork ... ok
 test test_recall_evidence_survives_resume ... ok
+test test_superseded_read_recall_returns_the_earlier_read_bytes ... ok
+test test_resume_restores_compacted_indices_and_budget_breakdown ... ok
+test test_projection_profiles_ab_metrics_and_tool_pairing_invariant ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
 
-     Running tests/golden_smoke.rs (target/debug/deps/golden_smoke-2ae0a11a5982dea7)
 
 running 1 test
 test test_golden_smoke_16_end_to_end_scenarios ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
 
-     Running tests/provider_contract.rs (target/debug/deps/provider_contract-1253a927c8f286bc)
 
 running 9 tests
 test test_base_url_rejects_control_characters_and_whitespace ... ok
 test test_base_url_security_rules ... ok
-test test_duplicate_conflicting_content_length_is_rejected ... ok
 test test_bogus_transfer_encoding_is_rejected ... ok
+test test_duplicate_conflicting_content_length_is_rejected ... ok
+test test_agent_loop_zero_side_effects_on_length_truncation_over_sse ... ok
 test test_http_smuggling_dual_te_cl_rejected_and_chunked_error_body_decoded ... ok
 test test_premature_eof_short_body_is_rejected ... ok
-test test_agent_loop_zero_side_effects_on_length_truncation_over_sse ... ok
 test test_mock_http_server_429_retry_after_and_redirect_block ... ok
 test test_chunked_sse_streaming_and_pre_chunk_disconnect_retry_and_oom_guard ... ok
 
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
 
-     Running tests/shell_supervisor.rs (target/debug/deps/shell_supervisor-97a2b23fbd8e59e6)
 
 running 4 tests
 test test_stream_line_collector_3_byte_incomplete_utf8_across_chunks ... ok
@@ -160,72 +157,395 @@ test test_bash_16kib_head_48kib_rolling_tail_and_4mib_spill_file ... ok
 test test_bash_200ms_pipe_drain_timeout_prevents_grandchild_deadlock ... ok
 test test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zero_spawn_on_deny ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
 
-     Running tests/sse_contract.rs (target/debug/deps/sse_contract-133ca4988d49b360)
 
 running 4 tests
-test test_sse_missing_done_or_truncated_length_rejects_all_tools ... ok
 test test_pre_dispatch_batch_rejects_empty_or_duplicate_call_id ... ok
+test test_sse_missing_done_or_truncated_length_rejects_all_tools ... ok
 test test_sse_multi_block_reasoning_and_indexless_tool_calls_and_unterminated_done ... ok
 test test_sse_arbitrary_chunking_100_iterations_and_1_byte_splits ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-     Running tests/tool_contracts.rs (target/debug/deps/tool_contracts-dfb73afb15e81ffe)
 
 running 1 test
 test test_read_write_ls_find_grep_contracts ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
-   Doc-tests harness_core
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/main.rs (target/debug/deps/harness-ac263022518676e7)
+     Running unittests src/lib.rs (target/debug/deps/harness_core-5e74347460b7a291)
+     Running tests/context_cache_stability.rs (target/debug/deps/context_cache_stability-e50da2b4bf36d430)
+     Running tests/edit_diagnostics.rs (target/debug/deps/edit_diagnostics-583bbac375a37576)
+     Running tests/filesystem_security.rs (target/debug/deps/filesystem_security-947b53ff2598b89e)
+     Running tests/gate0_config_and_events.rs (target/debug/deps/gate0_config_and_events-aa47240c81dc72a5)
+     Running tests/gate1_workspace_revision.rs (target/debug/deps/gate1_workspace_revision-d0bd866cac958b86)
+     Running tests/gate2_evidence_projection.rs (target/debug/deps/gate2_evidence_projection-fed774af93c71685)
+     Running tests/golden_smoke.rs (target/debug/deps/golden_smoke-2ae0a11a5982dea7)
+     Running tests/provider_contract.rs (target/debug/deps/provider_contract-1253a927c8f286bc)
+     Running tests/shell_supervisor.rs (target/debug/deps/shell_supervisor-97a2b23fbd8e59e6)
+     Running tests/sse_contract.rs (target/debug/deps/sse_contract-133ca4988d49b360)
+     Running tests/tool_contracts.rs (target/debug/deps/tool_contracts-dfb73afb15e81ffe)
+   Doc-tests harness_core
 
-=== End-to-end CLI validation (real provider: workbuddy/deepseek via cobblemon.asia/wb/v1) ===
+--- harness --version ---
+harness 0.10.0
 
-$ harness run --workspace /tmp/e2e/ws --task "Write hello.txt ... then read it back" --allow-write --no-stream
-[harness] session WAL: .../sessions/b416d827-7d97-4c42-ae4f-3ea2f24f1bda.wal.jsonl
-[harness] workspace revisions: /tmp/harness-state/runs/snapshots
-[harness] Run 066f0bd1-... started | policy=allow-write | static_prefix=4863B
-[revision] turn=0 rev=r-c47d72a522e63c7c05233b795d9eb82d trigger=baseline files=1 changed=1
-[turn 1] in=1514 (cached=0, hit=0.0%) out=169 think=94
-[tool:ls] path="." -> success
-[tool:find] path="." -> success
-[turn 2] in=1705 (cached=1536, hit=90.1%) out=113 think=24
-[tool:write] path="hello.txt" -> success
-[revision] turn=2 rev=r-52366b7f77aaa4c2d7a9c9be21f4bff5 trigger=mutation files=2 changed=1
-[turn 3] in=1862 (cached=1664, hit=89.4%) out=46
-[tool:read] path="hello.txt" -> success
-[turn 4] in=1957 (cached=1792, hit=91.6%) out=83
-[CompletionGate] verification skipped: auto-detected verification requires --allow-shell or explicit --verify-cmd
-[harness] Completed (ModelStop) in 13263ms | turns=4 tools=4 | in=7038 (cached=4992, hit=70.9%) out=411
-   -> baseline + mutation revisions captured; the 8-tool schema (now including recall_evidence,
-      static_prefix=4863B) was accepted by a real OpenAI-compatible provider.
-
-$ harness run --workspace /tmp/e2e/ws --resume latest --list-revisions
-workspace revisions for session b416d827-... (2 captured):
-  turn    0  r-c47d72a522e63c7c05233b795d9eb82d  files=1 changed=1
-        main.rs
-  turn    2  r-52366b7f77aaa4c2d7a9c9be21f4bff5  files=2 changed=1  <- current
-        hello.txt
-
-$ harness run --workspace /tmp/e2e/ws --resume latest --undo
-restored workspace to r-c47d72a522e63c7c05233b795d9eb82d (1 file(s) written, 1 removed)
-  restored main.rs
-  removed  hello.txt
-rewound session transcript to turn 0 (leaf ff78ac15-...)
-   -> hello.txt is gone from disk; main.rs byte-identical to the baseline.
-   -> Gate 1 audit event emitted:
-      {"event_type":"RevisionRestored","payload":{"revision_id":"r-c47d72a522e63c7c05233b795d9eb82d","restored_files":1,"removed_files":1}}
-
-$ harness run --workspace /tmp/e2e/ws --task "Call recall_evidence with source_entry_id ev-0001-nonexistent ..." --no-stream
-[tool:recall_evidence] path="-" -> error (0ms)
-[harness] Completed (ModelStop) in 5153ms | turns=2 tools=1
-   -> recall_evidence is dispatchable under --policy ask (read-only, no approval) and returns:
-      INVALID_ARGUMENTS: unknown source_entry_id 'ev-0001-nonexistent'.
-      Available compacted evidence ids: none (no tool output has been compacted yet)
+--- Gate 2 A/B evaluation record (docs/GATE2_EVAL_METRICS.json) ---
+{
+  "artifact": "gate2-context-projection-eval",
+  "blueprint": "docs/v1_blueprint/IMPLEMENTATION_GATES_AND_EVAL.md#gate-2--context-projection-ab",
+  "generated_by": "crates/harness-core/tests/gate2_evidence_projection.rs::test_projection_profiles_ab_metrics_and_tool_pairing_invariant",
+  "hard_constraints": {
+    "pairing_checks": 20,
+    "tool_call_pairing_validator": "harness_core::context_projector::validate_tool_call_pairing",
+    "tool_call_result_pairing": "100% pass"
+  },
+  "harness_version": "0.10.0",
+  "notes": [
+    "estimated_tokens = bytes / 4 (byte-based estimate; provider-reported usage remains the cost authority)",
+    "baseline = no compaction (A/B reference); p1 = watermarks + working-set pinning; p2 = p1 + source_entry_id evidence graph (default); p3 = p2 + 25% stricter low-watermark target (experimental, default off)"
+  ],
+  "profiles": [
+    "baseline",
+    "p1",
+    "p2",
+    "p3"
+  ],
+  "results": [
+    {
+      "archetype": "long_file_nav",
+      "compacted_stub_bytes": 0,
+      "estimated_history_tokens": 7966,
+      "estimated_tokens": 8478,
+      "evidence_link_count": 0,
+      "history_bytes": 31864,
+      "pinned_working_set_bytes": 0,
+      "profile": "baseline",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 30490,
+      "total_projected_bytes": 31864
+    },
+    {
+      "archetype": "long_file_nav",
+      "compacted_stub_bytes": 344,
+      "estimated_history_tokens": 2133,
+      "estimated_tokens": 2645,
+      "evidence_link_count": 0,
+      "history_bytes": 8534,
+      "pinned_working_set_bytes": 0,
+      "profile": "p1",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 7160,
+      "total_projected_bytes": 8534
+    },
+    {
+      "archetype": "long_file_nav",
+      "compacted_stub_bytes": 536,
+      "estimated_history_tokens": 2181,
+      "estimated_tokens": 2693,
+      "evidence_link_count": 2,
+      "history_bytes": 8726,
+      "pinned_working_set_bytes": 0,
+      "profile": "p2",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 7352,
+      "total_projected_bytes": 8726
+    },
+    {
+      "archetype": "long_file_nav",
+      "compacted_stub_bytes": 766,
+      "estimated_history_tokens": 555,
+      "estimated_tokens": 1067,
+      "evidence_link_count": 3,
+      "history_bytes": 2220,
+      "pinned_working_set_bytes": 0,
+      "profile": "p3",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 846,
+      "total_projected_bytes": 2220
+    },
+    {
+      "archetype": "cross_file_bug_fix",
+      "compacted_stub_bytes": 0,
+      "estimated_history_tokens": 6355,
+      "estimated_tokens": 6867,
+      "evidence_link_count": 0,
+      "history_bytes": 25421,
+      "pinned_working_set_bytes": 195,
+      "profile": "baseline",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 588,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 23877,
+      "total_projected_bytes": 25421
+    },
+    {
+      "archetype": "cross_file_bug_fix",
+      "compacted_stub_bytes": 340,
+      "estimated_history_tokens": 522,
+      "estimated_tokens": 1034,
+      "evidence_link_count": 0,
+      "history_bytes": 2091,
+      "pinned_working_set_bytes": 195,
+      "profile": "p1",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 588,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 547,
+      "total_projected_bytes": 2091
+    },
+    {
+      "archetype": "cross_file_bug_fix",
+      "compacted_stub_bytes": 524,
+      "estimated_history_tokens": 568,
+      "estimated_tokens": 1080,
+      "evidence_link_count": 2,
+      "history_bytes": 2275,
+      "pinned_working_set_bytes": 195,
+      "profile": "p2",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 588,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 731,
+      "total_projected_bytes": 2275
+    },
+    {
+      "archetype": "cross_file_bug_fix",
+      "compacted_stub_bytes": 524,
+      "estimated_history_tokens": 568,
+      "estimated_tokens": 1080,
+      "evidence_link_count": 2,
+      "history_bytes": 2275,
+      "pinned_working_set_bytes": 195,
+      "profile": "p3",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 588,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 731,
+      "total_projected_bytes": 2275
+    },
+    {
+      "archetype": "repeated_error_recovery",
+      "compacted_stub_bytes": 0,
+      "estimated_history_tokens": 6831,
+      "estimated_tokens": 7343,
+      "evidence_link_count": 0,
+      "history_bytes": 27324,
+      "pinned_working_set_bytes": 98,
+      "profile": "baseline",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 588,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 25733,
+      "total_projected_bytes": 27324
+    },
+    {
+      "archetype": "repeated_error_recovery",
+      "compacted_stub_bytes": 632,
+      "estimated_history_tokens": 2331,
+      "estimated_tokens": 2843,
+      "evidence_link_count": 0,
+      "history_bytes": 9327,
+      "pinned_working_set_bytes": 98,
+      "profile": "p1",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 588,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 7736,
+      "total_projected_bytes": 9327
+    },
+    {
+      "archetype": "repeated_error_recovery",
+      "compacted_stub_bytes": 724,
+      "estimated_history_tokens": 2354,
+      "estimated_tokens": 2866,
+      "evidence_link_count": 2,
+      "history_bytes": 9419,
+      "pinned_working_set_bytes": 98,
+      "profile": "p2",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 588,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 7828,
+      "total_projected_bytes": 9419
+    },
+    {
+      "archetype": "repeated_error_recovery",
+      "compacted_stub_bytes": 1184,
+      "estimated_history_tokens": 721,
+      "estimated_tokens": 1233,
+      "evidence_link_count": 3,
+      "history_bytes": 2885,
+      "pinned_working_set_bytes": 98,
+      "profile": "p3",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 588,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 1294,
+      "total_projected_bytes": 2885
+    },
+    {
+      "archetype": "over_budget",
+      "compacted_stub_bytes": 0,
+      "estimated_history_tokens": 7338,
+      "estimated_tokens": 7850,
+      "evidence_link_count": 0,
+      "history_bytes": 29352,
+      "pinned_working_set_bytes": 0,
+      "profile": "baseline",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 26334,
+      "total_projected_bytes": 29352
+    },
+    {
+      "archetype": "over_budget",
+      "compacted_stub_bytes": 2165,
+      "estimated_history_tokens": 2395,
+      "estimated_tokens": 2907,
+      "evidence_link_count": 0,
+      "history_bytes": 9583,
+      "pinned_working_set_bytes": 0,
+      "profile": "p1",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 6565,
+      "total_projected_bytes": 9583
+    },
+    {
+      "archetype": "over_budget",
+      "compacted_stub_bytes": 3564,
+      "estimated_history_tokens": 2323,
+      "estimated_tokens": 2835,
+      "evidence_link_count": 14,
+      "history_bytes": 9294,
+      "pinned_working_set_bytes": 0,
+      "profile": "p2",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 6276,
+      "total_projected_bytes": 9294
+    },
+    {
+      "archetype": "over_budget",
+      "compacted_stub_bytes": 4074,
+      "estimated_history_tokens": 1607,
+      "estimated_tokens": 2119,
+      "evidence_link_count": 16,
+      "history_bytes": 6428,
+      "pinned_working_set_bytes": 0,
+      "profile": "p3",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 3410,
+      "total_projected_bytes": 6428
+    },
+    {
+      "archetype": "multi_turn",
+      "compacted_stub_bytes": 0,
+      "estimated_history_tokens": 12509,
+      "estimated_tokens": 13021,
+      "evidence_link_count": 0,
+      "history_bytes": 50037,
+      "pinned_working_set_bytes": 0,
+      "profile": "baseline",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 47580,
+      "total_projected_bytes": 50037
+    },
+    {
+      "archetype": "multi_turn",
+      "compacted_stub_bytes": 678,
+      "estimated_history_tokens": 847,
+      "estimated_tokens": 1359,
+      "evidence_link_count": 0,
+      "history_bytes": 3391,
+      "pinned_working_set_bytes": 0,
+      "profile": "p1",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 934,
+      "total_projected_bytes": 3391
+    },
+    {
+      "archetype": "multi_turn",
+      "compacted_stub_bytes": 1014,
+      "estimated_history_tokens": 931,
+      "estimated_tokens": 1443,
+      "evidence_link_count": 4,
+      "history_bytes": 3727,
+      "pinned_working_set_bytes": 0,
+      "profile": "p2",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 1270,
+      "total_projected_bytes": 3727
+    },
+    {
+      "archetype": "multi_turn",
+      "compacted_stub_bytes": 1014,
+      "estimated_history_tokens": 931,
+      "estimated_tokens": 1443,
+      "evidence_link_count": 4,
+      "history_bytes": 3727,
+      "pinned_working_set_bytes": 0,
+      "profile": "p3",
+      "recall_hit_count": 0,
+      "recall_miss_count": 0,
+      "recent_tail_bytes": 606,
+      "tool_call_pairing": "ok",
+      "tool_output_bytes": 1270,
+      "total_projected_bytes": 3727
+    }
+  ],
+  "task_archetypes": [
+    "long_file_nav",
+    "cross_file_bug_fix",
+    "repeated_error_recovery",
+    "over_budget",
+    "multi_turn"
+  ]
+}

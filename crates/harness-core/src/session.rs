@@ -4,8 +4,11 @@
 //! provider reasoning signatures/opaque payloads). It does not promise provider-side KV-cache
 //! hits: those additionally depend on stable wire serialization and provider cache policy.
 
-use crate::context_projector::EvidenceLink;
+use crate::context_projector::{
+    extract_source_entry_id, CompactionReason, ContextProjector, EvidenceLink,
+};
 use crate::messages::TranscriptItem;
+use crate::prompt::sha256_hex64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -14,6 +17,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
@@ -404,20 +408,78 @@ impl SessionJournal {
         })
     }
 
+    /// Re-seed a projector's raw-evidence store from this WAL (Gate 2).
+    ///
+    /// The WAL keeps the pre-overlay `Append` item for every entry while `active_entries()` yields
+    /// the compacted stub, so the raw bytes a stub replaced survive a process restart. Only entries
+    /// on the active branch are considered and the links come from the branch-filtered
+    /// [`SessionJournal::evidence_links`], so a stub recorded on an abandoned branch can never be
+    /// re-seeded onto the live one.
+    pub fn seed_projector_evidence(&self, projector: &mut ContextProjector) {
+        let recorded = self.evidence_links();
+        for (index, entry) in self.active_entries().iter().enumerate() {
+            let TranscriptItem::ToolResult(active_tr) = &entry.item else { continue; };
+            let Some(sid) = extract_source_entry_id(&active_tr.content) else { continue; };
+            let Some(TranscriptItem::ToolResult(raw_tr)) = self.raw_entry_item(&entry.id) else {
+                continue;
+            };
+            // Only a genuinely compacted entry (stub shorter than the raw output) has hidden evidence.
+            if raw_tr.content.len() <= active_tr.content.len() {
+                continue;
+            }
+            let link = recorded
+                .iter()
+                .find(|l| l.source_entry_id == sid)
+                .cloned()
+                .unwrap_or_else(|| EvidenceLink {
+                    source_entry_id: sid.clone(),
+                    canonical_index: index,
+                    call_id: raw_tr.call_id.0.clone(),
+                    tool_name: raw_tr.tool_name.clone(),
+                    relative_path: raw_tr.meta.relative_path.clone(),
+                    original_sha256: sha256_hex64(raw_tr.content.as_bytes()),
+                    original_bytes: raw_tr.content.len(),
+                    original_lines: raw_tr.content.lines().count(),
+                    stub_bytes: active_tr.content.len(),
+                    reason: CompactionReason::StepDownArchive,
+                });
+            projector.register_evidence(link, Arc::clone(&raw_tr.content));
+        }
+    }
+
     pub fn path(&self) -> &Path { &self.path }
     pub fn session_id(&self) -> &str { &self.session_id }
     pub fn workspace_root(&self) -> &Path { &self.workspace_root }
     pub fn leaf_id(&self) -> Option<&str> { self.leaf_id.as_deref() }
 
     /// Evidence links recorded for the active branch, ordered by canonical index (Gate 2).
+    ///
+    /// One projection overlay per `entry_id` wins, selected by the topological depth of the leaf it
+    /// was recorded at (deepest descendant wins, WAL order breaks ties) — the same rule
+    /// [`SessionJournal::active_entries`] uses — so an ancestor overlay recorded after a `--fork`
+    /// cannot shadow a descendant's, and a rewound entry's links are never returned.
     pub fn evidence_links(&self) -> Vec<EvidenceLink> {
         let depth_map = self.active_depth_map();
+        let active_len = self.active_entries().len();
+        let mut winner: HashMap<&str, (usize, usize)> = HashMap::new();
+        for (wal_index, update) in self.projection_updates.iter().enumerate() {
+            let Some(&depth) = depth_map.get(&update.projected_at_leaf_id) else { continue; };
+            let slot = winner.entry(update.entry_id.as_str()).or_insert((0, 0));
+            if (depth, wal_index) >= *slot {
+                *slot = (depth, wal_index);
+            }
+        }
         let mut links: Vec<EvidenceLink> = Vec::new();
-        for update in &self.projection_updates {
-            if !depth_map.contains_key(&update.projected_at_leaf_id) {
+        for (wal_index, update) in self.projection_updates.iter().enumerate() {
+            let Some(&depth) = depth_map.get(&update.projected_at_leaf_id) else { continue; };
+            if winner.get(update.entry_id.as_str()) != Some(&(depth, wal_index)) {
                 continue;
             }
             for link in &update.evidence_links {
+                // A link pointing past the active transcript belongs to a rewound branch.
+                if link.canonical_index >= active_len {
+                    continue;
+                }
                 if !links.iter().any(|existing| existing.source_entry_id == link.source_entry_id) {
                     links.push(link.clone());
                 }

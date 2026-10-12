@@ -474,34 +474,11 @@ fn emit_revision_restored(
 /// Reconcile a snapshot manifest that was durably written immediately before a crash that stopped
 /// the WAL `RevisionCaptured` append (O6). Without this the WAL would describe an older workspace
 /// state and a following `--undo` would misreport the live files as external modifications.
+///
+/// Delegates to [`SnapshotStore::reconcile_with_wal`] so the CLI and the harness-core acceptance
+/// tests exercise exactly the same production reconciliation path.
 fn reconcile_store_with_wal(journal: &mut SessionJournal, store: &SnapshotStore) {
-    let Ok(Some(newest)) = store.newest_revision() else { return; };
-    let recorded = journal.revision_records();
-    if recorded.iter().any(|r| r.revision_id == newest.revision_id.as_str()) {
-        return;
-    }
-    // Only adopt a manifest that was bound to an entry on the active branch and is at least as new
-    // as the newest recorded revision, so a manifest from an abandoned branch or another session of
-    // the same state directory is never resurrected.
-    let bound_leaf = newest.wal_entry_id.as_deref();
-    let Some(leaf) = bound_leaf else { return; };
-    if !journal.is_entry_on_active_branch(leaf) {
-        return;
-    }
-    if let Some(last) = recorded.last() {
-        if newest.turn_index < last.turn {
-            return;
-        }
-    }
-    let turn = journal.max_active_turn();
-    let parent = recorded.last().map(|r| r.revision_id.clone());
-    let _ = journal.record_revision_capture(
-        turn,
-        newest.revision_id.as_str(),
-        parent.as_deref(),
-        newest.changed_paths.clone(),
-        newest.tracked_files.len(),
-    );
+    let _ = store.reconcile_with_wal(journal);
 }
 
 fn snapshot_store_for(state_dir: &Path) -> SnapshotStore {
@@ -723,6 +700,31 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
                         return ExitCode::from(1);
                     }
                 }
+                // The rewound leaf can be the very leaf the *undone* revision was bound to (that
+                // happens whenever `current` was recorded at a turn <= `previous.turn`, e.g. after
+                // a `--restore-rev` or a `--resume` baseline capture). Then `revision_records()`
+                // still ends with `current` and `latest_revision_id()` would keep naming the undone
+                // revision, making the next `--undo` / `--restore-rev` fail with a false
+                // `ModifiedExternally` conflict. Re-bind the restored revision so the WAL always
+                // describes the workspace that is actually on disk.
+                if journal.latest_revision_id().as_deref()
+                    != Some(restored_revision.as_str())
+                {
+                    if let Err(e) = record_restored_revision(
+                        &mut journal,
+                        &store,
+                        &restored_revision,
+                        &restored_files,
+                        &removed_files,
+                        expected.as_ref(),
+                    ) {
+                        eprintln!(
+                            "error: workspace restored to {} but the session WAL could not record it: {}",
+                            restored_revision, e
+                        );
+                        return ExitCode::from(1);
+                    }
+                }
             } else if let Err(e) = record_restored_revision(
                 &mut journal,
                 &store,
@@ -894,6 +896,10 @@ async fn main() -> ExitCode {
             eprintln!("error: session WAL belongs to workspace {}, not {}", journal.workspace_root().display(), env.workspace().root().display());
             return ExitCode::from(2);
         }
+        // O6: a crash between the snapshot write and the WAL append leaves the store one revision
+        // ahead of the WAL. Reconcile before `--fork` so a resumed run never starts from a stale
+        // `latest_revision_id()`.
+        reconcile_store_with_wal(&mut journal, &snapshot_store_for(&state_dir));
         if let Some(turn) = cli.fork_turn {
             if let Err(e) = journal.fork_at_turn(turn) {
                 eprintln!("error: failed to fork session at turn {}: {}", turn, e);
@@ -1377,6 +1383,106 @@ mod tests {
             undo
         );
         assert_eq!(fs::read_to_string(ws_dir.join("f.txt")).unwrap(), "v1\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Gate 2 audit (Finding 1): when the *undone* revision is bound to the same leaf the rewind
+    /// selects — which happens after a `--restore-rev` re-records it at the current leaf — `--undo`
+    /// must re-bind the restored revision into the WAL. Otherwise `latest_revision_id()` keeps
+    /// naming the undone revision and the next `--restore-rev` fails with a false
+    /// `ModifiedExternally` conflict.
+    #[test]
+    fn test_undo_rebinds_the_wal_when_the_undone_revision_shares_the_rewind_leaf() {
+        use harness_core::messages::{TranscriptItem, UserMessage};
+        use std::fs;
+
+        let root = std::env::temp_dir().join(format!(
+            "harness-cli-undo-leaf-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ws_dir = root.join("ws");
+        let state_dir = root.join("state");
+        fs::create_dir_all(&ws_dir).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(ws_dir.join("f.txt"), "v0\n").unwrap();
+
+        let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+        let store = SnapshotStore::new(state_dir.join("snapshots"));
+        let mut journal = SessionJournal::create(state_dir.join("sessions"), &ws_dir).unwrap();
+        journal
+            .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+            .unwrap();
+        let r0 = store.capture_revision(&workspace, None, None, 0).unwrap();
+        journal
+            .record_revision_capture(0, r0.revision_id.as_str(), None, r0.changed_paths.clone(), r0.tracked_files.len())
+            .unwrap();
+
+        fs::write(ws_dir.join("f.txt"), "v1\n").unwrap();
+        journal
+            .append_item(1, TranscriptItem::User(UserMessage { content: "turn 1".into() }))
+            .unwrap();
+        let r1 = store
+            .capture_revision(&workspace, Some(&r0.revision_id), None, 1)
+            .unwrap();
+        journal
+            .record_revision_capture(1, r1.revision_id.as_str(), Some(r0.revision_id.as_str()), r1.changed_paths.clone(), r1.tracked_files.len())
+            .unwrap();
+
+        // `--restore-rev r0` re-records r0 at the *current* leaf, i.e. the same turn-1 entry that
+        // `--undo` will rewind to.
+        let restored = store
+            .restore_revision(&workspace, &r0.revision_id, Some(&r1.revision_id), false)
+            .unwrap();
+        let (restored_files, removed_files) = match &restored {
+            RestoreResult::Applied { restored_files, removed_files, .. } => {
+                (restored_files.clone(), removed_files.clone())
+            }
+            other => panic!("expected Applied, got {:?}", other),
+        };
+        record_restored_revision(
+            &mut journal,
+            &store,
+            &r0.revision_id,
+            &restored_files,
+            &removed_files,
+            Some(&r1.revision_id),
+        )
+        .unwrap();
+        let wal_path = journal.path().to_path_buf();
+        drop(journal);
+
+        // `--undo` from here: `current` (r0) and `previous` (r1) share turn 1 and the same leaf.
+        let undo_cli = parse_cli_args(vec![
+            "harness".into(), "run".into(),
+            "--workspace".into(), ws_dir.display().to_string(),
+            "--resume".into(), wal_path.display().to_string(),
+            "--undo".into(),
+        ])
+        .unwrap();
+        let _ = run_revision_management(&undo_cli, &state_dir);
+        assert_eq!(
+            fs::read_to_string(ws_dir.join("f.txt")).unwrap(),
+            "v1\n",
+            "--undo must restore the previous revision's content"
+        );
+        let journal = SessionJournal::open(&wal_path).unwrap();
+        assert_eq!(
+            journal.latest_revision_id().as_deref(),
+            Some(r1.revision_id.as_str()),
+            "--undo must leave the WAL describing the restored workspace"
+        );
+        drop(journal);
+
+        // With the WAL in sync, a following `--restore-rev r0` must apply without a false conflict.
+        let restore_cli = parse_cli_args(vec![
+            "harness".into(), "run".into(),
+            "--workspace".into(), ws_dir.display().to_string(),
+            "--resume".into(), wal_path.display().to_string(),
+            "--restore-rev".into(), r0.revision_id.as_str().to_string(),
+        ])
+        .unwrap();
+        let _ = run_revision_management(&restore_cli, &state_dir);
+        assert_eq!(fs::read_to_string(ws_dir.join("f.txt")).unwrap(), "v0\n");
         let _ = fs::remove_dir_all(root);
     }
 

@@ -63,9 +63,29 @@ pub struct EvidenceLink {
     pub reason: CompactionReason,
 }
 
+/// Estimated-token mirror of [`ContextBudgetBreakdown`] (`bytes / 4`), reported alongside the byte
+/// counts so the Gate 2 A/B harness can compare profiles on a provider-shaped metric.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBudgetTokens {
+    pub system_prefix_tokens: usize,
+    pub tool_schema_tokens: usize,
+    pub history_tokens: usize,
+    pub tool_output_tokens: usize,
+    /// Total estimated request tokens (`system prefix + tool schema + history`).
+    pub total_tokens: usize,
+}
+
 /// Deterministic per-category byte accounting for the projected request (Gate 2).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextBudgetBreakdown {
+    /// Bytes of the frozen system prefix (system prompt incl. workspace orientation).
+    pub system_prefix_bytes: usize,
+    /// Bytes of the model-visible tool schemas.
+    pub tool_schema_bytes: usize,
+    /// Bytes of every projected history item (= `total_projected_bytes`).
+    pub history_bytes: usize,
+    /// Bytes of the tool results inside the projected history.
+    pub tool_output_bytes: usize,
     /// Bytes of Working-Set-pinned (recently modified file) tool output kept verbatim.
     pub pinned_working_set_bytes: usize,
     /// Bytes occupied by the Outline Stubs that replaced archived output.
@@ -76,14 +96,81 @@ pub struct ContextBudgetBreakdown {
     pub total_projected_bytes: usize,
     /// Number of raw-evidence pointers available for `recall_evidence`.
     pub evidence_link_count: usize,
+    /// Successful `recall_evidence` calls in this projection's lifetime.
+    pub recall_hit_count: u64,
+    /// Failed `recall_evidence` calls in this projection's lifetime.
+    pub recall_miss_count: u64,
+    /// `bytes / 4` estimate of every component above.
+    pub tokens: ContextBudgetTokens,
+}
+
+impl ContextBudgetBreakdown {
+    /// Estimated tokens for each component (`bytes / 4`).
+    pub fn estimated_tokens(&self) -> ContextBudgetTokens {
+        ContextBudgetTokens {
+            system_prefix_tokens: self.system_prefix_bytes / 4,
+            tool_schema_tokens: self.tool_schema_bytes / 4,
+            history_tokens: self.history_bytes / 4,
+            tool_output_tokens: self.tool_output_bytes / 4,
+            total_tokens: (self.system_prefix_bytes + self.tool_schema_bytes + self.history_bytes) / 4,
+        }
+    }
+}
+
+/// Which Gate 2 context-projection profile a run uses.
+///
+/// * `Baseline` — no compaction at all (the pre-Gate-2 algorithm, kept for A/B comparison).
+/// * `P1` — deterministic watermarks, Step-Down Compaction and Working-Set Pinning, but no
+///   evidence graph: stubs carry no `source_entry_id` and raw output is not retained.
+/// * `P2` — `P1` plus the `source_entry_id` evidence graph and the `recall_evidence` pointers.
+///   This is the default.
+/// * `P3` — `P2` plus a stricter budget target (compact an extra 25% below the low watermark).
+///   Experimental and off by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionProfile {
+    Baseline,
+    P1,
+    #[default]
+    P2,
+    P3,
+}
+
+impl ProjectionProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProjectionProfile::Baseline => "baseline",
+            ProjectionProfile::P1 => "p1",
+            ProjectionProfile::P2 => "p2",
+            ProjectionProfile::P3 => "p3",
+        }
+    }
+
+    /// `Baseline` never compacts; every other profile runs Step-Down Compaction.
+    pub fn compacts(&self) -> bool {
+        !matches!(self, ProjectionProfile::Baseline)
+    }
+
+    /// Only `P2`/`P3` mint `source_entry_id`s and retain raw evidence for `recall_evidence`.
+    pub fn records_evidence(&self) -> bool {
+        matches!(self, ProjectionProfile::P2 | ProjectionProfile::P3)
+    }
+
+    /// `P3` compacts an extra 25% below the profile's low-watermark target.
+    pub fn is_aggressive(&self) -> bool {
+        matches!(self, ProjectionProfile::P3)
+    }
 }
 
 /// Aggregated projection statistics exposed to the runtime and the acceptance tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionStats {
     pub budget: ContextBudgetBreakdown,
+    pub tokens: ContextBudgetTokens,
     pub compaction_reread_count: u64,
     pub evidence_link_count: usize,
+    pub recall_hit_count: u64,
+    pub recall_miss_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +210,15 @@ pub struct ContextProjector {
     /// Deterministic, ordered evidence graph for the current projection.
     evidence_links: Vec<EvidenceLink>,
     last_budget: ContextBudgetBreakdown,
+    /// Frozen system-prefix byte count, reported in the budget breakdown.
+    prefix_system_bytes: usize,
+    /// Frozen tool-schema byte count, reported in the budget breakdown.
+    prefix_tool_schema_bytes: usize,
+    /// Successful `recall_evidence` calls (evidence-recovery success rate).
+    recall_hit_count: u64,
+    /// Failed `recall_evidence` calls.
+    recall_miss_count: u64,
+    profile: ProjectionProfile,
 }
 
 impl Default for ContextProjector {
@@ -144,7 +240,43 @@ impl ContextProjector {
             evidence_call_index: HashMap::new(),
             evidence_links: Vec::new(),
             last_budget: ContextBudgetBreakdown::default(),
+            prefix_system_bytes: 0,
+            prefix_tool_schema_bytes: 0,
+            recall_hit_count: 0,
+            recall_miss_count: 0,
+            profile: ProjectionProfile::default(),
         }
+    }
+
+    /// Select the Gate 2 projection profile (default `P2`).
+    pub fn with_profile(mut self, profile: ProjectionProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    pub fn profile(&self) -> ProjectionProfile {
+        self.profile
+    }
+
+    /// Freeze the system-prefix / tool-schema byte split for the budget breakdown. The single
+    /// `static_prefix_bytes` argument of [`ContextProjector::project`] cannot distinguish them.
+    pub fn set_prefix_breakdown(&mut self, system_prefix_bytes: usize, tool_schema_bytes: usize) {
+        self.prefix_system_bytes = system_prefix_bytes;
+        self.prefix_tool_schema_bytes = tool_schema_bytes;
+    }
+
+    /// Record a successful `recall_evidence` call (evidence-recovery success telemetry).
+    pub fn record_recall_hit(&mut self) {
+        self.recall_hit_count = self.recall_hit_count.saturating_add(1);
+    }
+
+    /// Record a failed `recall_evidence` call.
+    pub fn record_recall_miss(&mut self) {
+        self.recall_miss_count = self.recall_miss_count.saturating_add(1);
+    }
+
+    pub fn recall_counts(&self) -> (u64, u64) {
+        (self.recall_hit_count, self.recall_miss_count)
     }
 
     pub fn compaction_reread_count(&self) -> u64 {
@@ -160,19 +292,35 @@ impl ContextProjector {
     pub fn stats(&self) -> ProjectionStats {
         ProjectionStats {
             budget: self.last_budget.clone(),
+            tokens: self.last_budget.tokens.clone(),
             compaction_reread_count: self.compaction_reread_count,
             evidence_link_count: self.evidence_links.len(),
+            recall_hit_count: self.recall_hit_count,
+            recall_miss_count: self.recall_miss_count,
         }
     }
 
-    /// Register raw evidence for an Outline Stub (used when seeding from a resumed WAL).
+    /// Register raw evidence for an Outline Stub (used by compaction and when seeding from a
+    /// resumed WAL).
+    ///
+    /// Registration is also what marks an item as compacted, so a `--resume` that re-seeds stubs
+    /// from the WAL restores the same `compacted_indices` / `compacted_file_paths` bookkeeping the
+    /// original compaction had — otherwise `ContextBudgetBreakdown.compacted_stub_bytes` would be
+    /// under-reported and reread-regret accounting would be blind. Re-registering an existing
+    /// `source_entry_id` overwrites the stored link/bytes instead of being dropped, so a rewound
+    /// branch's stale state can never block a fresh compaction at the same index.
     pub fn register_evidence(&mut self, link: EvidenceLink, raw: Arc<str>) {
-        if self.evidence.contains_key(&link.source_entry_id) {
-            return;
-        }
         self.evidence_call_index
             .insert(link.call_id.clone(), link.source_entry_id.clone());
         self.evidence.insert(link.source_entry_id.clone(), raw);
+        self.compacted_indices.insert(link.canonical_index);
+        if link.tool_name == "read" {
+            if let Some(path) = link.relative_path.clone() {
+                self.compacted_file_paths.insert(path);
+            }
+        }
+        self.evidence_links
+            .retain(|existing| existing.source_entry_id != link.source_entry_id);
         self.evidence_links.push(link);
         self.evidence_links.sort_by(|a, b| {
             a.canonical_index
@@ -263,7 +411,16 @@ impl ContextProjector {
     ) -> Result<ProjectedContext, TerminalReason> {
         // Append any newly added canonical items without touching already-projected items!
         if canonical.len() > self.projected_items.len() {
-            for item in &canonical[self.projected_items.len()..] {
+            let already_projected = self.projected_items.len();
+            for (idx, item) in canonical.iter().enumerate().skip(already_projected) {
+                // A resumed transcript already carries Outline Stubs whose raw output lives in the
+                // WAL. Mark them compacted so the byte breakdown and reread-regret accounting match
+                // a run that compacted them in-process.
+                if let TranscriptItem::ToolResult(tr) = item {
+                    if extract_source_entry_id(&tr.content).is_some() {
+                        self.compacted_indices.insert(idx);
+                    }
+                }
                 self.projected_items.push(item.clone());
             }
         } else if canonical.len() < self.projected_items.len() {
@@ -273,8 +430,32 @@ impl ContextProjector {
             self.compacted_indices.retain(|&idx| idx < canonical.len());
             self.last_pinned_baseline_end = self.last_pinned_baseline_end.min(canonical.len());
             // Evidence links for rewound items must go too, so a later append at the same index
-            // cannot inherit a stale pointer.
-            self.evidence_links.retain(|link| link.canonical_index < canonical.len());
+            // cannot inherit a stale pointer. The raw bytes and the `call_id` index are pruned with
+            // them: otherwise a reused `(canonical_index, call_id)` pair would mint an identical
+            // `source_entry_id` and be silently dropped by `register_evidence`.
+            let mut stale: Vec<EvidenceLink> = Vec::new();
+            self.evidence_links.retain(|link| {
+                if link.canonical_index < canonical.len() {
+                    true
+                } else {
+                    stale.push(link.clone());
+                    false
+                }
+            });
+            for link in stale {
+                self.evidence.remove(&link.source_entry_id);
+                if self.evidence_call_index.get(&link.call_id).map(String::as_str)
+                    == Some(link.source_entry_id.as_str())
+                {
+                    self.evidence_call_index.remove(&link.call_id);
+                }
+            }
+            self.compacted_file_paths = self
+                .evidence_links
+                .iter()
+                .filter(|link| link.tool_name == "read")
+                .filter_map(|link| link.relative_path.clone())
+                .collect();
         }
         self.refresh_last_touched_from_transcript();
 
@@ -302,7 +483,7 @@ impl ContextProjector {
 
         let mut compaction_event = None;
 
-        if byte_exceeded || token_exceeded {
+        if self.profile.compacts() && (byte_exceeded || token_exceeded) {
             let before_bytes = total_request_bytes;
             let target_low_bytes = budget
                 .context_low_watermark_bytes
@@ -317,6 +498,13 @@ impl ContextProjector {
                 }
                 _ => target_low_bytes,
             };
+            // P3 (experimental, default off) compacts an extra 25% below the profile's low-watermark
+            // target so an A/B run can measure the cost/benefit of a stricter budget.
+            let effective_target_bytes = if self.profile.is_aggressive() {
+                effective_target_bytes - effective_target_bytes / 4
+            } else {
+                effective_target_bytes
+            };
 
             let (compacted_seqs, pinned_files) = self.run_step_down_compaction(
                 canonical,
@@ -325,7 +513,6 @@ impl ContextProjector {
                 effective_target_bytes,
                 current_turn,
             );
-
             let mut after_history_bytes: usize = self
                 .projected_items
                 .iter()
@@ -370,7 +557,6 @@ impl ContextProjector {
 
         // Verify 1:1 tool_call_id pairing invariant across projected messages
         debug_assert!(verify_tool_call_pairing(&self.projected_items));
-
         let final_history_bytes: usize = self
             .projected_items
             .iter()
@@ -419,7 +605,30 @@ impl ContextProjector {
         let durable_last_touched = self.last_touched_turns.clone();
         let (pinned_indices, _) =
             compute_working_set_pins(&self.projected_items, current_turn, &durable_last_touched);
-        let mut breakdown = ContextBudgetBreakdown::default();
+        let (system_prefix_bytes, tool_schema_bytes) =
+            if self.prefix_system_bytes == 0 && self.prefix_tool_schema_bytes == 0 {
+                // No explicit split was supplied (unit tests / direct projector use): report the
+                // whole static prefix as the system prefix so the components still add up.
+                (static_prefix_bytes, 0)
+            } else {
+                (self.prefix_system_bytes, self.prefix_tool_schema_bytes)
+            };
+        let mut breakdown = ContextBudgetBreakdown {
+            system_prefix_bytes,
+            tool_schema_bytes,
+            history_bytes: final_history_bytes,
+            tool_output_bytes: self
+                .projected_items
+                .iter()
+                .filter_map(|item| match item {
+                    TranscriptItem::ToolResult(tr) => Some(tr.content.len()),
+                    _ => None,
+                })
+                .sum(),
+            recall_hit_count: self.recall_hit_count,
+            recall_miss_count: self.recall_miss_count,
+            ..Default::default()
+        };
         for (idx, item) in self.projected_items.iter().enumerate() {
             let bytes = item.estimated_bytes();
             breakdown.total_projected_bytes += bytes;
@@ -432,6 +641,7 @@ impl ContextProjector {
             }
         }
         breakdown.evidence_link_count = self.evidence_links.len();
+        breakdown.tokens = breakdown.estimated_tokens();
         self.last_budget = breakdown;
 
         Ok(ProjectedContext {
@@ -510,6 +720,7 @@ impl ContextProjector {
                                         later,
                                         TranscriptItem::ToolResult(t)
                                             if t.tool_name == "read"
+                                                && t.outcome.is_success()
                                                 && t.meta.relative_path.as_deref() == Some(path)
                                     )
                                 })
@@ -521,6 +732,7 @@ impl ContextProjector {
                 let mut raw_evidence: Option<Arc<str>> = None;
                 let mut new_link: Option<EvidenceLink> = None;
                 let mut read_path: Option<String> = None;
+                let mut compacted_now = false;
                 {
                     let tr = match &mut self.projected_items[idx] {
                         TranscriptItem::ToolResult(tr) => tr,
@@ -538,7 +750,8 @@ impl ContextProjector {
                     } else {
                         CompactionReason::StepDownArchive
                     };
-                    let stub = build_outline_stub(tr, idx, &sid);
+                    let records_evidence = self.profile.records_evidence();
+                    let stub = build_outline_stub_for_profile(tr, idx, &sid, records_evidence);
                     let new_bytes = stub.len();
                     if new_bytes < old_bytes {
                         let stub_arc: Arc<str> = Arc::from(stub);
@@ -552,33 +765,41 @@ impl ContextProjector {
                         } else {
                             None
                         };
-                        new_link = Some(EvidenceLink {
-                            source_entry_id: sid,
-                            canonical_index: idx,
-                            call_id: tr.call_id.0.clone(),
-                            tool_name: tr.tool_name.clone(),
-                            relative_path: tr.meta.relative_path.clone(),
-                            original_sha256: sha256_hex64(raw.as_bytes()),
-                            original_bytes: old_bytes,
-                            original_lines: raw.lines().count(),
-                            stub_bytes: new_bytes,
-                            reason,
-                        });
-                        raw_evidence = Some(raw);
+                        // `P1` runs the same compaction without minting an evidence pointer, so the
+                        // raw bytes are dropped rather than retained for `recall_evidence`.
+                        if records_evidence {
+                            new_link = Some(EvidenceLink {
+                                source_entry_id: sid,
+                                canonical_index: idx,
+                                call_id: tr.call_id.0.clone(),
+                                tool_name: tr.tool_name.clone(),
+                                relative_path: tr.meta.relative_path.clone(),
+                                original_sha256: sha256_hex64(raw.as_bytes()),
+                                original_bytes: old_bytes,
+                                original_lines: raw.lines().count(),
+                                stub_bytes: new_bytes,
+                                reason,
+                            });
+                            raw_evidence = Some(raw);
+                        }
+                        compacted_now = true;
                         current_bytes = current_bytes.saturating_sub(old_bytes - new_bytes);
                     }
                 }
                 // Retain the raw bytes as retrievable evidence (Gate 2) before they are dropped
-                // from the projected transcript.
-                if let (Some(link), Some(raw)) = (new_link, raw_evidence) {
-                    self.register_evidence(link, raw);
+                // from the projected transcript. The item is marked compacted for every compacting
+                // profile, so the byte breakdown and reread-regret accounting stay accurate even
+                // when no evidence graph is recorded (`P1`).
+                if compacted_now {
+                    if let (Some(link), Some(raw)) = (new_link, raw_evidence) {
+                        self.register_evidence(link, raw);
+                    }
                     if let Some(path) = read_path {
                         self.compacted_file_paths.insert(path);
                     }
                     self.compacted_indices.insert(idx);
                     compacted_seqs.push(idx);
-                }
-            }
+                }            }
         }
 
         (compacted_seqs, pinned_files)
@@ -695,28 +916,38 @@ fn compute_tail_window_start_index(
 /// The header always carries `source_entry_id=<id>` plus a pointer to `recall_evidence`, so the
 /// model can recover the raw lines that this stub replaced on demand (Gate 2).
 pub fn build_outline_stub(tr: &ToolResultMessage, seq_idx: usize, source_entry_id: &str) -> String {
+    build_outline_stub_for_profile(tr, seq_idx, source_entry_id, true)
+}
+
+/// Profile-aware stub builder: `P1` compacts without minting an evidence pointer, `P2`/`P3` embed
+/// the `source_entry_id` and the `recall_evidence` hint.
+pub fn build_outline_stub_for_profile(
+    tr: &ToolResultMessage,
+    seq_idx: usize,
+    source_entry_id: &str,
+    include_evidence: bool,
+) -> String {
     let size_kib = (tr.content.len() as f64) / 1024.0;
     let path = tr.meta.relative_path.as_deref().unwrap_or(".");
     let sha = tr.meta.content_sha256.as_deref().unwrap_or("none");
-    let recall_hint = format!(
-        " | source_entry_id={} | call recall_evidence(source_entry_id={}) for the raw lines",
-        source_entry_id, source_entry_id
-    );
+    let evidence = if include_evidence {
+        format!(
+            " | source_entry_id={} | call recall_evidence(source_entry_id={})",
+            source_entry_id, source_entry_id
+        )
+    } else {
+        String::new()
+    };
 
     if tr.tool_name == "bash" {
         let exit_code = tr.meta.exit_code.unwrap_or(0);
         let tail_lines: Vec<&str> = tr.content.lines().rev().take(15).collect();
         let tail_joined = tail_lines.into_iter().rev().collect::<Vec<_>>().join(" | ");
-        let mut stub = format!(
-            "[Compacted: bash(exit_code={}, duration={}ms, {:.1} KiB, seq={}){} | Tail: {}]",
-            exit_code, tr.meta.duration_ms, size_kib, seq_idx, recall_hint, tail_joined
+        let head = format!(
+            "[Compacted: bash(exit_code={}, duration={}ms, {:.1} KiB, seq={}){} | Tail: ",
+            exit_code, tr.meta.duration_ms, size_kib, seq_idx, evidence
         );
-        if stub.len() > MAX_OUTLINE_STUB_BYTES {
-            let cut = crate::tool::output_buffer::floor_char_boundary(&stub, MAX_OUTLINE_STUB_BYTES - 4);
-            stub.truncate(cut);
-            stub.push_str("...]");
-        }
-        return stub;
+        return append_bounded_tail(head, &tail_joined);
     }
 
     let (start_l, end_l) = tr.meta.lines_range.unwrap_or((1, tr.content.lines().count()));
@@ -727,15 +958,25 @@ pub fn build_outline_stub(tr: &ToolResultMessage, seq_idx: usize, source_entry_i
         outline_items.join(", ")
     };
 
-    let mut stub = format!(
-        "[Compacted: {}({}, lines {}-{}, {:.1} KiB, sha256={}, seq={}){} | Outline: {}]",
-        tr.tool_name, path, start_l, end_l, size_kib, sha, seq_idx, recall_hint, outline_str
+    let head = format!(
+        "[Compacted: {}({}, lines {}-{}, {:.1} KiB, sha256={}, seq={}){} | Outline: ",
+        tr.tool_name, path, start_l, end_l, size_kib, sha, seq_idx, evidence
     );
-    if stub.len() > MAX_OUTLINE_STUB_BYTES {
-        let cut = crate::tool::output_buffer::floor_char_boundary(&stub, MAX_OUTLINE_STUB_BYTES - 4);
-        stub.truncate(cut);
-        stub.push_str("...]");
+    append_bounded_tail(head, &outline_str)
+}
+
+/// Append the variable-length payload (symbol outline / bash tail) after a fixed header, truncating
+/// **only the payload**. Truncating the assembled stub instead could slice through `source_entry_id=`
+/// and break WAL evidence recovery on `--resume` (a long `relative_path` or `call_id` is enough).
+fn append_bounded_tail(head: String, tail: &str) -> String {
+    let budget = MAX_OUTLINE_STUB_BYTES.saturating_sub(head.len() + 4);
+    let cut = crate::tool::output_buffer::floor_char_boundary(tail, budget);
+    let mut stub = head;
+    stub.push_str(&tail[..cut]);
+    if cut < tail.len() {
+        stub.push_str("...");
     }
+    stub.push(']');
     stub
 }
 
@@ -804,31 +1045,61 @@ fn extract_top_level_symbols_from(content: &str, max_symbols: usize, start_line:
 }
 
 pub fn verify_tool_call_pairing(items: &[TranscriptItem]) -> bool {
+    validate_tool_call_pairing(items).is_ok()
+}
+
+/// Gate 2 hard-constraint validator: every `Assistant` tool call must be answered by exactly one
+/// `ToolResult` with the same `call_id`, in order, before the next `Assistant`/`User` message.
+///
+/// Returns a human-readable description of the first violation, so the A/B harness can assert the
+/// invariant across compaction boundaries with a diagnostic instead of a bare `false`.
+pub fn validate_tool_call_pairing(items: &[TranscriptItem]) -> Result<(), String> {
+    fn ids(calls: &[ToolCallId]) -> Vec<&str> {
+        calls.iter().map(|c| c.0.as_str()).collect()
+    }
+    fn names(calls: &[ToolCallId]) -> Vec<String> {
+        calls.iter().map(|c| c.0.clone()).collect()
+    }
     let mut expected_ids: Vec<ToolCallId> = Vec::new();
     let mut seen_ids: Vec<ToolCallId> = Vec::new();
 
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         match item {
             TranscriptItem::Assistant(a) => {
                 if expected_ids != seen_ids {
-                    return false;
+                    return Err(format!(
+                        "message {}: expected tool results {:?} before the next Assistant turn, observed {:?}",
+                        index,
+                        ids(&expected_ids),
+                        ids(&seen_ids)
+                    ));
                 }
                 expected_ids = a.tool_calls.iter().map(|tc| tc.call_id.clone()).collect();
                 seen_ids.clear();
             }
-            TranscriptItem::ToolResult(tr) => {
-                seen_ids.push(tr.call_id.clone());
-            }
+            TranscriptItem::ToolResult(tr) => seen_ids.push(tr.call_id.clone()),
             TranscriptItem::User(_) => {
                 if expected_ids != seen_ids {
-                    return false;
+                    return Err(format!(
+                        "message {}: expected tool results {:?} before the next User message, observed {:?}",
+                        index,
+                        ids(&expected_ids),
+                        ids(&seen_ids)
+                    ));
                 }
                 expected_ids.clear();
                 seen_ids.clear();
             }
         }
     }
-    expected_ids == seen_ids
+    if expected_ids != seen_ids {
+        return Err(format!(
+            "transcript tail: expected tool results {:?}, observed {:?}",
+            names(&expected_ids),
+            names(&seen_ids)
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -8,7 +8,8 @@
 use harness_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
 use harness_core::budget::BudgetConfig;
 use harness_core::context_projector::{
-    CompactionReason, ContextProjector, MIN_COMPACTABLE_TOOL_BYTES,
+    validate_tool_call_pairing, verify_tool_call_pairing, CompactionReason, ContextProjector,
+    EvidenceLink, ProjectionProfile, MIN_COMPACTABLE_TOOL_BYTES,
 };
 use harness_core::env::LocalHostEnv;
 use harness_core::events::EventLogger;
@@ -16,12 +17,13 @@ use harness_core::messages::{
     AssistantTurn, FinishReason, ToolCall, ToolOutcome, ToolResultMessage, ToolResultMeta,
     TranscriptItem, UserMessage,
 };
+use harness_core::prompt::sha256_hex64;
 use harness_core::provider::FakeProvider;
 use harness_core::revision::SnapshotStore;
 use harness_core::session::SessionJournal;
 use harness_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
 use harness_core::tools::recall_evidence::execute_recall_evidence;
-use harness_core::types::{RunStatus, ToolCallId};
+use harness_core::types::{ErrorCode, RunStatus, ToolCallId};
 use harness_core::workspace::WorkspaceCap;
 use std::fs;
 use std::path::PathBuf;
@@ -38,16 +40,22 @@ fn temp_root(tag: &str) -> PathBuf {
 /// The hidden constant lives inside a function body, so it is stripped from the Outline Stub and
 /// only recoverable through `recall_evidence`.
 const HIDDEN_CONSTANT: &str = "4242";
+/// A second hidden constant used to prove that a re-compaction replaces stale raw evidence.
+const HIDDEN_CONSTANT_V2: &str = "5151";
 
-fn big_rust_source() -> String {
+fn big_rust_source_with(secret: &str) -> String {
     let mut body = String::from("[File: src/big.rs | Lines: 1-400 of 400 | SHA256: 0123456789abcdef]\n");
     body.push_str("     1\tpub fn secret_answer() -> u32 {\n");
     for line in 2..=380 {
         body.push_str(&format!("{:>6}\t    // padding line {}\n", line, line));
     }
-    body.push_str(&format!("   381\t    {}\n", HIDDEN_CONSTANT));
+    body.push_str(&format!("   381\t    {}\n", secret));
     body.push_str("   382\t}\n");
     body
+}
+
+fn big_rust_source() -> String {
+    big_rust_source_with(HIDDEN_CONSTANT)
 }
 
 fn big_grep_output() -> String {
@@ -816,19 +824,10 @@ fn test_crash_before_wal_append_is_reconciled() {
         "pre-reconcile the WAL still names the stale revision"
     );
 
-    // Reconciliation adopts the manifest that is bound to an entry on the active branch.
+    // Reconciliation (the production path) adopts the manifest bound to the *current* leaf.
     assert!(journal.is_entry_on_active_branch(journal.leaf_id().unwrap()));
-    let turn = journal.max_active_turn();
-    let parent = journal.latest_revision_id();
-    journal
-        .record_revision_capture(
-            turn,
-            orphan.revision_id.as_str(),
-            parent.as_deref(),
-            orphan.changed_paths.clone(),
-            orphan.tracked_files.len(),
-        )
-        .unwrap();
+    let adopted = store.reconcile_with_wal(&mut journal).unwrap();
+    assert_eq!(adopted.as_deref(), Some(orphan.revision_id.as_str()));
     assert_eq!(
         journal.latest_revision_id().as_deref(),
         Some(orphan.revision_id.as_str())
@@ -837,5 +836,958 @@ fn test_crash_before_wal_append_is_reconciled() {
         .revision_records()
         .iter()
         .any(|r| r.changed_paths.iter().any(|p| p == "a.txt")));
+    // Reconciling twice is idempotent.
+    assert_eq!(store.reconcile_with_wal(&mut journal).unwrap(), None);
+    assert_eq!(journal.revision_records().len(), 2);
+
+    // A real (non-self) comparison must report the changed path.
+    assert_eq!(
+        store.compare(&baseline.revision_id, &orphan.revision_id).unwrap(),
+        vec!["a.txt".to_string()]
+    );
+    assert!(store.compare(&baseline.revision_id, &baseline.revision_id).unwrap().is_empty());
     let _ = fs::remove_dir_all(&root);
+}
+
+/// A transcript that reads `src/same.rs` twice with distinct bodies, optionally followed by a
+/// *failed* third read of the same path.
+fn superseded_read_transcript(secret1: &str, secret2: &str, failed_reread: bool) -> Vec<TranscriptItem> {
+    let mut items = vec![TranscriptItem::User(UserMessage { content: "reread a file".into() })];
+    items.push(assistant_with(&[("call_r1", "read"), ("call_r2", "read")]));
+    items.push(tool_result("call_r1", "read", Some("src/same.rs"), big_rust_source_with(secret1)));
+    items.push(tool_result("call_r2", "read", Some("src/same.rs"), big_rust_source_with(secret2)));
+    for turn in 0..6 {
+        push_read_turn(&mut items, "sup", turn);
+    }
+    if failed_reread {
+        items.push(assistant_with(&[("call_r3", "read")]));
+        items.push(TranscriptItem::ToolResult(ToolResultMessage {
+            call_id: ToolCallId::new("call_r3"),
+            tool_name: "read".into(),
+            outcome: ToolOutcome::Error { code: ErrorCode::IoError },
+            content: Arc::from("read failed"),
+            meta: ToolResultMeta {
+                relative_path: Some("src/same.rs".into()),
+                ..Default::default()
+            },
+        }));
+    }
+    items
+}
+
+/// `SupersededRead` recall: when a file is read twice, the *first* read is archived with
+/// `CompactionReason::SupersededRead`, and `recall_evidence` must still return that first read's
+/// exact bytes — never the newer read's.
+#[test]
+fn test_superseded_read_recall_returns_the_earlier_read_bytes() {
+    const V1: &str = "v1_secret_marker";
+    const V2: &str = "v2_secret_marker";
+    let budget = compaction_budget();
+
+    let mut items = superseded_read_transcript(V1, V2, false);
+    let mut projector = ContextProjector::new();
+    let _ = projector.project(&mut items, &budget, 2048, None, 8).unwrap();
+
+    let r1 = projector
+        .evidence_links()
+        .iter()
+        .find(|l| l.call_id == "call_r1")
+        .expect("the first read must be archived")
+        .clone();
+    assert_eq!(r1.reason, CompactionReason::SupersededRead);
+    let r2 = projector
+        .evidence_links()
+        .iter()
+        .find(|l| l.call_id == "call_r2")
+        .expect("the second read must be archived")
+        .clone();
+    assert_eq!(r2.reason, CompactionReason::StepDownArchive);
+    assert_ne!(r1.source_entry_id, r2.source_entry_id);
+
+    let first = execute_recall_evidence(
+        &projector,
+        &format!(r#"{{"source_entry_id":"{}","pattern":"{}"}}"#, r1.source_entry_id, V1),
+    );
+    assert!(first.outcome.is_success(), "{}", first.content);
+    assert!(first.content.contains(V1), "{}", first.content);
+    assert!(!first.content.contains(V2), "{}", first.content);
+
+    let second = execute_recall_evidence(
+        &projector,
+        &format!(r#"{{"source_entry_id":"{}","pattern":"{}"}}"#, r2.source_entry_id, V2),
+    );
+    assert!(second.outcome.is_success(), "{}", second.content);
+    assert!(second.content.contains(V2), "{}", second.content);
+    assert!(!second.content.contains(V1), "{}", second.content);
+
+    // A *failed* later read must not mark an earlier successful read as superseded.
+    let mut with_failed_reread = superseded_read_transcript(V1, V2, true);
+    let mut projector = ContextProjector::new();
+    let _ = projector.project(&mut with_failed_reread, &budget, 2048, None, 8).unwrap();
+    let r2_again = projector
+        .evidence_links()
+        .iter()
+        .find(|l| l.call_id == "call_r2")
+        .expect("the second read must still be archived");
+    assert_eq!(
+        r2_again.reason,
+        CompactionReason::StepDownArchive,
+        "a failed later read must not supersede a successful one"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Post-Gemini-audit Gate 2 regressions (v0.10.0 final): branch isolation, resume bookkeeping,
+// UTF-8 / byte-cap recall pagination, and the four-profile A/B evaluation record.
+// ---------------------------------------------------------------------------------------------
+
+const FIRST_BRANCH_SECRET: &str = "FIRST_BRANCH_SECRET";
+const ABANDONED_BRANCH_SECRET: &str = "ABANDONED_BRANCH_SECRET";
+
+/// A 383-line "read" body whose function-body secret differs per branch.
+fn branch_big_source(secret: &str) -> String {
+    big_rust_source_with(secret)
+}
+
+fn small_read(call_id: &str, path: &str) -> TranscriptItem {
+    tool_result(
+        call_id,
+        "read",
+        Some(path),
+        format!("     1\tpub fn {}() -> usize {{ 0 }}\n", path.replace(['/', '.'], "_")),
+    )
+}
+
+fn push_read_turn(items: &mut Vec<TranscriptItem>, prefix: &str, turn: usize) {
+    let id = format!("call_{}_{}", prefix, turn);
+    items.push(assistant_with(&[(id.as_str(), "read")]));
+    items.push(small_read(&id, &format!("src/{}_{}.rs", prefix, turn)));
+}
+
+fn append_both(
+    journal: &mut SessionJournal,
+    items: &mut Vec<TranscriptItem>,
+    turn: usize,
+    item: TranscriptItem,
+) -> String {
+    items.push(item.clone());
+    journal.append_item(turn, item).unwrap()
+}
+
+/// Gate 2 branch isolation: a compaction overlay recorded on an abandoned branch must never leak
+/// onto the live branch, an ancestor stub must stay resolvable after `--fork` + `--resume`, and the
+/// same canonical index must be re-compactable on the new branch.
+#[test]
+fn test_fork_isolates_evidence_links_across_branches() {
+    let root = temp_root("fork-isolation");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    let budget = compaction_budget();
+
+    let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
+    let mut items: Vec<TranscriptItem> = Vec::new();
+    let mut ids: Vec<String> = Vec::new();
+
+    // Branch A, first half: one large read that must be archived before the fork point.
+    ids.push(append_both(&mut journal, &mut items, 0, TranscriptItem::User(UserMessage { content: "task".into() })));
+    ids.push(append_both(&mut journal, &mut items, 1, assistant_with(&[("call_big1", "read")])));
+    ids.push(append_both(
+        &mut journal,
+        &mut items,
+        2,
+        tool_result("call_big1", "read", Some("src/first.rs"), branch_big_source(FIRST_BRANCH_SECRET)),
+    ));
+    for turn in 0..6 {
+        let id = format!("call_f{}", turn);
+        ids.push(append_both(&mut journal, &mut items, 2, assistant_with(&[(id.as_str(), "read")])));
+        ids.push(append_both(&mut journal, &mut items, 2, small_read(&id, &format!("src/f{}.rs", turn))));
+    }
+    assert_eq!(items.len(), 15);
+    // Sync #1 records the index-2 overlay at the leaf that is still an ancestor after the fork.
+    let mut projector_a = ContextProjector::new();
+    let _ = projector_a.project(&mut items, &budget, 2048, None, 8).unwrap();
+    journal.sync_projected_transcript(&items, projector_a.evidence_links()).unwrap();
+    assert!(projector_a.evidence_links().iter().any(|l| l.source_entry_id == "ev-0002-call_big1"));
+
+    // Branch A, second half: a second large read archived at a *deeper* leaf.
+    ids.push(append_both(&mut journal, &mut items, 3, assistant_with(&[("call_big2", "read")])));
+    ids.push(append_both(
+        &mut journal,
+        &mut items,
+        4,
+        tool_result("call_big2", "read", Some("src/second.rs"), branch_big_source(ABANDONED_BRANCH_SECRET)),
+    ));
+    for turn in 0..3 {
+        let id = format!("call_g{}", turn);
+        ids.push(append_both(&mut journal, &mut items, 4, assistant_with(&[(id.as_str(), "read")])));
+        ids.push(append_both(&mut journal, &mut items, 4, small_read(&id, &format!("src/g{}.rs", turn))));
+    }
+    assert_eq!(items.len(), 23);
+    let _ = projector_a.project(&mut items, &budget, 2048, None, 12).unwrap();
+    journal.sync_projected_transcript(&items, projector_a.evidence_links()).unwrap();
+    assert!(
+        projector_a.evidence_links().iter().any(|l| l.source_entry_id == "ev-0016-call_big2"),
+        "the second half must have archived index 16: {:?}",
+        projector_a.evidence_links()
+    );
+    // Fork onto the entry at index 20: it keeps the first half *and* the second large read, while
+    // abandoning the last two entries (and the deeper overlay that archived index 16).
+    let fork_point = ids[20].clone();
+    let wal_path = journal.path().to_path_buf();
+    drop(journal);
+
+    // Re-open and rewind onto branch B: everything appended after `fork_point` is abandoned.
+    let mut reopened = SessionJournal::open(&wal_path).unwrap();
+    reopened.fork_at(&fork_point).unwrap();
+    let branch_b_len = reopened.active_entries().len();
+    assert_eq!(branch_b_len, 21);
+
+    let links = reopened.evidence_links();
+    assert_eq!(
+        links.len(),
+        1,
+        "only the ancestor stub's link may survive the rewind: {:?}",
+        links
+    );
+    assert_eq!(links[0].source_entry_id, "ev-0002-call_big1");
+
+    let mut projector = ContextProjector::new();
+    reopened.seed_projector_evidence(&mut projector);
+    // The ancestor stub still resolves to the exact branch-A raw lines.
+    let ancestor = execute_recall_evidence(
+        &projector,
+        r#"{"source_entry_id":"ev-0002-call_big1","pattern":"FIRST_BRANCH_SECRET"}"#,
+    );
+    assert!(ancestor.outcome.is_success(), "{}", ancestor.content);
+    assert!(ancestor.content.contains(FIRST_BRANCH_SECRET), "{}", ancestor.content);
+    // The abandoned branch's evidence id must be rejected.
+    let abandoned = execute_recall_evidence(&projector, r#"{"source_entry_id":"ev-0016-call_big2"}"#);
+    assert!(
+        !abandoned.outcome.is_success(),
+        "an abandoned branch's source_entry_id must not resolve: {}",
+        abandoned.content
+    );
+    assert!(abandoned.content.contains("unknown source_entry_id"), "{}", abandoned.content);
+
+    // The new branch re-compacts canonical index 16 with the same call_id, minting the same
+    // deterministic id. That must register and resolve cleanly on the live branch.
+    let mut branch_b = reopened.active_transcript();
+    let mut projector_b = ContextProjector::new();
+    reopened.seed_projector_evidence(&mut projector_b);
+    let _ = projector_b.project(&mut branch_b, &budget, 2048, None, 10).unwrap();
+    assert!(
+        projector_b.evidence_links().iter().any(|l| l.source_entry_id == "ev-0016-call_big2"),
+        "branch B must be able to compact index 16 afresh: {:?}",
+        projector_b.evidence_links()
+    );
+    let branch_b_recall = execute_recall_evidence(
+        &projector_b,
+        r#"{"source_entry_id":"ev-0016-call_big2","pattern":"ABANDONED_BRANCH_SECRET"}"#,
+    );
+    assert!(branch_b_recall.outcome.is_success(), "{}", branch_b_recall.content);
+    assert!(branch_b_recall.content.contains(ABANDONED_BRANCH_SECRET));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Gate 2 `--fork` state hygiene: rewinding the canonical transcript must prune the rewound items'
+/// evidence (link, raw bytes and `call_id` index), so a fresh compaction at the same canonical index
+/// with the same `call_id` registers cleanly instead of being dropped as a duplicate.
+#[test]
+fn test_fork_rewind_prunes_evidence_and_allows_recompaction_at_the_same_index() {
+    let budget = compaction_budget();
+    let mut canonical = compaction_transcript();
+    let mut projector = ContextProjector::new();
+    let _ = projector.project(&mut canonical, &budget, 2048, None, 8).unwrap();
+    assert!(projector.evidence_lookup("ev-0002-call_big").is_some());
+    assert!(projector.evidence_lookup("call_big").is_some());
+
+    // `--fork` back to a 1-item prefix: index 2 is now past the tail and its evidence must go.
+    let mut forked = canonical[..1].to_vec();
+    let _ = projector.project(&mut forked, &budget, 2048, None, 1).unwrap();
+    assert!(
+        !projector
+            .evidence_links()
+            .iter()
+            .any(|l| l.source_entry_id == "ev-0002-call_big"),
+        "a rewound item's evidence link must be pruned: {:?}",
+        projector.evidence_links()
+    );
+    assert!(
+        projector.evidence_lookup("ev-0002-call_big").is_none()
+            && projector.evidence_lookup("call_big").is_none(),
+        "the rewound raw bytes and call_id index must be pruned too"
+    );
+
+    // Re-grow the same (index, call_id) pair on the new branch with *different* content: the same
+    // deterministic `source_entry_id` must register the new bytes rather than being dropped.
+    let mut regrown = canonical[..1].to_vec();
+    regrown.push(assistant_with(&[("call_big", "read")]));
+    regrown.push(tool_result(
+        "call_big",
+        "read",
+        Some("src/big.rs"),
+        big_rust_source_with(HIDDEN_CONSTANT_V2),
+    ));
+    for turn in 0..6 {
+        push_read_turn(&mut regrown, "re", turn);
+    }
+    let _ = projector.project(&mut regrown, &budget, 2048, None, 8).unwrap();
+    assert_eq!(
+        projector
+            .evidence_links()
+            .iter()
+            .filter(|l| l.source_entry_id == "ev-0002-call_big")
+            .count(),
+        1,
+        "re-compaction at the same index must register exactly one link: {:?}",
+        projector.evidence_links()
+    );
+    let fresh = execute_recall_evidence(
+        &projector,
+        r#"{"source_entry_id":"ev-0002-call_big","pattern":"5151"}"#,
+    );
+    assert!(fresh.outcome.is_success(), "{}", fresh.content);
+    assert!(fresh.content.contains(HIDDEN_CONSTANT_V2));
+    let stale = execute_recall_evidence(
+        &projector,
+        r#"{"source_entry_id":"ev-0002-call_big","pattern":"4242"}"#,
+    );
+    assert!(
+        !stale.outcome.is_success(),
+        "the rewound branch's raw bytes must not survive: {}",
+        stale.content
+    );
+}
+
+/// Gate 2 resume accounting: re-seeding compacted stubs from the WAL must also restore the
+/// `compacted_indices` / `compacted_file_paths` bookkeeping. Otherwise `--resume` under-reports
+/// `ContextBudgetBreakdown.compacted_stub_bytes` (pre-compacted stubs get misattributed to the tail
+/// or to the pinned working set) and reread-regret accounting goes blind.
+#[test]
+fn test_resume_restores_compacted_indices_and_budget_breakdown() {
+    let root = temp_root("resume-indices");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    let budget = compaction_budget();
+
+    let mut canonical = compaction_transcript();
+    let mut projector = ContextProjector::new();
+    let _ = projector.project(&mut canonical, &budget, 2048, None, 8).unwrap();
+    let fresh_breakdown = projector.stats().budget.clone();
+    assert!(fresh_breakdown.compacted_stub_bytes > 0);
+
+    let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
+    for (turn, item) in compaction_transcript().into_iter().enumerate() {
+        journal.append_item(turn, item).unwrap();
+    }
+    journal
+        .sync_projected_transcript(&canonical, projector.evidence_links())
+        .unwrap();
+    let wal_path = journal.path().to_path_buf();
+    drop(journal);
+
+    let resumed = SessionJournal::open(&wal_path).unwrap();
+    let mut restored = resumed.active_transcript();
+    let mut resumed_projector = ContextProjector::new();
+    resumed_projector.restore_pinned_baseline_end(projector.last_pinned_baseline_end());
+    resumed.seed_projector_evidence(&mut resumed_projector);
+    let resumed_projection = resumed_projector
+        .project(&mut restored, &budget, 2048, None, 8)
+        .unwrap();
+
+    let resumed_breakdown = resumed_projector.stats().budget.clone();
+    assert!(
+        resumed_breakdown.compacted_stub_bytes > 0,
+        "a resumed projection must still attribute the archived stubs: {:?}",
+        resumed_breakdown
+    );
+    assert_eq!(resumed_breakdown.compacted_stub_bytes, fresh_breakdown.compacted_stub_bytes);
+    assert_eq!(resumed_breakdown.evidence_link_count, 3);
+    assert_eq!(
+        resumed_breakdown.total_projected_bytes,
+        resumed_projection.messages.iter().map(|i| i.estimated_bytes()).sum::<usize>()
+    );
+
+    // Byte + estimated-token component reporting is present and internally consistent.
+    assert_eq!(resumed_breakdown.system_prefix_bytes, 2048);
+    assert_eq!(resumed_breakdown.tokens.system_prefix_tokens, 512);
+    assert_eq!(resumed_breakdown.tokens.history_tokens, resumed_breakdown.history_bytes / 4);
+    assert_eq!(
+        resumed_breakdown.tokens.total_tokens,
+        (resumed_breakdown.system_prefix_bytes
+            + resumed_breakdown.tool_schema_bytes
+            + resumed_breakdown.history_bytes)
+            / 4
+    );
+    assert!(resumed_breakdown.tool_output_bytes > 0);
+    assert!(resumed_breakdown.tool_output_bytes <= resumed_breakdown.history_bytes);
+    let stats = resumed_projector.stats();
+    assert_eq!(stats.tokens, resumed_breakdown.tokens);
+    assert_eq!(stats.recall_hit_count, 0);
+    assert_eq!(stats.recall_miss_count, 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn register_raw(projector: &mut ContextProjector, id: &str, raw: &str) {
+    projector.register_evidence(
+        EvidenceLink {
+            source_entry_id: id.to_string(),
+            canonical_index: 1,
+            call_id: format!("call_{}", id),
+            tool_name: "read".to_string(),
+            relative_path: Some("src/evidence.txt".to_string()),
+            original_sha256: sha256_hex64(raw.as_bytes()),
+            original_bytes: raw.len(),
+            original_lines: raw.lines().count(),
+            stub_bytes: 32,
+            reason: CompactionReason::StepDownArchive,
+        },
+        Arc::from(raw),
+    );
+}
+
+/// Parse the `Lines: <first>-<last> of <total>` field back out of a recall header.
+fn recalled_line_range(content: &str) -> (usize, usize, usize) {
+    let header_end = content.find(']').expect("recall header");
+    let header = &content[..header_end];
+    let marker = "Lines: ";
+    let start = header.find(marker).expect("Lines field") + marker.len();
+    let rest = &header[start..];
+    let end = rest.find(" |").unwrap_or(rest.len());
+    let field = &rest[..end];
+    let numbers: Vec<usize> = field
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(numbers.len(), 3, "expected first-last-of-triple in '{}'", field);
+    (numbers[0], numbers[1], numbers[2])
+}
+
+/// `recall_evidence` must handle multi-byte UTF-8 (CJK + emoji + Unicode case folding) and must
+/// report the *actually rendered* last line when the 32 KiB inline cap clips the response.
+#[test]
+fn test_recall_evidence_utf8_patterns_and_byte_cap_line_clipping() {
+    let mut projector = ContextProjector::new();
+
+    // ---- multi-byte pattern matching ----
+    let cjk = "第一行 中文内容 甲\n第二行 🎉🚀 emoji\n第三行 ΣΟΦΟΣ greek\n第四行 中文内容 乙\n";
+    register_raw(&mut projector, "ev-0001-cjk", cjk);
+
+    let hit = execute_recall_evidence(
+        &projector,
+        r#"{"source_entry_id":"ev-0001-cjk","pattern":"中文内容"}"#,
+    );
+    assert!(hit.outcome.is_success(), "{}", hit.content);
+    assert!(hit.content.contains("中文内容 甲") && hit.content.contains("中文内容 乙"));
+    assert!(hit.content.contains("🎉🚀"));
+    assert!(hit.content.contains("    1\t第一行"), "1-based numbering: {}", hit.content);
+
+    let emoji = execute_recall_evidence(&projector, r#"{"source_entry_id":"ev-0001-cjk","pattern":"🎉"}"#);
+    assert!(emoji.outcome.is_success(), "{}", emoji.content);
+    assert!(emoji.content.contains("第二行"));
+
+    // Unicode case folding: mixed-case Greek must fold to match the uppercase line. (`str::to_lowercase`
+    // applies the context-sensitive final-sigma rule, so the pattern avoids a word-final sigma.)
+    let greek = execute_recall_evidence(&projector, r#"{"source_entry_id":"ev-0001-cjk","pattern":"σΟφ"}"#);
+    assert!(greek.outcome.is_success(), "{}", greek.content);
+    assert!(greek.content.contains("ΣΟΦΟΣ"));
+
+    // `start_line`/`end_line` bound the pattern window (and its ±2 context lines).
+    let windowed = execute_recall_evidence(
+        &projector,
+        r#"{"source_entry_id":"ev-0001-cjk","pattern":"中文内容","start_line":3,"end_line":4}"#,
+    );
+    assert!(windowed.outcome.is_success(), "{}", windowed.content);
+    assert!(windowed.content.contains("中文内容 乙"), "{}", windowed.content);
+    assert!(
+        !windowed.content.contains("中文内容 甲"),
+        "the requested window must exclude earlier matches: {}",
+        windowed.content
+    );
+    assert_eq!(recalled_line_range(&windowed.content), (3, 4, 4));
+
+    // ---- 32 KiB byte-cap clipping with ASCII lines ----
+    let long_line = "x".repeat(300);
+    let mut ascii_big = String::new();
+    for line in 1..=200 {
+        ascii_big.push_str(&format!("{} #{}\n", long_line, line));
+    }
+    register_raw(&mut projector, "ev-0002-long", &ascii_big);
+
+    let clipped = execute_recall_evidence(
+        &projector,
+        r#"{"source_entry_id":"ev-0002-long","start_line":1,"end_line":200}"#,
+    );
+    assert!(clipped.outcome.is_success(), "{}", clipped.content);
+    let (first, last, total) = recalled_line_range(&clipped.content);
+    assert_eq!((first, total), (1, 200));
+    assert!(last < 200, "the 32 KiB cap must clip the requested range: {}", clipped.content);
+    assert_eq!(clipped.meta.lines_range, Some((first, last)));
+    assert!(
+        clipped.content.contains(&format!("start_line={} to continue", last + 1)),
+        "the continuation hint must name the next *unrendered* line: {}",
+        clipped.content
+    );
+    assert!(
+        clipped.content.contains(&format!("{} #{}\n", long_line, last)),
+        "the reported last line must actually be rendered"
+    );
+    assert!(
+        !clipped.content.contains(&format!("{} #{}\n", long_line, last + 1)),
+        "no line past the reported last line may be rendered"
+    );
+
+    // Following the continuation hint makes progress instead of re-serving the same window.
+    let continued = execute_recall_evidence(
+        &projector,
+        &format!(r#"{{"source_entry_id":"ev-0002-long","start_line":{}}}"#, last + 1),
+    );
+    assert!(continued.outcome.is_success(), "{}", continued.content);
+    assert!(continued.content.contains(&format!("{} #{}\n", long_line, last + 1)));
+
+    // ---- 32 KiB cap with 3-byte CJK lines: no char-boundary panic, footer preserved ----
+    let mut cjk_big = String::new();
+    for line in 1..=400 {
+        cjk_big.push_str(&format!("{} #{}\n", "汉字测试内容".repeat(25), line));
+    }
+    register_raw(&mut projector, "ev-0003-cjkbig", &cjk_big);
+    let cjk_clipped = execute_recall_evidence(
+        &projector,
+        r#"{"source_entry_id":"ev-0003-cjkbig","start_line":1,"end_line":200}"#,
+    );
+    assert!(cjk_clipped.outcome.is_success(), "{}", cjk_clipped.content);
+    let (_, cjk_last, cjk_total) = recalled_line_range(&cjk_clipped.content);
+    assert_eq!(cjk_total, 400);
+    assert!(cjk_last < 200, "{}", cjk_clipped.content);
+    assert!(
+        cjk_clipped.content.contains(&format!("start_line={} to continue", cjk_last + 1)),
+        "the footer must survive the byte cap for multi-byte content: {}",
+        cjk_clipped.content
+    );
+    assert!(cjk_clipped.content.len() < 40 * 1024);
+
+    // ---- A single line larger than the cap must still surface its prefix ----
+    let one_huge = format!("{}\n", "z".repeat(40 * 1024));
+    register_raw(&mut projector, "ev-0004-huge", &one_huge);
+    let huge = execute_recall_evidence(&projector, r#"{"source_entry_id":"ev-0004-huge"}"#);
+    assert!(huge.outcome.is_success(), "{}", huge.content);
+    assert!(huge.content.contains("[recall truncated at the 32 KiB cap]"), "{}", huge.content);
+    assert!(huge.content.len() < 40 * 1024, "len={}", huge.content.len());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 2 A/B: the four projection profiles over the five blueprint task archetypes.
+// ---------------------------------------------------------------------------------------------
+
+fn eval_budget() -> BudgetConfig {
+    let mut budget = BudgetConfig::default();
+    budget.context_high_watermark_bytes = 16 * 1024;
+    budget.context_low_watermark_bytes = 12 * 1024;
+    budget.context_tail_window_bytes = 512;
+    budget.context_min_tail_turns = 1;
+    budget
+}
+
+/// A ~1.6 KiB read body, just above `MIN_COMPACTABLE_TOOL_BYTES`, so compaction granularity is fine
+/// enough for the stricter `P3` target to be observably different from `P2`.
+fn medium_source(tag: usize) -> String {
+    let mut body = format!(
+        "[File: src/med_{}.rs | Lines: 1-40 of 40 | SHA256: 00000000000000aa]\n",
+        tag
+    );
+    body.push_str("     1\tpub fn medium() -> usize {\n");
+    while body.len() < 1600 {
+        body.push_str("     2\t    // padding\n");
+    }
+    body.push_str("    40\t}\n");
+    body
+}
+
+/// Archetype 1 — long-file navigation: read/grep three large outputs, then work on.
+fn archetype_long_file_nav() -> Vec<TranscriptItem> {
+    let mut items = vec![TranscriptItem::User(UserMessage { content: "navigate a long file".into() })];
+    items.push(assistant_with(&[("nav_read_a", "read"), ("nav_read_b", "read"), ("nav_grep", "grep")]));
+    items.push(tool_result("nav_read_a", "read", Some("src/a.rs"), big_rust_source()));
+    items.push(tool_result("nav_read_b", "read", Some("src/b.rs"), branch_big_source(HIDDEN_CONSTANT_V2)));
+    items.push(tool_result("nav_grep", "grep", None, big_grep_output()));
+    for turn in 0..6 {
+        push_read_turn(&mut items, "nav", turn);
+    }
+    items
+}
+
+/// Archetype 2 — cross-file bug fix: read three files (two large), edit the small one, then continue.
+/// The edited file is deliberately the *small* one so its Working-Set Pinning exemption cannot hide a
+/// large read from the A/B comparison.
+fn archetype_cross_file_bug_fix() -> Vec<TranscriptItem> {
+    let mut items = vec![TranscriptItem::User(UserMessage { content: "fix a cross-file bug".into() })];
+    items.push(assistant_with(&[("x_read_a", "read"), ("x_read_b", "read")]));
+    items.push(small_read("x_read_a", "src/a.rs"));
+    items.push(tool_result("x_read_b", "read", Some("src/b.rs"), big_rust_source()));
+    items.push(assistant_with(&[("x_read_c", "read")]));
+    items.push(tool_result("x_read_c", "read", Some("src/c.rs"), branch_big_source(HIDDEN_CONSTANT_V2)));
+    items.push(assistant_with(&[("x_edit_a", "edit")]));
+    items.push(TranscriptItem::ToolResult(ToolResultMessage {
+        call_id: ToolCallId::new("x_edit_a"),
+        tool_name: "edit".into(),
+        outcome: ToolOutcome::Success,
+        content: Arc::from("[Edited: src/a.rs | 1 hunk applied]"),
+        meta: ToolResultMeta {
+            relative_path: Some("src/a.rs".into()),
+            modified_file: true,
+            ..Default::default()
+        },
+    }));
+    for turn in 0..6 {
+        push_read_turn(&mut items, "x", turn);
+    }
+    items
+}
+
+/// Archetype 3 — repeated-error recovery: two failing `bash` runs plus one large read, interleaved
+/// with an edit of a *different*, small file.
+fn archetype_repeated_error_recovery() -> Vec<TranscriptItem> {
+    fn failed_bash(call_id: &str, marker: &str) -> TranscriptItem {
+        let mut body = String::from("[Command exit_code=101 | duration_ms=830]\n");
+        for line in 1..=200 {
+            body.push_str(&format!("{} error: unresolved name #{}\n", marker, line));
+        }
+        TranscriptItem::ToolResult(ToolResultMessage {
+            call_id: ToolCallId::new(call_id),
+            tool_name: "bash".into(),
+            outcome: ToolOutcome::Error { code: ErrorCode::IoError },
+            content: Arc::from(body),
+            meta: ToolResultMeta {
+                exit_code: Some(101),
+                ..Default::default()
+            },
+        })
+    }
+    let mut items = vec![TranscriptItem::User(UserMessage { content: "make the build pass".into() })];
+    items.push(assistant_with(&[("e_bash_1", "bash")]));
+    items.push(failed_bash("e_bash_1", "first"));
+    items.push(assistant_with(&[("e_read_1", "read")]));
+    items.push(tool_result("e_read_1", "read", Some("src/lib.rs"), big_rust_source()));
+    items.push(assistant_with(&[("e_edit_1", "edit")]));
+    items.push(TranscriptItem::ToolResult(ToolResultMessage {
+        call_id: ToolCallId::new("e_edit_1"),
+        tool_name: "edit".into(),
+        outcome: ToolOutcome::Success,
+        content: Arc::from("[Edited: src/main.rs | 1 hunk applied]"),
+        meta: ToolResultMeta {
+            relative_path: Some("src/main.rs".into()),
+            modified_file: true,
+            ..Default::default()
+        },
+    }));
+    items.push(assistant_with(&[("e_bash_2", "bash")]));
+    items.push(failed_bash("e_bash_2", "second"));
+    for turn in 0..6 {
+        push_read_turn(&mut items, "e", turn);
+    }
+    items
+}
+
+/// Archetype 4 — over budget: 16 medium reads (fine compaction granularity).
+fn archetype_over_budget() -> Vec<TranscriptItem> {
+    let mut items = vec![TranscriptItem::User(UserMessage { content: "summarise a large tree".into() })];
+    for turn in 0..8 {
+        let first = format!("ob_{}_0", turn);
+        let second = format!("ob_{}_1", turn);
+        items.push(assistant_with(&[(first.as_str(), "read"), (second.as_str(), "read")]));
+        items.push(tool_result(&first, "read", Some(&format!("src/ob_{}_0.rs", turn)), medium_source(turn * 2)));
+        items.push(tool_result(&second, "read", Some(&format!("src/ob_{}_1.rs", turn)), medium_source(turn * 2 + 1)));
+    }
+    for turn in 0..6 {
+        push_read_turn(&mut items, "obf", turn);
+    }
+    items
+}
+
+/// Archetype 5 — multi-turn: ten turns with four large reads spread across them.
+fn archetype_multi_turn() -> Vec<TranscriptItem> {
+    let mut items = vec![TranscriptItem::User(UserMessage { content: "ten turns of work".into() })];
+    for turn in 0..10 {
+        let id = format!("mt_{}", turn);
+        items.push(assistant_with(&[(id.as_str(), "read")]));
+        let body = if turn % 3 == 0 {
+            big_rust_source()
+        } else {
+            format!("     1\tpub fn mt_{}() -> usize {{ {} }}\n", turn, turn)
+        };
+        items.push(tool_result(&id, "read", Some(&format!("src/mt_{}.rs", turn)), body));
+    }
+    for turn in 0..6 {
+        push_read_turn(&mut items, "mtf", turn);
+    }
+    items
+}
+
+/// Gate 2 exit criterion: the four projection profiles over the five blueprint task archetypes,
+/// with the tool-call/result pairing invariant asserted at every compaction boundary. Also emits the
+/// versioned machine-readable evaluation record at `docs/GATE2_EVAL_METRICS.json`.
+#[test]
+fn test_projection_profiles_ab_metrics_and_tool_pairing_invariant() {
+    let budget = eval_budget();
+    let profiles = [
+        ProjectionProfile::Baseline,
+        ProjectionProfile::P1,
+        ProjectionProfile::P2,
+        ProjectionProfile::P3,
+    ];
+    let archetypes: [(&str, fn() -> Vec<TranscriptItem>); 5] = [
+        ("long_file_nav", archetype_long_file_nav),
+        ("cross_file_bug_fix", archetype_cross_file_bug_fix),
+        ("repeated_error_recovery", archetype_repeated_error_recovery),
+        ("over_budget", archetype_over_budget),
+        ("multi_turn", archetype_multi_turn),
+    ];
+
+    let mut pairing_checks = 0usize;
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut by_key: std::collections::BTreeMap<(String, String), (usize, usize)> =
+        std::collections::BTreeMap::new();
+
+    for (name, build) in archetypes {
+        let canonical = build();
+        for profile in profiles {
+            let mut items = canonical.clone();
+            let mut projector = ContextProjector::new().with_profile(profile);
+            let projected = projector
+                .project(&mut items, &budget, 2048, None, 8)
+                .unwrap_or_else(|e| panic!("{} / {}: {:?}", name, profile.as_str(), e));
+
+            // Hard constraint: 1:1 tool-call/result pairing must survive compaction.
+            validate_tool_call_pairing(&projected.messages)
+                .unwrap_or_else(|e| panic!("{} / {}: {}", name, profile.as_str(), e));
+            assert!(verify_tool_call_pairing(&projected.messages));
+            pairing_checks += 1;
+
+            let stats = projector.stats();
+            let breakdown = &stats.budget;
+            assert_eq!(
+                breakdown.total_projected_bytes,
+                projected.messages.iter().map(|i| i.estimated_bytes()).sum::<usize>(),
+                "{} / {}: byte accounting must cover every projected item",
+                name,
+                profile.as_str()
+            );
+            assert_eq!(breakdown.history_bytes, breakdown.total_projected_bytes);
+            assert_eq!(breakdown.tokens.history_tokens, breakdown.history_bytes / 4);
+            assert_eq!(stats.tokens, breakdown.tokens);
+
+            match profile {
+                ProjectionProfile::Baseline => {
+                    assert_eq!(
+                        breakdown.compacted_stub_bytes, 0,
+                        "{}: the baseline profile must not compact",
+                        name
+                    );
+                    assert_eq!(breakdown.evidence_link_count, 0);
+                }
+                ProjectionProfile::P1 => {
+                    assert_eq!(
+                        breakdown.evidence_link_count, 0,
+                        "{}: P1 keeps watermarks + pinning but no evidence graph",
+                        name
+                    );
+                    assert!(
+                        breakdown.compacted_stub_bytes > 0,
+                        "{}: P1 must still compact an over-budget transcript: {:?}",
+                        name,
+                        breakdown
+                    );
+                }
+                ProjectionProfile::P2 | ProjectionProfile::P3 => {
+                    assert!(
+                        breakdown.evidence_link_count > 0,
+                        "{} / {}: the evidence graph must record the archived stubs: {:?}",
+                        name,
+                        profile.as_str(),
+                        breakdown
+                    );
+                    assert!(breakdown.compacted_stub_bytes > 0);
+                }
+            }
+
+            by_key.insert(
+                (name.to_string(), profile.as_str().to_string()),
+                (breakdown.total_projected_bytes, breakdown.evidence_link_count),
+            );
+            results.push(serde_json::json!({
+                "archetype": name,
+                "profile": profile.as_str(),
+                "total_projected_bytes": breakdown.total_projected_bytes,
+                "history_bytes": breakdown.history_bytes,
+                "tool_output_bytes": breakdown.tool_output_bytes,
+                "pinned_working_set_bytes": breakdown.pinned_working_set_bytes,
+                "compacted_stub_bytes": breakdown.compacted_stub_bytes,
+                "recent_tail_bytes": breakdown.recent_tail_bytes,
+                "evidence_link_count": breakdown.evidence_link_count,
+                "estimated_tokens": breakdown.tokens.total_tokens,
+                "estimated_history_tokens": breakdown.tokens.history_tokens,
+                "recall_hit_count": breakdown.recall_hit_count,
+                "recall_miss_count": breakdown.recall_miss_count,
+                "tool_call_pairing": "ok",
+            }));
+        }
+
+        let key = |profile: &str| (name.to_string(), profile.to_string());
+        let (p2_bytes, p2_links) = by_key[&key("p2")];
+        let (p3_bytes, p3_links) = by_key[&key("p3")];
+        assert!(
+            p3_bytes <= p2_bytes,
+            "{}: the stricter P3 target must never project more than P2 ({} vs {})",
+            name,
+            p3_bytes,
+            p2_bytes
+        );
+        assert!(
+            p3_links >= p2_links,
+            "{}: P3 keeps P2's evidence graph and may archive more stubs under its stricter target ({} vs {})",
+            name,
+            p3_links,
+            p2_links
+        );    }
+
+    // The fine-grained over-budget archetype must show a strict P3 < P2 reduction.
+    let ob = |profile: &str| by_key[&("over_budget".to_string(), profile.to_string())].0;
+    assert!(
+        ob("p3") < ob("p2"),
+        "the P3 stricter target must measurably reduce the over-budget projection (p2={} p3={})",
+        ob("p2"),
+        ob("p3")
+    );
+
+    // The Working-Set Pinning bucket must be exercised by at least one archetype: the archetypes
+    // that edit a small file right before the tail window keep that file's read + edit pinned.
+    let pinned_probe = {
+        let mut items = archetype_repeated_error_recovery();
+        let mut projector = ContextProjector::new().with_profile(ProjectionProfile::P2);
+        let _ = projector.project(&mut items, &budget, 2048, None, 8).unwrap();
+        projector.stats().budget.pinned_working_set_bytes
+    };
+    assert!(
+        pinned_probe > 0,
+        "the pinned working-set bucket must be non-zero for a recently edited file"
+    );
+
+    assert_eq!(pairing_checks, 20, "4 profiles x 5 archetypes");
+
+    let artifact = serde_json::json!({
+        "artifact": "gate2-context-projection-eval",
+        "harness_version": env!("CARGO_PKG_VERSION"),
+        "generated_by": "crates/harness-core/tests/gate2_evidence_projection.rs::test_projection_profiles_ab_metrics_and_tool_pairing_invariant",
+        "blueprint": "docs/v1_blueprint/IMPLEMENTATION_GATES_AND_EVAL.md#gate-2--context-projection-ab",
+        "profiles": profiles.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        "task_archetypes": archetypes.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        "hard_constraints": {
+            "tool_call_result_pairing": "100% pass",
+            "pairing_checks": pairing_checks,
+            "tool_call_pairing_validator": "harness_core::context_projector::validate_tool_call_pairing",
+        },
+        "results": results,
+        "notes": [
+            "estimated_tokens = bytes / 4 (byte-based estimate; provider-reported usage remains the cost authority)",
+            "baseline = no compaction (A/B reference); p1 = watermarks + working-set pinning; p2 = p1 + source_entry_id evidence graph (default); p3 = p2 + 25% stricter low-watermark target (experimental, default off)"
+        ],
+    });
+    let metrics_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/GATE2_EVAL_METRICS.json");
+    fs::write(&metrics_path, serde_json::to_string_pretty(&artifact).unwrap())
+        .unwrap_or_else(|e| panic!("failed to write {}: {}", metrics_path.display(), e));
+    eprintln!("[gate2-eval] wrote {}", metrics_path.display());
+}
+
+/// Gate 2 evidence-overlay selection must mirror `active_entries()`: when two projection overlays
+/// exist for the same entry, the one recorded at the *deepest* leaf wins regardless of WAL append
+/// order. WAL-order dedup would let a shallower (earlier) overlay shadow the deeper one after a
+/// `--fork` re-selects the descendant leaf.
+#[test]
+fn test_evidence_links_select_the_deepest_overlay_like_active_entries() {
+    fn link_for(id: &str, canonical_index: usize, call_id: &str) -> EvidenceLink {
+        EvidenceLink {
+            source_entry_id: id.to_string(),
+            canonical_index,
+            call_id: call_id.to_string(),
+            tool_name: "read".to_string(),
+            relative_path: Some("src/x.rs".to_string()),
+            original_sha256: sha256_hex64(b"raw"),
+            original_bytes: 4,
+            original_lines: 1,
+            stub_bytes: 32,
+            reason: CompactionReason::StepDownArchive,
+        }
+    }
+    fn stub(id: &str) -> TranscriptItem {
+        TranscriptItem::ToolResult(ToolResultMessage {
+            call_id: ToolCallId::new("call_x"),
+            tool_name: "read".into(),
+            outcome: ToolOutcome::Success,
+            content: Arc::from(format!(
+                "[Compacted: read(src/x.rs) | source_entry_id={} | call recall_evidence(source_entry_id={}) | Outline: none]",
+                id, id
+            )),
+            meta: ToolResultMeta {
+                relative_path: Some("src/x.rs".into()),
+                ..Default::default()
+            },
+        })
+    }
+
+    let root = temp_root("overlay-depth");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
+
+    let a = journal
+        .append_item(0, TranscriptItem::User(UserMessage { content: "a".into() }))
+        .unwrap();
+    let b = journal
+        .append_item(0, tool_result("call_x", "read", Some("src/x.rs"), big_rust_source()))
+        .unwrap();
+
+    // 1. A *shallow* overlay for `b`, recorded at `b` itself (earliest in WAL order).
+    let mut shallow = journal.active_transcript();
+    shallow[1] = stub("ev-shallow");
+    journal
+        .sync_projected_transcript(&shallow, &[link_for("ev-shallow", 1, "call_x")])
+        .unwrap();
+
+    // 2. Append `c`, then a *deeper* overlay for `b` recorded at `c`.
+    let c = journal
+        .append_item(0, TranscriptItem::User(UserMessage { content: "c".into() }))
+        .unwrap();
+    let mut deep = journal.active_transcript();
+    deep[1] = stub("ev-deep");
+    journal
+        .sync_projected_transcript(&deep, &[link_for("ev-deep", 1, "call_x")])
+        .unwrap();
+    let wal_path = journal.path().to_path_buf();
+    drop(journal);
+
+    // Re-select the deepest leaf: both overlays are on the active path, and the deeper one must win.
+    let mut reopened = SessionJournal::open(&wal_path).unwrap();
+    reopened.fork_at(&c).unwrap();
+    assert_eq!(reopened.active_entries().len(), 3);
+    let links = reopened.evidence_links();
+    assert_eq!(links.len(), 1, "one link per entry: {:?}", links);
+    assert_eq!(
+        links[0].source_entry_id, "ev-deep",
+        "the deepest overlay must win regardless of WAL append order: {:?}",
+        links
+    );
+    assert!(reopened
+        .active_transcript()
+        .iter()
+        .any(|item| matches!(item, TranscriptItem::ToolResult(tr) if tr.content.contains("ev-deep"))));
+
+    // Re-selecting the shallower leaf exposes only the shallow overlay.
+    reopened.fork_at(&b).unwrap();
+    assert_eq!(reopened.active_entries().len(), 2);
+    let shallow_links = reopened.evidence_links();
+    assert_eq!(shallow_links.len(), 1, "{:?}", shallow_links);
+    assert_eq!(shallow_links[0].source_entry_id, "ev-shallow");
+    let _ = (a, b, root);
 }
