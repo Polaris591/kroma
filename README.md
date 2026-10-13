@@ -31,7 +31,7 @@ directory. For a one-off task: `kroma --task "add tests for the parser"`.
 
 | Command | Description |
 | --- | --- |
-| `kroma` / `kroma repl` / `kroma tui` | Interactive multi-turn terminal REPL/TUI |
+| `kroma` / `kroma repl` / `kroma tui` | Interactive multi-turn terminal REPL/TUI (`/help`, `/status`, `/graph`, `/model`, `/undo`, `/revisions`, `/skills`, `/fork`) |
 | `kroma run --task <TASK>` | Headless single-run mode (default; `--output-format jsonl` for CI) |
 | `kroma acp` | JSON-RPC 2.0 Agent Client Protocol server over stdio (stdout stays pure JSON-RPC) |
 | `kroma serve --listen 127.0.0.1:7878` | JSON-RPC 2.0 daemon over loopback TCP or a `0600` Unix socket |
@@ -46,7 +46,7 @@ Kroma reads configuration from environment variables (and, for scripts, from the
 | `KROMA_API_KEY` | Provider API key (stripped from child shell environments) |
 | `KROMA_BASE_URL` | OpenAI-compatible base URL (HTTPS required for remote hosts) |
 | `KROMA_MODEL` | Model identifier |
-| `KROMA_PROTOCOL` | Provider protocol: `auto` \| `chat-completions` \| `anthropic-messages` \| `openai-responses` |
+| `KROMA_PROTOCOL` | Provider protocol fallback when `--protocol` is not set: `auto` \| `chat-completions` \| `anthropic-messages` \| `openai-responses` |
 | `KROMA_REASONING_EFFORT` | Reasoning effort fallback when `--reasoning-effort` is not set |
 | `KROMA_VERIFY_COMMAND` | Completion-check command, e.g. `cargo test --workspace` |
 | `KROMA_VERIFY_TIMEOUT_SECS` | Completion-check timeout (default 180) |
@@ -67,7 +67,7 @@ Kroma reads configuration from environment variables (and, for scripts, from the
   attribution with zero automatic rollback.
 - **Controlled subagents** — read-only `Scout` and isolated-worktree `Worker` agents with three-way
   baseline-aware merge conflict detection and post-merge completion verification.
-- **Symbol graph navigation** — cross-file `RepoGraph` with personalized PageRank (`code_graph`).
+- **Symbol graph navigation** — cross-file `RepoGraph` with personalized PageRank (`code_graph` tool, `/graph` REPL command).
 - **Multimodal read** — PNG/JPEG/GIF/WebP images are decoded into vision model content blocks.
 
 ## Development

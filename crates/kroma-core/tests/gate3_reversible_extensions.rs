@@ -22,7 +22,7 @@ use kroma_core::extensions::{
     CustomToolContext, CustomToolHandler, ExtensionError, ExtensionManifest,
     ExtensionTrustLevel, HookContext, HookEngine, HookError, HookEvent, ObserverHook, PolicyHook,
     PolicyHookDecision, ScopedExtension, ScopedToolDefinition, SkillEntry, SubtreeContextTracker,
-    EXTENSION_API_VERSION, SUBTREE_DOC_MAX_BYTES, SUBTREE_TOTAL_MAX_BYTES,
+    EXTENSION_API_VERSION, RESERVED_KERNEL_TOOLS, SUBTREE_DOC_MAX_BYTES, SUBTREE_TOTAL_MAX_BYTES,
 };
 use kroma_core::messages::{
     AssistantTurn, FinishReason, ToolCall, ToolOutcome, ToolResultMeta, TranscriptItem,
@@ -409,7 +409,19 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
     filtered.unregister_extension(&filtered_id).unwrap();
 
     // Reserved kernel tools cannot be shadowed, and a rejected mount is a no-op.
-    for reserved in ["read", "bash", "write", "activate_skill", "recall_evidence"] {
+    // `code_graph` is a kernel tool (added in v1.2.0) and must stay unshadowable too.
+    assert!(
+        RESERVED_KERNEL_TOOLS.contains(&"code_graph"),
+        "code_graph must be reserved so an extension cannot shadow the kernel symbol-graph tool"
+    );
+    for reserved in [
+        "read",
+        "bash",
+        "write",
+        "activate_skill",
+        "recall_evidence",
+        "code_graph",
+    ] {
         let err = registry
             .register_extension(
                 ScopedExtension::new(manifest("shadow"))

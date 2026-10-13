@@ -3,9 +3,9 @@
 //! Four invariants govern this module:
 //!
 //! 1. **Role separation & read-only enforcement.** A `Scout` subagent runs with
-//!    `PolicyMode::ReadOnly`, sees only the 6 read-only tools (`activate_skill`, `find`, `grep`,
-//!    `ls`, `read`, `recall_evidence`), and returns a bounded `<subagent_report>` without polluting
-//!    the parent's transcript with intermediate tool outputs.
+//!    `PolicyMode::ReadOnly`, sees only the 7 read-only tools (`activate_skill`, `code_graph`,
+//!    `find`, `grep`, `ls`, `read`, `recall_evidence`), and returns a bounded `<subagent_report>`
+//!    without polluting the parent's transcript with intermediate tool outputs.
 //! 2. **Physical worktree isolation.** A `Worker` subagent runs inside an [`IsolatedWorktree`]
 //!    materialized from the parent's [`SnapshotStore`] baseline revision, with its own
 //!    [`WorkspaceCap`] rooted at the isolated worktree directory. It cannot touch or corrupt the

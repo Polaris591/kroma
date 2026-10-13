@@ -1,7 +1,7 @@
 //! Workspace revision snapshots, three-state restore, and crash-safe restore journaling.
 //!
 //! Gate 1 of the v1.0 blueprint: bind workspace file versions to the session WAL so an agent turn
-//! can be rewound without ever silently clobbering work the user did outside the kroma.
+//! can be rewound without ever silently clobbering work the user did outside Kroma.
 //!
 //! Storage is a manifest + content-addressed blob store kept *outside* the workspace tree. The
 //! blueprint prefers Git objects first, but a self-contained CAS avoids requiring `git` and avoids

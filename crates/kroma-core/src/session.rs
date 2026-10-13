@@ -1,6 +1,6 @@
 //! Append-only, hash-chained session WAL with branchable transcript history.
 //!
-//! This persists the exact structured provider payloads exposed by the kroma (including
+//! This persists the exact structured provider payloads exposed by Kroma (including
 //! provider reasoning signatures/opaque payloads). It does not promise provider-side KV-cache
 //! hits: those additionally depend on stable wire serialization and provider cache policy.
 

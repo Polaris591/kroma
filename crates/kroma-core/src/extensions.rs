@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 pub const RESERVED_KERNEL_TOOLS: &[&str] = &[
     "activate_skill",
     "bash",
+    "code_graph",
     "edit",
     "find",
     "grep",
