@@ -2698,3 +2698,28 @@ mod tests {
     }
 }
 
+
+#[repr(align(64))]
+struct BionicTlsPad([u8; 64]);
+
+thread_local! {
+    static _BIONIC_TLS_ALIGN_64: BionicTlsPad = const { BionicTlsPad([0; 64]) };
+}
+
+// Reference it in main to prevent dead-code elimination
+#[allow(dead_code)]
+fn _ensure_bionic_tls_aligned() {
+    _BIONIC_TLS_ALIGN_64.with(|pad| {
+        let _ = pad.0[0];
+    });
+}
+
+#[link(name = "ssl")]
+extern "C" {
+    static __kroma_bionic_tls_align_pad: u8;
+}
+
+#[inline(never)]
+fn _touch_bionic_pad() -> u8 {
+    unsafe { std::ptr::read_volatile(&__kroma_bionic_tls_align_pad) }
+}
