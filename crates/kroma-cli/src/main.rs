@@ -4,6 +4,7 @@ use approval_ui::TtyApprovalUi;
 use kroma_core::agent_loop::{ build_runtime_with_registry, AgentRunConfig, AgentRunner };
 use kroma_core::budget::BudgetConfig;
 use kroma_core::completion_gate::{configured_timeout, parse_command_argv, WorkspaceCompletionGate};
+use kroma_core::config_file::{ConfigOverrides, ResolvedConfig};
 use kroma_core::env::{AllowAllGate, ExecutionEnv, LocalHostEnv, SharedCompletionGate};
 use kroma_core::events::{ resolve_default_state_dir, EventLogger, EventPayload };
 use kroma_core::prompt::PromptBuilder;
@@ -83,6 +84,12 @@ pub struct CliArgs {
     /// Gate 7 (`v1.2.0`): wire protocol for the model endpoint
     /// (`auto` | `chat-completions` | `anthropic-messages` | `openai-responses`).
     pub protocol: String,
+    /// `v1.3.0`: named profile from `~/.kroma/config.toml` to activate.
+    pub profile: Option<String>,
+    /// `v1.3.0`: true when `--protocol` was passed explicitly (so it outranks env/config).
+    pub protocol_explicit: bool,
+    /// `v1.3.0`: true when `--max-subagents` was passed explicitly.
+    pub max_subagents_explicit: bool,
 }
 
 impl CliArgs {
@@ -162,7 +169,10 @@ where
     let mut no_predictive_check = false;
     let mut predict_cmd: Option<String> = None;
     let mut max_subagents: usize = kroma_core::subagents::DEFAULT_MAX_SUBAGENT_SPAWNS;
+    let mut max_subagents_explicit = false;
     let mut no_subagents = false;
+    let mut profile: Option<String> = None;
+    let mut protocol_explicit = false;
     let mut output_format = "text".to_string();
     let mut auth_token: Option<String> = std::env::var("KROMA_DAEMON_TOKEN")
         .ok()
@@ -312,6 +322,16 @@ where
                 let parsed = ProviderProtocol::parse(&val)
                     .map_err(|e| e.to_string())?;
                 protocol = parsed.as_str().to_string();
+                protocol_explicit = true;
+            }
+            "--profile" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --profile <NAME>".to_string())?;
+                if val.trim().is_empty() {
+                    return Err("empty value for --profile".to_string());
+                }
+                profile = Some(val);
             }
             "--quiet" | "-q" => {
                 quiet = true;
@@ -404,6 +424,7 @@ where
                 max_subagents = val
                     .parse::<usize>()
                     .map_err(|_| "--max-subagents expects a non-negative integer".to_string())?;
+                max_subagents_explicit = true;
             }
             "--no-subagents" => {
                 no_subagents = true;
@@ -548,6 +569,9 @@ where
         output_format,
         auth_token,
         protocol,
+        profile,
+        protocol_explicit,
+        max_subagents_explicit,
     })
 }
 
@@ -1135,8 +1159,9 @@ Options:\n\
   --policy <MODE>           Host policy: read-only | ask (default: ask)
   --allow-write             Auto-allow workspace file mutations (edit/write)
   --allow-shell             Auto-allow supervised shell commands (bash)
-  --reasoning-effort <LVL>  Reasoning effort level (e.g. low, medium, high)
+  --reasoning-effort <LVL>  Reasoning effort level (e.g. off, low, medium, high, xhigh)
   --protocol <NAME>         Wire protocol: auto | chat-completions | anthropic-messages | openai-responses
+  --profile <NAME>          Activate a [profiles.<name>] entry from ~/.kroma/config.toml
   --quiet, -q               Suppress live progress output on stderr
   --no-stream               Fallback to non-streaming JSON requests
   --strict-log              Fail-closed if diagnostic JSONL event logging fails
@@ -1183,6 +1208,57 @@ Security Notice:
 
 Exit codes:
   0 success, 1 run failure, 2 invalid invocation, 3 restore conflict, 4 restore recovery required."
+}
+
+/// `v1.3.0`: rebuilds the provider client when `/model`, `/thinking` or `/protocol` hot-swaps the
+/// active configuration, so the operator never has to restart `kroma`.
+struct CliProviderFactory {
+    base_url: String,
+    api_key: String,
+    default_model: String,
+    reasoning_effort: Option<String>,
+}
+
+impl kroma_core::surface::ProviderFactory for CliProviderFactory {
+    fn build(
+        &self,
+        model: &str,
+        protocol: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Result<
+        (
+            kroma_core::surface::ProviderSwap,
+            Arc<dyn kroma_core::provider::ModelProvider>,
+        ),
+        String,
+    > {
+        let parsed = ProviderProtocol::parse(protocol).map_err(|e| e.to_string())?;
+        let effective_model = if model.trim().is_empty() {
+            self.default_model.clone()
+        } else {
+            model.trim().to_string()
+        };
+        let settings = ProviderSettings {
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            model: effective_model.clone(),
+            max_retries: 2,
+            reasoning_effort: reasoning_effort
+                .map(|r| r.to_string())
+                .or_else(|| self.reasoning_effort.clone()),
+            protocol: parsed,
+            max_tokens: 0,
+        };
+        let (resolved, provider) =
+            build_provider(&settings).map_err(|e| format!("invalid provider configuration: {}", e))?;
+        Ok((
+            kroma_core::surface::ProviderSwap {
+                protocol: resolved.as_str().to_string(),
+                model: effective_model,
+            },
+            provider,
+        ))
+    }
 }
 
 #[tokio::main]
@@ -1241,41 +1317,83 @@ async fn main() -> ExitCode {
         }
     }
 
-    let api_key = match std::env::var("KROMA_API_KEY") {
-        Ok(k) if !k.trim().is_empty() => k,
-        _ => {
-            eprintln!("error: KROMA_API_KEY environment variable is required");
+    // v1.3.0: layered configuration. Precedence is CLI flags > KROMA_* env vars >
+    // workspace `.kroma.toml` (benign keys only) > `~/.kroma/config.toml`. A workspace file can
+    // never contribute credentials, endpoints, hooks or verification commands.
+    let overrides = ConfigOverrides {
+        profile: cli.profile.clone(),
+        model: None,
+        base_url: None,
+        api_key: None,
+        protocol: if cli.protocol_explicit {
+            Some(cli.protocol.clone())
+        } else {
+            None
+        },
+        reasoning_effort: cli.reasoning_effort.clone(),
+        verify_command: cli.verify_cmd.clone(),
+        max_subagents: if cli.max_subagents_explicit {
+            Some(cli.max_subagents)
+        } else {
+            None
+        },
+    };
+    let resolved_config = match ResolvedConfig::load(&cli.workspace, &overrides) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}", e);
             return ExitCode::from(2);
         }
     };
-    let base_url = std::env::var("KROMA_BASE_URL")
-        .unwrap_or_else(|_| "https://api.openai.com".to_string());
-    let model = std::env::var("KROMA_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-    let reasoning_effort = cli.reasoning_effort.clone().or_else(|| {
-        std::env::var("KROMA_REASONING_EFFORT")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    });
+    if resolved_config.workspace_guard_triggered() && !cli.quiet {
+        eprintln!(
+            "[kroma] ignoring untrusted workspace keys in {}: {}",
+            resolved_config
+                .workspace_config_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| ".kroma.toml".to_string()),
+            resolved_config.rejected_workspace_keys.join(", ")
+        );
+    }
+
+    let api_key = match resolved_config.api_key.clone() {
+        Some(k) if !k.trim().is_empty() => k,
+        _ => {
+            eprintln!(
+                "error: no API key configured; set KROMA_API_KEY, add api_key to ~/.kroma/config.toml, or pass --profile"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let base_url = resolved_config
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "https://api.openai.com".to_string());
+    let model = resolved_config
+        .model
+        .clone()
+        .unwrap_or_else(|| "gpt-4o".to_string());
+    let reasoning_effort = resolved_config.reasoning_effort.clone();
 
     // Gate 7: one settings struct feeds all three wire protocols. `--protocol` / `KROMA_PROTOCOL`
     // override auto-detection from the base URL and model id.
-    let protocol = match std::env::var("KROMA_PROTOCOL") {
-        Ok(raw) if !raw.trim().is_empty() => match ProviderProtocol::parse(&raw) {
+    let protocol = match resolved_config.protocol.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => match ProviderProtocol::parse(raw) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("error: invalid KROMA_PROTOCOL: {}", e);
+                eprintln!("error: invalid protocol '{}': {}", raw, e);
                 return ExitCode::from(2);
             }
         },
-        _ => ProviderProtocol::parse(&cli.protocol).unwrap_or(ProviderProtocol::Auto),
+        _ => ProviderProtocol::Auto,
     };
     let provider_settings = ProviderSettings {
-        base_url,
-        api_key,
-        model,
+        base_url: base_url.clone(),
+        api_key: api_key.clone(),
+        model: model.clone(),
         max_retries: 2,
-        reasoning_effort,
+        reasoning_effort: reasoning_effort.clone(),
         protocol,
         max_tokens: 0,
     };
@@ -1321,10 +1439,19 @@ async fn main() -> ExitCode {
             }
             CliSurface::Headless => ("headless", "stdio"),
         };
+        let provider_factory: Arc<dyn kroma_core::surface::ProviderFactory> =
+            Arc::new(CliProviderFactory {
+                base_url: base_url.clone(),
+                api_key: api_key.clone(),
+                default_model: model.clone(),
+                reasoning_effort: reasoning_effort.clone(),
+            });
         let mut rt_cfg =
             KromaRuntimeConfig::new(cli.workspace.clone(), state_dir.clone(), cli.policy_mode)
                 .with_surface(surface_name, transport_name)
                 .with_auth_token(cli.auth_token.clone())
+                .with_provider_factory(provider_factory)
+                .with_resolved_config(resolved_config.clone())
                 .with_completion_gate(build_completion_gate(gate_choice));
         rt_cfg.budget = budget;
         rt_cfg.stream = !cli.no_stream;
@@ -1336,7 +1463,9 @@ async fn main() -> ExitCode {
         rt_cfg.completion_gate_max_retries = max_gate_retries;
         rt_cfg.predictive_check = !cli.no_predictive_check;
         rt_cfg.subtree_context_enabled = !cli.no_subtree_context;
-        rt_cfg.max_subagents = cli.max_subagents;
+        rt_cfg.max_subagents = resolved_config
+            .max_subagents
+            .unwrap_or(cli.max_subagents);
         rt_cfg.initial_skill = cli.skill.clone();
         if let Some(raw_pred) = cli.predict_cmd.as_deref() {
             if cli.policy_mode != PolicyMode::ReadOnly && !cli.no_predictive_check {

@@ -619,6 +619,11 @@ pub struct KromaRuntimeConfig {
     pub auth_token: Option<String>,
     pub approval_timeout: Duration,
     pub quiet: bool,
+    /// `v1.3.0`: optional factory used by `/model` and `/protocol` to rebuild the provider client
+    /// in place when the active model or wire protocol is hot-swapped.
+    pub provider_factory: Option<Arc<dyn ProviderFactory>>,
+    /// `v1.3.0`: merged layered configuration (`~/.kroma/config.toml` + `.kroma.toml` + env + CLI).
+    pub resolved_config: Option<crate::config_file::ResolvedConfig>,
 }
 
 impl KromaRuntimeConfig {
@@ -650,7 +655,24 @@ impl KromaRuntimeConfig {
             auth_token: None,
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             quiet: false,
+            provider_factory: None,
+            resolved_config: None,
         }
+    }
+
+    /// `v1.3.0`: attach a [`ProviderFactory`] so the active model/protocol can be hot-swapped.
+    pub fn with_provider_factory(mut self, factory: Arc<dyn ProviderFactory>) -> Self {
+        self.provider_factory = Some(factory);
+        self
+    }
+
+    /// `v1.3.0`: attach the merged layered configuration for `/config` inspection.
+    pub fn with_resolved_config(
+        mut self,
+        resolved: crate::config_file::ResolvedConfig,
+    ) -> Self {
+        self.resolved_config = Some(resolved);
+        self
     }
 
     pub fn with_surface(mut self, surface: impl Into<String>, transport: impl Into<String>) -> Self {
@@ -693,11 +715,56 @@ struct SessionStatusSnapshot {
     total_output_tokens: u64,
 }
 
+/// `v1.3.0`: accepted thinking levels for `/thinking`.
+pub const THINKING_LEVELS: &[&str] = &["off", "none", "low", "medium", "high", "xhigh"];
+
+/// Normalize a user-supplied thinking level. `off`/`none`/`clear` disable reasoning.
+pub fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "" | "off" | "none" | "clear" | "disable" | "disabled" => None,
+        other => Some(other.to_string()),
+    }
+}
+
+/// True when `value` looks like a thinking level rather than a model id.
+pub fn looks_like_thinking_level(value: &str) -> bool {
+    THINKING_LEVELS.contains(&value.trim().to_ascii_lowercase().as_str())
+}
+
 type SubscriberCallback = Arc<dyn Fn(&JsonRpcNotification) -> bool + Send + Sync>;
+
+/// `v1.3.0`: the effective model and protocol after a hot-swap, as resolved by the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSwap {
+    /// Concrete wire protocol actually in use (`auto` is resolved by the host).
+    pub protocol: String,
+    /// Effective model id (the host may substitute its configured default when `model` is empty).
+    pub model: String,
+}
+
+/// `v1.3.0`: rebuilds the provider client for a hot-swapped model or wire protocol.
+///
+/// The kernel owns the swap mechanics (locking, cancellation, notification); the host supplies the
+/// credentials and endpoint, so `kroma-core` never has to know how the operator configured them.
+pub trait ProviderFactory: Send + Sync {
+    /// Build a provider for `model` using wire protocol `protocol`
+    /// (`auto` | `chat-completions` | `anthropic-messages` | `openai-responses`) and reasoning
+    /// effort `reasoning_effort` (`None` clears it).
+    ///
+    /// An empty `model` means "keep the host's configured default", which lets `/thinking` and
+    /// `/protocol` work even before any model has been named.
+    fn build(
+        &self,
+        model: &str,
+        protocol: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Result<(ProviderSwap, Arc<dyn ModelProvider>), String>;
+}
 
 struct RuntimeEngineInner {
     config: KromaRuntimeConfig,
-    provider: Arc<dyn ModelProvider>,
+    provider: Mutex<Arc<dyn ModelProvider>>,
     env: Arc<LocalHostEnv>,
     snapshot_store: Arc<SnapshotStore>,
     registry: ToolRegistry,
@@ -712,6 +779,14 @@ struct RuntimeEngineInner {
     next_subscriber_id: std::sync::atomic::AtomicU64,
     subscribers: Mutex<Vec<(u64, SubscriberCallback)>>,
     op_lock: AsyncMutex<()>,
+    /// `v1.3.0`: active model id after any `/model` hot-swap.
+    active_model: Mutex<Option<String>>,
+    /// `v1.3.0`: active wire protocol after any `/protocol` hot-swap.
+    active_protocol: Mutex<Option<String>>,
+    /// `v1.3.0`: active reasoning/thinking effort after any `/thinking` hot-swap (`None` = off).
+    active_reasoning_effort: Mutex<Option<String>>,
+    /// `v1.3.0`: layered configuration view, refreshed by `/config set`.
+    resolved_config: Mutex<Option<crate::config_file::ResolvedConfig>>,
 }
 
 struct InFlightPromptGuard {
@@ -804,9 +879,22 @@ impl RpcDispatcher {
             mounted_extensions.push(id);
         }
 
+        let initial_model = config
+            .resolved_config
+            .as_ref()
+            .and_then(|c| c.model.clone());
+        let initial_protocol = config
+            .resolved_config
+            .as_ref()
+            .and_then(|c| c.protocol.clone());
+        let initial_reasoning = config
+            .resolved_config
+            .as_ref()
+            .and_then(|c| c.reasoning_effort.clone());
+        let initial_resolved = config.resolved_config.clone();
         let inner = Arc::new(RuntimeEngineInner {
             config,
-            provider,
+            provider: Mutex::new(provider),
             env,
             snapshot_store,
             registry,
@@ -821,6 +909,10 @@ impl RpcDispatcher {
             next_subscriber_id: std::sync::atomic::AtomicU64::new(1),
             subscribers: Mutex::new(Vec::new()),
             op_lock: AsyncMutex::new(()),
+            active_model: Mutex::new(initial_model),
+            active_protocol: Mutex::new(initial_protocol),
+            active_reasoning_effort: Mutex::new(initial_reasoning),
+            resolved_config: Mutex::new(initial_resolved),
         });
 
         let weak_inner = Arc::downgrade(&inner);
@@ -1014,6 +1106,20 @@ impl RpcDispatcher {
             "evidence.recall" | "evidence/recall" => self.rpc_evidence_recall(&req.params).await,
             // Gate 7 (v1.2.0): symbol dependency graph + Personalized PageRank navigation.
             "workspace.graph" | "workspace/graph" => self.rpc_workspace_graph(&req.params).await,
+            // v1.3.0: layered configuration + live model/protocol hot-swapping.
+            "config.get" | "config/get" => self.rpc_config_get(&req.params).await,
+            "config.set" | "config/set" | "session.configure" | "session/configure" => {
+                self.rpc_config_set(&req.params).await
+            }
+            // v1.3.0: in-REPL session listing and switching.
+            "sessions.list" | "sessions/list" | "session.list" => {
+                self.rpc_sessions_list().await
+            }
+            "session.resume" | "session/resume" => self.rpc_session_resume(&req.params).await,
+            // v1.3.0: Best-of-N worktree tournament.
+            "session.tournament" | "session/tournament" => {
+                self.rpc_session_tournament(&req.params).await
+            }
             "skills.list" | "skills/list" => self.rpc_skills_list().await,
             "skills.activate" | "skills/activate" => self.rpc_skills_activate(&req.params).await,
             "shutdown" | "acp.shutdown" => self.rpc_shutdown().await,
@@ -1282,7 +1388,7 @@ impl RpcDispatcher {
 
         let mut runner = AgentRunner::new(
             run_cfg,
-            Arc::clone(&self.inner.provider),
+            Arc::clone(&self.inner.provider.lock().unwrap_or_else(|e| e.into_inner())),
             runtime,
             cancel_rx,
         )
@@ -2058,6 +2164,659 @@ impl RpcDispatcher {
         }))
     }
 
+    // -----------------------------------------------------------------------------------------
+    // v1.3.0 — persistent configuration and live model/protocol hot-swapping
+    // -----------------------------------------------------------------------------------------
+
+    /// Current active model id (after any `/model` hot-swap), or `"<unset>"`.
+    pub fn active_model(&self) -> Option<String> {
+        self.inner
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Current active wire protocol name (after any `/protocol` hot-swap).
+    pub fn active_protocol(&self) -> Option<String> {
+        self.inner
+            .active_protocol
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Current active reasoning/thinking effort (`None` means reasoning is off).
+    pub fn active_reasoning_effort(&self) -> Option<String> {
+        self.inner
+            .active_reasoning_effort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// `session.tournament`: run a Best-of-N worktree tournament and merge only the winner.
+    ///
+    /// Each candidate runs in its own isolated worktree, is verified inside that worktree, and is
+    /// ranked deterministically. The parent workspace is only touched when a candidate passed
+    /// verification, and the winning merge is recorded as a single WAL revision so `/undo` reverts
+    /// the whole tournament in one step.
+    async fn rpc_session_tournament(&self, params: &Value) -> Result<Value, JsonRpcError> {
+        if self.inner.in_flight.load(Ordering::SeqCst) {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot run a tournament while a prompt is in flight; cancel or await completion first",
+            ));
+        }
+        let Ok(_guard) = self.inner.op_lock.try_lock() else {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "cannot run a tournament while another session operation is in progress",
+            ));
+        };
+
+        let task = params
+            .get("task")
+            .or_else(|| params.get("prompt"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                JsonRpcError::new(
+                    JSONRPC_INVALID_PARAMS,
+                    "missing non-empty 'task' (or 'prompt') string parameter",
+                )
+            })?
+            .to_string();
+
+        let count = params
+            .get("candidates")
+            .and_then(Value::as_u64)
+            .unwrap_or(3) as usize;
+        if !(crate::subagents::MIN_TOURNAMENT_CANDIDATES
+            ..=crate::subagents::MAX_TOURNAMENT_CANDIDATES)
+            .contains(&count)
+        {
+            return Err(JsonRpcError::new(
+                JSONRPC_INVALID_PARAMS,
+                format!(
+                    "'candidates' must be between {} and {}",
+                    crate::subagents::MIN_TOURNAMENT_CANDIDATES,
+                    crate::subagents::MAX_TOURNAMENT_CANDIDATES
+                ),
+            ));
+        }
+
+        let strategies: Vec<String> = params
+            .get("strategies")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let allowed_write_globs: Option<Vec<String>> = params
+            .get("allowed_paths")
+            .or_else(|| params.get("allowed_write_globs"))
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.to_string())
+                    .collect()
+            });
+        let max_turns = params
+            .get("max_turns")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
+        let timeout_ms = params
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(crate::subagents::DEFAULT_SUBAGENT_TIMEOUT_MS);
+
+        // Candidate strategy hints: distinct by default so the candidates actually diverge.
+        let default_strategies = [
+            "Fix the root cause with the smallest possible change.",
+            "Consider an alternative design and pick the most robust minimal fix.",
+            "Re-derive the failure from first principles before editing.",
+            "Prefer a defensive fix that also adds a regression guard.",
+        ];
+
+        let mut candidates: Vec<crate::subagents::TournamentCandidate> = Vec::with_capacity(count);
+        for index in 0..count {
+            let label = format!("c{}", index + 1);
+            let strategy = strategies
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| default_strategies[index % default_strategies.len()].to_string());
+            let mut spec = crate::subagents::SubagentSpec::worker(format!(
+                "{}\n\n[TOURNAMENT CANDIDATE {} STRATEGY] {}",
+                task,
+                label,
+                strategy
+            ));
+            if let Some(globs) = &allowed_write_globs {
+                spec = spec.with_allowed_write_globs(globs.clone());
+            }
+            if let Some(turns) = max_turns {
+                spec = spec.with_max_turns(turns);
+            }
+            spec = spec.with_timeout_ms(timeout_ms);
+            candidates.push(
+                crate::subagents::TournamentCandidate {
+                    label,
+                    strategy: Some(strategy),
+                    spec,
+                },
+            );
+        }
+
+        let workspace = self.inner.env.workspace().clone();
+        let store = Arc::clone(&self.inner.snapshot_store);
+        let provider = Arc::clone(&self.inner.provider.lock().unwrap_or_else(|e| e.into_inner()));
+        let backend: Arc<dyn crate::subagents::SubagentBackend> =
+            Arc::new(crate::subagents::ProviderSubagentBackend::new(provider));
+
+        let parent_revision_id: Option<RevisionId> = self
+            .inner
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .latest_revision_id
+            .clone()
+            .map(RevisionId::new);
+        let turn = self
+            .inner
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .turn_count;
+
+        // Capture a fresh baseline of the live parent workspace so every candidate forks from the
+        // exact bytes on disk right now (not from a possibly stale earlier revision).
+        let baseline = store
+            .capture_revision(&workspace, parent_revision_id.as_ref(), None, turn)
+            .map_err(|e| {
+                JsonRpcError::new(
+                    JSONRPC_INTERNAL_ERROR,
+                    format!("failed to capture tournament baseline revision: {}", e),
+                )
+            })?;
+        let base_revision = baseline.revision_id.clone();
+
+        let spec = crate::subagents::TournamentSpec {
+            candidates,
+            worktree_base: self.inner.config.state_dir.join("worktrees"),
+            state_base: self.inner.config.state_dir.join("subagents"),
+            allowed_write_globs,
+            budget: self.inner.config.budget.clone(),
+            policy_mode: self.inner.policy_engine.mode(),
+            workspace_skills: self.inner.registry.skills(),
+            predictive_check: self.inner.config.predictive_check,
+            cancel_rx: self.ensure_active_cancel_receiver(),
+            timeout_ms,
+        };
+
+        let outcome = crate::subagents::run_worktree_tournament(
+            spec,
+            &workspace,
+            &store,
+            backend,
+            Some(&base_revision),
+            &self.inner.config.completion_gate,
+        )
+        .await
+        .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
+
+        // Record the winning merge as one WAL revision so `/undo` reverts it atomically.
+        if let Some(rev) = outcome.merged_revision.clone() {
+            if let Ok(mut journal) = SessionJournal::open(&self.session_path()) {
+                let (changed_paths, tracked_file_count) = match store.load_revision(&rev) {
+                    Ok(manifest) => (manifest.changed_paths.clone(), manifest.tracked_files.len()),
+                    Err(_) => (Vec::new(), 0),
+                };
+                if journal
+                    .record_revision_capture(
+                        journal.max_active_turn(),
+                        rev.as_str(),
+                        Some(base_revision.as_str()),
+                        changed_paths,
+                        tracked_file_count,
+                    )
+                    .is_ok()
+                {
+                    self.update_snapshot_from_journal(&journal);
+                }
+            }
+        }
+
+        let note = JsonRpcNotification::new(
+            "kroma/event",
+            json!({
+                "schema_version": crate::events::EVENT_SCHEMA_VERSION,
+                "event": "tournament_completed",
+                "candidates": outcome.scores.len(),
+                "merged_revision": outcome.merged_revision.as_ref().map(|r| r.as_str().to_string()),
+                "winner": outcome.winner.map(|i| outcome.scores[i].label.clone()),
+            }),
+        );
+        Self::broadcast_to_subscribers(&self.inner, note);
+
+        Ok(json!({
+            "session_id": self.session_id(),
+            "candidates": outcome.scores.iter().map(|s| json!({
+                "label": s.label,
+                "status": s.status,
+                "gate_passed": s.gate_passed,
+                "gate_detail": s.gate_detail,
+                "predictive_warnings": s.predictive_warnings,
+                "conflict_free_with_parent": s.conflict_free_with_parent,
+                "files_modified": s.files_modified,
+                "total_changed_lines": s.total_changed_lines,
+                "turns_used": s.turns_used,
+                "winner": s.winner,
+            })).collect::<Vec<Value>>(),
+            "winner": outcome.winner.map(|i| outcome.scores[i].label.clone()),
+            "merged_revision": outcome.merged_revision.as_ref().map(|r| r.as_str().to_string()),
+            "parent_untouched": outcome.parent_untouched(),
+            "all_worktrees_cleaned_up": outcome.all_worktrees_cleaned_up,
+            "report": outcome.render_report(),
+        }))
+    }
+
+    /// `config.get`: redacted layered configuration plus the active model/protocol.
+    async fn rpc_config_get(&self, _params: &Value) -> Result<Value, JsonRpcError> {
+        let resolved = self
+            .inner
+            .resolved_config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let active_model = self.active_model();
+        let active_protocol = self.active_protocol();
+        let hot_swap_available = self.inner.config.provider_factory.is_some();
+
+        let (summary, rejected, user_path, workspace_path) = match &resolved {
+            Some(cfg) => (
+                cfg.redacted_summary(),
+                cfg.rejected_workspace_keys.clone(),
+                cfg.user_config_path
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
+                cfg.workspace_config_path
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
+            ),
+            // Surfaces started without layered configuration still report the live state so
+            // `/config show` is never blank.
+            None => (
+                format!(
+                    "profile:          <none>\nmodel:            {}\nprotocol:         {}\nreasoning_effort: {}\nnote:             no ~/.kroma/config.toml or .kroma.toml was loaded\n",
+                    active_model.clone().unwrap_or_else(|| "<unset>".to_string()),
+                    active_protocol.clone().unwrap_or_else(|| "<unset>".to_string()),
+                    self.active_reasoning_effort()
+                        .unwrap_or_else(|| "off".to_string()),
+                ),
+                Vec::new(),
+                None,
+                None,
+            ),
+        };
+
+        Ok(json!({
+            "active_model": active_model,
+            "active_protocol": active_protocol,
+            "hot_swap_available": hot_swap_available,
+            "summary": summary,
+            "rejected_workspace_keys": rejected,
+            "workspace_guard_triggered": !rejected.is_empty(),
+            "user_config_path": user_path,
+            "workspace_config_path": workspace_path,
+            "api_key": if resolved.as_ref().and_then(|c| c.api_key.as_ref()).is_some() {
+                crate::config_file::REDACTED_API_KEY
+            } else {
+                "<unset>"
+            },
+        }))
+    }
+
+    /// `config.set` / `session.configure`: hot-swap the active model, wire protocol and/or profile
+    /// without restarting the session, optionally persisting the change to `~/.kroma/config.toml`.
+    async fn rpc_config_set(&self, params: &Value) -> Result<Value, JsonRpcError> {
+        let model = params
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let protocol = params
+            .get("protocol")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let profile = params
+            .get("profile")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        // `reasoning_effort` may be an explicit level, or `off`/`none`/`clear` to disable it.
+        let reasoning_raw = params
+            .get("reasoning_effort")
+            .or_else(|| params.get("thinking"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let save = params.get("save").and_then(Value::as_bool).unwrap_or(false);
+
+        if model.is_none()
+            && protocol.is_none()
+            && profile.is_none()
+            && reasoning_raw.is_none()
+        {
+            return Err(JsonRpcError::new(
+                JSONRPC_INVALID_PARAMS,
+                "config.set requires at least one of 'model', 'protocol', 'reasoning_effort' or 'profile'"
+                    .to_string(),
+            ));
+        }
+
+        let mut new_model = self.active_model();
+        let mut new_protocol = self.active_protocol();
+        let mut new_reasoning = self.active_reasoning_effort();
+
+        if let Some(name) = &profile {
+            let user = crate::config_file::KromaConfigFile::load_user_global()
+                .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
+            let entry = user.profiles.get(name).ok_or_else(|| {
+                let known: Vec<&str> = user.profiles.keys().map(String::as_str).collect();
+                JsonRpcError::new(
+                    JSONRPC_INVALID_PARAMS,
+                    format!(
+                        "unknown profile '{}'; available: {}",
+                        name,
+                        if known.is_empty() {
+                            "<none>".to_string()
+                        } else {
+                            known.join(", ")
+                        }
+                    ),
+                )
+            })?;
+            if let Some(m) = &entry.model {
+                new_model = Some(m.clone());
+            }
+            if let Some(p) = &entry.protocol {
+                new_protocol = Some(p.clone());
+            }
+            if let Some(r) = &entry.reasoning_effort {
+                new_reasoning = Some(r.clone());
+            }
+        }
+        if let Some(m) = &model {
+            new_model = Some(m.clone());
+        }
+        if let Some(p) = &protocol {
+            new_protocol = Some(p.clone());
+        }
+        if let Some(raw) = &reasoning_raw {
+            new_reasoning = normalize_reasoning_effort(raw);
+        }
+
+        let factory = self.inner.config.provider_factory.as_ref().ok_or_else(|| {
+            JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "this surface was started without a provider factory; restart with --model/--protocol"
+                    .to_string(),
+            )
+        })?;
+        let requested_model = new_model.clone().unwrap_or_default();
+        let effective_protocol = new_protocol.clone().unwrap_or_else(|| "auto".to_string());
+
+        let (swap, provider) = factory
+            .build(
+                &requested_model,
+                &effective_protocol,
+                new_reasoning.as_deref(),
+            )
+            .map_err(|e| JsonRpcError::new(JSONRPC_INVALID_PARAMS, e))?;
+        let resolved_protocol = swap.protocol.clone();
+        let effective_model = swap.model.clone();
+        if effective_model.trim().is_empty() {
+            return Err(JsonRpcError::new(
+                JSONRPC_INVALID_PARAMS,
+                "no model is configured; pass 'model' or set model in ~/.kroma/config.toml"
+                    .to_string(),
+            ));
+        }
+
+        {
+            let mut guard = self
+                .inner
+                .provider
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = provider;
+        }
+        *self
+            .inner
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(effective_model.clone());
+        *self
+            .inner
+            .active_protocol
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(resolved_protocol.clone());
+        *self
+            .inner
+            .active_reasoning_effort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = new_reasoning.clone();
+        {
+            let mut guard = self
+                .inner
+                .resolved_config
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(cfg) = guard.as_mut() {
+                cfg.model = Some(effective_model.clone());
+                cfg.protocol = Some(resolved_protocol.clone());
+                cfg.reasoning_effort = new_reasoning.clone();
+                if let Some(name) = &profile {
+                    cfg.active_profile = Some(name.clone());
+                }
+            }
+        }
+
+        let mut persisted_to = None;
+        if save {
+            let mut file = crate::config_file::KromaConfigFile::load_user_global()
+                .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
+            if model.is_some() || profile.is_some() {
+                file.model = Some(effective_model.clone());
+            }
+            if protocol.is_some() {
+                file.protocol = Some(resolved_protocol.clone());
+            }
+            if reasoning_raw.is_some() {
+                file.reasoning_effort = new_reasoning.clone();
+            }
+            if let Some(name) = &profile {
+                file.default_profile = Some(name.clone());
+            }
+            let path = file
+                .save_user_global()
+                .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
+            persisted_to = Some(path.display().to_string());
+        }
+
+        let note = JsonRpcNotification::new(
+            "kroma/event",
+            json!({
+                "schema_version": crate::events::EVENT_SCHEMA_VERSION,
+                "event": "config_updated",
+                "model": effective_model,
+                "protocol": resolved_protocol,
+                "reasoning_effort": new_reasoning,
+                "persisted_to": persisted_to,
+            }),
+        );
+        Self::broadcast_to_subscribers(&self.inner, note);
+
+        Ok(json!({
+            "model": effective_model,
+            "protocol": resolved_protocol,
+            "reasoning_effort": new_reasoning,
+            "profile": profile,
+            "persisted_to": persisted_to,
+        }))
+    }
+
+    /// `sessions.list`: recent session WALs in the state directory, newest first.
+    async fn rpc_sessions_list(&self) -> Result<Value, JsonRpcError> {
+        let sessions_dir = self.inner.config.state_dir.join("sessions");
+        let active = self
+            .inner
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .session_id
+            .clone();
+        let mut out: Vec<Value> = Vec::new();
+        let entries = match std::fs::read_dir(&sessions_dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(json!({ "sessions": [], "active_session_id": active })),
+        };
+        let mut candidates: Vec<(u128, PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !name.ends_with(".wal.jsonl") {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            candidates.push((modified, path));
+        }
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        for (modified, path) in candidates.into_iter().take(20) {
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let id = file_name.trim_end_matches(".wal.jsonl").to_string();
+            let (entries, turns) = match SessionJournal::open(&path) {
+                Ok(journal) => (
+                    journal.active_transcript().len(),
+                    journal.max_active_turn(),
+                ),
+                Err(_) => (0, 0),
+            };
+            out.push(json!({
+                "session_id": id,
+                "path": path.display().to_string(),
+                "entries": entries,
+                "turns": turns,
+                "modified_ms": modified,
+                "active": id == active,
+            }));
+        }
+        Ok(json!({ "sessions": out, "active_session_id": active }))
+    }
+
+    /// `session.resume`: attach an existing session WAL (by full id, unique prefix, or `latest`).
+    async fn rpc_session_resume(&self, params: &Value) -> Result<Value, JsonRpcError> {
+        let requested = params
+            .get("session_id")
+            .or_else(|| params.get("id"))
+            .or_else(|| params.get("resume"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("latest");
+
+        let sessions_dir = self.inner.config.state_dir.join("sessions");
+        let target = self.resolve_session_path(&sessions_dir, requested)?;
+        let resume = target.display().to_string();
+        self.rpc_session_new(&json!({ "resume": resume })).await
+    }
+
+    /// Resolve `latest`, an exact session id, or a unique id prefix to a session WAL path.
+    fn resolve_session_path(
+        &self,
+        sessions_dir: &Path,
+        requested: &str,
+    ) -> Result<PathBuf, JsonRpcError> {
+        let mut candidates: Vec<(u128, PathBuf, String)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(sessions_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                if !name.ends_with(".wal.jsonl") {
+                    continue;
+                }
+                let id = name.trim_end_matches(".wal.jsonl").to_string();
+                let modified = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                candidates.push((modified, path, id));
+            }
+        }
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+        if requested.eq_ignore_ascii_case("latest") {
+            return candidates
+                .into_iter()
+                .next()
+                .map(|(_, path, _)| path)
+                .ok_or_else(|| {
+                    JsonRpcError::new(
+                        JSONRPC_INVALID_PARAMS,
+                        "no sessions found to resume".to_string(),
+                    )
+                });
+        }
+
+        let matches: Vec<PathBuf> = candidates
+            .into_iter()
+            .filter(|(_, _, id)| id == requested || id.starts_with(requested))
+            .map(|(_, path, _)| path)
+            .collect();
+        match matches.len() {
+            0 => Err(JsonRpcError::new(
+                JSONRPC_INVALID_PARAMS,
+                format!("no session matches '{}'", requested),
+            )),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            n => Err(JsonRpcError::new(
+                JSONRPC_INVALID_PARAMS,
+                format!("session prefix '{}' is ambiguous ({} matches)", requested, n),
+            )),
+        }
+    }
+
     async fn rpc_shutdown(&self) -> Result<Value, JsonRpcError> {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         let _ = self.rpc_session_cancel().await;
@@ -2711,21 +3470,536 @@ impl InteractiveRepl {
             .unwrap_or(0.0)
             * 100.0;
 
+        let active_model = self
+            .dispatcher
+            .active_model()
+            .unwrap_or_else(|| "<unset>".to_string());
+        let active_thinking = self
+            .dispatcher
+            .active_reasoning_effort()
+            .unwrap_or_else(|| "off".to_string());
+        let active_protocol = self
+            .dispatcher
+            .active_protocol()
+            .unwrap_or_else(|| "auto".to_string());
+
         format!(
             "=== Kroma v{} Interactive REPL ===\n\
              workspace: {} | policy: {} | session: {}\n\
+             model: {} | thinking: {} | protocol: {}\n\
              turns: {} | revision: {} | tokens: in={} (cached={}, hit={:.1}%)\n\
-             Type a task prompt or /help for commands (/status, /revisions, /undo, /skills, /graph, /fork, /clear, /quit).\n",
+             Type a task prompt, or /help for all commands.\n\
+             Key commands: /model  /thinking  /resume  /sessions  /new  /undo  /revisions  /graph  /race  /config  /status  /help  /quit\n",
             crate::version(),
             sanitize_terminal_text(ws),
             sanitize_terminal_text(policy),
             sanitize_terminal_text(session_id),
+            sanitize_terminal_text(&active_model),
+            sanitize_terminal_text(&active_thinking),
+            sanitize_terminal_text(&active_protocol),
             turns,
             sanitize_terminal_text(rev),
             in_tok,
             cached_tok,
             hit_pct,
         )
+    }
+
+    /// Shared handler for `/model`, `/thinking`, `/protocol` and `/config`.
+    async fn repl_config_command(
+        &self,
+        kind: &str,
+        rest: &[&str],
+    ) -> Result<ReplStepOutcome, String> {
+        let save = rest.iter().any(|a| *a == "--save");
+        let args: Vec<&str> = rest.iter().copied().filter(|a| *a != "--save").collect();
+        let out = |text: String| {
+            Ok(ReplStepOutcome {
+                output: text,
+                should_exit: false,
+            })
+        };
+
+        match kind {
+            "model" => {
+                if args.is_empty() {
+                    let resp = self
+                        .dispatcher
+                        .handle_request(JsonRpcRequest::new(1, "config.get", json!({})))
+                        .await;
+                    let val = resp.result.unwrap_or_else(|| json!({}));
+                    let active = val
+                        .get("active_model")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unset>");
+                    return out(format!(
+                        "model: {}\n",
+                        sanitize_terminal_text(active)
+                    ));
+                }
+                let requested = args[0];
+                // Mix-up guard: `/model high` is almost certainly a `/thinking` invocation.
+                if looks_like_thinking_level(requested) {
+                    return out(format!(
+                        "hint: '{}' is a thinking level, not a model id.\n  did you mean: /thinking {} [--save]\n",
+                        sanitize_terminal_text(requested),
+                        sanitize_terminal_text(requested)
+                    ));
+                }
+                let resp = self
+                    .dispatcher
+                    .handle_request(JsonRpcRequest::new(
+                        1,
+                        "config.set",
+                        json!({ "model": requested, "save": save }),
+                    ))
+                    .await;
+                match resp.result {
+                    Some(val) => {
+                        let model = val.get("model").and_then(Value::as_str).unwrap_or("-");
+                        let protocol = val.get("protocol").and_then(Value::as_str).unwrap_or("-");
+                        let persisted = val.get("persisted_to").and_then(Value::as_str);
+                        out(format!(
+                            "model -> {} (protocol: {}){}\n",
+                            sanitize_terminal_text(model),
+                            sanitize_terminal_text(protocol),
+                            persisted
+                                .map(|p| format!(" [saved to {}]", sanitize_terminal_text(p)))
+                                .unwrap_or_default()
+                        ))
+                    }
+                    None => out(format!(
+                        "error: {}\n",
+                        sanitize_terminal_text(
+                            &resp
+                                .error
+                                .map(|e| e.message)
+                                .unwrap_or_else(|| "config.set failed".to_string())
+                        )
+                    )),
+                }
+            }
+            "thinking" => {
+                if args.is_empty() {
+                    let resp = self
+                        .dispatcher
+                        .handle_request(JsonRpcRequest::new(1, "config.get", json!({})))
+                        .await;
+                    let val = resp.result.unwrap_or_else(|| json!({}));
+                    let level = val
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .and_then(|summary| {
+                            summary.lines().find_map(|line| {
+                                line.strip_prefix("reasoning_effort:")
+                                    .map(|v| v.trim().to_string())
+                            })
+                        })
+                        .unwrap_or_else(|| "<unset>".to_string());
+                    return out(format!(
+                        "thinking: {}\n",
+                        sanitize_terminal_text(&level)
+                    ));
+                }
+                let requested = args[0];
+                if !looks_like_thinking_level(requested) {
+                    return out(format!(
+                        "hint: '{}' is not a thinking level (off|low|medium|high|xhigh).\n  did you mean: /model {} [--save]\n",
+                        sanitize_terminal_text(requested),
+                        sanitize_terminal_text(requested)
+                    ));
+                }
+                let resp = self
+                    .dispatcher
+                    .handle_request(JsonRpcRequest::new(
+                        1,
+                        "config.set",
+                        json!({ "reasoning_effort": requested, "save": save }),
+                    ))
+                    .await;
+                match resp.result {
+                    Some(val) => {
+                        let level = val
+                            .get("reasoning_effort")
+                            .and_then(Value::as_str)
+                            .unwrap_or("off");
+                        let persisted = val.get("persisted_to").and_then(Value::as_str);
+                        out(format!(
+                            "thinking -> {}{}\n",
+                            sanitize_terminal_text(level),
+                            persisted
+                                .map(|p| format!(" [saved to {}]", sanitize_terminal_text(p)))
+                                .unwrap_or_default()
+                        ))
+                    }
+                    None => out(format!(
+                        "error: {}\n",
+                        sanitize_terminal_text(
+                            &resp
+                                .error
+                                .map(|e| e.message)
+                                .unwrap_or_else(|| "config.set failed".to_string())
+                        )
+                    )),
+                }
+            }
+            "protocol" => {
+                if args.is_empty() {
+                    let resp = self
+                        .dispatcher
+                        .handle_request(JsonRpcRequest::new(1, "config.get", json!({})))
+                        .await;
+                    let val = resp.result.unwrap_or_else(|| json!({}));
+                    let active = val
+                        .get("active_protocol")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unset>");
+                    return out(format!(
+                        "protocol: {}\n",
+                        sanitize_terminal_text(active)
+                    ));
+                }
+                let resp = self
+                    .dispatcher
+                    .handle_request(JsonRpcRequest::new(
+                        1,
+                        "config.set",
+                        json!({ "protocol": args[0], "save": save }),
+                    ))
+                    .await;
+                match resp.result {
+                    Some(val) => {
+                        let protocol = val.get("protocol").and_then(Value::as_str).unwrap_or("-");
+                        out(format!(
+                            "protocol -> {}\n",
+                            sanitize_terminal_text(protocol)
+                        ))
+                    }
+                    None => out(format!(
+                        "error: {}\n",
+                        sanitize_terminal_text(
+                            &resp
+                                .error
+                                .map(|e| e.message)
+                                .unwrap_or_else(|| "config.set failed".to_string())
+                        )
+                    )),
+                }
+            }
+            _ => {
+                // `/config [show | set <key> <value> | profile <name>]`
+                let sub = args.first().copied().unwrap_or("show");
+                match sub {
+                    "show" => {
+                        let resp = self
+                            .dispatcher
+                            .handle_request(JsonRpcRequest::new(1, "config.get", json!({})))
+                            .await;
+                        let val = resp.result.unwrap_or_else(|| json!({}));
+                        let summary = val
+                            .get("summary")
+                            .and_then(Value::as_str)
+                            .unwrap_or("<no layered configuration>");
+                        let guard = val
+                            .get("rejected_workspace_keys")
+                            .and_then(Value::as_array)
+                            .map(|list| {
+                                list.iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default();
+                        let mut text = sanitize_terminal_text(summary);
+                        if !guard.is_empty() {
+                            text.push_str(&format!(
+                                "guard: ignored untrusted workspace keys: {}\n",
+                                sanitize_terminal_text(&guard)
+                            ));
+                        }
+                        out(text)
+                    }
+                    "set" => {
+                        if args.len() < 3 {
+                            return out(
+                                "usage: /config set <key> <value>\n  keys: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents\n"
+                                    .to_string(),
+                            );
+                        }
+                        let key = args[1];
+                        let value = args[2..].join(" ");
+                        let mut payload = json!({ "save": true });
+                        if let Value::Object(ref mut map) = payload {
+                            map.insert(key.to_string(), Value::String(value.clone()));
+                        }
+                        let resp = self
+                            .dispatcher
+                            .handle_request(JsonRpcRequest::new(1, "config.set", payload))
+                            .await;
+                        match resp.result {
+                            Some(val) => out(format!(
+                                "{} = {} [saved to {}]\n",
+                                sanitize_terminal_text(key),
+                                sanitize_terminal_text(&value),
+                                sanitize_terminal_text(
+                                    val.get("persisted_to")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("<unknown>")
+                                )
+                            )),
+                            None => out(format!(
+                                "error: {}\n",
+                                sanitize_terminal_text(
+                                    &resp
+                                        .error
+                                        .map(|e| e.message)
+                                        .unwrap_or_else(|| "config.set failed".to_string())
+                                )
+                            )),
+                        }
+                    }
+                    "profile" => {
+                        if args.len() < 2 {
+                            return out("usage: /config profile <name>\n".to_string());
+                        }
+                        let resp = self
+                            .dispatcher
+                            .handle_request(JsonRpcRequest::new(
+                                1,
+                                "config.set",
+                                json!({ "profile": args[1], "save": save }),
+                            ))
+                            .await;
+                        match resp.result {
+                            Some(val) => out(format!(
+                                "profile -> {} (model: {}, protocol: {})\n",
+                                sanitize_terminal_text(args[1]),
+                                sanitize_terminal_text(
+                                    val.get("model").and_then(Value::as_str).unwrap_or("-")
+                                ),
+                                sanitize_terminal_text(
+                                    val.get("protocol").and_then(Value::as_str).unwrap_or("-")
+                                ),
+                            )),
+                            None => out(format!(
+                                "error: {}\n",
+                                sanitize_terminal_text(
+                                    &resp
+                                        .error
+                                        .map(|e| e.message)
+                                        .unwrap_or_else(|| "config.set failed".to_string())
+                                )
+                            )),
+                        }
+                    }
+                    other => out(format!(
+                        "unknown /config subcommand '{}'; use show | set <key> <value> | profile <name>\n",
+                        sanitize_terminal_text(other)
+                    )),
+                }
+            }
+        }
+    }
+
+    /// `/sessions`: list recent session WALs.
+    async fn repl_sessions_command(&self) -> Result<ReplStepOutcome, String> {
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "sessions.list", json!({})))
+            .await;
+        let val = match resp.result {
+            Some(v) => v,
+            None => {
+                return Ok(ReplStepOutcome {
+                    output: format!(
+                        "error: {}\n",
+                        sanitize_terminal_text(
+                            &resp
+                                .error
+                                .map(|e| e.message)
+                                .unwrap_or_else(|| "sessions.list failed".to_string())
+                        )
+                    ),
+                    should_exit: false,
+                })
+            }
+        };
+        let sessions = val
+            .get("sessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if sessions.is_empty() {
+            return Ok(ReplStepOutcome {
+                output: "no sessions found.\n".to_string(),
+                should_exit: false,
+            });
+        }
+        let mut text = format!("sessions ({}):\n", sessions.len());
+        for entry in sessions {
+            let id = entry.get("session_id").and_then(Value::as_str).unwrap_or("-");
+            let entries = entry.get("entries").and_then(Value::as_u64).unwrap_or(0);
+            let turns = entry.get("turns").and_then(Value::as_u64).unwrap_or(0);
+            let active = entry.get("active").and_then(Value::as_bool).unwrap_or(false);
+            text.push_str(&format!(
+                "  {}{}  entries={} turns={}\n",
+                if active { "* " } else { "  " },
+                sanitize_terminal_text(id),
+                entries,
+                turns
+            ));
+        }
+        text.push_str("use /resume <id|latest> to attach one.\n");
+        Ok(ReplStepOutcome {
+            output: text,
+            should_exit: false,
+        })
+    }
+
+    /// `/resume [<latest|id>]`: attach an existing session WAL.
+    async fn repl_resume_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let target = rest.first().copied().unwrap_or("latest");
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "session.resume",
+                json!({ "session_id": target }),
+            ))
+            .await;
+        match resp.result {
+            Some(val) => {
+                let sid = val.get("session_id").and_then(Value::as_str).unwrap_or("-");
+                let turns = val.get("turn_count").and_then(Value::as_u64).unwrap_or(0);
+                Ok(ReplStepOutcome {
+                    output: format!(
+                        "resumed session {} ({} turns restored)\n",
+                        sanitize_terminal_text(sid),
+                        turns
+                    ),
+                    should_exit: false,
+                })
+            }
+            None => Ok(ReplStepOutcome {
+                output: format!(
+                    "error: {}\n",
+                    sanitize_terminal_text(
+                        &resp
+                            .error
+                            .map(|e| e.message)
+                            .unwrap_or_else(|| "session.resume failed".to_string())
+                    )
+                ),
+                should_exit: false,
+            }),
+        }
+    }
+
+    /// `/new`: start a fresh session without exiting the REPL.
+    async fn repl_new_session_command(&self) -> Result<ReplStepOutcome, String> {
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "session.new", json!({})))
+            .await;
+        let sid = resp
+            .result
+            .and_then(|v| v.get("session_id").and_then(Value::as_str).map(String::from))
+            .unwrap_or_default();
+        Ok(ReplStepOutcome {
+            output: format!("started new session {}\n", sanitize_terminal_text(&sid)),
+            should_exit: false,
+        })
+    }
+
+    /// `/race <N> <task>`: Best-of-N worktree tournament.
+    async fn repl_race_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        if rest.len() < 2 {
+            return Ok(ReplStepOutcome {
+                output: "usage: /race <N> <task>   (N between 2 and 4)\n".to_string(),
+                should_exit: false,
+            });
+        }
+        let count = match rest[0].parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                return Ok(ReplStepOutcome {
+                    output: format!(
+                        "usage: /race <N> <task>   ('{}' is not a number)\n",
+                        sanitize_terminal_text(rest[0])
+                    ),
+                    should_exit: false,
+                })
+            }
+        };
+        let task = rest[1..].join(" ");
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "session.tournament",
+                json!({ "candidates": count, "task": task }),
+            ))
+            .await;
+        match resp.result {
+            Some(val) => {
+                let winner = val
+                    .get("winner")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<none>");
+                let merged = val
+                    .get("merged_revision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<none>");
+                let cleaned = val
+                    .get("all_worktrees_cleaned_up")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut text = format!(
+                    "tournament complete: winner={} merged_revision={} worktrees_cleaned_up={}\n",
+                    sanitize_terminal_text(winner),
+                    sanitize_terminal_text(merged),
+                    cleaned
+                );
+                if let Some(list) = val.get("candidates").and_then(Value::as_array) {
+                    for c in list {
+                        text.push_str(&format!(
+                            "  {} status={} gate_passed={} warnings={} changed_lines={} turns={}{}\n",
+                            sanitize_terminal_text(
+                                c.get("label").and_then(Value::as_str).unwrap_or("-")
+                            ),
+                            sanitize_terminal_text(
+                                c.get("status").and_then(Value::as_str).unwrap_or("-")
+                            ),
+                            c.get("gate_passed").and_then(Value::as_bool).unwrap_or(false),
+                            c.get("predictive_warnings").and_then(Value::as_u64).unwrap_or(0),
+                            c.get("total_changed_lines").and_then(Value::as_u64).unwrap_or(0),
+                            c.get("turns_used").and_then(Value::as_u64).unwrap_or(0),
+                            if c.get("winner").and_then(Value::as_bool).unwrap_or(false) {
+                                "  <-- winner"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                }
+                Ok(ReplStepOutcome {
+                    output: text,
+                    should_exit: false,
+                })
+            }
+            None => Ok(ReplStepOutcome {
+                output: format!(
+                    "error: {}\n",
+                    sanitize_terminal_text(
+                        &resp
+                            .error
+                            .map(|e| e.message)
+                            .unwrap_or_else(|| "session.tournament failed".to_string())
+                    )
+                ),
+                should_exit: false,
+            }),
+        }
     }
 
     /// Process one user input line (either a `/slash` command or a prompt turn) through
@@ -2747,18 +4021,26 @@ impl InteractiveRepl {
                 "/help" | "/?" => Ok(ReplStepOutcome {
                     output: concat!(
                         "Available commands:\n",
-                        "  /help                  Show this command reference\n",
-                        "  /status                Show active session, revision, subtree, and token status\n",
-                        "  /revisions             List captured workspace revisions for this session\n",
-                        "  /undo [--force]        Restore workspace & session leaf to previous revision\n",
-                        "  /restore <rev> [--force] Restore workspace to a specific revision ID\n",
-                        "  /diff                  Show files changed in the latest revision\n",
-                        "  /skills [<name>]       List workspace skills or activate <name>\n",
-                        "  /graph [<query>]       Rank files with Personalized PageRank over the symbol graph\n",
-                        "  /fork <turn>           Rewind/branch active session at <turn>\n",
-                        "  /inspect <id>          Recall raw tool evidence by source_entry_id\n",
-                        "  /clear                 Start a fresh session in this workspace\n",
-                        "  /quit | /exit          Shut down the interactive session\n"
+                        "  /help                       Show this command reference\n",
+                        "  /status                     Show active session, model, thinking, revision and token status\n",
+                        "  /model [<id>] [--save]      Show or hot-swap the active model (--save persists it)\n",
+                        "  /thinking [<lvl>] [--save]  Show or hot-swap reasoning effort (off|low|medium|high|xhigh)\n",
+                        "  /protocol [<name>]          Show or hot-swap the wire protocol (auto|chat-completions|\n",
+                        "                              anthropic-messages|openai-responses)\n",
+                        "  /config [show|set <k> <v>|profile <name>]  Inspect or persist layered configuration\n",
+                        "  /sessions                   List recent sessions in the state directory\n",
+                        "  /resume [<latest|id>]       Attach an existing session WAL as the active session\n",
+                        "  /new | /clear               Start a fresh session in this workspace\n",
+                        "  /revisions                  List captured workspace revisions for this session\n",
+                        "  /undo [--force]             Restore workspace & session leaf to previous revision\n",
+                        "  /restore <rev> [--force]    Restore workspace to a specific revision ID\n",
+                        "  /diff                       Show files changed in the latest revision\n",
+                        "  /skills [<name>]            List workspace skills or activate <name>\n",
+                        "  /graph [<query>]            Rank files with Personalized PageRank over the symbol graph\n",
+                        "  /race <N> <task>            Best-of-N worktree tournament: race N workers, merge the best\n",
+                        "  /fork <turn>                Rewind/branch active session at <turn>\n",
+                        "  /inspect <id>               Recall raw tool evidence by source_entry_id\n",
+                        "  /quit | /exit               Shut down the interactive session\n"
                     )
                     .to_string(),
                     should_exit: false,
@@ -3157,6 +4439,14 @@ impl InteractiveRepl {
                         _ => Err("empty response from evidence.recall".to_string()),
                     }
                 }
+                "/model" => self.repl_config_command("model", &rest).await,
+                "/thinking" => self.repl_config_command("thinking", &rest).await,
+                "/protocol" => self.repl_config_command("protocol", &rest).await,
+                "/config" => self.repl_config_command("config", &rest).await,
+                "/sessions" => self.repl_sessions_command().await,
+                "/resume" => self.repl_resume_command(&rest).await,
+                "/new" => self.repl_new_session_command().await,
+                "/race" => self.repl_race_command(&rest).await,
                 "/clear" => {
                     let resp = self
                         .dispatcher

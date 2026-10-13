@@ -20,10 +20,11 @@ use crate::provider::{
 };
 use crate::revision::{RevisionId, SnapshotStore};
 use crate::subagents::{
-    build_worker_mutation_spans, parse_spawn_subagent_specs, render_subagent_batch_report,
-    IsolatedWorktree, ProviderSubagentBackend, SubagentBackend, SubagentExecutionRequest,
-    SubagentResult, SubagentRole, SubagentRunOutcome, WorktreeMergeResult,
-    DEFAULT_MAX_SUBAGENT_SPAWNS,
+    build_worker_mutation_spans, parse_spawn_subagent_specs, parse_tournament_request,
+    render_subagent_batch_report, run_worktree_tournament, IsolatedWorktree,
+    ProviderSubagentBackend, SubagentBackend, SubagentExecutionRequest, SubagentResult,
+    SubagentRole, SubagentRunOutcome, TournamentCandidate, TournamentRequest, TournamentSpec,
+    WorktreeMergeResult, DEFAULT_MAX_SUBAGENT_SPAWNS,
 };
 use crate::extensions::{
     is_subtree_context_tool, HookContext, HookEvaluation, SubtreeContextTracker,
@@ -1909,6 +1910,141 @@ impl AgentRunner {
         }
     }
 
+    /// `v1.3.0`: run a Best-of-N worktree tournament and merge only the best verified candidate.
+    ///
+    /// Mirrors the `session.tournament` RPC path: every candidate races in its own isolated
+    /// worktree, is verified inside that worktree, and only a gate-passing winner is merged. When no
+    /// candidate passes, the parent workspace is left byte-for-byte untouched.
+    async fn execute_spawn_tournament(
+        &mut self,
+        request: TournamentRequest,
+        absolute_turn: usize,
+        modified_files_set: &mut HashSet<String>,
+        logger: &mut EventLogger,
+        decision_label: String,
+    ) -> (ToolExecutionOutput, String) {
+        let store = self.snapshot_store.clone().unwrap_or_else(|| {
+            Arc::new(SnapshotStore::new(
+                self.tool_runtime.env().state_dir().join("snapshots"),
+            ))
+        });
+        let workspace = self.tool_runtime.env().workspace().clone();
+
+        // Capture a fresh baseline of the live parent workspace so every candidate forks from the
+        // exact bytes on disk right now.
+        let baseline = match store.capture_revision(
+            &workspace,
+            self.current_revision_id.as_ref(),
+            None,
+            absolute_turn,
+        ) {
+            Ok(rev) => rev,
+            Err(e) => {
+                return (
+                    ToolExecutionOutput::error(
+                        ErrorCode::IoError,
+                        format!("failed to capture tournament baseline revision: {}", e),
+                        ToolResultMeta::default(),
+                    ),
+                    decision_label,
+                );
+            }
+        };
+        let base_revision = baseline.revision_id.clone();
+
+        let strategies = [
+            "Fix the root cause with the smallest possible change.",
+            "Consider an alternative design and pick the most robust minimal fix.",
+            "Re-derive the failure from first principles before editing.",
+            "Prefer a defensive fix that also adds a regression guard.",
+        ];
+        let mut candidates: Vec<TournamentCandidate> = Vec::with_capacity(request.candidates);
+        for index in 0..request.candidates {
+            let label = format!("c{}", index + 1);
+            let strategy = strategies[index % strategies.len()].to_string();
+            let mut spec = crate::subagents::SubagentSpec::worker(format!(
+                "{}\n\n[TOURNAMENT CANDIDATE {} STRATEGY] {}",
+                request.task, label, strategy
+            ));
+            if let Some(globs) = &request.allowed_write_globs {
+                spec = spec.with_allowed_write_globs(globs.clone());
+            }
+            if let Some(turns) = request.max_turns {
+                spec = spec.with_max_turns(turns);
+            }
+            spec = spec.with_timeout_ms(request.timeout_ms.max(1));
+            candidates.push(TournamentCandidate {
+                label,
+                strategy: Some(strategy),
+                spec,
+            });
+        }
+
+        self.subagents_spawned += request.candidates;
+        for candidate in &candidates {
+            let _ = logger.log(EventPayload::SubagentSpawned {
+                subagent_id: format!("tournament-{}", candidate.label),
+                role: "worker".to_string(),
+                max_turns: candidate.spec.budget.max_turns,
+                isolated_worktree: true,
+            });
+        }
+
+        let spec = TournamentSpec {
+            candidates,
+            worktree_base: self.tool_runtime.env().state_dir().join("worktrees"),
+            state_base: self.tool_runtime.env().state_dir().join("subagents"),
+            allowed_write_globs: request.allowed_write_globs.clone(),
+            budget: self.config.budget.clone(),
+            policy_mode: self.tool_runtime.policy_engine().mode(),
+            workspace_skills: self.tool_runtime.registry().skills(),
+            predictive_check: self.tool_runtime.predictive_check_enabled(),
+            cancel_rx: self.cancel_rx.clone(),
+            timeout_ms: request.timeout_ms.max(1),
+        };
+
+        let outcome = match run_worktree_tournament(
+            spec,
+            &workspace,
+            &store,
+            Arc::clone(&self.subagent_backend),
+            Some(&base_revision),
+            &self.completion_gate,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                return (
+                    ToolExecutionOutput::error(
+                        ErrorCode::IoError,
+                        format!("tournament failed: {}", e),
+                        ToolResultMeta::default(),
+                    ),
+                    decision_label,
+                );
+            }
+        };
+
+        if let Some(rev) = outcome.merged_revision.clone() {
+            let written: Vec<String> = store
+                .load_revision(&rev)
+                .map(|m| m.changed_paths.clone())
+                .unwrap_or_default();
+            for path in &written {
+                modified_files_set.insert(path.clone());
+            }
+            self.batch_mutated = true;
+            self.current_revision_id = Some(rev);
+        }
+
+        let report = outcome.render_report();
+        (
+            ToolExecutionOutput::success(report, ToolResultMeta::default()),
+            decision_label,
+        )
+    }
+
     async fn execute_spawn_subagent_inner(
         &mut self,
         call: &ToolCall,
@@ -1929,8 +2065,11 @@ impl AgentRunner {
             );
         }
 
-        let specs = match parse_spawn_subagent_specs(&call.raw_arguments) {
-            Ok(s) => s,
+        // `v1.3.0`: `"mode": "tournament"` races N `Worker` candidates in isolated worktrees and
+        // merges only the single best verified candidate. Detected before the plain fan-out parser,
+        // which requires an explicit `role`.
+        let tournament_request = match parse_tournament_request(&call.raw_arguments) {
+            Ok(r) => r,
             Err(err) => {
                 return (
                     ToolExecutionOutput::error(
@@ -1943,13 +2082,36 @@ impl AgentRunner {
             }
         };
 
-        if self.subagents_spawned.saturating_add(specs.len()) > self.max_subagent_spawns {
+        let specs = if tournament_request.is_some() {
+            Vec::new()
+        } else {
+            match parse_spawn_subagent_specs(&call.raw_arguments) {
+                Ok(s) => s,
+                Err(err) => {
+                    return (
+                        ToolExecutionOutput::error(
+                            ErrorCode::InvalidArguments,
+                            err,
+                            ToolResultMeta::default(),
+                        ),
+                        "deny_invalid_args".to_string(),
+                    );
+                }
+            }
+        };
+
+        let requested_spawns = tournament_request
+            .as_ref()
+            .map(|t| t.candidates)
+            .unwrap_or(specs.len());
+
+        if self.subagents_spawned.saturating_add(requested_spawns) > self.max_subagent_spawns {
             return (
                 ToolExecutionOutput::error(
                     ErrorCode::PolicyDenied,
                     format!(
                         "subagent spawn budget exceeded: requested {}, already spawned {}, max_subagents={}",
-                        specs.len(),
+                        requested_spawns,
                         self.subagents_spawned,
                         self.max_subagent_spawns
                     ),
@@ -1959,7 +2121,8 @@ impl AgentRunner {
             );
         }
 
-        let has_worker = specs.iter().any(|s| s.role == SubagentRole::Worker);
+        let has_worker =
+            tournament_request.is_some() || specs.iter().any(|s| s.role == SubagentRole::Worker);
         let effective_effect = if has_worker {
             EffectClass::Mutating
         } else {
@@ -2078,6 +2241,18 @@ impl AgentRunner {
         };
 
         let absolute_turn = self.session_turn_offset.saturating_add(relative_turn);
+
+        if let Some(request) = tournament_request {
+            return self
+                .execute_spawn_tournament(
+                    request,
+                    absolute_turn,
+                    modified_files_set,
+                    logger,
+                    decision_label,
+                )
+                .await;
+        }
 
         // If earlier tools in this same batch mutated the parent workspace, capture a revision now
         // so any worker subagent starts from the up-to-date parent state.

@@ -135,6 +135,19 @@ pub fn spawn_subagent_registration() -> RegisteredTool {
                         "type": "boolean",
                         "description": "If true, automatically restore the parent workspace to revision_before when post-merge verification fails."
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["fanout", "tournament"],
+                        "description": "Set to 'tournament' to race N worker candidates in isolated worktrees and merge only the best verified one. Requires a top-level 'task'."
+                    },
+                    "tournament": {
+                        "type": "boolean",
+                        "description": "Shorthand for mode='tournament'."
+                    },
+                    "candidates": {
+                        "type": "integer",
+                        "description": "Number of racing candidates for a tournament (2-4, default 3)."
+                    },
                     "tasks": {
                         "type": "array",
                         "description": "Optional batch of 1-4 subagent specs to execute concurrently.",
@@ -371,6 +384,15 @@ struct RawSpawnSubagentArgs {
     revert_on_verify_failure: Option<bool>,
     #[serde(default)]
     tasks: Option<Vec<RawSubagentTaskItem>>,
+    /// `v1.3.0`: `"tournament"` runs a Best-of-N worktree race instead of a plain fan-out.
+    #[serde(default)]
+    mode: Option<String>,
+    /// `v1.3.0`: shorthand for `"mode": "tournament"`.
+    #[serde(default)]
+    tournament: Option<bool>,
+    /// `v1.3.0`: number of racing candidates (2..=4, default 3).
+    #[serde(default)]
+    candidates: Option<usize>,
 }
 
 fn normalize_and_validate_globs(
@@ -408,6 +430,69 @@ fn normalize_and_validate_globs(
 }
 
 /// Parse the JSON arguments of a `spawn_subagent` call into 1..=`MAX_PARALLEL_SUBAGENTS` specs.
+/// `v1.3.0`: a parsed `spawn_subagent` tournament request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TournamentRequest {
+    pub task: String,
+    pub candidates: usize,
+    pub allowed_write_globs: Option<Vec<String>>,
+    pub max_turns: Option<usize>,
+    pub timeout_ms: u64,
+}
+
+/// Detect a tournament request in `spawn_subagent` arguments.
+///
+/// Returns `Ok(None)` for a plain fan-out call. A tournament is requested either by
+/// `"mode": "tournament"` or by `"tournament": true`.
+pub fn parse_tournament_request(raw_args: &str) -> Result<Option<TournamentRequest>, String> {
+    let parsed: RawSpawnSubagentArgs = serde_json::from_str(raw_args)
+        .map_err(|e| format!("invalid JSON arguments for `spawn_subagent`: {}", e))?;
+
+    let mode_is_tournament = parsed
+        .mode
+        .as_deref()
+        .map(|m| m.trim().eq_ignore_ascii_case("tournament"))
+        .unwrap_or(false);
+    if !mode_is_tournament && parsed.tournament != Some(true) {
+        return Ok(None);
+    }
+
+    let task = parsed
+        .task
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            "a tournament requires a top-level `task` string describing the goal".to_string()
+        })?
+        .to_string();
+
+    let candidates = parsed.candidates.unwrap_or(3);
+    if !(MIN_TOURNAMENT_CANDIDATES..=MAX_TOURNAMENT_CANDIDATES).contains(&candidates) {
+        return Err(format!(
+            "`candidates` must be between {} and {} (got {})",
+            MIN_TOURNAMENT_CANDIDATES, MAX_TOURNAMENT_CANDIDATES, candidates
+        ));
+    }
+
+    let allowed_write_globs = normalize_and_validate_globs(
+        parsed.allowed_paths.clone(),
+        parsed.allowed_write_globs.clone(),
+    )?;
+    let timeout_ms = parsed.timeout_ms.unwrap_or(DEFAULT_SUBAGENT_TIMEOUT_MS);
+    if timeout_ms == 0 {
+        return Err("`timeout_ms` must be > 0".to_string());
+    }
+
+    Ok(Some(TournamentRequest {
+        task,
+        candidates,
+        allowed_write_globs,
+        max_turns: parsed.max_turns,
+        timeout_ms,
+    }))
+}
+
 pub fn parse_spawn_subagent_specs(raw_args: &str) -> Result<Vec<SubagentSpec>, String> {
     let parsed: RawSpawnSubagentArgs = serde_json::from_str(raw_args)
         .map_err(|e| format!("invalid JSON arguments for `spawn_subagent`: {}", e))?;
@@ -1474,4 +1559,541 @@ pub fn build_worker_mutation_spans(
         });
     }
     spans
+}
+
+// ---------------------------------------------------------------------------------------------
+// v1.3.0 — Best-of-N Worktree Tournament
+// ---------------------------------------------------------------------------------------------
+
+/// Minimum number of candidates a tournament may run.
+pub const MIN_TOURNAMENT_CANDIDATES: usize = 2;
+/// Maximum number of candidates a tournament may run (bounded by parallel subagent capacity).
+pub const MAX_TOURNAMENT_CANDIDATES: usize = MAX_PARALLEL_SUBAGENTS;
+
+/// One competing `Worker` candidate in a tournament.
+///
+/// Every candidate starts from the same parent `base_revision` in its own isolated worktree, so the
+/// candidates cannot observe or corrupt each other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentCandidate {
+    /// Short stable label used in the `<subagent_tournament_report>` (for example `c1`).
+    pub label: String,
+    /// Free-form strategy hint recorded in the report so the parent model can see what was tried.
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// The `Worker` specification. `role` must be `Worker`; a `Scout` candidate is rejected.
+    pub spec: SubagentSpec,
+}
+
+impl TournamentCandidate {
+    pub fn worker(label: impl Into<String>, task: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            strategy: None,
+            spec: SubagentSpec::worker(task),
+        }
+    }
+
+    pub fn with_strategy(mut self, strategy: impl Into<String>) -> Self {
+        self.strategy = Some(strategy.into());
+        self
+    }
+}
+
+/// Inputs for [`run_worktree_tournament`].
+pub struct TournamentSpec {
+    pub candidates: Vec<TournamentCandidate>,
+    /// Base directory that holds the `wt-race-000N` worktrees.
+    pub worktree_base: PathBuf,
+    /// Base directory that holds per-candidate child state.
+    pub state_base: PathBuf,
+    pub allowed_write_globs: Option<Vec<String>>,
+    pub budget: BudgetConfig,
+    pub policy_mode: PolicyMode,
+    pub workspace_skills: Vec<SkillEntry>,
+    pub predictive_check: bool,
+    pub cancel_rx: watch::Receiver<bool>,
+    pub timeout_ms: u64,
+}
+
+/// Deterministic per-candidate score. Ranking is lexicographic over these fields, in the order
+/// documented on [`TournamentOutcome::scores`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentScore {
+    pub label: String,
+    pub candidate_index: usize,
+    /// Child loop status (`completed`, `failed`, `cancelled`, `budget_exhausted`).
+    pub status: String,
+    /// `true` when the candidate's own isolated worktree passed the completion gate
+    /// (`Approved` or `Skipped`); a `Rejected` gate makes a candidate ineligible to win.
+    pub gate_passed: bool,
+    /// Human-readable gate detail (verification output excerpt, skip reason, or the reason the
+    /// candidate never reached verification).
+    pub gate_detail: String,
+    /// Number of structural (syntax/delimiter) warnings reported by [`PredictiveValidator`].
+    pub predictive_warnings: usize,
+    /// `true` when the candidate's delta merges cleanly against the live parent workspace.
+    pub conflict_free_with_parent: bool,
+    pub files_modified: usize,
+    /// Approximate changed-line count (lines added + lines removed) — Occam's razor tie-breaker.
+    pub total_changed_lines: usize,
+    pub turns_used: usize,
+    /// Set on exactly one candidate when a merge actually happened.
+    pub winner: bool,
+}
+
+impl TournamentScore {
+    /// Lexicographic ranking key. Lower sorts better.
+    fn rank_key(&self) -> (u8, usize, u8, usize, usize, usize, usize) {
+        (
+            u8::from(!self.gate_passed),
+            self.predictive_warnings,
+            u8::from(!self.conflict_free_with_parent),
+            self.total_changed_lines,
+            self.files_modified,
+            self.turns_used,
+            self.candidate_index,
+        )
+    }
+}
+
+/// Result of a completed tournament.
+#[derive(Debug, Clone)]
+pub struct TournamentOutcome {
+    /// Per-candidate scores, ordered by candidate index (not by rank).
+    pub scores: Vec<TournamentScore>,
+    /// Index into `scores` of the merged candidate, if one was merged.
+    pub winner: Option<usize>,
+    pub merged_revision: Option<RevisionId>,
+    pub merge: Option<WorktreeMergeResult>,
+    /// `true` when every candidate worktree directory was removed from disk.
+    pub all_worktrees_cleaned_up: bool,
+}
+
+impl TournamentOutcome {
+    /// `true` when the parent workspace was left byte-for-byte untouched.
+    pub fn parent_untouched(&self) -> bool {
+        self.merged_revision.is_none()
+    }
+
+    /// Render the sanitized `<subagent_tournament_report>` block for the parent transcript.
+    pub fn render_report(&self) -> String {
+        let mut out = String::new();
+        out.push_str("<subagent_tournament_report>\n");
+        out.push_str(&format!("candidates: {}\n", self.scores.len()));
+        out.push_str(&format!(
+            "merged_revision: {}\n",
+            self.merged_revision
+                .as_ref()
+                .map(|r| r.as_str().to_string())
+                .unwrap_or_else(|| "<none>".to_string())
+        ));
+        out.push_str(&format!(
+            "all_worktrees_cleaned_up: {}\n",
+            self.all_worktrees_cleaned_up
+        ));
+        if self.winner.is_none() {
+            out.push_str(
+                "outcome: no candidate passed verification; the parent workspace was not modified\n",
+            );
+        }
+        for score in &self.scores {
+            out.push_str(&format!(
+                "candidate {} [{}]: gate_passed={} warnings={} conflict_free={} changed_lines={} files_modified={} turns_used={} winner={}\n",
+                score.label,
+                score.status,
+                score.gate_passed,
+                score.predictive_warnings,
+                score.conflict_free_with_parent,
+                score.total_changed_lines,
+                score.files_modified,
+                score.turns_used,
+                score.winner,
+            ));
+            if !score.gate_detail.is_empty() {
+                out.push_str(&format!(
+                    "  detail: {}\n",
+                    escape_fence_attribute(&score.gate_detail)
+                ));
+            }
+        }
+        out.push_str("</subagent_tournament_report>");
+        out
+    }
+}
+
+/// Approximate changed-line count between two byte blobs.
+///
+/// Uses a line multiset difference (deterministic and O(n)) rather than an LCS, which is enough to
+/// implement Occam's razor between candidates without ever making the ranking non-deterministic.
+fn approximate_changed_lines(base: &[u8], updated: &[u8]) -> usize {
+    if base == updated {
+        return 0;
+    }
+    let to_lines = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        let text = String::from_utf8_lossy(bytes);
+        text.lines().map(|l| l.as_bytes().to_vec()).collect()
+    };
+    let mut base_counts: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+    for line in to_lines(base) {
+        *base_counts.entry(line).or_insert(0) += 1;
+    }
+    let mut removed = 0usize;
+    let mut new_lines: Vec<Vec<u8>> = Vec::new();
+    for line in to_lines(updated) {
+        match base_counts.get_mut(&line) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => new_lines.push(line),
+        }
+    }
+    removed += base_counts.values().sum::<usize>();
+    removed + new_lines.len()
+}
+
+/// Run a Best-of-N worktree tournament.
+///
+/// Every candidate runs in parallel in its own isolated worktree, is verified **inside** that
+/// worktree (completion gate + predictive validation), and is then ranked. Only the single best
+/// candidate that passed verification is merged into `parent_workspace`; every loser worktree is
+/// removed. When no candidate passes verification the parent workspace is not modified at all.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_worktree_tournament(
+    spec: TournamentSpec,
+    parent_workspace: &WorkspaceCap,
+    snapshot_store: &SnapshotStore,
+    backend: Arc<dyn SubagentBackend>,
+    parent_revision: Option<&RevisionId>,
+    completion_gate: &SharedCompletionGate,
+) -> Result<TournamentOutcome, String> {
+    if spec.candidates.len() < MIN_TOURNAMENT_CANDIDATES
+        || spec.candidates.len() > MAX_TOURNAMENT_CANDIDATES
+    {
+        return Err(format!(
+            "a tournament needs between {} and {} candidates (got {})",
+            MIN_TOURNAMENT_CANDIDATES,
+            MAX_TOURNAMENT_CANDIDATES,
+            spec.candidates.len()
+        ));
+    }
+    for candidate in &spec.candidates {
+        if candidate.spec.role != SubagentRole::Worker {
+            return Err(format!(
+                "tournament candidate '{}' must be role=worker (got {})",
+                candidate.label, candidate.spec.role
+            ));
+        }
+    }
+
+    // Materialize every worktree from the same baseline before any candidate starts.
+    let mut worktrees: Vec<(String, IsolatedWorktree)> = Vec::with_capacity(spec.candidates.len());
+    for (index, candidate) in spec.candidates.iter().enumerate() {
+        let wt_dir = spec
+            .worktree_base
+            .join(format!("wt-race-{:04}", index + 1));
+        let wt = IsolatedWorktree::materialize(
+            format!("race-{:04}-{}", index + 1, candidate.label),
+            parent_workspace,
+            snapshot_store,
+            parent_revision,
+            wt_dir,
+        )
+        .map_err(|e| format!("failed to materialize tournament worktree: {}", e))?;
+        worktrees.push((candidate.label.clone(), wt));
+    }
+
+    let mut handles = Vec::with_capacity(spec.candidates.len());
+    for (index, candidate) in spec.candidates.iter().enumerate() {
+        let child_workspace = worktrees[index].1.workspace().clone();
+        let backend = Arc::clone(&backend);
+        let mut parent_cancel = spec.cancel_rx.clone();
+        let timeout_ms = spec.timeout_ms;
+        let req_spec = candidate.spec.clone();
+        let req_id = format!("race-{:04}-{}", index + 1, candidate.label);
+        let child_state_dir = spec.state_base.join(&req_id);
+        let skills = spec.workspace_skills.clone();
+        let budget = spec.budget.clone();
+        let policy_mode = spec.policy_mode;
+        let predictive_check = spec.predictive_check;
+
+        handles.push(tokio::spawn(async move {
+            let (child_cancel_tx, child_cancel_rx) = watch::channel(*parent_cancel.borrow());
+            let cancel_tx_for_timer = child_cancel_tx.clone();
+            let timer = tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
+                        let _ = cancel_tx_for_timer.send(true);
+                    }
+                    _ = async {
+                        loop {
+                            if *parent_cancel.borrow() {
+                                break;
+                            }
+                            if parent_cancel.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    } => {
+                        let _ = cancel_tx_for_timer.send(true);
+                    }
+                }
+            });
+
+            let req = SubagentExecutionRequest {
+                subagent_id: req_id,
+                spec: req_spec,
+                workspace: child_workspace,
+                state_dir: child_state_dir,
+                workspace_skills: skills,
+                parent_policy_mode: policy_mode,
+                parent_budget: budget,
+                predictive_check,
+                cancel_rx: child_cancel_rx,
+            };
+            let hard_deadline = Duration::from_millis(timeout_ms.saturating_add(150));
+            let outcome = tokio::select! {
+                res = backend.run_subagent(req) => res,
+                _ = tokio::time::sleep(hard_deadline) => {
+                    let _ = child_cancel_tx.send(true);
+                    Ok(SubagentRunOutcome {
+                        status: RunStatus::Cancelled,
+                        terminal_reason: TerminalReason::RunDeadlineExceeded,
+                        summary: "tournament candidate timed out and was cancelled".to_string(),
+                        relevant_files: Vec::new(),
+                        findings: Vec::new(),
+                        turns_used: 0,
+                        tool_calls_used: 0,
+                        tokens_used: 0,
+                        duration_ms: 0,
+                        visible_tools: Vec::new(),
+                    })
+                }
+            };
+            timer.abort();
+            outcome
+        }));
+    }
+
+    let mut scores: Vec<TournamentScore> = Vec::with_capacity(spec.candidates.len());
+    let mut join_failures: Vec<String> = Vec::new();
+    for (index, handle) in handles.into_iter().enumerate() {
+        let candidate = &spec.candidates[index];
+        let base_revision = worktrees[index].1.base_revision().clone();
+        let worktree = &worktrees[index].1;
+
+        let outcome = match handle.await {
+            Ok(Ok(o)) => o,
+            Ok(Err(err)) => {
+                join_failures.push(format!("{}: {}", candidate.label, err));
+                SubagentRunOutcome {
+                    status: RunStatus::Failed,
+                    terminal_reason: TerminalReason::ProviderProtocolError(err),
+                    summary: "tournament candidate failed".to_string(),
+                    relevant_files: Vec::new(),
+                    findings: Vec::new(),
+                    turns_used: 0,
+                    tool_calls_used: 0,
+                    tokens_used: 0,
+                    duration_ms: 0,
+                    visible_tools: Vec::new(),
+                }
+            }
+            Err(join_err) => {
+                join_failures.push(format!("{}: {}", candidate.label, join_err));
+                SubagentRunOutcome {
+                    status: RunStatus::Cancelled,
+                    terminal_reason: TerminalReason::UserCancelled,
+                    summary: "tournament candidate join error".to_string(),
+                    relevant_files: Vec::new(),
+                    findings: Vec::new(),
+                    turns_used: 0,
+                    tool_calls_used: 0,
+                    tokens_used: 0,
+                    duration_ms: 0,
+                    visible_tools: Vec::new(),
+                }
+            }
+        };
+
+        let status_str = match outcome.status {
+            RunStatus::Completed => "completed",
+            RunStatus::Cancelled => "cancelled",
+            RunStatus::BudgetExhausted => "budget_exhausted",
+            _ => "failed",
+        };
+
+        // Compute this candidate's delta against its own baseline revision.
+        let mut changed_paths: Vec<String> = Vec::new();
+        let mut total_changed_lines = 0usize;
+        let mut predictive_warnings = 0usize;
+        let mut gate_passed = false;
+        let gate_detail: String;
+
+        if outcome.status != RunStatus::Completed {
+            gate_detail = format!("candidate did not complete ({})", status_str);
+        } else {
+            let scan = snapshot_store
+                .scan_workspace_to_blobs(worktree.workspace())
+                .map_err(|e| format!("failed to scan tournament worktree: {}", e))?;
+            let base_files = &base_revision.tracked_files;
+            for (path, entry) in &scan.0 {
+                if base_files.get(path) == Some(entry) {
+                    continue;
+                }
+                changed_paths.push(path.clone());
+                let base_bytes = base_files
+                    .get(path)
+                    .map(|b| snapshot_store.read_blob(&b.sha256))
+                    .transpose()
+                    .map_err(|e| format!("failed to read base blob: {}", e))?
+                    .unwrap_or_default();
+                let new_bytes = snapshot_store
+                    .read_blob(&entry.sha256)
+                    .map_err(|e| format!("failed to read candidate blob: {}", e))?;
+                total_changed_lines += approximate_changed_lines(&base_bytes, &new_bytes);
+            }
+            for path in base_files.keys() {
+                if !scan.0.contains_key(path) {
+                    changed_paths.push(path.clone());
+                    if let Some(base_entry) = base_files.get(path) {
+                        let base_bytes = snapshot_store
+                            .read_blob(&base_entry.sha256)
+                            .map_err(|e| format!("failed to read base blob: {}", e))?;
+                        total_changed_lines += approximate_changed_lines(&base_bytes, &[]);
+                    }
+                }
+            }
+            changed_paths.sort();
+            changed_paths.dedup();
+
+            if changed_paths.is_empty() {
+                gate_passed = true;
+                gate_detail = "no changes; nothing to verify".to_string();
+            } else {
+                // Predictive validation runs on the candidate's own worktree copy.
+                if spec.predictive_check {
+                    let validator = crate::attribution::PredictiveValidator::default();
+                    for path in &changed_paths {
+                        let report = validator.validate_file(worktree.workspace(), path);
+                        predictive_warnings += report.issues.len();
+                    }
+                }
+
+                // Verification runs INSIDE the isolated worktree, before the parent is touched.
+                let gate_ctx = CompletionGateContext {
+                    run_id: RunId::new(),
+                    workspace_root: worktree.root().to_path_buf(),
+                    modified_files: changed_paths.clone(),
+                    turns_used: outcome.turns_used,
+                };
+                match completion_gate.check(&gate_ctx).await {
+                    Ok(GateOutcome::Approved) => {
+                        gate_passed = true;
+                        gate_detail = "verification passed".to_string();
+                    }
+                    Ok(GateOutcome::Skipped { reason }) => {
+                        gate_passed = true;
+                        gate_detail = format!("verification skipped: {}", reason);
+                    }
+                    Ok(GateOutcome::Rejected { feedback }) => {
+                        gate_detail = format!("verification failed: {}", feedback);
+                    }
+                    Err(e) => {
+                        gate_detail = format!("verification error: {}", e);
+                    }
+                }
+            }
+        }
+
+        scores.push(TournamentScore {
+            label: candidate.label.clone(),
+            candidate_index: index,
+            status: status_str.to_string(),
+            gate_passed,
+            gate_detail,
+            predictive_warnings,
+            // Filled in below once the merge is attempted; a candidate is "conflict free" when the
+            // three-way baseline-aware merge against the live parent reports no conflicts.
+            conflict_free_with_parent: false,
+            files_modified: changed_paths.len(),
+            total_changed_lines,
+            turns_used: outcome.turns_used,
+            winner: false,
+        });
+    }
+
+    // Rank: gate first, then zero predictive warnings, then conflict-freedom, then minimal diff.
+    let mut order: Vec<usize> = (0..scores.len()).collect();
+    order.sort_by_key(|&i| scores[i].rank_key());
+
+    let mut merged_revision: Option<RevisionId> = None;
+    let mut merge_result: Option<WorktreeMergeResult> = None;
+    let mut winner: Option<usize> = None;
+
+    if let Some(&best) = order.first() {
+        if scores[best].gate_passed {
+            let (label, worktree) = &mut worktrees[best];
+            let allowed = spec.allowed_write_globs.as_deref();
+            let merge = worktree
+                .merge_into_parent(
+                    parent_workspace,
+                    snapshot_store,
+                    parent_revision,
+                    allowed,
+                    None,
+                    false,
+                    scores[best].turns_used,
+                )
+                .await
+                .map_err(|e| format!("tournament merge failed for '{}': {}", label, e))?;
+            match &merge {
+                WorktreeMergeResult::Applied {
+                    merged_revision: rev,
+                    ..
+                } => {
+                    scores[best].conflict_free_with_parent = true;
+                    scores[best].winner = true;
+                    merged_revision = Some(rev.clone());
+                    winner = Some(best);
+                }
+                WorktreeMergeResult::Conflict {
+                    conflicting_paths, ..
+                } => {
+                    scores[best].conflict_free_with_parent = false;
+                    scores[best].gate_detail = format!(
+                        "{} (merge conflict on: {})",
+                        scores[best].gate_detail,
+                        conflicting_paths.join(", ")
+                    );
+                }
+                WorktreeMergeResult::VerificationFailed { .. } => {
+                    // Only reachable when a post-merge gate is configured; the tournament passes
+                    // `None`, so treat it defensively as "not merged".
+                    scores[best].gate_detail =
+                        format!("{} (post-merge verification failed)", scores[best].gate_detail);
+                }
+            }
+            merge_result = Some(merge);
+        }
+    }
+
+    // Every worktree, winner included, is removed from disk.
+    let mut all_cleaned = true;
+    for (_, worktree) in worktrees.iter_mut() {
+        if worktree.cleanup().is_err() {
+            all_cleaned = false;
+        }
+    }
+
+    if let Some(index) = winner {
+        let _ = join_failures; // failures are already reflected in per-candidate status
+        let _ = index;
+    }
+
+    Ok(TournamentOutcome {
+        scores,
+        winner,
+        merged_revision,
+        merge: merge_result,
+        all_worktrees_cleaned_up: all_cleaned,
+    })
 }

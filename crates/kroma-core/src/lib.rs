@@ -3,6 +3,7 @@ pub mod attribution;
 pub mod budget;
 pub mod context_projector;
 pub mod completion_gate;
+pub mod config_file;
 pub mod env;
 pub mod events;
 pub mod extensions;
