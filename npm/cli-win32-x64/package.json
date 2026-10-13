@@ -1,0 +1,16 @@
+{
+  "name": "@kroma-ai/cli-win32-x64",
+  "version": "1.5.0",
+  "description": "Native win32-x64 Rust binary for Kroma CLI",
+  "license": "MIT",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/kroma.exe"
+  ],
+  "preferUnplugged": true
+}
