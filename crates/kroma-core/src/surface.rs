@@ -5166,6 +5166,11 @@ impl InteractiveRepl {
                         out.push('\n');
                     }
                 }
+                if status != "completed" {
+                    if let Some(reason) = val.get("terminal_reason").and_then(Value::as_str) {
+                        out.push_str(&format!("error: {}\n", sanitize_terminal_text(reason)));
+                    }
+                }
                 out.push_str(&format!(
                     "[status={} turns={} tools={} rev={}]\n",
                     sanitize_terminal_text(status),

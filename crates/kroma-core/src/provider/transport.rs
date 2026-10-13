@@ -163,18 +163,40 @@ impl OpenSslStream {
             if ctx.is_null() {
                 return Err(io::Error::other("SSL_CTX_new returned null"));
             }
-            if SSL_CTX_set_default_verify_paths(ctx) != 1 {
-                SSL_CTX_free(ctx);
-                return Err(io::Error::other("SSL_CTX_set_default_verify_paths failed"));
-            }
+            let _ = SSL_CTX_set_default_verify_paths(ctx);
             if let Ok(ca_bundle) = std::env::var("KROMA_CA_BUNDLE") {
-                let c_ca = CString::new(ca_bundle).map_err(|_| {
-                    SSL_CTX_free(ctx);
-                    io::Error::new(io::ErrorKind::InvalidInput, "invalid KROMA_CA_BUNDLE")
-                })?;
-                if SSL_CTX_load_verify_locations(ctx, c_ca.as_ptr(), std::ptr::null()) != 1 {
-                    SSL_CTX_free(ctx);
-                    return Err(io::Error::other("SSL_CTX_load_verify_locations failed"));
+                if let Ok(c_ca) = CString::new(ca_bundle) {
+                    let _ = SSL_CTX_load_verify_locations(ctx, c_ca.as_ptr(), std::ptr::null());
+                }
+            } else {
+                const KNOWN_CA_FILES: &[&str] = &[
+                    "/data/data/com.termux/files/usr/etc/tls/cert.pem",
+                    "/data/data/com.termux/files/usr/etc/ssl/cert.pem",
+                    "/etc/ssl/certs/ca-certificates.crt",
+                    "/etc/pki/tls/certs/ca-bundle.crt",
+                    "/etc/ssl/ca-bundle.pem",
+                    "/etc/pki/tls/cacert.pem",
+                    "/etc/ssl/cert.pem",
+                ];
+                for file_path in KNOWN_CA_FILES {
+                    if std::path::Path::new(file_path).is_file() {
+                        if let Ok(c_path) = CString::new(*file_path) {
+                            if SSL_CTX_load_verify_locations(ctx, c_path.as_ptr(), std::ptr::null()) == 1 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                const KNOWN_CA_DIRS: &[&str] = &[
+                    "/system/etc/security/cacerts",
+                    "/etc/ssl/certs",
+                ];
+                for dir_path in KNOWN_CA_DIRS {
+                    if std::path::Path::new(dir_path).is_dir() {
+                        if let Ok(c_path) = CString::new(*dir_path) {
+                            let _ = SSL_CTX_load_verify_locations(ctx, std::ptr::null(), c_path.as_ptr());
+                        }
+                    }
                 }
             }
             SSL_CTX_set_verify(ctx, verify_mode, None);
