@@ -17,12 +17,23 @@ with open(p, "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
-mkdir -p "${DIST_DIR}" "${PKG_DIR}/bin/vendor/linux-x64" "${PKG_DIR}/bin/vendor/win32-x64"
+mkdir -p "${DIST_DIR}" \
+         "${PKG_DIR}/bin/vendor/linux-x64" \
+         "${PKG_DIR}/bin/vendor/win32-x64" \
+         "${PKG_DIR}/bin/vendor/darwin-arm64" \
+         "${PKG_DIR}/bin/vendor/darwin-x64"
 rm -rf "${DIST_DIR:?}"/*
 
 cp "${ROOT_DIR}/target/release/kroma" "${PKG_DIR}/bin/vendor/linux-x64/kroma"
 chmod 0755 "${PKG_DIR}/bin/vendor/linux-x64/kroma"
+
 cp "${ROOT_DIR}/target/x86_64-pc-windows-gnu/release/kroma.exe" "${PKG_DIR}/bin/vendor/win32-x64/kroma.exe"
+
+cp "${ROOT_DIR}/target/aarch64-apple-darwin/release/kroma" "${PKG_DIR}/bin/vendor/darwin-arm64/kroma"
+chmod 0755 "${PKG_DIR}/bin/vendor/darwin-arm64/kroma"
+
+cp "${ROOT_DIR}/target/x86_64-apple-darwin/release/kroma" "${PKG_DIR}/bin/vendor/darwin-x64/kroma"
+chmod 0755 "${PKG_DIR}/bin/vendor/darwin-x64/kroma"
 
 (cd "${PKG_DIR}" && npm pack --pack-destination "${DIST_DIR}" --quiet >/dev/null)
 rm -rf "${PKG_DIR}/bin/vendor"
