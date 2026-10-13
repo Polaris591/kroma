@@ -7,7 +7,7 @@
     "tool_call_pairing_validator": "kroma_core::context_projector::validate_tool_call_pairing",
     "tool_call_result_pairing": "100% pass"
   },
-  "kroma_version": "1.3.0",
+  "kroma_version": "1.4.0",
   "notes": [
     "estimated_tokens = bytes / 4 (byte-based estimate; provider-reported usage remains the cost authority)",
     "baseline = no compaction (A/B reference); p1 = watermarks + working-set pinning; p2 = p1 + source_entry_id evidence graph (default); p3 = p2 + 25% stricter low-watermark target (experimental, default off)"

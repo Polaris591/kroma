@@ -62,6 +62,29 @@ pub fn serialize_openai_request_body_with_effort(
     stream: bool,
     reasoning_effort: Option<&str>,
 ) -> String {
+    serialize_openai_request_body_with_limit(
+        model,
+        system_prompt,
+        tools,
+        messages,
+        stream,
+        reasoning_effort,
+        None,
+    )
+}
+
+/// F08 (`v1.4.0`): same as [`serialize_openai_request_body_with_effort`] but also emits the
+/// remaining output-token allowance as `max_tokens`, so a single completion can never overshoot the
+/// run's token budget.
+pub fn serialize_openai_request_body_with_limit(
+    model: &str,
+    system_prompt: &str,
+    tools: &[ToolDefinition],
+    messages: &[TranscriptItem],
+    stream: bool,
+    reasoning_effort: Option<&str>,
+    max_output_tokens: Option<u64>,
+) -> String {
     let mut sorted_tools = tools.to_vec();
     sorted_tools.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
 
@@ -228,6 +251,9 @@ pub fn serialize_openai_request_body_with_effort(
     root.insert("messages".to_string(), Value::Array(wire_messages));
     if !tools_json.is_empty() {
         root.insert("tools".to_string(), Value::Array(tools_json));
+    }
+    if let Some(limit) = max_output_tokens {
+        root.insert("max_tokens".to_string(), Value::Number(limit.into()));
     }
     root.insert("stream".to_string(), Value::Bool(stream));
     if stream {
@@ -405,13 +431,14 @@ impl ModelProvider for ChatCompletionsClient {
         mut cancel_rx: watch::Receiver<bool>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            let body_json = serialize_openai_request_body_with_effort(
+            let body_json = serialize_openai_request_body_with_limit(
                 &self.config.model,
                 &req.system_prompt,
                 &req.tools,
                 &req.messages,
                 req.stream,
                 self.config.reasoning_effort.as_deref(),
+                req.max_output_tokens,
             );
             let request_body_bytes = body_json.len();
 

@@ -82,6 +82,10 @@ pub enum TerminalReason {
     MaxRequestAttempts,
     ContextBudgetExceeded,
     RunDeadlineExceeded,
+    /// F08 (`v1.4.0`): the run stopped because the *token* budget (`--max-tokens`) was exhausted.
+    /// Distinct from [`TerminalReason::MaxTurns`] so callers can tell a turn-count stop from a
+    /// spend stop.
+    TokenBudgetExhausted,
     ProviderProtocolError(String),
     UserCancelled,
     StrictLogFailure(String),
@@ -95,7 +99,8 @@ impl TerminalReason {
             | TerminalReason::MaxToolCalls
             | TerminalReason::MaxRequestAttempts
             | TerminalReason::ContextBudgetExceeded
-            | TerminalReason::RunDeadlineExceeded => RunStatus::BudgetExhausted,
+            | TerminalReason::RunDeadlineExceeded
+            | TerminalReason::TokenBudgetExhausted => RunStatus::BudgetExhausted,
             TerminalReason::ProviderProtocolError(_) | TerminalReason::StrictLogFailure(_) => {
                 RunStatus::Failed
             }

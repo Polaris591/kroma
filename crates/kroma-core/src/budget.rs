@@ -203,6 +203,12 @@ pub struct BudgetTracker {
     total_input_tokens: u64,
     total_cached_input_tokens: u64,
     total_output_tokens: u64,
+    // F10 (`v1.4.0`): token spend of child subagents (plain fan-out + tournament candidates,
+    // including failed/cancelled candidates). Tracked separately so callers can attribute cost to
+    // `self` vs `children` while still seeing a combined total.
+    children_input_tokens: u64,
+    children_cached_input_tokens: u64,
+    children_output_tokens: u64,
 }
 
 impl BudgetTracker {
@@ -217,6 +223,9 @@ impl BudgetTracker {
             total_input_tokens: 0,
             total_cached_input_tokens: 0,
             total_output_tokens: 0,
+            children_input_tokens: 0,
+            children_cached_input_tokens: 0,
+            children_output_tokens: 0,
         })
     }
 
@@ -268,6 +277,16 @@ impl BudgetTracker {
         self.total_output_tokens = self.total_output_tokens.saturating_add(output);
     }
 
+    /// F10 (`v1.4.0`): fold a child subagent's (or tournament candidate's) token spend into this
+    /// tracker so the parent run summary can attribute `children` cost separately from `self` cost.
+    pub fn record_children_token_usage(&mut self, input: u64, cached: Option<u64>, output: u64) {
+        self.children_input_tokens = self.children_input_tokens.saturating_add(input);
+        self.children_cached_input_tokens = self
+            .children_cached_input_tokens
+            .saturating_add(cached.unwrap_or(0));
+        self.children_output_tokens = self.children_output_tokens.saturating_add(output);
+    }
+
     pub fn turns_used(&self) -> usize {
         self.turns_used
     }
@@ -290,6 +309,33 @@ impl BudgetTracker {
 
     pub fn total_output_tokens(&self) -> u64 {
         self.total_output_tokens
+    }
+
+    /// F10 (`v1.4.0`): input tokens spent by child subagents / tournament candidates.
+    pub fn children_input_tokens(&self) -> u64 {
+        self.children_input_tokens
+    }
+
+    /// F10 (`v1.4.0`): output tokens spent by child subagents / tournament candidates.
+    pub fn children_output_tokens(&self) -> u64 {
+        self.children_output_tokens
+    }
+
+    /// F10 (`v1.4.0`): total (self + children) input tokens.
+    pub fn all_input_tokens(&self) -> u64 {
+        self.total_input_tokens
+            .saturating_add(self.children_input_tokens)
+    }
+
+    /// F10 (`v1.4.0`): total (self + children) output tokens.
+    pub fn all_output_tokens(&self) -> u64 {
+        self.total_output_tokens
+            .saturating_add(self.children_output_tokens)
+    }
+
+    /// F10 (`v1.4.0`): total (self + children) token spend, the number used for budget decisions.
+    pub fn all_total_tokens(&self) -> u64 {
+        self.all_input_tokens().saturating_add(self.all_output_tokens())
     }
 
     pub fn overall_cache_hit_ratio(&self) -> f64 {

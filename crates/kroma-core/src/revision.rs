@@ -33,6 +33,11 @@ const BLOB_DIR: &str = "blobs";
 const REVISION_DIR: &str = "revisions";
 const RESTORE_INTENT_FILE: &str = "restore-in-progress.json";
 const RESTORE_INTENT_VERSION: u32 = 1;
+/// F03 (`v1.4.0`): durable intent journal for a multi-file worktree→parent merge, distinct from the
+/// restore intent so a partially-applied merge is detectable and recoverable without confusing the
+/// `--undo` path.
+const MERGE_INTENT_FILE: &str = "merge-in-progress.json";
+const MERGE_INTENT_VERSION: u32 = 1;
 
 /// Largest single file that may be tracked. Larger files are recorded in `skipped_paths` so a
 /// vendored binary or dataset can never make a snapshot unbounded.
@@ -60,6 +65,12 @@ pub enum RevisionError {
     UnknownRevision(String),
     #[error("invalid snapshot store: {0}")]
     InvalidStore(String),
+    #[error("workspace merge recovery required: {reason} (journal: {journal_path:?}, restore target: {target_revision})")]
+    RecoveryRequired {
+        target_revision: RevisionId,
+        journal_path: PathBuf,
+        reason: String,
+    },
 }
 
 /// Content-addressed workspace revision identifier: `r-` plus 32 hex chars of the manifest digest.
@@ -215,6 +226,24 @@ pub struct SnapshotStore {
     root: PathBuf,
 }
 
+/// F03 (`v1.4.0`): durable intent journal for a worktree→parent merge. It is written and fsynced
+/// before the first parent file is touched, and removed only after the merged revision has been
+/// durably captured. Its presence on startup means a merge was interrupted and the parent workspace
+/// may be partially modified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeIntent {
+    pub version: u32,
+    /// The revision the parent workspace is restored to if the merge must be rolled back.
+    pub pre_merge_revision: RevisionId,
+    pub created_at_ms: u64,
+    /// Parent-relative paths the merge intends to write.
+    #[serde(default)]
+    pub written_files: Vec<String>,
+    /// Parent-relative paths the merge intends to remove.
+    #[serde(default)]
+    pub removed_files: Vec<String>,
+}
+
 impl SnapshotStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -226,6 +255,53 @@ impl SnapshotStore {
 
     pub fn intent_path(&self) -> PathBuf {
         self.root.join(RESTORE_INTENT_FILE)
+    }
+
+    /// F03 (`v1.4.0`): path of the durable merge intent journal.
+    pub fn merge_intent_path(&self) -> PathBuf {
+        self.root.join(MERGE_INTENT_FILE)
+    }
+
+    /// F03 (`v1.4.0`): durably record that a multi-file merge into the parent workspace is about to
+    /// start. Written *before* the first parent file is touched so a crash mid-merge is detectable.
+    pub fn write_merge_intent(&self, intent: &MergeIntent) -> Result<(), RevisionError> {
+        self.ensure_layout()?;
+        write_atomic_bytes(
+            &self.merge_intent_path(),
+            &serde_json::to_vec(intent)?,
+            0o600,
+        )
+    }
+
+    /// F03 (`v1.4.0`): read the pending merge intent journal, if one is present.
+    pub fn pending_merge_intent(&self) -> Result<Option<MergeIntent>, RevisionError> {
+        let path = self.merge_intent_path();
+        let mut file = match open_store_file_no_symlink(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let intent: MergeIntent = serde_json::from_slice(&bytes)?;
+        if intent.version != MERGE_INTENT_VERSION {
+            return Err(RevisionError::InvalidStore(format!(
+                "unsupported merge intent journal version {}",
+                intent.version
+            )));
+        }
+        Ok(Some(intent))
+    }
+
+    /// F03 (`v1.4.0`): clear the merge intent journal after a successful merge (or a clean
+    /// rollback).
+    pub fn clear_merge_intent(&self) -> Result<(), RevisionError> {
+        match fs::remove_file(self.merge_intent_path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        sync_dir(&self.root)
     }
 
     pub fn blob_path(&self, sha256: &str) -> PathBuf {

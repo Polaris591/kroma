@@ -1661,8 +1661,19 @@ pub struct AttributionCandidate {
     pub source_entry_id: Option<String>,
     pub revision_before: Option<RevisionId>,
     pub revision_after: Option<RevisionId>,
+    /// Heuristic ranking score in `[0, 1]`. B3 (`v1.4.0`): this is a *ranking* score, not a
+    /// calibrated probability — prefer [`AttributionCandidate::ranking_score`] when the distinction
+    /// matters. Retained under the historical name for wire compatibility.
     pub confidence: f64,
     pub rationale: String,
+}
+
+impl AttributionCandidate {
+    /// B3 (`v1.4.0`): explicit alias documenting that `confidence` is an uncalibrated heuristic
+    /// ranking score, not a probability. Use this name in new code and in rendered output.
+    pub fn ranking_score(&self) -> f64 {
+        self.confidence
+    }
 }
 
 /// Ranked, explicitly non-causal report over a failure.
@@ -1868,6 +1879,106 @@ impl AttributionEngine {
             anchors,
             candidates,
         }
+    }
+
+    /// B3 (`v1.4.0`): counterfactual verification of a candidate mutation **inside a temporary
+    /// isolated worktree**, so the user's live parent directory is never reverted or otherwise
+    /// touched. The worktree is materialized from `parent_revision`, the candidate's
+    /// `revision_before` is restored inside it, `probe` runs there, and the worktree is then
+    /// removed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_candidate_in_isolated_worktree<F>(
+        store: &crate::revision::SnapshotStore,
+        parent_workspace: &WorkspaceCap,
+        parent_revision: Option<&RevisionId>,
+        candidate: &mut AttributionCandidate,
+        current_revision: &RevisionId,
+        worktree_root: std::path::PathBuf,
+        mut probe: F,
+    ) -> Result<CandidateVerificationResult, String>
+    where
+        F: FnMut(&WorkspaceCap) -> bool,
+    {
+        let Some(rev_before) = candidate.revision_before.clone() else {
+            return Err(format!(
+                "candidate {} has no revision_before to revert to",
+                candidate.mutation_id
+            ));
+        };
+        if &rev_before == current_revision {
+            return Err(format!(
+                "candidate {} revision_before {} equals current_revision",
+                candidate.mutation_id, rev_before
+            ));
+        }
+
+        // Materialize an isolated copy of the parent workspace; the live parent is never touched.
+        let mut worktree = crate::subagents::IsolatedWorktree::materialize(
+            format!("attribution-{}", candidate.mutation_id),
+            parent_workspace,
+            store,
+            parent_revision,
+            worktree_root,
+        )
+        .map_err(|e| format!("failed to materialize attribution worktree: {}", e))?;
+        let isolated = worktree.workspace().clone();
+
+        let outcome = (|| -> Result<CandidateVerificationResult, String> {
+            match store
+                .restore_revision(&isolated, &rev_before, Some(current_revision), false)
+                .map_err(|e| e.to_string())?
+            {
+                crate::revision::RestoreResult::Applied { .. } => {}
+                other => {
+                    return Err(format!(
+                        "isolated revert to {} did not apply cleanly: {:?}",
+                        rev_before, other
+                    ));
+                }
+            }
+
+            let passed_on_revert = probe(&isolated);
+
+            match store
+                .restore_revision(&isolated, current_revision, Some(&rev_before), true)
+                .map_err(|e| e.to_string())?
+            {
+                crate::revision::RestoreResult::Applied { .. } => {}
+                other => {
+                    return Err(format!(
+                        "isolated reapply of {} failed: {:?}",
+                        current_revision, other
+                    ));
+                }
+            }
+
+            if passed_on_revert {
+                candidate.confidence = round3((candidate.confidence + 0.25).min(0.99));
+            }
+            let note = if passed_on_revert {
+                format!(
+                    "verified in isolated worktree: reverting to {} resolved the failure",
+                    rev_before
+                )
+            } else {
+                format!(
+                    "isolated worktree probe did not resolve the failure at {}",
+                    rev_before
+                )
+            };
+            candidate.rationale = format!("{}; {}", candidate.rationale, note);
+
+            Ok(CandidateVerificationResult {
+                mutation_id: candidate.mutation_id.clone(),
+                revision_before: rev_before.clone(),
+                restored_revision: current_revision.clone(),
+                failure_resolved_on_revert: passed_on_revert,
+                rationale_note: note,
+            })
+        })();
+
+        let _ = worktree.cleanup();
+        outcome
     }
 
     /// Verify a candidate hypothesis using Gate 1's `SnapshotStore` by temporarily reverting the

@@ -170,6 +170,8 @@ impl SubagentBackend for ScriptedBackend {
                 turns_used: 2,
                 tool_calls_used: 2,
                 tokens_used: 100,
+                input_tokens: 60,
+                output_tokens: 40,
                 duration_ms: 5,
                 visible_tools: Vec::new(),
             })
@@ -202,6 +204,8 @@ fn tournament_spec(root: &Path, candidates: usize) -> TournamentSpec {
         predictive_check: false,
         cancel_rx: watch::channel(false).1,
         timeout_ms: 5_000,
+        disallow_test_tampering: false,
+        protected_paths: Vec::new(),
     }
 }
 
@@ -793,3 +797,691 @@ fn test_reserved_kernel_tools_include_code_graph_after_tournament_work() {
 }
 
 fn _assert_paths_used(_: &RevisionId, _: &Path) {}
+
+// =============================================================================================
+// v1.4.0 — Astra F01..F10 remediation + Item #3 (protected paths / adaptive / bench)
+// =============================================================================================
+
+use kroma_core::messages::{
+    AssistantTurn, FinishReason, TokenUsage, ToolCall, TranscriptItem, UserMessage,
+};
+use kroma_core::types::ToolCallId;
+
+/// A completion gate that approves only when `lib.rs` contains `"fixed"`.
+struct FixedGate;
+
+impl CompletionGate for FixedGate {
+    fn check<'a>(
+        &'a self,
+        ctx: &'a CompletionGateContext,
+    ) -> Pin<Box<dyn Future<Output = Result<GateOutcome, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let text = fs::read_to_string(ctx.workspace_root.join("lib.rs")).unwrap_or_default();
+            if text.contains("fixed") {
+                Ok(GateOutcome::Approved)
+            } else {
+                Ok(GateOutcome::Rejected {
+                    feedback: "lib.rs does not contain the expected fix".to_string(),
+                })
+            }
+        })
+    }
+}
+
+fn write_turn(path: &str, content: &str, call_id: &str) -> AssistantTurn {
+    AssistantTurn {
+        content: None,
+        reasoning_blocks: Vec::new(),
+        tool_calls: vec![ToolCall {
+            call_id: ToolCallId::new(call_id),
+            name: "write".to_string(),
+            raw_arguments: serde_json::json!({ "path": path, "content": content }).to_string(),
+        }],
+        finish_reason: FinishReason::ToolCalls,
+        usage: Some(TokenUsage {
+            input_tokens: 100,
+            cached_input_tokens: None,
+            output_tokens: 50,
+            reasoning_tokens: None,
+        }),
+    }
+}
+
+fn stop_turn(text: &str) -> AssistantTurn {
+    AssistantTurn {
+        content: Some(text.to_string()),
+        reasoning_blocks: Vec::new(),
+        tool_calls: Vec::new(),
+        finish_reason: FinishReason::Stop,
+        usage: Some(TokenUsage {
+            input_tokens: 120,
+            cached_input_tokens: None,
+            output_tokens: 20,
+            reasoning_tokens: None,
+        }),
+    }
+}
+
+// ---- F01: shared authorization + quota preflight ---------------------------------------------
+
+#[test]
+fn test_f01_subagent_spawn_preflight_quota_and_readonly_equivalence() {
+    use kroma_core::subagents::subagent_spawn_preflight;
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyCheckResult, PolicyEngine};
+    use kroma_core::types::EffectClass;
+
+    let readonly = PolicyEngine::new(PolicyMode::ReadOnly, Arc::new(NonInteractiveApprovalHandler));
+    // A `Mutating` spawn (worker/tournament) is denied under `read-only` — identically for the tool
+    // path and the RPC path, because both call this one function.
+    let check = subagent_spawn_preflight(&readonly, 2, 0, 8, EffectClass::Mutating).unwrap();
+    assert!(matches!(check, PolicyCheckResult::Deny(_)));
+
+    // A read-only spawn (scout) is still allowed under `read-only`.
+    let check = subagent_spawn_preflight(&readonly, 1, 0, 8, EffectClass::ReadOnly).unwrap();
+    assert!(matches!(check, PolicyCheckResult::Allow));
+
+    // `max_subagents = 0` disables spawning outright.
+    let ask = PolicyEngine::new(PolicyMode::Ask, Arc::new(NonInteractiveApprovalHandler));
+    let err = subagent_spawn_preflight(&ask, 2, 0, 0, EffectClass::Mutating).unwrap_err();
+    assert!(err.contains("disabled"), "got: {}", err);
+
+    // Quota exhaustion is rejected before any worktree is created.
+    let err = subagent_spawn_preflight(&ask, 2, 7, 8, EffectClass::Mutating).unwrap_err();
+    assert!(err.contains("budget exceeded"), "got: {}", err);
+}
+
+#[test]
+fn test_f01_worker_backend_never_escalates_readonly_parent() {
+    // `ProviderSubagentBackend` must refuse to turn a `ReadOnly` parent into a writing worker: this
+    // is the exact escalation that let `/race` write files from a read-only session.
+    use kroma_core::subagents::{ProviderSubagentBackend, SubagentExecutionRequest, SubagentSpec};
+
+    let root = temp_root("f01-readonly");
+    let (ws, workspace, _store) = baseline_workspace(&root);
+    let backend = ProviderSubagentBackend::new(Arc::new(NoopProvider));
+    let (_tx, rx) = watch::channel(false);
+    let req = SubagentExecutionRequest {
+        subagent_id: "sub-0001".to_string(),
+        spec: SubagentSpec::worker("fix it"),
+        workspace,
+        state_dir: root.join("state"),
+        workspace_skills: Vec::new(),
+        parent_policy_mode: PolicyMode::ReadOnly,
+        parent_budget: BudgetConfig::default(),
+        predictive_check: false,
+        cancel_rx: rx,
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let err = runtime
+        .block_on(backend.run_subagent(req))
+        .expect_err("a read-only parent must not spawn a writing worker");
+    assert!(err.contains("read-only"), "got: {}", err);
+    // The parent workspace is untouched.
+    assert!(!fs::read_to_string(ws.join("lib.rs")).unwrap().contains("fixed"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- F02: cancellation is honoured before the merge ------------------------------------------
+
+#[tokio::test]
+async fn test_f02_tournament_cancel_before_merge_never_touches_parent() {
+    let root = temp_root("f02-cancel");
+    let (ws, workspace, store) = baseline_workspace(&root);
+    let backend: Arc<dyn SubagentBackend> = ScriptedBackend::new(vec![
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+    ]);
+    let gate: Arc<dyn CompletionGate> = Arc::new(FixedGate);
+
+    // Pre-cancelled: the tournament must observe the cancel flag before merging.
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    cancel_tx.send(true).unwrap();
+    let mut spec = tournament_spec(&root, 2);
+    spec.cancel_rx = cancel_rx;
+    spec.candidates = vec![
+        kroma_core::subagents::TournamentCandidate::worker("c1", "fix it"),
+        kroma_core::subagents::TournamentCandidate::worker("c2", "fix it differently"),
+    ];
+
+    let outcome = run_worktree_tournament(spec, &workspace, &store, backend, None, &gate)
+        .await
+        .unwrap();
+    assert!(outcome.merged_revision.is_none());
+    assert!(!fs::read_to_string(ws.join("lib.rs")).unwrap().contains("fixed"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- F03: merge intent journal lifecycle -----------------------------------------------------
+
+#[test]
+fn test_f03_merge_intent_journal_round_trip_and_cleanup() {
+    let root = temp_root("f03-intent");
+    let (_ws, _workspace, store) = baseline_workspace(&root);
+    let rev = RevisionId::new("r-0123456789abcdef0123456789abcdef");
+    assert!(store.pending_merge_intent().unwrap().is_none());
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: rev.clone(),
+            created_at_ms: 0,
+            written_files: vec!["lib.rs".to_string()],
+            removed_files: vec!["gone.rs".to_string()],
+        })
+        .unwrap();
+    let pending = store.pending_merge_intent().unwrap().unwrap();
+    assert_eq!(pending.pre_merge_revision, rev);
+    assert_eq!(pending.written_files, vec!["lib.rs".to_string()]);
+
+    store.clear_merge_intent().unwrap();
+    assert!(store.pending_merge_intent().unwrap().is_none());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn test_f03_successful_tournament_merge_leaves_no_intent_journal() {
+    let root = temp_root("f03-merge-clean");
+    let (_ws, workspace, store) = baseline_workspace(&root);
+    let backend: Arc<dyn SubagentBackend> = ScriptedBackend::new(vec![
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+    ]);
+    let gate: Arc<dyn CompletionGate> = Arc::new(FixedGate);
+    let mut spec = tournament_spec(&root, 2);
+    spec.candidates = vec![
+        kroma_core::subagents::TournamentCandidate::worker("c1", "fix it"),
+        kroma_core::subagents::TournamentCandidate::worker("c2", "fix it differently"),
+    ];
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime
+        .block_on(run_worktree_tournament(spec, &workspace, &store, backend, None, &gate))
+        .unwrap();
+    assert!(outcome.merged_revision.is_some());
+    assert!(store.pending_merge_intent().unwrap().is_none());
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- F05: zero-change candidate must never beat a real fix ------------------------------------
+
+#[test]
+fn test_f05_zero_change_candidate_never_wins() {
+    let root = temp_root("f05-zero");
+    let (_ws, workspace, store) = baseline_workspace(&root);
+    // c1 makes no change at all; c2 applies the real fix. c1 must not win.
+    let backend: Arc<dyn SubagentBackend> = ScriptedBackend::new(vec![
+        vec![],
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+    ]);
+    let gate: Arc<dyn CompletionGate> = Arc::new(FixedGate);
+    let mut spec = tournament_spec(&root, 2);
+    spec.candidates = vec![
+        kroma_core::subagents::TournamentCandidate::worker("c1", "do nothing"),
+        kroma_core::subagents::TournamentCandidate::worker("c2", "fix it"),
+    ];
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime
+        .block_on(run_worktree_tournament(spec, &workspace, &store, backend, None, &gate))
+        .unwrap();
+    let winner = outcome.winner.expect("the real fix must win");
+    assert_eq!(outcome.scores[winner].label, "c2");
+    assert!(!outcome.scores[0].has_changes);
+    assert!(!outcome.scores[0].eligible_to_win());
+    assert_eq!(
+        outcome.scores[0].gate_status,
+        kroma_core::subagents::GateVerificationStatus::Skipped
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- F06: rank #1 conflict falls back to rank #2 ---------------------------------------------
+
+#[test]
+fn test_f06_rank1_conflict_falls_back_to_rank2_winner() {
+    let root = temp_root("f06-fallback");
+    let (ws, workspace, store) = baseline_workspace(&root);
+    // Capture a baseline revision, then concurrently edit README.md in the parent. c1's README edit
+    // then conflicts with the live parent; c2's lib.rs fix merges cleanly.
+    let baseline = store.capture_revision(&workspace, None, None, 0).unwrap();
+    fs::write(ws.join("README.md"), "# demo\n// concurrent parent edit\n").unwrap();
+
+    let backend: Arc<dyn SubagentBackend> = ScriptedBackend::new(vec![
+        vec![("README.md", "# demo\n// fixed\n".to_string())],
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+    ]);
+    let gate: Arc<dyn CompletionGate> = Arc::new(FixedGate);
+    let mut spec = tournament_spec(&root, 2);
+    spec.candidates = vec![
+        kroma_core::subagents::TournamentCandidate::worker("c1", "edit readme"),
+        kroma_core::subagents::TournamentCandidate::worker("c2", "fix lib"),
+    ];
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime
+        .block_on(run_worktree_tournament(
+            spec,
+            &workspace,
+            &store,
+            backend,
+            Some(&baseline.revision_id),
+            &gate,
+        ))
+        .unwrap();
+    let winner = outcome.winner.expect("rank #2 must win after rank #1 conflicts");
+    assert_eq!(outcome.scores[winner].label, "c2");
+    let c1 = outcome.scores.iter().find(|s| s.label == "c1").unwrap();
+    assert!(!c1.conflict_free_with_parent);
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- F07: post-merge verification on the real merged parent state ----------------------------
+
+#[test]
+fn test_f07_post_merge_gate_rolls_back_on_parent_dependency_change() {
+    let root = temp_root("f07-postmerge");
+    let (ws, workspace, store) = baseline_workspace(&root);
+    // Fork baseline, then add a poisoned dependency to the *live parent* only. Candidates verify in
+    // their own worktrees (no `dep.txt`) and pass; the merged parent state fails the post-merge gate
+    // and must be rolled back.
+    let baseline = store.capture_revision(&workspace, None, None, 0).unwrap();
+    fs::write(ws.join("dep.txt"), "poisoned\n").unwrap();
+
+    let backend: Arc<dyn SubagentBackend> = ScriptedBackend::new(vec![
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+    ]);
+    let gate: Arc<dyn CompletionGate> = Arc::new(PoisonedDependencyGate);
+    let mut spec = tournament_spec(&root, 2);
+    spec.candidates = vec![
+        kroma_core::subagents::TournamentCandidate::worker("c1", "fix it"),
+        kroma_core::subagents::TournamentCandidate::worker("c2", "fix it differently"),
+    ];
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime
+        .block_on(run_worktree_tournament(
+            spec,
+            &workspace,
+            &store,
+            backend,
+            Some(&baseline.revision_id),
+            &gate,
+        ))
+        .unwrap();
+    assert!(
+        outcome.merged_revision.is_none(),
+        "post-merge verification failure must roll back every candidate"
+    );
+    assert!(fs::read_to_string(ws.join("lib.rs")).unwrap().contains("// broken") || !fs::read_to_string(ws.join("lib.rs")).unwrap().contains("fixed"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Approves a candidate's own worktree but rejects the merged parent state once the poisoned
+/// dependency is present.
+struct PoisonedDependencyGate;
+
+impl CompletionGate for PoisonedDependencyGate {
+    fn check<'a>(
+        &'a self,
+        ctx: &'a CompletionGateContext,
+    ) -> Pin<Box<dyn Future<Output = Result<GateOutcome, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let dep = ctx.workspace_root.join("dep.txt");
+            let lib = fs::read_to_string(ctx.workspace_root.join("lib.rs")).unwrap_or_default();
+            if dep.exists() {
+                Ok(GateOutcome::Rejected {
+                    feedback: "poisoned dependency present in merged workspace".to_string(),
+                })
+            } else if lib.contains("fixed") {
+                Ok(GateOutcome::Approved)
+            } else {
+                Ok(GateOutcome::Rejected {
+                    feedback: "not fixed".to_string(),
+                })
+            }
+        })
+    }
+}
+
+// ---- Item #3.1: protected verification/test paths ---------------------------------------------
+
+#[test]
+fn test_item3_protected_test_path_disqualifies_candidate() {
+    use kroma_core::subagents::{
+        effective_protected_globs, path_is_protected, GateVerificationStatus,
+    };
+    // Glob classification.
+    let globs = effective_protected_globs(true, &[]);
+    assert!(path_is_protected("tests/gate8.rs", &globs));
+    assert!(path_is_protected("crates/x/tests/y.rs", &globs));
+    assert!(path_is_protected("src/foo_test.py", &globs));
+    assert!(!path_is_protected("src/lib.rs", &globs));
+    assert!(!path_is_protected("src/lib.rs", &effective_protected_globs(false, &[])));
+
+    let root = temp_root("item3-protected");
+    let (_ws, workspace, store) = baseline_workspace(&root);
+    // c1 "fixes" the test instead of the code; c2 fixes the code. c1 must be disqualified.
+    let backend: Arc<dyn SubagentBackend> = ScriptedBackend::new(vec![
+        vec![(
+            "tests/gate8.rs",
+            "// fixed\n#[test]\nfn t() {}\n".to_string(),
+        )],
+        vec![("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string())],
+    ]);
+    let gate: Arc<dyn CompletionGate> = Arc::new(FixedGate);
+    let mut spec = tournament_spec(&root, 2);
+    spec.disallow_test_tampering = true;
+    spec.candidates = vec![
+        kroma_core::subagents::TournamentCandidate::worker("c1", "edit the test"),
+        kroma_core::subagents::TournamentCandidate::worker("c2", "fix lib"),
+    ];
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime
+        .block_on(run_worktree_tournament(spec, &workspace, &store, backend, None, &gate))
+        .unwrap();
+    let c1 = outcome.scores.iter().find(|s| s.label == "c1").unwrap();
+    assert_eq!(c1.gate_status, GateVerificationStatus::Failed);
+    assert!(c1.gate_detail.contains("tampered"), "got: {}", c1.gate_detail);
+    assert!(!c1.eligible_to_win());
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- Item #3.3: paired budget-locked benchmark ------------------------------------------------
+
+#[test]
+fn test_item3_bench_paired_budget_locked_report() {
+    use kroma_core::bench::{
+        builtin_smoke_suite, default_strategy_pair, run_paired_benchmark, SyntheticBenchExecutor,
+    };
+    let root = temp_root("item3-bench");
+    let report = run_paired_benchmark(
+        "builtin-smoke",
+        &builtin_smoke_suite(),
+        &default_strategy_pair(),
+        8_000,
+        &root,
+        &SyntheticBenchExecutor,
+    );
+    assert_eq!(report.arms.len(), 2);
+    for r in &report.results {
+        assert!(r.total_tokens <= 8_000, "arm exceeded its budget: {:?}", r);
+    }
+    assert!(report.winner.is_some());
+    assert!(report.render().contains("pass_rate"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- Item #3.2: adaptive tournament escalation ------------------------------------------------
+
+#[tokio::test]
+async fn test_item3_adaptive_tournament_escalates_on_repeated_gate_failure() {
+    use kroma_core::agent_loop::{build_runtime_with_registry, AgentRunConfig, AgentRunner};
+    use kroma_core::env::LocalHostEnv;
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine};
+    use kroma_core::tool::registry::ToolRegistry;
+
+    let root = temp_root("item3-adaptive");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+
+    let env = Arc::new(LocalHostEnv::new(&ws, root.join("state")).unwrap());
+    let registry = ToolRegistry::new(None);
+    let policy = PolicyEngine::new(
+        PolicyMode::FullAutonomous,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    let runtime = build_runtime_with_registry(registry, env, policy, BudgetConfig::default());
+
+    // Parent writes a broken lib.rs then stops twice (gate rejects twice) -> escalation; the child
+    // candidates see the subagent role banner and write the real fix.
+    let provider = Arc::new(EscalationProvider::default());
+    let mut cfg = AgentRunConfig::new("fix lib.rs", BudgetConfig::default());
+    cfg.stream = false;
+    let (_tx, rx) = watch::channel(false);
+    let gate: Arc<dyn CompletionGate> = Arc::new(FixedGate);
+    let runner = AgentRunner::new(cfg, provider, runtime, rx)
+        .with_completion_gate(gate)
+        .with_completion_gate_max_retries(5)
+        .with_max_subagents(4)
+        .with_adaptive_tournament_candidates(2);
+
+    let (summary, _logger) = runner.run(kroma_core::events::EventLogger::new(kroma_core::types::RunId::new(), None, false).unwrap()).await;
+    // The escalation must have produced a fixed workspace (a candidate merged the real fix).
+    let text = fs::read_to_string(ws.join("lib.rs")).unwrap();
+    assert!(
+        text.contains("fixed"),
+        "adaptive escalation did not merge a fix; summary={:?}",
+        summary.terminal_reason
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Provider used by the adaptive-escalation test: the parent writes a *broken* `lib.rs`, while
+/// child subagents (identified by the subagent role banner) write the real fix.
+#[derive(Default)]
+struct EscalationProvider {
+    call: Mutex<usize>,
+}
+
+impl ModelProvider for EscalationProvider {
+    fn complete<'a>(
+        &'a self,
+        req: ProviderRequest,
+        _budget: &'a BudgetConfig,
+        cancel_rx: watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            if *cancel_rx.borrow() {
+                return Err(ProviderError::Cancelled);
+            }
+            let is_child = req.system_prompt.contains("SUBAGENT ROLE: worker");
+            let mut n = self.call.lock().unwrap();
+            let index = *n;
+            *n += 1;
+            let turn = if index % 2 == 0 {
+                let content = if is_child {
+                    "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n"
+                } else {
+                    "pub fn add(a: i32, b: i32) -> i32 { a + b } // broken\n"
+                };
+                write_turn("lib.rs", content, &format!("call-{}", index))
+            } else {
+                stop_turn("done")
+            };
+            Ok(ProviderCompletion {
+                turn,
+                request_body_bytes: 0,
+                latency_ms: 0,
+                ttft_ms: Some(0),
+                attempts_used: 1,
+            })
+        })
+    }
+}
+
+// ---- F08/F10: token budget reservation and children aggregation --------------------------------
+
+#[test]
+fn test_f08_provider_request_serializes_max_output_tokens() {
+    use kroma_core::provider::chat_completions::serialize_openai_request_body_with_limit;
+    let body = serialize_openai_request_body_with_limit(
+        "m",
+        "sys",
+        &[],
+        &[TranscriptItem::User(UserMessage {
+            content: "hi".to_string(),
+        })],
+        false,
+        None,
+        Some(1234),
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v.get("max_tokens").and_then(|n| n.as_u64()), Some(1234));
+
+    let body = serialize_openai_request_body_with_limit(
+        "m",
+        "sys",
+        &[],
+        &[TranscriptItem::User(UserMessage {
+            content: "hi".to_string(),
+        })],
+        false,
+        None,
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("max_tokens").is_none());
+}
+
+#[test]
+fn test_f10_children_token_usage_is_aggregated_separately() {
+    let mut tracker = kroma_core::budget::BudgetTracker::new(BudgetConfig::default()).unwrap();
+    tracker.record_token_usage(100, None, 50);
+    tracker.record_children_token_usage(400, None, 200);
+    assert_eq!(tracker.total_input_tokens(), 100);
+    assert_eq!(tracker.children_input_tokens(), 400);
+    assert_eq!(tracker.children_output_tokens(), 200);
+    assert_eq!(tracker.all_input_tokens(), 500);
+    assert_eq!(tracker.all_output_tokens(), 250);
+    assert_eq!(tracker.all_total_tokens(), 750);
+}
+
+#[test]
+fn test_f08_token_budget_exhausted_is_a_distinct_terminal_reason() {
+    use kroma_core::types::{RunStatus, TerminalReason};
+    assert_eq!(
+        TerminalReason::TokenBudgetExhausted.to_status(),
+        RunStatus::BudgetExhausted
+    );
+    assert_ne!(
+        TerminalReason::TokenBudgetExhausted,
+        TerminalReason::MaxTurns
+    );
+}
+
+// ---- F01 (RPC entry point): `session.tournament` honours policy + quota -----------------------
+
+#[tokio::test]
+async fn test_f01_rpc_tournament_rejects_readonly_and_disabled_subagents() {
+    use kroma_core::surface::{JsonRpcRequest, RpcDispatcher};
+
+    let root = temp_root("f01-rpc");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+
+    // `read-only`: the RPC tournament must be rejected before any candidate worktree exists.
+    let cfg = KromaRuntimeConfig::new(&ws, root.join("state-readonly"), PolicyMode::ReadOnly);
+    let dispatcher = RpcDispatcher::new(cfg, Arc::new(NoopProvider)).unwrap();
+    let resp = dispatcher
+        .handle_request(JsonRpcRequest::new(
+            1,
+            "session.tournament",
+            serde_json::json!({ "task": "fix lib.rs", "candidates": 2 }),
+        ))
+        .await;
+    let err = resp.error.expect("read-only tournament must fail").message;
+    assert!(
+        err.contains("read-only") || err.contains("forbidden"),
+        "got: {}",
+        err
+    );
+
+    // `max_subagents = 0`: spawning is disabled at the RPC entry point too.
+    let mut cfg0 =
+        KromaRuntimeConfig::new(&ws, root.join("state-none"), PolicyMode::FullAutonomous);
+    cfg0.max_subagents = 0;
+    let dispatcher0 = RpcDispatcher::new(cfg0, Arc::new(NoopProvider)).unwrap();
+    let resp0 = dispatcher0
+        .handle_request(JsonRpcRequest::new(
+            2,
+            "session.tournament",
+            serde_json::json!({ "task": "fix lib.rs", "candidates": 2 }),
+        ))
+        .await;
+    let err0 = resp0.error.expect("disabled subagents must fail").message;
+    assert!(err0.contains("disabled"), "got: {}", err0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- Item #3 / B2: new config keys are honoured from `.kroma.toml` ----------------------------
+
+#[test]
+fn test_b2_projection_profile_and_adaptive_tournament_resolve_from_workspace_config() {
+    let root = temp_root("b2-config");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(
+        ws.join(".kroma.toml"),
+        "projection_profile = \"p3\"\nadaptive_tournament = 3\n",
+    )
+    .unwrap();
+
+    let overrides = ConfigOverrides::default();
+    let resolved = ResolvedConfig::resolve(
+        &KromaConfigFile::default(),
+        &KromaConfigFile::load_workspace(&ws).unwrap(),
+        &BTreeMap::new(),
+        &overrides,
+        None,
+        ws.join(".kroma.toml"),
+    );
+    // Both keys are in the workspace allow-list, so the trust guard must NOT flag them.
+    assert!(
+        resolved.rejected_workspace_keys.is_empty(),
+        "unexpected rejected keys: {:?}",
+        resolved.rejected_workspace_keys
+    );
+    assert_eq!(resolved.projection_profile.as_deref(), Some("p3"));
+    assert_eq!(resolved.adaptive_tournament, Some(3));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn test_b2_invalid_projection_profile_is_rejected_at_parse_time() {
+    let err = KromaConfigFile::parse_str("projection_profile = \"p9\"\n").unwrap_err();
+    assert!(err.contains("projection_profile"), "got: {}", err);
+}
+
+// ---- F08: missing provider usage is estimated, not ignored ------------------------------------
+
+#[tokio::test]
+async fn test_f08_missing_usage_is_estimated_conservatively() {
+    use kroma_core::agent_loop::{build_runtime_with_registry, AgentRunConfig, AgentRunner};
+    use kroma_core::env::LocalHostEnv;
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine};
+    use kroma_core::tool::registry::ToolRegistry;
+
+    let root = temp_root("f08-missing-usage");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+    let env = Arc::new(LocalHostEnv::new(&ws, root.join("state")).unwrap());
+    let registry = ToolRegistry::new(None);
+    let policy = PolicyEngine::new(
+        PolicyMode::FullAutonomous,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    let runtime = build_runtime_with_registry(registry, env, policy, BudgetConfig::default());
+
+    // Two turns, both reporting `usage: None`.
+    let provider = Arc::new(kroma_core::provider::FakeProvider::new(vec![
+        AssistantTurn {
+            content: Some("hello there".to_string()),
+            reasoning_blocks: Vec::new(),
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        },
+    ]));
+    let mut cfg = AgentRunConfig::new("say hi", BudgetConfig::default());
+    cfg.stream = false;
+    let (_tx, rx) = watch::channel(false);
+    let runner = AgentRunner::new(cfg, provider, runtime, rx);
+    let (summary, _logger) =
+        runner.run(kroma_core::events::EventLogger::new(kroma_core::types::RunId::new(), None, false).unwrap()).await;
+    assert!(
+        summary.total_input_tokens > 0,
+        "missing usage must be estimated, not counted as zero"
+    );
+    assert!(summary.total_output_tokens > 0);
+    let _ = fs::remove_dir_all(&root);
+}

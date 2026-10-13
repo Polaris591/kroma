@@ -114,6 +114,24 @@ pub struct GraphEdge {
     pub to: String,
     pub symbol: String,
     pub weight: f64,
+    /// B1 (`v1.4.0`): the kind of relationship this edge represents. Explicit `Import` edges carry
+    /// more PageRank weight than heuristic `CallOrReference` edges, and `TypeOrSymbol` edges point
+    /// at type definitions rather than call sites.
+    pub kind: EdgeKind,
+}
+
+/// B1 (`v1.4.0`): typed dependency edge classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgeKind {
+    /// The referencing file explicitly imports/uses the symbol (Rust `use`, Python `import`, TS
+    /// `import`, C `#include`).
+    Import,
+    /// The symbol is referenced from an ordinary call or expression position (heuristic).
+    #[default]
+    CallOrReference,
+    /// The symbol is a type-like definition (`struct` / `enum` / `trait` / `class` / `interface` /
+    /// `type`).
+    TypeOrSymbol,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +209,134 @@ pub struct RepoGraph {
     pub truncated: bool,
     /// Files skipped because they were sensitive, unreadable, oversized or not UTF-8.
     pub skipped_files: usize,
+    /// B1 (`v1.4.0`): number of files served from the incremental parse cache instead of being
+    /// re-parsed during this build.
+    pub cache_hits: usize,
+}
+
+/// B1 (`v1.4.0`): the cached parse of a single source file, keyed by path. Reused when the file's
+/// `(len, mtime_ns)` fingerprint is unchanged, so repeated graph builds do not re-parse the world.
+#[derive(Debug, Clone)]
+pub struct CachedFileParse {
+    len: u64,
+    mtime_ns: u64,
+    /// Content hash, retained for diagnostics and future content-addressed reuse.
+    content_sha256: String,
+    byte_len: usize,
+    symbols: Vec<SymbolDef>,
+    tokens: BTreeSet<String>,
+    import_tokens: BTreeSet<String>,
+}
+
+/// B1 (`v1.4.0`): an incremental per-file parse cache for [`RepoGraph::build_from_workspace_cached`].
+#[derive(Debug, Clone, Default)]
+pub struct RepoGraphCache {
+    entries: HashMap<String, CachedFileParse>,
+    /// Number of cache hits observed across all builds (telemetry only).
+    pub hits: u64,
+}
+
+impl RepoGraphCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn get_fresh(&mut self, rel: &str, len: u64, mtime_ns: u64) -> Option<&CachedFileParse> {
+        let hit = self
+            .entries
+            .get(rel)
+            .is_some_and(|e| e.len == len && e.mtime_ns == mtime_ns);
+        if hit {
+            self.hits = self.hits.saturating_add(1);
+            self.entries.get(rel)
+        } else {
+            None
+        }
+    }
+
+    /// Content hash of a cached file's last parse (diagnostics / content-addressed reuse).
+    pub fn content_sha256(&self, rel: &str) -> Option<&str> {
+        self.entries.get(rel).map(|e| e.content_sha256.as_str())
+    }
+
+    fn insert(&mut self, rel: String, parsed: CachedFileParse) {
+        self.entries.insert(rel, parsed);
+    }
+
+    /// Drop cache entries for files that no longer exist in the workspace.
+    fn retain_paths(&mut self, files: &[String]) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let live: std::collections::HashSet<&str> = files.iter().map(|s| s.as_str()).collect();
+        self.entries.retain(|k, _| live.contains(k.as_str()));
+    }
+}
+
+/// B1: nanoseconds since the Unix epoch for a file's modification time (0 when unavailable).
+fn mtime_nanos(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// B1 (`v1.4.0`): tokens that appear in an explicit import/use/include statement, used to classify
+/// graph edges as [`EdgeKind::Import`].
+pub fn extract_import_tokens(rel: &str, content: &str) -> BTreeSet<String> {
+    let Some(lang) = lang_of(rel) else {
+        return BTreeSet::new();
+    };
+    let stripped = strip_comments_and_strings(lang, content);
+    let mut tokens = BTreeSet::new();
+    for raw_line in stripped.lines() {
+        let line = raw_line.trim_start();
+        let is_import = match lang {
+            Lang::Rust => {
+                line.starts_with("use ") || line.starts_with("pub use ") || line.starts_with("mod ")
+            }
+            Lang::Python => line.starts_with("import ") || line.starts_with("from "),
+            Lang::TsJs => {
+                line.starts_with("import ")
+                    || line.starts_with("export ")
+                    || line.contains("require(")
+            }
+            Lang::CLike | Lang::Java | Lang::Go => {
+                line.starts_with("#include")
+                    || line.starts_with("#import")
+                    || line.starts_with("import ")
+                    || line.starts_with("package ")
+            }
+        };
+        if !is_import {
+            continue;
+        }
+        let mut current = String::new();
+        for ch in line.chars() {
+            if ch.is_alphanumeric() || ch == '_' {
+                current.push(ch);
+            } else {
+                if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    tokens.insert(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+            }
+        }
+        if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            tokens.insert(current);
+        }
+    }
+    tokens
 }
 
 impl RepoGraph {
@@ -223,6 +369,18 @@ impl RepoGraph {
     /// Files are indexed in deterministic lexicographic order and the walk stops at `max_files`
     /// (or the byte caps), setting `truncated` so callers can report partial coverage honestly.
     pub fn build_from_workspace(cap: &WorkspaceCap, max_files: usize) -> RepoGraph {
+        let mut cache = RepoGraphCache::new();
+        Self::build_from_workspace_cached(cap, max_files, &mut cache)
+    }
+
+    /// B1 (`v1.4.0`): like [`RepoGraph::build_from_workspace`], but reuses a persistent per-file
+    /// parse cache. A file whose `(path, len, mtime_ns, content_sha256)` is unchanged is not
+    /// re-parsed, so repeated `code_graph` / `/graph` calls within a session stay cheap.
+    pub fn build_from_workspace_cached(
+        cap: &WorkspaceCap,
+        max_files: usize,
+        cache: &mut RepoGraphCache,
+    ) -> RepoGraph {
         let ignore_rules = load_workspace_ignore_patterns(cap);
         let mut paths: Vec<std::path::PathBuf> = Vec::new();
         let mut skipped_sensitive = 0usize;
@@ -240,9 +398,11 @@ impl RepoGraph {
         let mut symbols: Vec<SymbolDef> = Vec::new();
         let mut file_symbols: Vec<Vec<usize>> = Vec::new();
         let mut file_tokens: Vec<BTreeSet<String>> = Vec::new();
+        let mut file_import_tokens: Vec<BTreeSet<String>> = Vec::new();
         let mut skipped_files = skipped_sensitive;
         let mut truncated = false;
         let mut total_bytes = 0usize;
+        let mut cache_hits = 0usize;
 
         for path in paths {
             let rel = path.to_string_lossy().replace('\\', "/");
@@ -257,7 +417,7 @@ impl RepoGraph {
                 skipped_files += 1;
                 continue;
             }
-            let Ok((_, mut file)) = cap.open_existing_no_symlink(&rel) else {
+            let Ok((_, file)) = cap.open_existing_no_symlink(&rel) else {
                 skipped_files += 1;
                 continue;
             };
@@ -269,7 +429,27 @@ impl RepoGraph {
                 skipped_files += 1;
                 continue;
             }
-            let mut bytes = Vec::with_capacity(meta.len() as usize);
+            let len = meta.len();
+            let mtime_ns = mtime_nanos(&meta);
+
+            // B1: reuse the cached parse when the cheap `(len, mtime_ns)` fingerprint matches.
+            if let Some(cached) = cache.get_fresh(&rel, len, mtime_ns) {
+                cache_hits += 1;
+                total_bytes = total_bytes.saturating_add(cached.byte_len);
+                let mut indices = Vec::with_capacity(cached.symbols.len());
+                for def in &cached.symbols {
+                    indices.push(symbols.len());
+                    symbols.push(def.clone());
+                }
+                file_symbols.push(indices);
+                file_tokens.push(cached.tokens.clone());
+                file_import_tokens.push(cached.import_tokens.clone());
+                files.push(rel);
+                continue;
+            }
+
+            let mut file = file;
+            let mut bytes = Vec::with_capacity(len as usize);
             let mut limited = (&mut file).take(MAX_GRAPH_FILE_BYTES + 1);
             if limited.read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_GRAPH_FILE_BYTES {
                 skipped_files += 1;
@@ -287,16 +467,39 @@ impl RepoGraph {
 
             let mut defs = Vec::new();
             extract_symbols_from_source(&rel, &text, &mut defs);
-            let mut indices = Vec::with_capacity(defs.len());
+            let mut cached_symbols = Vec::with_capacity(defs.len());
             for mut def in defs {
                 def.file_path = rel.clone();
+                cached_symbols.push(def);
+            }
+            let tokens = extract_reference_tokens(&rel, &text);
+            let import_tokens = extract_import_tokens(&rel, &text);
+
+            let mut indices = Vec::with_capacity(cached_symbols.len());
+            for def in &cached_symbols {
                 indices.push(symbols.len());
-                symbols.push(def);
+                symbols.push(def.clone());
             }
             file_symbols.push(indices);
-            file_tokens.push(extract_reference_tokens(&rel, &text));
-            files.push(rel);
+            file_tokens.push(tokens.clone());
+            file_import_tokens.push(import_tokens.clone());
+            files.push(rel.clone());
+
+            cache.insert(
+                rel,
+                CachedFileParse {
+                    len,
+                    mtime_ns,
+                    content_sha256: crate::prompt::sha256_hex64(text.as_bytes()),
+                    byte_len: text.len(),
+                    symbols: cached_symbols,
+                    tokens,
+                    import_tokens,
+                },
+            );
         }
+
+        cache.retain_paths(&files);
 
         let mut graph = RepoGraph {
             file_index: files
@@ -311,12 +514,19 @@ impl RepoGraph {
             in_adj: Vec::new(),
             truncated,
             skipped_files,
+            cache_hits: 0,
         };
-        graph.build_edges(&file_symbols, &file_tokens);
+        graph.cache_hits = cache_hits;
+        graph.build_edges(&file_symbols, &file_tokens, &file_import_tokens);
         graph
     }
 
-    fn build_edges(&mut self, file_symbols: &[Vec<usize>], file_tokens: &[BTreeSet<String>]) {
+    fn build_edges(
+        &mut self,
+        file_symbols: &[Vec<usize>],
+        file_tokens: &[BTreeSet<String>],
+        file_import_tokens: &[BTreeSet<String>],
+    ) {
         // symbol name -> indices of the symbols with that name.
         let mut definitions: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for (idx, sym) in self.symbols.iter().enumerate() {
@@ -327,6 +537,8 @@ impl RepoGraph {
         }
 
         let mut per_pair: BTreeMap<(usize, usize, String), f64> = BTreeMap::new();
+        // B1: track whether the matched definition is a type-like symbol.
+        let mut per_pair_is_type: BTreeMap<(usize, usize, String), bool> = BTreeMap::new();
         for (from_idx, tokens) in file_tokens.iter().enumerate() {
             let from_path = &self.files[from_idx];
             for token in tokens {
@@ -345,6 +557,19 @@ impl RepoGraph {
                     *per_pair
                         .entry((from_idx, to_idx, token.clone()))
                         .or_insert(0.0) += weight;
+                    let is_type = matches!(
+                        def.kind,
+                        SymbolKind::Struct
+                            | SymbolKind::Enum
+                            | SymbolKind::Trait
+                            | SymbolKind::Class
+                            | SymbolKind::Interface
+                            | SymbolKind::Type
+                    );
+                    let entry = per_pair_is_type
+                        .entry((from_idx, to_idx, token.clone()))
+                        .or_insert(false);
+                    *entry = *entry || is_type;
                 }
             }
         }
@@ -357,11 +582,36 @@ impl RepoGraph {
             if weight <= 0.0 {
                 continue;
             }
+            // B1 (`v1.4.0`): classify the edge and give explicit imports more PageRank weight than
+            // heuristic name matches, so a real dependency outranks a coincidental identifier hit.
+            let kind = if file_import_tokens
+                .get(from)
+                .is_some_and(|imports| imports.contains(&symbol))
+            {
+                EdgeKind::Import
+            } else if per_pair_is_type
+                .get(&(from, to, symbol.clone()))
+                .copied()
+                .unwrap_or(false)
+            {
+                EdgeKind::TypeOrSymbol
+            } else {
+                EdgeKind::CallOrReference
+            };
+            let weight = match kind {
+                EdgeKind::Import => (weight * 1.5).min(8.0),
+                EdgeKind::TypeOrSymbol => (weight * 1.2).min(8.0),
+                EdgeKind::CallOrReference => weight,
+            };
+            if weight <= 0.0 {
+                continue;
+            }
             self.edges.push(GraphEdge {
                 from: self.files[from].clone(),
                 to: self.files[to].clone(),
                 symbol,
                 weight,
+                kind,
             });
             out_adj[from].push((to, weight));
             in_adj[to].push((from, weight));

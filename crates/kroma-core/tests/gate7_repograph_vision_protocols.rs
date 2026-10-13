@@ -562,6 +562,7 @@ async fn test_anthropic_messages_protocol_cache_control_breakpoints_and_sse_stre
             breakpoint: CacheBreakpoint::PinnedBaselineEnd,
             message_index: 0,
         }],
+            max_output_tokens: None,
     };
 
     let (_tx, cancel_rx) = watch::channel(false);
@@ -748,6 +749,7 @@ async fn test_openai_responses_protocol_roundtrip_and_function_call() {
         messages,
         stream: true,
         cache_breakpoints: Vec::new(),
+            max_output_tokens: None,
     };
 
     let (_tx, cancel_rx) = watch::channel(false);
@@ -898,6 +900,7 @@ fn single_user_request() -> ProviderRequest {
         })],
         stream: true,
         cache_breakpoints: Vec::new(),
+        max_output_tokens: None,
     }
 }
 
@@ -1480,4 +1483,208 @@ fn test_anthropic_wire_messages_alternate_roles_and_lead_with_thinking() {
         "ephemeral",
         "the breakpoint must land on the assistant wire message, not drift forward"
     );
+}
+
+// =============================================================================================
+// v1.4.0 — Astra F09 (Responses encrypted reasoning round-trip) + B1 (incremental RepoGraph)
+// =============================================================================================
+
+use kroma_core::messages::ReasoningBlock;
+use kroma_core::repo_graph::{EdgeKind, RepoGraphCache};
+use kroma_core::subagents::{default_test_protected_globs, effective_protected_globs};
+
+#[test]
+fn test_f09_responses_encrypted_content_round_trip_non_streaming() {
+    // A non-streaming reasoning item carrying only `encrypted_content` (no readable summary) must
+    // be preserved on the turn...
+    let body = r#"{
+        "id": "resp_1",
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "encrypted_content": "OPAQUE-BLOB-123"},
+            {"type": "message", "content": [{"type": "output_text", "text": "hi"}]}
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 2}
+    }"#;
+    let turn = parse_responses_response(body).unwrap();
+    assert_eq!(turn.reasoning_blocks.len(), 1);
+    assert_eq!(
+        turn.reasoning_blocks[0].opaque_payload.as_deref(),
+        Some("OPAQUE-BLOB-123")
+    );
+    assert!(turn.reasoning_blocks[0].text.is_none());
+
+    // ...and replayed verbatim on the next request, even though `text` is empty.
+    let messages = vec![
+        TranscriptItem::User(UserMessage {
+            content: "do a thing".to_string(),
+        }),
+        TranscriptItem::Assistant(turn),
+        TranscriptItem::ToolResult(ToolResultMessage {
+            call_id: ToolCallId::new("call_1"),
+            tool_name: "read".to_string(),
+            outcome: ToolOutcome::Success,
+            content: Arc::from("ok"),
+            meta: ToolResultMeta::default(),
+        }),
+    ];
+    let wire = serialize_responses_request_body("gpt-5.2", "sys", &[], &messages, false, None);
+    let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    let reasoning = v["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
+        .expect("reasoning item must be replayed");
+    assert_eq!(
+        reasoning.get("encrypted_content").and_then(|c| c.as_str()),
+        Some("OPAQUE-BLOB-123")
+    );
+}
+
+#[test]
+fn test_f09_responses_serialization_replays_text_and_opaque_together() {
+    let turn = AssistantTurn {
+        content: Some("thinking out loud".to_string()),
+        reasoning_blocks: vec![ReasoningBlock {
+            text: Some("summary".to_string()),
+            signature: None,
+            opaque_payload: Some("OPAQUE-2".to_string()),
+        }],
+        tool_calls: Vec::new(),
+        finish_reason: FinishReason::Stop,
+        usage: None,
+    };
+    let messages = vec![TranscriptItem::Assistant(turn)];
+    let wire = serialize_responses_request_body("m", "sys", &[], &messages, false, None);
+    let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    let reasoning = v["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
+        .unwrap();
+    assert_eq!(
+        reasoning.get("encrypted_content").and_then(|c| c.as_str()),
+        Some("OPAQUE-2")
+    );
+    assert!(reasoning.get("summary").is_some());
+}
+
+#[tokio::test]
+async fn test_f09_responses_sse_captures_encrypted_reasoning_item() {
+    let events = [
+        (
+            "response.created",
+            r#"{"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}"#,
+        ),
+        (
+            "response.output_item.done",
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","encrypted_content":"SSE-OPAQUE-9"}}"#,
+        ),
+        (
+            "response.output_text.delta",
+            r#"{"type":"response.output_text.delta","delta":"done"}"#,
+        ),
+        (
+            "response.completed",
+            r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":10,"output_tokens":2}}}"#,
+        ),
+    ];
+    let mut body = String::new();
+    for (name, data) in events {
+        body.push_str(&format!("event: {}\ndata: {}\n\n", name, data));
+    }
+
+    let (base_url, _rx) = spawn_mock_http_server(
+        "HTTP/1.1 200 OK",
+        vec![("Content-Type", "text/event-stream".to_string())],
+        body,
+    )
+    .await;
+    let client = OpenAiResponsesClient::new(OpenAiResponsesConfig {
+        base_url,
+        api_key: "sk-openai-test".to_string(),
+        model: "gpt-5.2".to_string(),
+        max_retries: 0,
+        reasoning_effort: None,
+    })
+    .unwrap();
+    let req = ProviderRequest {
+        system_prompt: "sys".to_string(),
+        tools: Vec::new(),
+        messages: vec![TranscriptItem::User(UserMessage {
+            content: "hello".to_string(),
+        })],
+        stream: true,
+        cache_breakpoints: Vec::new(),
+        max_output_tokens: None,
+    };
+    let (_tx, cancel_rx) = watch::channel(false);
+    let completion = client
+        .complete(req, &kroma_core::budget::BudgetConfig::default(), cancel_rx)
+        .await
+        .expect("responses stream should succeed");
+    assert!(
+        completion
+            .turn
+            .reasoning_blocks
+            .iter()
+            .any(|r| r.opaque_payload.as_deref() == Some("SSE-OPAQUE-9")),
+        "streamed encrypted reasoning must be captured: {:?}",
+        completion.turn.reasoning_blocks
+    );
+}
+
+#[test]
+fn test_b1_repo_graph_incremental_cache_and_typed_edges() {
+    let root = temp_root("b1-repograph");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(ws_dir.join("src")).unwrap();
+    fs::write(
+        ws_dir.join("src/lib.rs"),
+        "use crate::auth::Session;\n\npub fn login() -> Session { Session::new() }\n",
+    )
+    .unwrap();
+    fs::write(
+        ws_dir.join("src/auth.rs"),
+        "pub struct Session { id: u32 }\n\nimpl Session { pub fn new() -> Self { Self { id: 1 } } }\n",
+    )
+    .unwrap();
+    let cap = WorkspaceCap::new(&ws_dir).unwrap();
+
+    let mut cache = RepoGraphCache::new();
+    let first = RepoGraph::build_from_workspace_cached(&cap, MAX_GRAPH_FILES, &mut cache);
+    assert_eq!(first.cache_hits, 0);
+    assert!(!cache.is_empty());
+    assert!(cache.content_sha256("src/lib.rs").is_some());
+
+    // Second build with unchanged files: everything is served from the cache.
+    let second = RepoGraph::build_from_workspace_cached(&cap, MAX_GRAPH_FILES, &mut cache);
+    assert!(
+        second.cache_hits >= first.total_files(),
+        "expected cache hits for unchanged files, got {} of {}",
+        second.cache_hits,
+        first.total_files()
+    );
+
+    // Typed edges: `Session` is a type defined in auth.rs and referenced from lib.rs.
+    assert!(
+        second
+            .edges()
+            .iter()
+            .any(|e| matches!(e.kind, EdgeKind::Import | EdgeKind::TypeOrSymbol)),
+        "expected a typed edge, got {:?}",
+        second.edges()
+    );
+}
+
+#[test]
+fn test_item3_default_test_protected_globs_cover_common_layouts() {
+    let globs = effective_protected_globs(true, &[]);
+    assert!(globs.contains(&"**/tests/**".to_string()));
+    assert!(!default_test_protected_globs().is_empty());
+    // Explicit globs are honoured even without the default set.
+    let explicit = effective_protected_globs(false, &["docs/**".to_string()]);
+    assert_eq!(explicit, vec!["docs/**".to_string()]);
 }

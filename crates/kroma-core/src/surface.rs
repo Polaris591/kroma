@@ -24,13 +24,14 @@ use crate::extensions::{
     discover_skills, execute_activate_skill, ExtensionId, ScopedExtension, SkillEntry,
     SubtreeContextTracker,
 };
-use crate::messages::TranscriptItem;
+use crate::messages::{ToolCall, TranscriptItem};
+use crate::types::ToolCallId;
 use crate::prompt::{sha256_hex64, PromptBuilder};
 use crate::provider::ModelProvider;
 use crate::revision::{RestoreResult, RevisionId, SnapshotStore, WorkspaceRevision};
 use crate::session::{RevisionRecord, SessionJournal};
 use crate::tool::policy::{
-    ApprovalDecision, ApprovalHandler, ApprovalRequest, PolicyEngine, PolicyMode,
+    ApprovalDecision, ApprovalHandler, ApprovalRequest, PolicyCheckResult, PolicyEngine, PolicyMode,
 };
 use crate::tool::registry::ToolRegistry;
 use crate::tools::recall_evidence::execute_recall_evidence;
@@ -612,6 +613,8 @@ pub struct KromaRuntimeConfig {
     pub predictive_check: bool,
     pub subtree_context_enabled: bool,
     pub max_subagents: usize,
+    /// Item #3 (`v1.4.0`): candidates to race when the single agent stalls (`0` = off).
+    pub adaptive_tournament_candidates: usize,
     pub initial_skill: Option<String>,
     pub extensions: Vec<ScopedExtension>,
     pub surface_name: String,
@@ -648,6 +651,7 @@ impl KromaRuntimeConfig {
             predictive_check: true,
             subtree_context_enabled: true,
             max_subagents: crate::subagents::DEFAULT_MAX_SUBAGENT_SPAWNS,
+            adaptive_tournament_candidates: 0,
             initial_skill: None,
             extensions: Vec::new(),
             surface_name: "acp".to_string(),
@@ -785,6 +789,10 @@ struct RuntimeEngineInner {
     active_protocol: Mutex<Option<String>>,
     /// `v1.3.0`: active reasoning/thinking effort after any `/thinking` hot-swap (`None` = off).
     active_reasoning_effort: Mutex<Option<String>>,
+    /// B2 (`v1.4.0`): active context projection profile after `/config set projection_profile`.
+    active_projection_profile: Mutex<Option<crate::context_projector::ProjectionProfile>>,
+    /// Item #3 (`v1.4.0`): active adaptive-tournament candidate count (`0` = off).
+    active_adaptive_tournament: Mutex<usize>,
     /// `v1.3.0`: layered configuration view, refreshed by `/config set`.
     resolved_config: Mutex<Option<crate::config_file::ResolvedConfig>>,
 }
@@ -891,6 +899,16 @@ impl RpcDispatcher {
             .resolved_config
             .as_ref()
             .and_then(|c| c.reasoning_effort.clone());
+        // B2 (`v1.4.0`): resolve the configured context projection profile (invalid values are
+        // rejected at config-parse time, so this only ever sees a valid profile).
+        let initial_projection_profile = config
+            .resolved_config
+            .as_ref()
+            .and_then(|c| c.projection_profile.as_deref())
+            .and_then(|v| crate::context_projector::ProjectionProfile::parse(v).ok());
+        // Item #3 (`v1.4.0`): adaptive tournament escalation count (config default, overridable by
+        // `/config set adaptive_tournament <N>`).
+        let initial_adaptive_tournament = config.adaptive_tournament_candidates;
         let initial_resolved = config.resolved_config.clone();
         let inner = Arc::new(RuntimeEngineInner {
             config,
@@ -912,6 +930,8 @@ impl RpcDispatcher {
             active_model: Mutex::new(initial_model),
             active_protocol: Mutex::new(initial_protocol),
             active_reasoning_effort: Mutex::new(initial_reasoning),
+            active_projection_profile: Mutex::new(initial_projection_profile),
+            active_adaptive_tournament: Mutex::new(initial_adaptive_tournament),
             resolved_config: Mutex::new(initial_resolved),
         });
 
@@ -1185,6 +1205,24 @@ impl RpcDispatcher {
         }))
     }
 
+    /// Item #3 (`v1.4.0`): active adaptive-tournament candidate count (`0` = off).
+    fn adaptive_tournament_candidates(&self) -> usize {
+        *self
+            .inner
+            .active_adaptive_tournament
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// B2 (`v1.4.0`): active context projection profile (`None` = default `P2`).
+    fn active_projection_profile(&self) -> Option<crate::context_projector::ProjectionProfile> {
+        *self
+            .inner
+            .active_projection_profile
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     fn ensure_active_cancel_receiver(&self) -> watch::Receiver<bool> {
         let mut guard = self.inner.active_cancel.lock().unwrap();
         if let Some((_, ref rx)) = *guard {
@@ -1348,6 +1386,8 @@ impl RpcDispatcher {
         let mut run_cfg = AgentRunConfig::new(prompt_text, self.inner.config.budget.clone());
         run_cfg.stream = self.inner.config.stream;
         run_cfg.strict_log = self.inner.config.strict_log;
+        // B2 (`v1.4.0`): apply the configured context projection profile.
+        run_cfg.projection_profile = self.active_projection_profile();
 
         let mut logger = EventLogger::new(
             run_cfg.run_id,
@@ -1398,7 +1438,8 @@ impl RpcDispatcher {
         .with_subtree_context(subtree_tracker)
         .with_completion_gate(Arc::clone(&self.inner.config.completion_gate))
         .with_completion_gate_max_retries(self.inner.config.completion_gate_max_retries)
-        .with_max_subagents(self.inner.config.max_subagents);
+        .with_max_subagents(self.inner.config.max_subagents)
+        .with_adaptive_tournament_candidates(self.adaptive_tournament_candidates());
 
         if let Some(ref pred) = self.inner.config.predict_cmd {
             if self.inner.policy_engine.mode() != PolicyMode::ReadOnly
@@ -2195,6 +2236,110 @@ impl RpcDispatcher {
             .clone()
     }
 
+    /// F01 (`v1.4.0`): shared authorization + quota preflight for `session.tournament`.
+    ///
+    /// Mirrors the `spawn_subagent` tool path exactly: `max_subagents` quota, `PolicyEngine`
+    /// evaluation with `EffectClass::Mutating`, the registered fail-closed `PolicyHook` gate, and an
+    /// interactive approval round-trip for `Ask`. Before this fix the RPC path skipped all of these,
+    /// so a `ReadOnly` session could write (and merge) files through `/race`.
+    async fn tournament_preflight(&self, candidate_count: usize) -> Result<(), JsonRpcError> {
+        // Quota + policy mode (shared helper, same as the tool path).
+        let check = match crate::subagents::subagent_spawn_preflight(
+            &self.inner.policy_engine,
+            candidate_count,
+            0,
+            self.inner.config.max_subagents,
+            EffectClass::Mutating,
+        ) {
+            Ok(check) => check,
+            Err(reason) => {
+                return Err(JsonRpcError::new(JSONRPC_INTERNAL_ERROR, reason));
+            }
+        };
+
+        // `PolicyHook` gate: a registered fail-closed hook can veto the tournament before any
+        // worktree is materialized.
+        let runtime = build_runtime_with_registry(
+            self.inner.registry.clone(),
+            Arc::clone(&self.inner.env) as Arc<dyn ExecutionEnv>,
+            self.inner.policy_engine.clone(),
+            self.inner.config.budget.clone(),
+        );
+        let hook_call = ToolCall {
+            call_id: ToolCallId::new("rpc-tournament"),
+            name: "spawn_subagent".to_string(),
+            raw_arguments: "{\"role\":\"worker\"}".to_string(),
+        };
+        if let Err((denied, _)) = runtime.pre_tool_hook_gate(&hook_call, 0).await {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                format!(
+                    "policy hook denied session.tournament: {}",
+                    denied.content
+                ),
+            ));
+        }
+
+        match check {
+            PolicyCheckResult::Allow => Ok(()),
+            PolicyCheckResult::Deny(reason) => Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                format!("{} (session.tournament requires write access)", reason),
+            )),
+            PolicyCheckResult::Ask => {
+                let mut cancel_rx = self.ensure_active_cancel_receiver();
+                if *cancel_rx.borrow() {
+                    return Err(JsonRpcError::new(
+                        JSONRPC_INTERNAL_ERROR,
+                        "session.tournament cancelled before approval prompt",
+                    ));
+                }
+                let req = ApprovalRequest {
+                    tool_name: "spawn_subagent".to_string(),
+                    effect_class: EffectClass::Mutating,
+                    is_sensitive_path: false,
+                    target_path: None,
+                    diff_preview: None,
+                    command_preview: None,
+                    workspace_root: self.inner.env.workspace().root().to_path_buf(),
+                };
+                let engine = self.inner.policy_engine.clone();
+                let mut prompt_task =
+                    tokio::task::spawn_blocking(move || engine.prompt_approval(&req));
+                let decision = tokio::select! {
+                    res = &mut prompt_task => res.unwrap_or(ApprovalDecision::Deny),
+                    _ = async {
+                        loop {
+                            if *cancel_rx.borrow() {
+                                break;
+                            }
+                            if cancel_rx.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    } => {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            &mut prompt_task,
+                        )
+                        .await;
+                        return Err(JsonRpcError::new(
+                            JSONRPC_INTERNAL_ERROR,
+                            "session.tournament approval cancelled",
+                        ));
+                    }
+                };
+                match decision {
+                    ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => Ok(()),
+                    ApprovalDecision::Deny => Err(JsonRpcError::new(
+                        JSONRPC_INTERNAL_ERROR,
+                        "session.tournament denied by approval policy",
+                    )),
+                }
+            }
+        }
+    }
+
     /// `session.tournament`: run a Best-of-N worktree tournament and merge only the winner.
     ///
     /// Each candidate runs in its own isolated worktree, is verified inside that worktree, and is
@@ -2247,6 +2392,10 @@ impl RpcDispatcher {
             ));
         }
 
+        // F01 (`v1.4.0`): enforce the same authorization + quota as the `spawn_subagent` tool path
+        // BEFORE any candidate worktree is materialized.
+        self.tournament_preflight(count).await?;
+
         let strategies: Vec<String> = params
             .get("strategies")
             .and_then(Value::as_array)
@@ -2276,6 +2425,21 @@ impl RpcDispatcher {
             .get("timeout_ms")
             .and_then(Value::as_u64)
             .unwrap_or(crate::subagents::DEFAULT_SUBAGENT_TIMEOUT_MS);
+        // Item #3 (`v1.4.0`): protected test/verification paths.
+        let disallow_test_tampering = params
+            .get("disallow_test_tampering")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let protected_paths: Vec<String> = params
+            .get("protected_paths")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Candidate strategy hints: distinct by default so the candidates actually diverge.
         let default_strategies = [
@@ -2358,6 +2522,8 @@ impl RpcDispatcher {
             predictive_check: self.inner.config.predictive_check,
             cancel_rx: self.ensure_active_cancel_receiver(),
             timeout_ms,
+            disallow_test_tampering,
+            protected_paths: protected_paths.clone(),
         };
 
         let outcome = crate::subagents::run_worktree_tournament(
@@ -2372,25 +2538,53 @@ impl RpcDispatcher {
         .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
 
         // Record the winning merge as one WAL revision so `/undo` reverts it atomically.
+        // F04 (`v1.4.0`): the winning merge MUST be durably bound to the WAL. A failure to open or
+        // append the journal is surfaced as an explicit RPC error instead of being silently
+        // swallowed by `if let Ok(...)`, which previously reported success while `/undo` and the
+        // session history had no record of the merged revision.
         if let Some(rev) = outcome.merged_revision.clone() {
-            if let Ok(mut journal) = SessionJournal::open(&self.session_path()) {
-                let (changed_paths, tracked_file_count) = match store.load_revision(&rev) {
-                    Ok(manifest) => (manifest.changed_paths.clone(), manifest.tracked_files.len()),
-                    Err(_) => (Vec::new(), 0),
-                };
-                if journal
-                    .record_revision_capture(
-                        journal.max_active_turn(),
+            let mut journal = SessionJournal::open(&self.session_path()).map_err(|e| {
+                JsonRpcError::new(
+                    JSONRPC_INTERNAL_ERROR,
+                    format!(
+                        "tournament merged revision {} but the session WAL could not be opened ({}); the merge is on disk but unrecorded",
                         rev.as_str(),
-                        Some(base_revision.as_str()),
-                        changed_paths,
-                        tracked_file_count,
-                    )
-                    .is_ok()
-                {
-                    self.update_snapshot_from_journal(&journal);
+                        e
+                    ),
+                )
+            })?;
+            let (changed_paths, tracked_file_count) = match store.load_revision(&rev) {
+                Ok(manifest) => (manifest.changed_paths.clone(), manifest.tracked_files.len()),
+                Err(e) => {
+                    return Err(JsonRpcError::new(
+                        JSONRPC_INTERNAL_ERROR,
+                        format!(
+                            "tournament merged revision {} but its manifest could not be loaded ({}); the merge is on disk but unrecorded",
+                            rev.as_str(),
+                            e
+                        ),
+                    ));
                 }
-            }
+            };
+            journal
+                .record_revision_capture(
+                    journal.max_active_turn(),
+                    rev.as_str(),
+                    Some(base_revision.as_str()),
+                    changed_paths,
+                    tracked_file_count,
+                )
+                .map_err(|e| {
+                    JsonRpcError::new(
+                        JSONRPC_INTERNAL_ERROR,
+                        format!(
+                            "tournament merged revision {} but appending it to the session WAL failed ({}); the merge is on disk but unrecorded",
+                            rev.as_str(),
+                            e
+                        ),
+                    )
+                })?;
+            self.update_snapshot_from_journal(&journal);
         }
 
         let note = JsonRpcNotification::new(
@@ -2512,19 +2706,42 @@ impl RpcDispatcher {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        // B2 (`v1.4.0`): `projection_profile` is a safe, hot-swappable key that does not require a
+        // provider rebuild.
+        let projection_profile_raw = params
+            .get("projection_profile")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        // Item #3 (`v1.4.0`): `adaptive_tournament` is also a safe, hot-swappable key.
+        let adaptive_tournament_raw = params
+            .get("adaptive_tournament")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
         let save = params.get("save").and_then(Value::as_bool).unwrap_or(false);
 
         if model.is_none()
             && protocol.is_none()
             && profile.is_none()
             && reasoning_raw.is_none()
+            && projection_profile_raw.is_none()
+            && adaptive_tournament_raw.is_none()
         {
             return Err(JsonRpcError::new(
                 JSONRPC_INVALID_PARAMS,
-                "config.set requires at least one of 'model', 'protocol', 'reasoning_effort' or 'profile'"
+                "config.set requires at least one of 'model', 'protocol', 'reasoning_effort', 'profile', 'projection_profile' or 'adaptive_tournament'"
                     .to_string(),
             ));
         }
+
+        let new_projection_profile = match &projection_profile_raw {
+            Some(raw) => Some(
+                crate::context_projector::ProjectionProfile::parse(raw)
+                    .map_err(|e| JsonRpcError::new(JSONRPC_INVALID_PARAMS, e))?,
+            ),
+            None => self.active_projection_profile(),
+        };
 
         let mut new_model = self.active_model();
         let mut new_protocol = self.active_protocol();
@@ -2566,6 +2783,65 @@ impl RpcDispatcher {
         }
         if let Some(raw) = &reasoning_raw {
             new_reasoning = normalize_reasoning_effort(raw);
+        }
+
+        let needs_provider_rebuild = model.is_some()
+            || protocol.is_some()
+            || profile.is_some()
+            || reasoning_raw.is_some();
+
+        if !needs_provider_rebuild {
+            // Only safe hot-swappable keys changed: apply them in place without touching the
+            // provider.
+            if projection_profile_raw.is_some() {
+                *self
+                    .inner
+                    .active_projection_profile
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = new_projection_profile;
+            }
+            if let Some(n) = adaptive_tournament_raw {
+                *self
+                    .inner
+                    .active_adaptive_tournament
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = n;
+            }
+            {
+                let mut guard = self
+                    .inner
+                    .resolved_config
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(cfg) = guard.as_mut() {
+                    if projection_profile_raw.is_some() {
+                        cfg.projection_profile = projection_profile_raw.clone();
+                    }
+                    if let Some(n) = adaptive_tournament_raw {
+                        cfg.adaptive_tournament = Some(n);
+                    }
+                }
+            }
+            let mut persisted_to = None;
+            if save {
+                let mut file = crate::config_file::KromaConfigFile::load_user_global()
+                    .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
+                if projection_profile_raw.is_some() {
+                    file.projection_profile = projection_profile_raw.clone();
+                }
+                if let Some(n) = adaptive_tournament_raw {
+                    file.adaptive_tournament = Some(n);
+                }
+                let path = file
+                    .save_user_global()
+                    .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
+                persisted_to = Some(path.display().to_string());
+            }
+            return Ok(json!({
+                "projection_profile": new_projection_profile.map(|p| p.as_str()),
+                "adaptive_tournament": adaptive_tournament_raw,
+                "persisted_to": persisted_to,
+            }));
         }
 
         let factory = self.inner.config.provider_factory.as_ref().ok_or_else(|| {
@@ -2618,6 +2894,18 @@ impl RpcDispatcher {
             .active_reasoning_effort
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = new_reasoning.clone();
+        *self
+            .inner
+            .active_projection_profile
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = new_projection_profile;
+        if let Some(n) = adaptive_tournament_raw {
+            *self
+                .inner
+                .active_adaptive_tournament
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = n;
+        }
         {
             let mut guard = self
                 .inner
@@ -2649,6 +2937,12 @@ impl RpcDispatcher {
             }
             if let Some(name) = &profile {
                 file.default_profile = Some(name.clone());
+            }
+            if let Some(raw) = &projection_profile_raw {
+                file.projection_profile = Some(raw.clone());
+            }
+            if let Some(n) = adaptive_tournament_raw {
+                file.adaptive_tournament = Some(n);
             }
             let path = file
                 .save_user_global()
@@ -2970,9 +3264,17 @@ impl RpcDispatcher {
             }
 
             let is_shutdown = matches!(req.method.as_str(), "shutdown" | "acp.shutdown");
+            // F02 (`v1.4.0`): `session.tournament` is dispatched asynchronously like a prompt so a
+            // `session.cancel` sent on the same stream connection is read by the loop and reaches
+            // the tournament's cancel channel. Previously it was awaited inline, so the connection
+            // could not process any other request (including a cancel) while a race was running.
             let is_async_prompt = matches!(
                 req.method.as_str(),
-                "session.start" | "session.prompt" | "acp.prompt" | "session/prompt"
+                "session.start"
+                    | "session.prompt"
+                    | "acp.prompt"
+                    | "session/prompt"
+                    | "session.tournament"
             );
 
             if is_async_prompt {
@@ -3722,7 +4024,7 @@ impl InteractiveRepl {
                     "set" => {
                         if args.len() < 3 {
                             return out(
-                                "usage: /config set <key> <value>\n  keys: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents\n"
+                                "usage: /config set <key> <value>\n  keys: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents, projection_profile, adaptive_tournament\n"
                                     .to_string(),
                             );
                         }

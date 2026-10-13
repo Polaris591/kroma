@@ -44,7 +44,9 @@ use crate::revision::{
 };
 use crate::sensitive_paths::SensitivePathGuard;
 use crate::tool::definition::{RegisteredTool, ToolDefinition, ToolMetadata};
-use crate::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
+use crate::tool::policy::{
+    NonInteractiveApprovalHandler, PolicyCheckResult, PolicyEngine, PolicyMode,
+};
 use crate::tool::registry::ToolRegistry;
 use crate::tools::find::compile_glob_to_regex;
 use crate::types::{EffectClass, RunId, RunStatus, TerminalReason};
@@ -59,6 +61,35 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
+
+/// F01 (`v1.4.0`): the shared authorization + quota preflight for spawning subagents and
+/// tournament candidates. Both the `spawn_subagent` tool path and the RPC `session.tournament`
+/// path call this so every entry point enforces the same `max_subagents` quota and the same
+/// `PolicyEngine` decision (a `ReadOnly` policy denies the `Mutating` spawn outright; `Ask` returns
+/// `PolicyCheckResult::Ask` for the caller to resolve through its approval handler).
+///
+/// The `PolicyHook` gate (a registered [`crate::extensions::PolicyHook`]) is evaluated by the
+/// caller's tool runtime before this function, because only the runtime holds the hook engine.
+pub fn subagent_spawn_preflight(
+    policy_engine: &PolicyEngine,
+    requested: usize,
+    already_spawned: usize,
+    max_subagents: usize,
+    effect: EffectClass,
+) -> Result<PolicyCheckResult, String> {
+    if max_subagents == 0 {
+        return Err(
+            "subagent spawning is disabled for this session (max_subagents=0)".to_string(),
+        );
+    }
+    if already_spawned.saturating_add(requested) > max_subagents {
+        return Err(format!(
+            "subagent spawn budget exceeded: requested {}, already spawned {}, max_subagents={}",
+            requested, already_spawned, max_subagents
+        ));
+    }
+    Ok(policy_engine.evaluate("spawn_subagent", effect, false))
+}
 
 /// Default maximum number of subagents a parent session may spawn (`--max-subagents`).
 pub const DEFAULT_MAX_SUBAGENT_SPAWNS: usize = 8;
@@ -284,6 +315,14 @@ pub struct SubagentSpec {
     pub budget: SubagentBudget,
     #[serde(default)]
     pub revert_on_verify_failure: bool,
+    /// Item #3 (`v1.4.0`): when `true`, a candidate/worker that modifies a default test/verification
+    /// path (see [`default_test_protected_globs`]) is disqualified from winning/merging.
+    #[serde(default)]
+    pub disallow_test_tampering: bool,
+    /// Item #3 (`v1.4.0`): additional explicit protected path globs (union with the default test
+    /// paths when `disallow_test_tampering` is set).
+    #[serde(default)]
+    pub protected_paths: Vec<String>,
 }
 
 impl SubagentSpec {
@@ -294,6 +333,8 @@ impl SubagentSpec {
             allowed_write_globs: None,
             budget: SubagentBudget::default(),
             revert_on_verify_failure: false,
+            disallow_test_tampering: false,
+            protected_paths: Vec::new(),
         }
     }
 
@@ -304,7 +345,21 @@ impl SubagentSpec {
             allowed_write_globs: None,
             budget: SubagentBudget::default(),
             revert_on_verify_failure: false,
+            disallow_test_tampering: false,
+            protected_paths: Vec::new(),
         }
+    }
+
+    /// Item #3 (`v1.4.0`): enable default test/verification-path protection.
+    pub fn with_disallow_test_tampering(mut self, value: bool) -> Self {
+        self.disallow_test_tampering = value;
+        self
+    }
+
+    /// Item #3 (`v1.4.0`): add explicit protected path globs.
+    pub fn with_protected_paths(mut self, globs: Vec<String>) -> Self {
+        self.protected_paths = globs;
+        self
     }
 
     pub fn with_allowed_write_globs(mut self, globs: Vec<String>) -> Self {
@@ -359,6 +414,12 @@ struct RawSubagentTaskItem {
     timeout_ms: Option<u64>,
     #[serde(default)]
     revert_on_verify_failure: Option<bool>,
+    /// Item #3 (`v1.4.0`): per-task test-path protection override.
+    #[serde(default)]
+    disallow_test_tampering: Option<bool>,
+    /// Item #3 (`v1.4.0`): per-task explicit protected path globs.
+    #[serde(default)]
+    protected_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -393,6 +454,12 @@ struct RawSpawnSubagentArgs {
     /// `v1.3.0`: number of racing candidates (2..=4, default 3).
     #[serde(default)]
     candidates: Option<usize>,
+    /// Item #3 (`v1.4.0`): protect default test/verification paths from tampering.
+    #[serde(default)]
+    disallow_test_tampering: Option<bool>,
+    /// Item #3 (`v1.4.0`): explicit protected path globs.
+    #[serde(default)]
+    protected_paths: Option<Vec<String>>,
 }
 
 fn normalize_and_validate_globs(
@@ -438,6 +505,10 @@ pub struct TournamentRequest {
     pub allowed_write_globs: Option<Vec<String>>,
     pub max_turns: Option<usize>,
     pub timeout_ms: u64,
+    /// Item #3 (`v1.4.0`): protect default test/verification paths from tampering.
+    pub disallow_test_tampering: bool,
+    /// Item #3 (`v1.4.0`): explicit protected path globs.
+    pub protected_paths: Vec<String>,
 }
 
 /// Detect a tournament request in `spawn_subagent` arguments.
@@ -490,6 +561,8 @@ pub fn parse_tournament_request(raw_args: &str) -> Result<Option<TournamentReque
         allowed_write_globs,
         max_turns: parsed.max_turns,
         timeout_ms,
+        disallow_test_tampering: parsed.disallow_test_tampering.unwrap_or(false),
+        protected_paths: parsed.protected_paths.clone().unwrap_or_default(),
     }))
 }
 
@@ -558,6 +631,15 @@ pub fn parse_spawn_subagent_specs(raw_args: &str) -> Result<Vec<SubagentSpec>, S
                 }
                 .clamped(),
                 revert_on_verify_failure,
+                disallow_test_tampering: item
+                    .disallow_test_tampering
+                    .or(parsed.disallow_test_tampering)
+                    .unwrap_or(false),
+                protected_paths: item
+                    .protected_paths
+                    .clone()
+                    .or_else(|| parsed.protected_paths.clone())
+                    .unwrap_or_default(),
             });
         }
         return Ok(specs);
@@ -601,6 +683,8 @@ pub fn parse_spawn_subagent_specs(raw_args: &str) -> Result<Vec<SubagentSpec>, S
         }
         .clamped(),
         revert_on_verify_failure: parsed.revert_on_verify_failure.unwrap_or(false),
+        disallow_test_tampering: parsed.disallow_test_tampering.unwrap_or(false),
+        protected_paths: parsed.protected_paths.clone().unwrap_or_default(),
     }])
 }
 
@@ -657,6 +741,62 @@ pub fn is_path_allowed_by_scope(rel_path: &str, allowed_globs: &[String]) -> boo
         }
     }
     false
+}
+
+/// Item #3 (`v1.4.0`): the default set of test / verification path globs protected from tampering.
+///
+/// A candidate or worker that edits one of these without an explicit override is disqualified from
+/// winning/merging, so a race can never "fix" a failing test by rewriting the test itself.
+pub fn default_test_protected_globs() -> Vec<String> {
+    vec![
+        "**/tests/**".to_string(),
+        "**/test/**".to_string(),
+        "**/__tests__/**".to_string(),
+        "**/spec/**".to_string(),
+        "**/*_test.rs".to_string(),
+        "**/*_test.go".to_string(),
+        "**/test_*.py".to_string(),
+        "**/*_test.py".to_string(),
+        "**/*.test.ts".to_string(),
+        "**/*.test.tsx".to_string(),
+        "**/*.test.js".to_string(),
+        "**/*.spec.ts".to_string(),
+        "**/*.spec.js".to_string(),
+        "**/conftest.py".to_string(),
+    ]
+}
+
+/// Item #3 (`v1.4.0`): the effective protected-glob set for a worker/candidate. Explicit
+/// `protected_paths` are always honoured; the default test paths are added when
+/// `disallow_test_tampering` is set.
+pub fn effective_protected_globs(
+    disallow_test_tampering: bool,
+    explicit: &[String],
+) -> Vec<String> {
+    let mut globs: Vec<String> = explicit.to_vec();
+    if disallow_test_tampering {
+        globs.extend(default_test_protected_globs());
+    }
+    globs.sort();
+    globs.dedup();
+    globs
+}
+
+/// Item #3 (`v1.4.0`): `true` when `rel_path` matches any protected glob.
+pub fn path_is_protected(rel_path: &str, protected_globs: &[String]) -> bool {
+    if protected_globs.is_empty() {
+        return false;
+    }
+    is_path_allowed_by_scope(rel_path, protected_globs)
+}
+
+/// Item #3 (`v1.4.0`): the subset of `changed_paths` that touches a protected path.
+pub fn protected_changed_paths(changed_paths: &[String], protected_globs: &[String]) -> Vec<String> {
+    changed_paths
+        .iter()
+        .filter(|p| path_is_protected(p, protected_globs))
+        .cloned()
+        .collect()
 }
 
 /// Fail-closed `PreToolUse` `PolicyHook` mounted inside a `Worker` subagent when `allowed_paths`
@@ -863,6 +1003,213 @@ impl IsolatedWorktree {
         revert_on_verify_failure: bool,
         turn_index: usize,
     ) -> Result<WorktreeMergeResult, RevisionError> {
+        let delta = self.compute_merge_delta(parent_workspace, snapshot_store, allowed_write_globs)?;
+        let MergeDelta {
+            written_entries,
+            mut removed_files,
+            delta_paths,
+            conflicting_paths,
+            reasons,
+        } = delta;
+
+        if !conflicting_paths.is_empty() {
+            self.preserve_on_drop = true;
+            return Ok(WorktreeMergeResult::Conflict {
+                base_revision: self.base_revision.revision_id.clone(),
+                conflicting_paths: conflicting_paths.into_iter().collect(),
+                reasons,
+                worker_worktree_preserved: true,
+                preserved_worktree_path: Some(self.root.clone()),
+            });
+        }
+
+        if delta_paths.is_empty() {
+            let _ = self.cleanup();
+            let rev = current_parent_revision
+                .cloned()
+                .unwrap_or_else(|| self.base_revision.revision_id.clone());
+            return Ok(WorktreeMergeResult::Applied {
+                base_revision: rev.clone(),
+                merged_revision: rev,
+                written_files: Vec::new(),
+                removed_files: Vec::new(),
+            });
+        }
+
+        // Always capture a fresh pre-merge revision of the live `parent_workspace` immediately
+        // before applying `removed_files`/`written_entries`, so `revert_on_verify_failure` and
+        // `--undo` restore the exact pre-merge workspace without clobbering un-snapshotted parent files.
+        let pre_merge_rev = snapshot_store
+            .capture_revision(parent_workspace, current_parent_revision, None, turn_index)?
+            .revision_id;
+
+        // F03 (`v1.4.0`): durably record the merge intent *before* the first parent file is touched,
+        // so an interrupted multi-file merge is detectable and recoverable instead of silently
+        // leaving the parent workspace half-updated.
+        snapshot_store.write_merge_intent(&crate::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre_merge_rev.clone(),
+            created_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            written_files: written_entries.keys().cloned().collect(),
+            removed_files: removed_files.clone(),
+        })?;
+
+        // Apply removals deepest-first, then writes in sorted path order.
+        removed_files.sort_by(|a, b| {
+            let depth = |s: &String| s.matches('/').count();
+            depth(b).cmp(&depth(a)).then_with(|| b.cmp(a))
+        });
+
+        let mut written_files: Vec<String> = Vec::with_capacity(written_entries.len());
+        let apply_result: Result<(), RevisionError> = (|| {
+            for path in &removed_files {
+                remove_tracked_file(parent_workspace, path, false)?;
+            }
+            for (path, entry) in &written_entries {
+                let bytes = snapshot_store.read_blob(&entry.sha256)?;
+                write_tracked_file(parent_workspace, path, &bytes, entry.mode, false)?;
+                written_files.push(path.clone());
+            }
+            Ok(())
+        })();
+
+        if let Err(apply_err) = apply_result {
+            // F03 (`v1.4.0`): a mid-merge I/O failure must not leave the parent workspace partially
+            // updated with no recovery material. Try an automatic rollback to the pre-merge
+            // revision; a clean rollback clears the intent and returns a normal error, otherwise the
+            // intent is left in place and `RecoveryRequired` is surfaced.
+            match snapshot_store.restore_revision(parent_workspace, &pre_merge_rev, None, false) {
+                Ok(crate::revision::RestoreResult::Applied { .. }) => {
+                    let _ = snapshot_store.clear_merge_intent();
+                    return Err(apply_err);
+                }
+                _ => {
+                    return Err(RevisionError::RecoveryRequired {
+                        target_revision: pre_merge_rev,
+                        journal_path: snapshot_store.merge_intent_path(),
+                        reason: format!(
+                            "worktree merge failed midway ({}) and automatic rollback did not complete; restore the parent workspace before continuing",
+                            apply_err
+                        ),
+                    });
+                }
+            }
+        }
+        removed_files.sort();
+
+        // F03: the candidate worktree is NOT cleaned up until the merged revision has been durably
+        // captured, so a late failure still has the worktree available for recovery.
+        let merged_manifest = snapshot_store.capture_revision(
+            parent_workspace,
+            Some(&pre_merge_rev),
+            None,
+            turn_index,
+        )?;
+        let merged_revision = merged_manifest.revision_id;
+        let _ = snapshot_store.clear_merge_intent();
+
+        if let Some(gate) = post_merge_gate {
+            let mut mod_list: Vec<String> = delta_paths.into_iter().collect();
+            mod_list.sort();
+            let gate_ctx = CompletionGateContext {
+                run_id: RunId::new(),
+                workspace_root: parent_workspace.root().to_path_buf(),
+                modified_files: mod_list,
+                turns_used: turn_index,
+            };
+            let failure_feedback = match gate.check(&gate_ctx).await {
+                Ok(GateOutcome::Approved) | Ok(GateOutcome::Skipped { .. }) => None,
+                Ok(GateOutcome::Rejected { feedback }) => Some(feedback),
+                Err(e) => Some(format!("post-merge verification gate error: {}", e)),
+            };
+            if let Some(gate_output) = failure_feedback {
+                let mut reverted = false;
+                if revert_on_verify_failure {
+                    if let Ok(crate::revision::RestoreResult::Applied { .. }) = snapshot_store
+                        .restore_revision(
+                            parent_workspace,
+                            &pre_merge_rev,
+                            Some(&merged_revision),
+                            false,
+                        )
+                    {
+                        reverted = true;
+                        if merged_revision != pre_merge_rev {
+                            let _ = snapshot_store.remove_unlinked_revision(&merged_revision);
+                        }
+                    }
+                }
+                // F03 (`v1.4.0`): the post-merge rollback (or the absence of one) is complete, so
+                // the merge intent journal can be cleared.
+                let _ = snapshot_store.clear_merge_intent();
+                return Ok(WorktreeMergeResult::VerificationFailed {
+                    merged_revision,
+                    revision_before: Some(pre_merge_rev),
+                    reverted,
+                    written_files,
+                    removed_files,
+                    gate_output,
+                });
+            }
+        }
+
+        let _ = self.cleanup();
+
+        Ok(WorktreeMergeResult::Applied {
+            base_revision: pre_merge_rev,
+            merged_revision,
+            written_files,
+            removed_files,
+        })
+    }
+}
+
+/// F03/F06 (`v1.4.0`): the three-way merge delta computed against the live parent workspace,
+/// without mutating anything. Split out so both the non-mutating pre-merge conflict check and the
+/// actual [`IsolatedWorktree::merge_into_parent`] share exactly one conflict-detection code path.
+struct MergeDelta {
+    written_entries: BTreeMap<String, TrackedFile>,
+    removed_files: Vec<String>,
+    delta_paths: BTreeSet<String>,
+    conflicting_paths: BTreeSet<String>,
+    reasons: Vec<String>,
+}
+
+impl IsolatedWorktree {
+    /// F06 (`v1.4.0`): compute the worker's delta against the live parent workspace and report
+    /// whether it merges without conflict, WITHOUT touching the parent workspace or the worktree.
+    pub fn preflight_conflict_check(
+        &self,
+        parent_workspace: &WorkspaceCap,
+        snapshot_store: &SnapshotStore,
+        allowed_write_globs: Option<&[String]>,
+    ) -> Result<bool, RevisionError> {
+        let delta = self.compute_merge_delta(parent_workspace, snapshot_store, allowed_write_globs)?;
+        Ok(delta.conflicting_paths.is_empty())
+    }
+
+    /// Item #3 (`v1.4.0`): the workspace-relative paths this worker changed relative to its base
+    /// revision (written ∪ removed), without touching the parent workspace.
+    pub fn delta_paths(
+        &self,
+        parent_workspace: &WorkspaceCap,
+        snapshot_store: &SnapshotStore,
+    ) -> Result<Vec<String>, RevisionError> {
+        let delta = self.compute_merge_delta(parent_workspace, snapshot_store, None)?;
+        Ok(delta.delta_paths.into_iter().collect())
+    }
+
+    /// Compute the worker's three-way delta against the live parent workspace. Pure read-only: it
+    /// never writes to the parent workspace, so it is safe to call for ranking before any merge.
+    fn compute_merge_delta(
+        &self,
+        parent_workspace: &WorkspaceCap,
+        snapshot_store: &SnapshotStore,
+        allowed_write_globs: Option<&[String]>,
+    ) -> Result<MergeDelta, RevisionError> {
         let (worker_tracked, worker_skipped) =
             snapshot_store.scan_workspace_to_blobs(&self.workspace)?;
         let base_files = &self.base_revision.tracked_files;
@@ -1016,113 +1363,12 @@ impl IsolatedWorktree {
                     }
                 },
             }
-        }
-
-        if !conflicting_paths.is_empty() {
-            self.preserve_on_drop = true;
-            return Ok(WorktreeMergeResult::Conflict {
-                base_revision: self.base_revision.revision_id.clone(),
-                conflicting_paths: conflicting_paths.into_iter().collect(),
-                reasons,
-                worker_worktree_preserved: true,
-                preserved_worktree_path: Some(self.root.clone()),
-            });
-        }
-
-        if delta_paths.is_empty() {
-            let _ = self.cleanup();
-            let rev = current_parent_revision
-                .cloned()
-                .unwrap_or_else(|| self.base_revision.revision_id.clone());
-            return Ok(WorktreeMergeResult::Applied {
-                base_revision: rev.clone(),
-                merged_revision: rev,
-                written_files: Vec::new(),
-                removed_files: Vec::new(),
-            });
-        }
-
-        // Always capture a fresh pre-merge revision of the live `parent_workspace` immediately
-        // before applying `removed_files`/`written_entries`, so `revert_on_verify_failure` and
-        // `--undo` restore the exact pre-merge workspace without clobbering un-snapshotted parent files.
-        let pre_merge_rev = snapshot_store
-            .capture_revision(parent_workspace, current_parent_revision, None, turn_index)?
-            .revision_id;
-
-        // Apply removals deepest-first, then writes in sorted path order.
-        removed_files.sort_by(|a, b| {
-            let depth = |s: &String| s.matches('/').count();
-            depth(b).cmp(&depth(a)).then_with(|| b.cmp(a))
-        });
-        for path in &removed_files {
-            remove_tracked_file(parent_workspace, path, false)?;
-        }
-        removed_files.sort();
-
-        let mut written_files: Vec<String> = Vec::with_capacity(written_entries.len());
-        for (path, entry) in &written_entries {
-            let bytes = snapshot_store.read_blob(&entry.sha256)?;
-            write_tracked_file(parent_workspace, path, &bytes, entry.mode, false)?;
-            written_files.push(path.clone());
-        }
-
-        let _ = self.cleanup();
-
-        let merged_manifest = snapshot_store.capture_revision(
-            parent_workspace,
-            Some(&pre_merge_rev),
-            None,
-            turn_index,
-        )?;
-        let merged_revision = merged_manifest.revision_id;
-
-        if let Some(gate) = post_merge_gate {
-            let mut mod_list: Vec<String> = delta_paths.into_iter().collect();
-            mod_list.sort();
-            let gate_ctx = CompletionGateContext {
-                run_id: RunId::new(),
-                workspace_root: parent_workspace.root().to_path_buf(),
-                modified_files: mod_list,
-                turns_used: turn_index,
-            };
-            let failure_feedback = match gate.check(&gate_ctx).await {
-                Ok(GateOutcome::Approved) | Ok(GateOutcome::Skipped { .. }) => None,
-                Ok(GateOutcome::Rejected { feedback }) => Some(feedback),
-                Err(e) => Some(format!("post-merge verification gate error: {}", e)),
-            };
-            if let Some(gate_output) = failure_feedback {
-                let mut reverted = false;
-                if revert_on_verify_failure {
-                    if let Ok(crate::revision::RestoreResult::Applied { .. }) = snapshot_store
-                        .restore_revision(
-                            parent_workspace,
-                            &pre_merge_rev,
-                            Some(&merged_revision),
-                            false,
-                        )
-                    {
-                        reverted = true;
-                        if merged_revision != pre_merge_rev {
-                            let _ = snapshot_store.remove_unlinked_revision(&merged_revision);
-                        }
-                    }
-                }
-                return Ok(WorktreeMergeResult::VerificationFailed {
-                    merged_revision,
-                    revision_before: Some(pre_merge_rev),
-                    reverted,
-                    written_files,
-                    removed_files,
-                    gate_output,
-                });
-            }
-        }
-
-        Ok(WorktreeMergeResult::Applied {
-            base_revision: pre_merge_rev,
-            merged_revision,
-            written_files,
+        }        Ok(MergeDelta {
+            written_entries,
             removed_files,
+            delta_paths,
+            conflicting_paths,
+            reasons,
         })
     }
 }
@@ -1307,7 +1553,12 @@ pub struct SubagentRunOutcome {
     pub findings: Vec<String>,
     pub turns_used: usize,
     pub tool_calls_used: usize,
+    /// F10 (`v1.4.0`): total tokens (input + output) spent by this child run.
     pub tokens_used: u64,
+    /// F10 (`v1.4.0`): input tokens spent by this child run, so the parent can attribute cost.
+    pub input_tokens: u64,
+    /// F10 (`v1.4.0`): output tokens spent by this child run, so the parent can attribute cost.
+    pub output_tokens: u64,
     pub duration_ms: u64,
     /// Visible tool names that were exposed to this subagent (for invariant verification).
     pub visible_tools: Vec<String>,
@@ -1356,10 +1607,20 @@ impl SubagentBackend for ProviderSubagentBackend {
                 .without_subagents()
                 .with_workspace_skills(req.workspace_skills.clone());
 
-            // Role-specific policy & scoped write guard.
+            // F01 (`v1.4.0`): a `Worker` mutates an isolated worktree that is later merged into the
+            // parent workspace, so it must NEVER be granted more authority than its parent. The
+            // previous mapping silently promoted a `ReadOnly` parent to `AllowWrite`, letting a
+            // read-only session write (and merge) files through RPC/`/race`. A `ReadOnly` parent now
+            // rejects any `Worker` outright.
             let policy_mode = match req.spec.role {
                 SubagentRole::Scout => PolicyMode::ReadOnly,
                 SubagentRole::Worker => {
+                    if req.parent_policy_mode == PolicyMode::ReadOnly {
+                        return Err(
+                            "policy denied: cannot spawn a `worker` subagent while the parent policy is read-only"
+                                .to_string(),
+                        );
+                    }
                     if req.parent_policy_mode.allows_shell_auto() {
                         PolicyMode::FullAutonomous
                     } else {
@@ -1474,6 +1735,8 @@ impl SubagentBackend for ProviderSubagentBackend {
                 turns_used: summary.turns_used,
                 tool_calls_used: summary.tool_calls_used,
                 tokens_used,
+                input_tokens: summary.total_input_tokens,
+                output_tokens: summary.total_output_tokens,
                 duration_ms,
                 visible_tools,
             })
@@ -1614,6 +1877,44 @@ pub struct TournamentSpec {
     pub predictive_check: bool,
     pub cancel_rx: watch::Receiver<bool>,
     pub timeout_ms: u64,
+    /// Item #3 (`v1.4.0`): protect default test/verification paths from tampering.
+    pub disallow_test_tampering: bool,
+    /// Item #3 (`v1.4.0`): explicit protected path globs (union with the defaults when
+    /// `disallow_test_tampering` is set).
+    pub protected_paths: Vec<String>,
+}
+
+/// F05 (`v1.4.0`): explicit verification status for a tournament candidate, so a *skipped*
+/// verification is never silently treated as a *passed* one when choosing a winner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateVerificationStatus {
+    /// The candidate's own worktree passed the completion gate (`Approved`).
+    Passed,
+    /// Verification was skipped (no gate configured / nothing to verify).
+    Skipped,
+    /// The candidate's own worktree failed the completion gate.
+    Failed,
+    /// The verification command itself errored (infrastructure, not the candidate's patch).
+    InfrastructureError,
+    /// The candidate never reached verification (did not complete).
+    NotRun,
+}
+
+impl GateVerificationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GateVerificationStatus::Passed => "passed",
+            GateVerificationStatus::Skipped => "skipped",
+            GateVerificationStatus::Failed => "failed",
+            GateVerificationStatus::InfrastructureError => "infrastructure_error",
+            GateVerificationStatus::NotRun => "not_run",
+        }
+    }
+
+    fn not_run() -> Self {
+        GateVerificationStatus::NotRun
+    }
 }
 
 /// Deterministic per-candidate score. Ranking is lexicographic over these fields, in the order
@@ -1627,6 +1928,13 @@ pub struct TournamentScore {
     /// `true` when the candidate's own isolated worktree passed the completion gate
     /// (`Approved` or `Skipped`); a `Rejected` gate makes a candidate ineligible to win.
     pub gate_passed: bool,
+    /// F05 (`v1.4.0`): explicit verification status (never inferred from `gate_passed` alone).
+    #[serde(default = "GateVerificationStatus::not_run")]
+    pub gate_status: GateVerificationStatus,
+    /// F05 (`v1.4.0`): `true` when the candidate actually changed at least one file. A zero-change
+    /// candidate is never eligible to win a repair tournament, regardless of its (skipped) gate.
+    #[serde(default)]
+    pub has_changes: bool,
     /// Human-readable gate detail (verification output excerpt, skip reason, or the reason the
     /// candidate never reached verification).
     pub gate_detail: String,
@@ -1638,14 +1946,27 @@ pub struct TournamentScore {
     /// Approximate changed-line count (lines added + lines removed) — Occam's razor tie-breaker.
     pub total_changed_lines: usize,
     pub turns_used: usize,
+    /// F10 (`v1.4.0`): input tokens spent by this candidate (kept for cost attribution).
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// F10 (`v1.4.0`): output tokens spent by this candidate (kept for cost attribution).
+    #[serde(default)]
+    pub output_tokens: u64,
     /// Set on exactly one candidate when a merge actually happened.
     pub winner: bool,
 }
 
 impl TournamentScore {
-    /// Lexicographic ranking key. Lower sorts better.
-    fn rank_key(&self) -> (u8, usize, u8, usize, usize, usize, usize) {
+    /// F05 (`v1.4.0`): only a candidate that actually changed files *and* passed its own gate is
+    /// eligible to win and merge. A zero-change candidate must never out-rank a real passing fix.
+    pub fn eligible_to_win(&self) -> bool {
+        self.has_changes && self.gate_passed
+    }
+
+    /// Lexicographic ranking key. Lower sorts better. Ineligible candidates sort last.
+    fn rank_key(&self) -> (u8, u8, usize, u8, usize, usize, usize, usize) {
         (
+            u8::from(!self.eligible_to_win()),
             u8::from(!self.gate_passed),
             self.predictive_warnings,
             u8::from(!self.conflict_free_with_parent),
@@ -1668,6 +1989,11 @@ pub struct TournamentOutcome {
     pub merge: Option<WorktreeMergeResult>,
     /// `true` when every candidate worktree directory was removed from disk.
     pub all_worktrees_cleaned_up: bool,
+    /// F10 (`v1.4.0`): total input tokens spent by every candidate (including losers, failures and
+    /// cancellations), so the parent run can attribute the whole tournament's cost.
+    pub total_input_tokens: u64,
+    /// F10 (`v1.4.0`): total output tokens spent by every candidate.
+    pub total_output_tokens: u64,
 }
 
 impl TournamentOutcome {
@@ -1699,10 +2025,12 @@ impl TournamentOutcome {
         }
         for score in &self.scores {
             out.push_str(&format!(
-                "candidate {} [{}]: gate_passed={} warnings={} conflict_free={} changed_lines={} files_modified={} turns_used={} winner={}\n",
+                "candidate {} [{}]: gate_passed={} gate_status={} has_changes={} warnings={} conflict_free={} changed_lines={} files_modified={} turns_used={} winner={}\n",
                 score.label,
                 score.status,
                 score.gate_passed,
+                score.gate_status.as_str(),
+                score.has_changes,
                 score.predictive_warnings,
                 score.conflict_free_with_parent,
                 score.total_changed_lines,
@@ -1863,6 +2191,8 @@ pub async fn run_worktree_tournament(
                         turns_used: 0,
                         tool_calls_used: 0,
                         tokens_used: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
                         duration_ms: 0,
                         visible_tools: Vec::new(),
                     })
@@ -1872,6 +2202,10 @@ pub async fn run_worktree_tournament(
             outcome
         }));
     }
+
+    // Item #3 (`v1.4.0`): the effective protected test/verification glob set for this tournament.
+    let protected_globs =
+        effective_protected_globs(spec.disallow_test_tampering, &spec.protected_paths);
 
     let mut scores: Vec<TournamentScore> = Vec::with_capacity(spec.candidates.len());
     let mut join_failures: Vec<String> = Vec::new();
@@ -1893,6 +2227,8 @@ pub async fn run_worktree_tournament(
                     turns_used: 0,
                     tool_calls_used: 0,
                     tokens_used: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
                     duration_ms: 0,
                     visible_tools: Vec::new(),
                 }
@@ -1908,6 +2244,8 @@ pub async fn run_worktree_tournament(
                     turns_used: 0,
                     tool_calls_used: 0,
                     tokens_used: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
                     duration_ms: 0,
                     visible_tools: Vec::new(),
                 }
@@ -1921,11 +2259,16 @@ pub async fn run_worktree_tournament(
             _ => "failed",
         };
 
+        // F10 (`v1.4.0`): capture this candidate's token spend before the outcome is consumed.
+        let candidate_input_tokens = outcome.input_tokens;
+        let candidate_output_tokens = outcome.output_tokens;
+
         // Compute this candidate's delta against its own baseline revision.
         let mut changed_paths: Vec<String> = Vec::new();
         let mut total_changed_lines = 0usize;
         let mut predictive_warnings = 0usize;
         let mut gate_passed = false;
+        let mut gate_status = GateVerificationStatus::NotRun;
         let gate_detail: String;
 
         if outcome.status != RunStatus::Completed {
@@ -1965,9 +2308,26 @@ pub async fn run_worktree_tournament(
             changed_paths.sort();
             changed_paths.dedup();
 
+            let tampered = protected_changed_paths(&changed_paths, &protected_globs);
             if changed_paths.is_empty() {
-                gate_passed = true;
+                // F05 (`v1.4.0`): a zero-change candidate has *nothing verified*. It is recorded as
+                // `Skipped` (not `Passed`) and `has_changes = false`, so `eligible_to_win()` rejects
+                // it and a real passing fix can never lose to an empty diff.
+                gate_status = GateVerificationStatus::Skipped;
                 gate_detail = "no changes; nothing to verify".to_string();
+            } else if !tampered.is_empty() {
+                // Item #3 (`v1.4.0`): a candidate that rewrote the verification/test surface is
+                // disqualified — it can never "pass" by editing the check itself.
+                gate_passed = false;
+                gate_status = GateVerificationStatus::Failed;
+                gate_detail = format!(
+                    "tampered with protected verification/test path: {}",
+                    tampered.join(", ")
+                );
+            } else if *spec.cancel_rx.borrow() {
+                // F02 (`v1.4.0`): cancellation observed *before* verification must not fall through
+                // to a merge.
+                gate_detail = "cancelled before verification".to_string();
             } else {
                 // Predictive validation runs on the candidate's own worktree copy.
                 if spec.predictive_check {
@@ -1988,40 +2348,75 @@ pub async fn run_worktree_tournament(
                 match completion_gate.check(&gate_ctx).await {
                     Ok(GateOutcome::Approved) => {
                         gate_passed = true;
+                        gate_status = GateVerificationStatus::Passed;
                         gate_detail = "verification passed".to_string();
                     }
                     Ok(GateOutcome::Skipped { reason }) => {
                         gate_passed = true;
+                        gate_status = GateVerificationStatus::Skipped;
                         gate_detail = format!("verification skipped: {}", reason);
                     }
                     Ok(GateOutcome::Rejected { feedback }) => {
+                        gate_status = GateVerificationStatus::Failed;
                         gate_detail = format!("verification failed: {}", feedback);
                     }
                     Err(e) => {
+                        gate_status = GateVerificationStatus::InfrastructureError;
                         gate_detail = format!("verification error: {}", e);
                     }
                 }
             }
         }
 
+        let has_changes = !changed_paths.is_empty();
         scores.push(TournamentScore {
             label: candidate.label.clone(),
             candidate_index: index,
             status: status_str.to_string(),
             gate_passed,
+            gate_status,
+            has_changes,
             gate_detail,
             predictive_warnings,
-            // Filled in below once the merge is attempted; a candidate is "conflict free" when the
-            // three-way baseline-aware merge against the live parent reports no conflicts.
+            // Filled in below once the pre-merge conflict check runs against the live parent.
             conflict_free_with_parent: false,
             files_modified: changed_paths.len(),
             total_changed_lines,
             turns_used: outcome.turns_used,
+            input_tokens: candidate_input_tokens,
+            output_tokens: candidate_output_tokens,
             winner: false,
         });
     }
 
-    // Rank: gate first, then zero predictive warnings, then conflict-freedom, then minimal diff.
+    // F10 (`v1.4.0`): aggregate the token spend of *every* candidate, including losers, failures
+    // and cancellations, so the parent run can account for the whole tournament.
+    let total_input_tokens = scores.iter().map(|s| s.input_tokens).sum::<u64>();
+    let total_output_tokens = scores.iter().map(|s| s.output_tokens).sum::<u64>();
+
+    // F06 (`v1.4.0`): run the *real* three-way conflict pre-check against the live parent workspace
+    // BEFORE ranking, so `conflict_free_with_parent` reflects reality instead of being hardcoded
+    // `false`.
+    {
+        let allowed = spec.allowed_write_globs.as_deref();
+        for (index, score) in scores.iter_mut().enumerate() {
+            if !score.has_changes || !score.gate_passed {
+                continue;
+            }
+            let worktree = &worktrees[index].1;
+            match worktree.preflight_conflict_check(
+                parent_workspace,
+                snapshot_store,
+                allowed,
+            ) {
+                Ok(conflict_free) => score.conflict_free_with_parent = conflict_free,
+                Err(_) => score.conflict_free_with_parent = false,
+            }
+        }
+    }
+
+    // Rank: eligible candidates first, then gate, then zero predictive warnings, then
+    // conflict-freedom, then minimal diff.
     let mut order: Vec<usize> = (0..scores.len()).collect();
     order.sort_by_key(|&i| scores[i].rank_key());
 
@@ -2029,50 +2424,70 @@ pub async fn run_worktree_tournament(
     let mut merge_result: Option<WorktreeMergeResult> = None;
     let mut winner: Option<usize> = None;
 
-    if let Some(&best) = order.first() {
-        if scores[best].gate_passed {
-            let (label, worktree) = &mut worktrees[best];
-            let allowed = spec.allowed_write_globs.as_deref();
-            let merge = worktree
-                .merge_into_parent(
-                    parent_workspace,
-                    snapshot_store,
-                    parent_revision,
-                    allowed,
-                    None,
-                    false,
-                    scores[best].turns_used,
-                )
-                .await
-                .map_err(|e| format!("tournament merge failed for '{}': {}", label, e))?;
-            match &merge {
-                WorktreeMergeResult::Applied {
-                    merged_revision: rev,
-                    ..
-                } => {
-                    scores[best].conflict_free_with_parent = true;
-                    scores[best].winner = true;
-                    merged_revision = Some(rev.clone());
-                    winner = Some(best);
-                }
-                WorktreeMergeResult::Conflict {
-                    conflicting_paths, ..
-                } => {
-                    scores[best].conflict_free_with_parent = false;
-                    scores[best].gate_detail = format!(
-                        "{} (merge conflict on: {})",
-                        scores[best].gate_detail,
-                        conflicting_paths.join(", ")
-                    );
-                }
-                WorktreeMergeResult::VerificationFailed { .. } => {
-                    // Only reachable when a post-merge gate is configured; the tournament passes
-                    // `None`, so treat it defensively as "not merged".
-                    scores[best].gate_detail =
-                        format!("{} (post-merge verification failed)", scores[best].gate_detail);
-                }
+    // F02/F06/F07 (`v1.4.0`): try every eligible candidate in ranked order until one merges AND
+    // passes the post-merge gate on the *actual* merged parent workspace. A rank-#1 conflict or a
+    // post-merge verification failure (with automatic rollback) falls back to the next candidate.
+    for &index in &order {
+        if !scores[index].eligible_to_win() {
+            continue;
+        }
+        // F02 (`v1.4.0`): never merge after the run has been cancelled.
+        if *spec.cancel_rx.borrow() {
+            break;
+        }
+        let (label, worktree) = &mut worktrees[index];
+        let allowed = spec.allowed_write_globs.as_deref();
+        let merge = worktree
+            .merge_into_parent(
+                parent_workspace,
+                snapshot_store,
+                parent_revision,
+                allowed,
+                Some(completion_gate),
+                true,
+                scores[index].turns_used,
+            )
+            .await
+            .map_err(|e| format!("tournament merge failed for '{}': {}", label, e))?;
+        match &merge {
+            WorktreeMergeResult::Applied {
+                merged_revision: rev,
+                ..
+            } => {
+                scores[index].conflict_free_with_parent = true;
+                scores[index].winner = true;
+                merged_revision = Some(rev.clone());
+                winner = Some(index);
+                merge_result = Some(merge);
+                break;
             }
-            merge_result = Some(merge);
+            WorktreeMergeResult::Conflict {
+                conflicting_paths, ..
+            } => {
+                scores[index].conflict_free_with_parent = false;
+                scores[index].gate_detail = format!(
+                    "{} (merge conflict on: {})",
+                    scores[index].gate_detail,
+                    conflicting_paths.join(", ")
+                );
+                merge_result = Some(merge);
+            }
+            WorktreeMergeResult::VerificationFailed {
+                reverted,
+                gate_output,
+                ..
+            } => {
+                // F07 (`v1.4.0`): the candidate's own worktree passed, but the *combined* parent
+                // state failed post-merge verification. It has been rolled back; try the next one.
+                scores[index].gate_status = GateVerificationStatus::Failed;
+                scores[index].gate_detail = format!(
+                    "{} (post-merge verification failed, reverted={}: {})",
+                    scores[index].gate_detail,
+                    reverted,
+                    gate_output
+                );
+                merge_result = Some(merge);
+            }
         }
     }
 
@@ -2095,5 +2510,7 @@ pub async fn run_worktree_tournament(
         merged_revision,
         merge: merge_result,
         all_worktrees_cleaned_up: all_cleaned,
+        total_input_tokens,
+        total_output_tokens,
     })
 }

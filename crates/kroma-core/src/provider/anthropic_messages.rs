@@ -664,10 +664,16 @@ impl ModelProvider for AnthropicMessagesClient {
         mut cancel_rx: watch::Receiver<bool>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            let max_tokens = if self.config.max_tokens == 0 {
+            let configured_max_tokens = if self.config.max_tokens == 0 {
                 DEFAULT_MAX_TOKENS
             } else {
                 self.config.max_tokens
+            };
+            // F08 (`v1.4.0`): clamp the per-request output allowance to the remaining token budget
+            // so one completion cannot overshoot the run's spend cap.
+            let max_tokens = match req.max_output_tokens {
+                Some(limit) => configured_max_tokens.min(limit.min(u64::from(u32::MAX)) as u32).max(1),
+                None => configured_max_tokens,
             };
             let body_json = serialize_anthropic_request_body(
                 &self.config.model,

@@ -47,6 +47,12 @@ pub const MAX_PREDICT_CMD_RUNS: usize = 8;
 /// Gate 4: number of ranked candidates surfaced in a failure prompt.
 pub const ATTRIBUTION_TOP_K: usize = 3;
 
+/// F08 (`v1.4.0`): rough token count for a byte length. Deliberately conservative (~4 bytes per
+/// token) so a provider that omits `usage` still consumes the budget rather than bypassing it.
+pub(crate) fn approx_tokens(bytes: usize) -> u64 {
+    ((bytes as u64).saturating_add(3)) / 4
+}
+
 #[derive(Debug, Clone)]
 pub struct RunSummary {
     pub run_id: RunId,
@@ -58,6 +64,10 @@ pub struct RunSummary {
     pub total_input_tokens: u64,
     pub total_cached_input_tokens: u64,
     pub total_output_tokens: u64,
+    /// F10 (`v1.4.0`): input/output tokens spent by child subagents and tournament candidates
+    /// (including failed/cancelled ones), tracked separately from the parent's own spend.
+    pub children_input_tokens: u64,
+    pub children_output_tokens: u64,
     pub cache_hit_ratio: f64,
     pub compaction_reread_count: u64,
     pub modified_files: Vec<String>,
@@ -74,6 +84,9 @@ pub struct AgentRunConfig {
     pub stream: bool,
     pub allow_tool_calls_on_stop: bool,
     pub strict_log: bool,
+    /// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`), configurable via
+    /// `config.toml` / `.kroma.toml` / `/config set projection_profile <p>`. `None` = default (`P2`).
+    pub projection_profile: Option<crate::context_projector::ProjectionProfile>,
 }
 
 impl AgentRunConfig {
@@ -85,7 +98,17 @@ impl AgentRunConfig {
             stream: true,
             allow_tool_calls_on_stop: false,
             strict_log: false,
+            projection_profile: None,
         }
+    }
+
+    /// B2 (`v1.4.0`): select the context projection profile for this run.
+    pub fn with_projection_profile(
+        mut self,
+        profile: Option<crate::context_projector::ProjectionProfile>,
+    ) -> Self {
+        self.projection_profile = profile;
+        self
     }
 }
 
@@ -122,6 +145,17 @@ pub struct AgentRunner {
     subagents_spawned: usize,
     /// Gate 5: optional total token cap (input + output) enforced on child subagent runs.
     max_total_tokens: Option<u64>,
+    /// F10 (`v1.4.0`): token spend accumulated by child subagents / tournament candidates during
+    /// the current turn, drained into the parent [`BudgetTracker`] after each tool batch so the run
+    /// summary can attribute `self` vs `children` cost.
+    children_tokens_pending_input: u64,
+    children_tokens_pending_output: u64,
+    /// Item #3 (`v1.4.0`): when `>= 2`, a single agent that stalls on repeated verification
+    /// failures automatically escalates to a Best-of-N worktree tournament with this many
+    /// candidates. `0` disables escalation.
+    adaptive_tournament_candidates: usize,
+    /// Item #3: guards against escalating more than once per run.
+    adaptive_tournament_attempted: bool,
 }
 
 impl AgentRunner {
@@ -157,6 +191,10 @@ impl AgentRunner {
             max_subagent_spawns: DEFAULT_MAX_SUBAGENT_SPAWNS,
             subagents_spawned: 0,
             max_total_tokens: None,
+            children_tokens_pending_input: 0,
+            children_tokens_pending_output: 0,
+            adaptive_tournament_candidates: 0,
+            adaptive_tournament_attempted: false,
         }
     }
 
@@ -189,6 +227,14 @@ impl AgentRunner {
 
     pub fn with_completion_gate_max_retries(mut self, max_retries: usize) -> Self {
         self.completion_gate_max_retries = max_retries.max(1);
+        self
+    }
+
+    /// Item #3 (`v1.4.0`): race this many candidates when the single agent stalls on repeated
+    /// verification failures. Values below [`crate::subagents::MIN_TOURNAMENT_CANDIDATES`] disable
+    /// escalation.
+    pub fn with_adaptive_tournament_candidates(mut self, candidates: usize) -> Self {
+        self.adaptive_tournament_candidates = candidates;
         self
     }
 
@@ -375,6 +421,10 @@ impl AgentRunner {
             );
         }
         let mut projector = ContextProjector::new();
+        // B2 (`v1.4.0`): honour a configured projection profile (default `P2`).
+        if let Some(profile) = self.config.projection_profile {
+            projector = projector.with_profile(profile);
+        }
         // Freeze the system-prefix / tool-schema byte split so the Gate 2 budget breakdown can
         // report them separately instead of one opaque `static_prefix_bytes`.
         projector.set_prefix_breakdown(
@@ -495,14 +545,12 @@ impl AgentRunner {
                 );
             }
 
+            // F08 (`v1.4.0`): budget accounting covers `self` *and* child subagent spend, and the
+            // stop reason is a dedicated `TokenBudgetExhausted` (not `MaxTurns`).
             if let Some(max_tok) = self.max_total_tokens {
-                if budget_tracker
-                    .total_input_tokens()
-                    .saturating_add(budget_tracker.total_output_tokens())
-                    >= max_tok
-                {
+                if budget_tracker.all_total_tokens() >= max_tok {
                     return self.finish_run(
-                        TerminalReason::MaxTurns,
+                        TerminalReason::TokenBudgetExhausted,
                         &budget_tracker,
                         &projector,
                         modified_files_set.into_iter().collect(),
@@ -613,6 +661,34 @@ impl AgentRunner {
                 );
             }
 
+            // F08 (`v1.4.0`): reserve budget *before* sending the request. Estimate the prompt
+            // input tokens from the projected byte size and refuse to start a request that would
+            // already blow the remaining budget; otherwise cap this request's output so a single
+            // completion cannot overshoot what is left.
+            let estimated_input_tokens = approx_tokens(
+                static_prefix.static_prefix_bytes
+                    .saturating_add(projected.message_history_bytes)
+                    .saturating_add(static_prefix.system_prompt.len()),
+            );
+            let max_output_tokens = if let Some(max_tok) = self.max_total_tokens {
+                let spent = budget_tracker.all_total_tokens();
+                let projected_total = spent.saturating_add(estimated_input_tokens);
+                if projected_total >= max_tok {
+                    return self.finish_run(
+                        TerminalReason::TokenBudgetExhausted,
+                        &budget_tracker,
+                        &projector,
+                        modified_files_set.into_iter().collect(),
+                        last_assistant_text,
+                        transcript,
+                        logger,
+                    );
+                }
+                Some(max_tok.saturating_sub(projected_total))
+            } else {
+                None
+            };
+
             let req = ProviderRequest {
                 system_prompt: static_prefix.system_prompt.clone(),
                 tools: visible_tools.clone(),
@@ -621,6 +697,8 @@ impl AgentRunner {
                 // Gate 7: hand the projector's logical cache boundaries to the protocol client so
                 // Anthropic-style explicit prompt caching can pin the frozen prefix.
                 cache_breakpoints: projected.breakpoints,
+                // F08: remaining output-token allowance derived from `--max-tokens`.
+                max_output_tokens,
             };
 
             let completion = match self
@@ -685,26 +763,47 @@ impl AgentRunner {
                         logger,
                     );
                 }
-            } else if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
-                turn: current_turn,
-                input_tokens: 0,
-                cached_input_tokens: None,
-                uncached_input_tokens: 0,
-                output_tokens: 0,
-                reasoning_tokens: None,
-                prefix_cache_hit_ratio: 0.0,
-                latency_ms: completion.latency_ms,
-                ttft_ms: completion.ttft_ms,
-            }) {
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(e.to_string()),
-                    &budget_tracker,
-                    &projector,
-                    modified_files_set.into_iter().collect(),
-                    last_assistant_text,
-                    transcript,
-                    logger,
+            } else {
+                // F08 (`v1.4.0`): a provider that omits `usage` must not bypass the token cap.
+                // Conservatively estimate both directions from byte length (~4 bytes per token).
+                let est_input = estimated_input_tokens;
+                let est_output = approx_tokens(
+                    assistant_turn
+                        .content
+                        .as_ref()
+                        .map(|t| t.len())
+                        .unwrap_or(0)
+                        .saturating_add(
+                            assistant_turn
+                                .tool_calls
+                                .iter()
+                                .map(|c| c.raw_arguments.len() + c.name.len())
+                                .sum::<usize>(),
+                        ),
                 );
+                budget_tracker.record_token_usage(est_input, None, est_output);
+                last_input_tokens = Some(est_input);
+                if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
+                    turn: current_turn,
+                    input_tokens: est_input,
+                    cached_input_tokens: None,
+                    uncached_input_tokens: est_input,
+                    output_tokens: est_output,
+                    reasoning_tokens: None,
+                    prefix_cache_hit_ratio: 0.0,
+                    latency_ms: completion.latency_ms,
+                    ttft_ms: completion.ttft_ms,
+                }) {
+                    return self.finish_run(
+                        TerminalReason::StrictLogFailure(e.to_string()),
+                        &budget_tracker,
+                        &projector,
+                        modified_files_set.into_iter().collect(),
+                        last_assistant_text,
+                        transcript,
+                        logger,
+                    );
+                }
             }
 
             // §4.1: Pre-dispatch batch validation BEFORE adding to transcript or running any tools!
@@ -886,6 +985,67 @@ impl AgentRunner {
                                     transcript, logger,
                                 );
                             }
+                            // Item #3 (`v1.4.0`): adaptive escalation. Instead of tripping the
+                            // circuit breaker on a stall (2+ consecutive verification failures),
+                            // race N diverse repair candidates in isolated worktrees and merge the
+                            // best verified one.
+                            if !self.adaptive_tournament_attempted
+                                && gate_failure_count >= 2
+                                && self.adaptive_tournament_candidates
+                                    >= crate::subagents::MIN_TOURNAMENT_CANDIDATES
+                                && self.max_subagent_spawns > 0
+                                && !*self.cancel_rx.borrow()
+                            {
+                                let preflight = crate::subagents::subagent_spawn_preflight(
+                                    self.tool_runtime.policy_engine(),
+                                    self.adaptive_tournament_candidates,
+                                    self.subagents_spawned,
+                                    self.max_subagent_spawns,
+                                    EffectClass::Mutating,
+                                );
+                                if matches!(preflight, Ok(PolicyCheckResult::Allow)) {
+                                    self.adaptive_tournament_attempted = true;
+                                    let excerpt: String = feedback.chars().take(1200).collect();
+                                    let request = crate::subagents::TournamentRequest {
+                                        task: format!(
+                                            "{}\n\n[ADAPTIVE ESCALATION] The single-agent attempt failed verification {} time(s). Race independent repair strategies. Last verification failure:\n{}",
+                                            self.config.task, gate_failure_count, excerpt
+                                        ),
+                                        candidates: self.adaptive_tournament_candidates,
+                                        allowed_write_globs: None,
+                                        max_turns: None,
+                                        timeout_ms: crate::subagents::DEFAULT_SUBAGENT_TIMEOUT_MS,
+                                        disallow_test_tampering: true,
+                                        protected_paths: Vec::new(),
+                                    };
+                                    let before_rev = self.current_revision_id.clone();
+                                    let (tournament_out, _label) = self
+                                        .execute_spawn_tournament(
+                                            request,
+                                            absolute_turn,
+                                            &mut modified_files_set,
+                                            &mut logger,
+                                            "adaptive_tournament".to_string(),
+                                        )
+                                        .await;
+                                    if self.current_revision_id != before_rev {
+                                        // A candidate was verified and merged: the stall is broken.
+                                        gate_failure_count = 0;
+                                        last_gate_failure_hash = None;
+                                        self.record_transcript_item(
+                                            &mut transcript,
+                                            TranscriptItem::User(UserMessage {
+                                                content: format!(
+                                                    "[ADAPTIVE TOURNAMENT MERGED] {}",
+                                                    tournament_out.content
+                                                ),
+                                            }),
+                                            current_turn.saturating_add(1),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
                             if gate_failure_count >= self.completion_gate_max_retries {
                                 let excerpt: String = feedback.chars().take(1600).collect();
                                 return self.finish_run(
@@ -986,6 +1146,19 @@ impl AgentRunner {
                 .await;
 
             debug_assert!(verify_tool_call_pairing(&transcript));
+
+            // F10 (`v1.4.0`): fold any child subagent / tournament token spend accumulated during
+            // this batch into the parent budget tracker so the run summary reports
+            // `self` + `children` cost.
+            if self.children_tokens_pending_input > 0 || self.children_tokens_pending_output > 0 {
+                budget_tracker.record_children_token_usage(
+                    self.children_tokens_pending_input,
+                    None,
+                    self.children_tokens_pending_output,
+                );
+                self.children_tokens_pending_input = 0;
+                self.children_tokens_pending_output = 0;
+            }
 
             // Gate 1: a batch that mutated files — directly via `edit`/`write`, or indirectly via a
             // `bash` command whose writes the tool cannot report (O1) — gets a fresh revision bound
@@ -2001,6 +2174,8 @@ impl AgentRunner {
             predictive_check: self.tool_runtime.predictive_check_enabled(),
             cancel_rx: self.cancel_rx.clone(),
             timeout_ms: request.timeout_ms.max(1),
+            disallow_test_tampering: request.disallow_test_tampering,
+            protected_paths: request.protected_paths.clone(),
         };
 
         let outcome = match run_worktree_tournament(
@@ -2037,6 +2212,15 @@ impl AgentRunner {
             self.batch_mutated = true;
             self.current_revision_id = Some(rev);
         }
+
+        // F10 (`v1.4.0`): aggregate the token spend of every tournament candidate, including the
+        // losers and any candidate that failed or was cancelled.
+        self.children_tokens_pending_input = self
+            .children_tokens_pending_input
+            .saturating_add(outcome.total_input_tokens);
+        self.children_tokens_pending_output = self
+            .children_tokens_pending_output
+            .saturating_add(outcome.total_output_tokens);
 
         let report = outcome.render_report();
         (
@@ -2105,22 +2289,6 @@ impl AgentRunner {
             .map(|t| t.candidates)
             .unwrap_or(specs.len());
 
-        if self.subagents_spawned.saturating_add(requested_spawns) > self.max_subagent_spawns {
-            return (
-                ToolExecutionOutput::error(
-                    ErrorCode::PolicyDenied,
-                    format!(
-                        "subagent spawn budget exceeded: requested {}, already spawned {}, max_subagents={}",
-                        requested_spawns,
-                        self.subagents_spawned,
-                        self.max_subagent_spawns
-                    ),
-                    ToolResultMeta::default(),
-                ),
-                "deny:subagent_budget_exceeded".to_string(),
-            );
-        }
-
         let has_worker =
             tournament_request.is_some() || specs.iter().any(|s| s.role == SubagentRole::Worker);
         let effective_effect = if has_worker {
@@ -2129,10 +2297,27 @@ impl AgentRunner {
             EffectClass::ReadOnly
         };
 
-        let check = self
-            .tool_runtime
-            .policy_engine()
-            .evaluate(&call.name, effective_effect, false);
+        // F01 (`v1.4.0`): the shared quota + policy preflight (identical to the RPC tournament
+        // entry point) so every entry path enforces the same `max_subagents` cap and policy mode.
+        let check = match crate::subagents::subagent_spawn_preflight(
+            self.tool_runtime.policy_engine(),
+            requested_spawns,
+            self.subagents_spawned,
+            self.max_subagent_spawns,
+            effective_effect,
+        ) {
+            Ok(check) => check,
+            Err(reason) => {
+                return (
+                    ToolExecutionOutput::error(
+                        ErrorCode::PolicyDenied,
+                        reason,
+                        ToolResultMeta::default(),
+                    ),
+                    "deny:subagent_budget_exceeded".to_string(),
+                );
+            }
+        };
         let decision_label = match check {
             PolicyCheckResult::Allow => {
                 if has_worker {
@@ -2420,6 +2605,8 @@ impl AgentRunner {
                             turns_used: 0,
                             tool_calls_used: 0,
                             tokens_used: 0,
+                            input_tokens: 0,
+                            output_tokens: 0,
                             duration_ms: started_sub.elapsed().as_millis() as u64,
                             visible_tools: Vec::new(),
                         })
@@ -2445,6 +2632,8 @@ impl AgentRunner {
                             turns_used: 0,
                             tool_calls_used: 0,
                             tokens_used: 0,
+                            input_tokens: 0,
+                            output_tokens: 0,
                             duration_ms: started_sub.elapsed().as_millis() as u64,
                             visible_tools: Vec::new(),
                         })
@@ -2477,6 +2666,8 @@ impl AgentRunner {
                     turns_used: 0,
                     tool_calls_used: 0,
                     tokens_used: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
                     duration_ms: 0,
                     visible_tools: Vec::new(),
                 },
@@ -2489,6 +2680,8 @@ impl AgentRunner {
                     turns_used: 0,
                     tool_calls_used: 0,
                     tokens_used: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
                     duration_ms: 0,
                     visible_tools: Vec::new(),
                 },
@@ -2511,10 +2704,70 @@ impl AgentRunner {
                 duration_ms: outcome.duration_ms,
             });
 
+            // F10 (`v1.4.0`): attribute every child run's spend (completed, failed or cancelled) to
+            // the parent run so `children_*` cost is never silently dropped.
+            self.children_tokens_pending_input = self
+                .children_tokens_pending_input
+                .saturating_add(outcome.input_tokens);
+            self.children_tokens_pending_output = self
+                .children_tokens_pending_output
+                .saturating_add(outcome.output_tokens);
+
             let mut merge_result = None;
             let mut worktree_cleaned_up = true;
 
             if let Some(ref mut wt) = worktree {
+                // Item #3 (`v1.4.0`): a worker that edited a protected verification/test path is
+                // disqualified from merging, so a fix can never be "verified" by rewriting the test.
+                let worker_protected_globs = crate::subagents::effective_protected_globs(
+                    spec.disallow_test_tampering,
+                    &spec.protected_paths,
+                );
+                let tampered_paths = if worker_protected_globs.is_empty() {
+                    Vec::new()
+                } else {
+                    match wt.delta_paths(
+                        self.tool_runtime.env().workspace(),
+                        &store,
+                    ) {
+                        Ok(paths) => crate::subagents::protected_changed_paths(
+                            &paths,
+                            &worker_protected_globs,
+                        ),
+                        Err(_) => Vec::new(),
+                    }
+                };
+                if !tampered_paths.is_empty() {
+                    let _ = logger.log(EventPayload::SubagentCompleted {
+                        subagent_id: subagent_id.clone(),
+                        role: spec.role.as_str().to_string(),
+                        status: "disqualified_test_tampering".to_string(),
+                        turns_used: outcome.turns_used,
+                        tool_calls_used: outcome.tool_calls_used,
+                        tokens_used: outcome.tokens_used,
+                        duration_ms: outcome.duration_ms,
+                    });
+                    let _ = wt.cleanup();
+                    results.push(SubagentResult {
+                        subagent_id,
+                        role: spec.role,
+                        status: RunStatus::Failed,
+                        terminal_reason: "policy_denied: protected verification/test path".to_string(),
+                        summary: format!(
+                            "worker disqualified: it modified protected verification/test path(s): {}",
+                            tampered_paths.join(", ")
+                        ),
+                        relevant_files: outcome.relevant_files,
+                        findings: outcome.findings,
+                        turns_used: outcome.turns_used,
+                        tool_calls_used: outcome.tool_calls_used,
+                        tokens_used: outcome.tokens_used,
+                        duration_ms: outcome.duration_ms,
+                        merge_result: None,
+                        worktree_cleaned_up: true,
+                    });
+                    continue;
+                }
                 if outcome.status == RunStatus::Completed && !*self.cancel_rx.borrow() {
                     match wt
                         .merge_into_parent(
@@ -2877,6 +3130,8 @@ impl AgentRunner {
             total_input_tokens: budget_tracker.total_input_tokens(),
             total_cached_input_tokens: budget_tracker.total_cached_input_tokens(),
             total_output_tokens: budget_tracker.total_output_tokens(),
+            children_input_tokens: budget_tracker.children_input_tokens(),
+            children_output_tokens: budget_tracker.children_output_tokens(),
             cache_hit_ratio: budget_tracker.overall_cache_hit_ratio(),
             compaction_reread_count: projector.compaction_reread_count(),
             modified_files,

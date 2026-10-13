@@ -50,7 +50,7 @@ impl ProviderError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProviderRequest {
     pub system_prompt: String,
     pub tools: Vec<ToolDefinition>,
@@ -61,6 +61,11 @@ pub struct ProviderRequest {
     /// frozen prefix is cached instead of re-billed every turn. Empty for callers that do not
     /// project context (tests, subagent runs without a projector).
     pub cache_breakpoints: Vec<CacheBreakpointMarker>,
+    /// F08 (`v1.4.0`): the remaining output-token allowance for *this* request, derived from the
+    /// run's token budget. `None` means unbounded (no token budget configured). Protocols map this
+    /// onto their native output cap (`max_tokens` / `max_output_tokens`) so a single response can
+    /// never overshoot the remaining budget.
+    pub max_output_tokens: Option<u64>,
 }
 
 /// Gate 7 (`v1.2.0`): the wire protocol used to talk to a model endpoint.

@@ -33,7 +33,15 @@ use std::path::{Path, PathBuf};
 
 /// Top-level keys a workspace `.kroma.toml` is allowed to contribute. Everything else — including
 /// credentials, endpoint overrides, verification commands, hooks and policy switches — is ignored.
-pub const WORKSPACE_ALLOWED_KEYS: &[&str] = &["model", "protocol", "reasoning_effort", "max_subagents"];
+pub const WORKSPACE_ALLOWED_KEYS: &[&str] =
+    &[
+        "model",
+        "protocol",
+        "reasoning_effort",
+        "max_subagents",
+        "projection_profile",
+        "adaptive_tournament",
+    ];
 
 /// Keys that change security posture or carry credentials. A workspace file may never set these;
 /// they are only trusted from the user global file, `KROMA_*` environment variables, or CLI flags.
@@ -57,6 +65,10 @@ const ENV_REASONING_EFFORT: &str = "KROMA_REASONING_EFFORT";
 const ENV_VERIFY_COMMAND: &str = "KROMA_VERIFY_COMMAND";
 const ENV_MAX_SUBAGENTS: &str = "KROMA_MAX_SUBAGENTS";
 const ENV_PROFILE: &str = "KROMA_PROFILE";
+/// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`).
+const ENV_PROJECTION_PROFILE: &str = "KROMA_PROJECTION_PROFILE";
+/// Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
+const ENV_ADAPTIVE_TOURNAMENT: &str = "KROMA_ADAPTIVE_TOURNAMENT";
 
 /// Placeholder shown instead of a real credential by [`ResolvedConfig::redacted_summary`].
 pub const REDACTED_API_KEY: &str = "sk-***";
@@ -94,6 +106,11 @@ pub struct KromaConfigFile {
     pub policy: Option<String>,
     pub verify_command: Option<String>,
     pub max_subagents: Option<usize>,
+    /// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`). A safe key that a
+    /// workspace `.kroma.toml` may set.
+    pub projection_profile: Option<String>,
+    /// Item #3 (`v1.4.0`): number of candidates to race when the single agent stalls (`0` = off).
+    pub adaptive_tournament: Option<usize>,
     pub profiles: BTreeMap<String, ConfigProfile>,
     /// Every top-level key name present in the file (typed or not), sorted and deduplicated.
     pub raw_keys: Vec<String>,
@@ -134,6 +151,16 @@ impl KromaConfigFile {
                     "verify_command" => file.verify_command = Some(value.as_string()?),
                     "max_subagents" => {
                         file.max_subagents = Some(value.as_positive_usize(&key)?);
+                    }
+                    "adaptive_tournament" => {
+                        file.adaptive_tournament = Some(value.as_positive_usize(&key)?);
+                    }
+                    "projection_profile" => {
+                        let raw = value.as_string()?;
+                        // Validate eagerly so a typo never silently changes behaviour.
+                        crate::context_projector::ProjectionProfile::parse(&raw)
+                            .map_err(|e| format!("{}: {}", key, e))?;
+                        file.projection_profile = Some(raw);
                     }
                     // Unknown top-level keys are ignored but remembered for the trust guard.
                     _ => {}
@@ -296,6 +323,10 @@ pub struct ConfigOverrides {
     pub reasoning_effort: Option<String>,
     pub verify_command: Option<String>,
     pub max_subagents: Option<usize>,
+    /// B2 (`v1.4.0`): context projection profile override.
+    pub projection_profile: Option<String>,
+    /// Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
+    pub adaptive_tournament: Option<usize>,
 }
 
 /// Fully merged configuration plus the provenance needed to explain it.
@@ -309,6 +340,10 @@ pub struct ResolvedConfig {
     pub policy: Option<String>,
     pub verify_command: Option<String>,
     pub max_subagents: Option<usize>,
+    /// B2 (`v1.4.0`): resolved context projection profile.
+    pub projection_profile: Option<String>,
+    /// Item #3 (`v1.4.0`): resolved adaptive tournament escalation candidate count.
+    pub adaptive_tournament: Option<usize>,
     pub active_profile: Option<String>,
     /// Keys a workspace `.kroma.toml` tried to set outside [`WORKSPACE_ALLOWED_KEYS`].
     pub rejected_workspace_keys: Vec<String>,
@@ -419,6 +454,21 @@ impl ResolvedConfig {
                 .or_else(|| env_string(ENV_MAX_SUBAGENTS).and_then(|v| v.parse::<usize>().ok()))
                 .or_else(|| workspace.max_subagents)
                 .or_else(|| user.max_subagents),
+            // B2: a safe, non-security key — the workspace file may set it.
+            projection_profile: overrides
+                .projection_profile
+                .clone()
+                .or_else(|| env_string(ENV_PROJECTION_PROFILE))
+                .or_else(|| workspace.projection_profile.clone())
+                .or_else(|| user.projection_profile.clone()),
+            // Item #3: a safe, non-security key — the workspace file may set it.
+            adaptive_tournament: overrides
+                .adaptive_tournament
+                .or_else(|| {
+                    env_string(ENV_ADAPTIVE_TOURNAMENT).and_then(|v| v.parse::<usize>().ok())
+                })
+                .or_else(|| workspace.adaptive_tournament)
+                .or_else(|| user.adaptive_tournament),
             active_profile,
             rejected_workspace_keys,
             user_config_path,

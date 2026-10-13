@@ -160,6 +160,20 @@ impl ProjectionProfile {
     pub fn is_aggressive(&self) -> bool {
         matches!(self, ProjectionProfile::P3)
     }
+
+    /// B2 (`v1.4.0`): parse a `projection_profile` config value.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "baseline" => Ok(ProjectionProfile::Baseline),
+            "p1" => Ok(ProjectionProfile::P1),
+            "p2" => Ok(ProjectionProfile::P2),
+            "p3" => Ok(ProjectionProfile::P3),
+            other => Err(format!(
+                "unknown projection profile '{}'; expected baseline|p1|p2|p3",
+                other
+            )),
+        }
+    }
 }
 
 /// Aggregated projection statistics exposed to the runtime and the acceptance tests.

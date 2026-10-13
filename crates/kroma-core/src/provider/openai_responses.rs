@@ -58,6 +58,28 @@ pub fn serialize_responses_request_body(
     stream: bool,
     reasoning_effort: Option<&str>,
 ) -> String {
+    serialize_responses_request_body_with_limit(
+        model,
+        system_prompt,
+        tools,
+        messages,
+        stream,
+        reasoning_effort,
+        None,
+    )
+}
+
+/// F08/F09 (`v1.4.0`): serialize a Responses request, optionally emitting `max_output_tokens` and
+/// always round-tripping provider-native reasoning state (`encrypted_content` -> `opaque_payload`).
+pub fn serialize_responses_request_body_with_limit(
+    model: &str,
+    system_prompt: &str,
+    tools: &[ToolDefinition],
+    messages: &[TranscriptItem],
+    stream: bool,
+    reasoning_effort: Option<&str>,
+    max_output_tokens: Option<u64>,
+) -> String {
     let mut sorted_tools = tools.to_vec();
     sorted_tools.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
 
@@ -90,11 +112,26 @@ pub fn serialize_responses_request_body(
                     }));
                 }
                 for rb in &a.reasoning_blocks {
+                    // F09 (`v1.4.0`): provider-native reasoning state MUST be replayed verbatim in
+                    // the next turn. When `opaque_payload` (the Responses API `encrypted_content`)
+                    // is present it is emitted even if the readable `text` summary is empty,
+                    // otherwise the model loses its encrypted reasoning chain across tool calls.
+                    let mut item = Map::new();
+                    item.insert("type".to_string(), Value::String("reasoning".to_string()));
                     if let Some(text) = &rb.text {
-                        input.push(json!({
-                            "type": "reasoning",
-                            "summary": [{ "type": "summary_text", "text": text }],
-                        }));
+                        item.insert(
+                            "summary".to_string(),
+                            json!([{ "type": "summary_text", "text": text }]),
+                        );
+                    }
+                    if let Some(opaque) = &rb.opaque_payload {
+                        item.insert(
+                            "encrypted_content".to_string(),
+                            Value::String(opaque.clone()),
+                        );
+                    }
+                    if item.len() > 1 {
+                        input.push(Value::Object(item));
                     }
                 }
                 for tc in &a.tool_calls {
@@ -147,6 +184,12 @@ pub fn serialize_responses_request_body(
     }
     root.insert("stream".to_string(), Value::Bool(stream));
     root.insert("store".to_string(), Value::Bool(false));
+    if let Some(limit) = max_output_tokens {
+        root.insert(
+            "max_output_tokens".to_string(),
+            Value::Number(limit.into()),
+        );
+    }
 
     serde_json::to_string(&Value::Object(root)).unwrap_or_else(|_| "{}".to_string())
 }
@@ -380,6 +423,30 @@ impl ResponsesStreamAssembler {
                         },
                     });
                 }
+                // F09 (`v1.4.0`): a completed `reasoning` item carries the provider-native
+                // `encrypted_content` that must be replayed on the next turn. Capture it into the
+                // matching `ReasoningBlock` (or a fresh one when only the opaque payload is known).
+                if let Some(item) = val.get("item") {
+                    if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                        if let Some(encrypted) =
+                            item.get("encrypted_content").and_then(Value::as_str)
+                        {
+                            if !encrypted.is_empty() {
+                                if let Some(block) = self.reasoning.last_mut() {
+                                    if block.opaque_payload.is_none() {
+                                        block.opaque_payload = Some(encrypted.to_string());
+                                    }
+                                } else {
+                                    self.reasoning.push(ReasoningBlock {
+                                        text: None,
+                                        signature: None,
+                                        opaque_payload: Some(encrypted.to_string()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
             }
             "response.completed" => {
                 if let Some(resp) = val.get("response") {
@@ -499,13 +566,14 @@ impl ModelProvider for OpenAiResponsesClient {
         mut cancel_rx: watch::Receiver<bool>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            let body_json = serialize_responses_request_body(
+            let body_json = serialize_responses_request_body_with_limit(
                 &self.config.model,
                 &req.system_prompt,
                 &req.tools,
                 &req.messages,
                 req.stream,
                 self.config.reasoning_effort.as_deref(),
+                req.max_output_tokens,
             );
             let request_body_bytes = body_json.len();
             let max_attempts = (self.config.max_retries + 1).min(budget.max_model_request_attempts);

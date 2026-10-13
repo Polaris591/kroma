@@ -35,6 +35,7 @@ directory. For a one-off task: `kroma --task "add tests for the parser"`.
 | `kroma run --task <TASK>` | Headless single-run mode (default; `--output-format jsonl` for CI) |
 | `kroma acp` | JSON-RPC 2.0 Agent Client Protocol server over stdio (stdout stays pure JSON-RPC) |
 | `kroma serve --listen 127.0.0.1:7878` | JSON-RPC 2.0 daemon over loopback TCP or a `0600` Unix socket |
+| `kroma bench [--suite <PATH>] [--budget-tokens <N>] [--json]` | Paired, budget-locked A/B benchmark (built-in smoke suite by default) |
 
 ## Configuration
 
@@ -49,6 +50,8 @@ Kroma reads configuration from environment variables (and, for scripts, from the
 | `KROMA_PROTOCOL` | Provider protocol fallback when `--protocol` is not set: `auto` \| `chat-completions` \| `anthropic-messages` \| `openai-responses` |
 | `KROMA_REASONING_EFFORT` | Reasoning effort fallback when `--reasoning-effort` is not set |
 | `KROMA_VERIFY_COMMAND` | Completion-check command, e.g. `cargo test --workspace` |
+| `KROMA_PROJECTION_PROFILE` | Context projection profile: `baseline` \| `p1` \| `p2` \| `p3` (default `p2`) |
+| `KROMA_ADAPTIVE_TOURNAMENT` | Race this many candidates when the single agent stalls (`0` = off) |
 | `KROMA_VERIFY_TIMEOUT_SECS` | Completion-check timeout (default 180) |
 | `KROMA_GATE_MAX_RETRIES` | Maximum completion-gate rejections (default 3) |
 | `KROMA_SHELL` | Shell used for the `bash` tool (Windows: Git Bash / pwsh / cmd auto-detected) |
@@ -112,7 +115,42 @@ kroma> /race 3 fix the flaky parser test
 ```
 
 Also available as `spawn_subagent {"mode":"tournament","task":"...","candidates":3}` and as the
-`session.tournament` JSON-RPC method.
+`session.tournament` JSON-RPC method. Every entry point (tool, REPL `/race`, RPC) runs the **same**
+authorization + `max_subagents` quota preflight, so a `read-only` session can never write through a
+race.
+
+### Protected verification paths (`v1.4.0`)
+
+Pass `"disallow_test_tampering": true` (and/or `"protected_paths": ["..."]`) to `spawn_subagent` or
+`session.tournament`. A candidate or worker that edits a protected test/verification file is
+disqualified from winning and from merging, so a race can never "pass" by rewriting the test.
+
+### Adaptive tournament escalation (`v1.4.0`)
+
+Set `adaptive_tournament = N` in `config.toml` / `.kroma.toml` (or
+`/config set adaptive_tournament <N>`). When the single agent's completion gate rejects twice in a
+row and the policy/quota permit, Kroma automatically escalates to a Best-of-N worktree tournament
+with `N` diverse repair strategies before tripping the circuit breaker.
+
+### Merge recovery journal (`v1.4.0`)
+
+A worktree→parent merge writes a durable `merge-in-progress.json` intent before touching the first
+parent file. A mid-merge I/O failure triggers an automatic rollback to the pre-merge revision; if
+that rollback cannot complete, the run surfaces `RecoveryRequired` instead of silently leaving the
+workspace half-merged.
+
+## Benchmarking (`v1.4.0`)
+
+```console
+kroma bench --budget-tokens 100000
+kroma bench --suite ./bench/my-suite.json --json
+```
+
+Every arm receives the **identical** total token budget, so the report is a paired measurement
+(pass rate, total tokens, latency, regressions, winner) rather than "the arm that spent more won".
+With no `--suite`, a built-in smoke suite runs against a deterministic **synthetic** executor: it
+validates the benchmark plumbing on a machine with no model endpoint, and the report labels those
+numbers `synthetic` so they are never presented as evidence about real task resolution.
 
 ## Interactive commands (`kroma>`)
 
@@ -121,10 +159,17 @@ Also available as `spawn_subagent {"mode":"tournament","task":"...","candidates"
 `/race <N> <task>`, `/status`, `/revisions`, `/undo`, `/diff`, `/skills`, `/graph`, `/fork`,
 `/inspect`, `/help`, `/quit`.
 
+## Incremental code graph (`v1.4.0`)
+
+`RepoGraph` caches each file's parse keyed by `(path, len, mtime_ns, content_sha256)`, so repeated
+`code_graph` / `/graph` calls within a session skip unchanged files. Edges are typed
+(`import` / `call_or_reference` / `type_or_symbol`); explicit imports and type references carry more
+PageRank weight than coincidental identifier matches.
+
 ## Development
 
 ```bash
-cargo test --workspace                     # 165 tests
+cargo test --workspace                     # 198 tests
 cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 cargo build --workspace --release          # -> target/release/kroma
 ```

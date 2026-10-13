@@ -36,6 +36,12 @@ pub enum CliSurface {
     Repl,
     Acp,
     Serve { listen_addr: String },
+    /// Item #3 (`v1.4.0`): paired, budget-locked A/B benchmark runner.
+    Bench {
+        suite: Option<PathBuf>,
+        budget_tokens: u64,
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +143,15 @@ where
                     listen_addr: "127.0.0.1:7878".to_string(),
                 };
                 explicit_surface = Some("serve");
+            }
+            "bench" => {
+                iter.next();
+                surface = CliSurface::Bench {
+                    suite: None,
+                    budget_tokens: kroma_core::bench::default_bench_budget_tokens(),
+                    json: false,
+                };
+                explicit_surface = Some("bench");
             }
             _ => {}
         }
@@ -285,6 +300,40 @@ where
             }
             "--jsonl" => {
                 output_format = "jsonl".to_string();
+            }
+            "--suite" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --suite <PATH>".to_string())?;
+                if let CliSurface::Bench { suite, .. } = &mut surface {
+                    *suite = Some(PathBuf::from(val));
+                } else {
+                    return Err("--suite is only valid for `kroma bench`".to_string());
+                }
+            }
+            "--budget-tokens" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --budget-tokens <N>".to_string())?;
+                let parsed: u64 = val
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid --budget-tokens '{}'", val))?;
+                if parsed == 0 {
+                    return Err("--budget-tokens must be > 0".to_string());
+                }
+                if let CliSurface::Bench { budget_tokens, .. } = &mut surface {
+                    *budget_tokens = parsed;
+                } else {
+                    return Err("--budget-tokens is only valid for `kroma bench`".to_string());
+                }
+            }
+            "--json" => {
+                if let CliSurface::Bench { json, .. } = &mut surface {
+                    *json = true;
+                } else {
+                    return Err("--json is only valid for `kroma bench`".to_string());
+                }
             }
             "--policy" => {
                 let val = iter
@@ -787,6 +836,78 @@ fn snapshot_store_for(state_dir: &Path) -> SnapshotStore {
 }
 
 /// Gate 3: `--list-skills` discovers the workspace skill catalog and exits without a provider call.
+/// Item #3 (`v1.4.0`): `kroma bench [--suite <PATH>] [--budget-tokens <N>] [--json]`.
+///
+/// Runs a paired, budget-locked A/B comparison. With no `--suite`, the built-in smoke suite and the
+/// deterministic synthetic executor are used so the command works out of the box; the report marks
+/// those numbers as `synthetic`.
+fn run_bench(
+    suite_path: Option<&Path>,
+    budget_tokens: u64,
+    json: bool,
+    workspace: &Path,
+    quiet: bool,
+) -> ExitCode {
+    use kroma_core::bench::{
+        default_strategy_pair, load_suite, run_paired_benchmark, SyntheticBenchExecutor,
+        SYNTHETIC_EXECUTOR_LABEL,
+    };
+
+    let (suite_name, tasks) = match suite_path {
+        Some(path) => match load_suite(path) {
+            Ok(tasks) => (
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("suite")
+                    .to_string(),
+                tasks,
+            ),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+        },
+        None => (
+            "builtin-smoke".to_string(),
+            kroma_core::bench::builtin_smoke_suite(),
+        ),
+    };
+    if tasks.is_empty() {
+        eprintln!("error: benchmark suite is empty");
+        return ExitCode::from(2);
+    }
+
+    let scratch = workspace
+        .join(".kroma-bench")
+        .join(format!("run-{}", std::process::id()));
+    let executor = SyntheticBenchExecutor;
+    let report = run_paired_benchmark(
+        &suite_name,
+        &tasks,
+        &default_strategy_pair(),
+        budget_tokens,
+        &scratch,
+        &executor,
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{}", s),
+            Err(e) => {
+                eprintln!("error: failed to serialize bench report: {}", e);
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        print!("{}", report.render());
+    }
+    if !quiet && report.executor == SYNTHETIC_EXECUTOR_LABEL {
+        eprintln!("[kroma] note: built-in smoke suite uses the synthetic executor (plumbing check only)");
+    }
+    ExitCode::SUCCESS
+}
+
 fn run_list_skills(cli: &CliArgs) -> ExitCode {
     let workspace = match WorkspaceCap::new(&cli.workspace) {
         Ok(w) => w,
@@ -1140,7 +1261,8 @@ pub fn usage_text() -> String {
        kroma run [--workspace <DIR>] --task <TASK> [OPTIONS]\n\
        kroma repl [--workspace <DIR>] [OPTIONS]\n\
        kroma acp [--workspace <DIR>] [OPTIONS]\n\
-       kroma serve [--workspace <DIR>] [--listen 127.0.0.1:<PORT>] [--auth-token <TOKEN>] [OPTIONS]\n\n\
+       kroma serve [--workspace <DIR>] [--listen 127.0.0.1:<PORT>] [--auth-token <TOKEN>] [OPTIONS]\n\
+       kroma bench [--suite <PATH>] [--budget-tokens <N>] [--json]\n\n\
 Surfaces (Gate 6):\n\
   (default with no args)    Interactive multi-turn terminal REPL/TUI in current directory\n\
   run                       Headless single-run CLI mode\n\
@@ -1150,7 +1272,11 @@ Surfaces (Gate 6):\n\
   --listen <ADDR>           Listen endpoint for `kroma serve` (default: 127.0.0.1:7878)\n\
   --auth-token <TOKEN>      Required when binding `kroma serve` to a non-loopback address\n\
   --output-format <FMT>     Headless output format: text | jsonl (default: text)\n\
-  --jsonl                   Shorthand for --output-format jsonl\n\n\
+  --jsonl                   Shorthand for --output-format jsonl\n\
+  bench                     Paired, budget-locked A/B benchmark (built-in smoke suite by default)\n\
+  --suite <PATH>            Benchmark suite JSON for `kroma bench`\n\
+  --budget-tokens <N>       Shared per-arm token budget for `kroma bench`\n\
+  --json                    Emit the `kroma bench` report as JSON\n\n\
 Options:\n\
   --workspace <DIR>         Target repository workspace directory (default: current directory `.`)\n\
   --task <TASK>             Coding or analysis task description"
@@ -1277,6 +1403,17 @@ async fn main() -> ExitCode {
 
     let state_dir = resolve_default_state_dir();
 
+    // Item #3 (`v1.4.0`): `kroma bench` is a self-contained measurement command; it never contacts
+    // a provider for the built-in smoke suite.
+    if let CliSurface::Bench {
+        ref suite,
+        budget_tokens,
+        json,
+    } = cli.surface
+    {
+        return run_bench(suite.as_deref(), budget_tokens, json, &cli.workspace, cli.quiet);
+    }
+
     // Gate 1: revision management actions never contact a provider and never need an API key.
     if cli.is_revision_management() {
         return run_revision_management(&cli, &state_dir);
@@ -1337,6 +1474,11 @@ async fn main() -> ExitCode {
         } else {
             None
         },
+        // B2 (`v1.4.0`): a `--projection-profile` CLI flag is not exposed yet; the value comes from
+        // `config.toml` / `.kroma.toml` / `KROMA_PROJECTION_PROFILE` / `/config set`.
+        projection_profile: None,
+        // Item #3 (`v1.4.0`): adaptive tournament escalation comes from config, not a CLI flag.
+        adaptive_tournament: None,
     };
     let resolved_config = match ResolvedConfig::load(&cli.workspace, &overrides) {
         Ok(c) => c,
@@ -1438,6 +1580,7 @@ async fn main() -> ExitCode {
                 }
             }
             CliSurface::Headless => ("headless", "stdio"),
+            CliSurface::Bench { .. } => ("bench", "local"),
         };
         let provider_factory: Arc<dyn kroma_core::surface::ProviderFactory> =
             Arc::new(CliProviderFactory {
@@ -1466,6 +1609,9 @@ async fn main() -> ExitCode {
         rt_cfg.max_subagents = resolved_config
             .max_subagents
             .unwrap_or(cli.max_subagents);
+        // Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
+        rt_cfg.adaptive_tournament_candidates =
+            resolved_config.adaptive_tournament.unwrap_or(0);
         rt_cfg.initial_skill = cli.skill.clone();
         if let Some(raw_pred) = cli.predict_cmd.as_deref() {
             if cli.policy_mode != PolicyMode::ReadOnly && !cli.no_predictive_check {
@@ -1531,6 +1677,9 @@ async fn main() -> ExitCode {
                     .serve_stream(tokio::io::stdin(), tokio::io::stdout())
                     .await
             }
+            CliSurface::Bench { .. } => Err(
+                "kroma bench runs before the agent surfaces; this branch is unreachable".to_string(),
+            ),
             CliSurface::Serve { listen_addr } => {
                 match KromaDaemon::bind(listen_addr, dispatcher).await {
                     Ok(daemon) => {
@@ -1616,6 +1765,11 @@ async fn main() -> ExitCode {
     let mut run_cfg = AgentRunConfig::new(cli.task.clone().unwrap_or_default(), budget.clone());
     run_cfg.stream = !cli.no_stream;
     run_cfg.strict_log = cli.strict_log;
+    // B2 (`v1.4.0`): apply the configured context projection profile.
+    run_cfg.projection_profile = resolved_config
+        .projection_profile
+        .as_deref()
+        .and_then(|v| kroma_core::context_projector::ProjectionProfile::parse(v).ok());
 
     let mut logger = match EventLogger::new(run_cfg.run_id, Some(state_dir.clone()), cli.strict_log) {
         Ok(l) => l,
@@ -1707,7 +1861,11 @@ async fn main() -> ExitCode {
         .with_subtree_context(subtree_tracker)
         .with_completion_gate(build_completion_gate(gate_choice))
         .with_completion_gate_max_retries(max_gate_retries)
-        .with_max_subagents(cli.max_subagents);
+        .with_max_subagents(cli.max_subagents)
+        // Item #3 (`v1.4.0`): adaptive tournament escalation on repeated verification failure.
+        .with_adaptive_tournament_candidates(
+            resolved_config.adaptive_tournament.unwrap_or(0),
+        );
     // Gate 4: `--predict-cmd` is an explicit operator authorization, exactly like `--verify-cmd`,
     // so it runs without needing `--allow-shell`. It is skipped when `--policy read-only` or
     // `--no-predictive-check` is active.
