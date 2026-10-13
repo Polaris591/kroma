@@ -1502,10 +1502,15 @@ async fn main() -> ExitCode {
     let api_key = match resolved_config.api_key.clone() {
         Some(k) if !k.trim().is_empty() => k,
         _ => {
-            eprintln!(
-                "error: no API key configured; set KROMA_API_KEY, add api_key to ~/.kroma/config.toml, or pass --profile"
-            );
-            return ExitCode::from(2);
+            if matches!(cli.surface, CliSurface::Repl) {
+                // Interactive REPL allows zero-config startup: user can configure via `/config set api_key <key>` inside REPL.
+                "unconfigured".to_string()
+            } else {
+                eprintln!(
+                    "error: no API key configured; set KROMA_API_KEY, add api_key to ~/.kroma/config.toml, or pass --profile"
+                );
+                return ExitCode::from(2);
+            }
         }
     };
     let base_url = resolved_config

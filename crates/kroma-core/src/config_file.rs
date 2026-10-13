@@ -419,12 +419,15 @@ impl ResolvedConfig {
                 .base_url
                 .clone()
                 .or_else(|| env_string(ENV_BASE_URL))
+                .or_else(|| env_string("OPENAI_BASE_URL"))
                 .or_else(|| profile.and_then(|p| p.base_url.clone()))
                 .or_else(|| user.base_url.clone()),
             api_key: overrides
                 .api_key
                 .clone()
                 .or_else(|| env_string(ENV_API_KEY))
+                .or_else(|| env_string("OPENAI_API_KEY"))
+                .or_else(|| env_string("ANTHROPIC_API_KEY"))
                 .or_else(|| profile.and_then(|p| p.api_key.clone()))
                 .or_else(|| user.api_key.clone()),
             protocol: overrides
