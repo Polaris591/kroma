@@ -14,10 +14,8 @@
     "node": ">=16.0.0"
   },
   "optionalDependencies": {
-    "@kroma-ai/cli-linux-x64": "1.5.0",
-    "@kroma-ai/cli-win32-x64": "1.5.0",
-    "@kroma-ai/cli-darwin-arm64": "1.5.0",
-    "@kroma-ai/cli-darwin-x64": "1.5.0"
+    "kroma-cli-linux-x64": "1.5.0",
+    "kroma-cli-win32-x64": "1.5.0"
   },
   "keywords": [
     "kroma",
