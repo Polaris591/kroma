@@ -39,7 +39,7 @@ chmod 0755 "${PKG_DIR}/bin/vendor/darwin-arm64/kroma"
 cp "${ROOT_DIR}/target/x86_64-apple-darwin/release/kroma" "${PKG_DIR}/bin/vendor/darwin-x64/kroma"
 chmod 0755 "${PKG_DIR}/bin/vendor/darwin-x64/kroma"
 
-# 4. Android Termux ARM64 & Linux ARM64
+# 4. Android Termux ARM64 (PIE: e_type=3 / ET_DYN) & Linux ARM64
 cp "${ROOT_DIR}/target/aarch64-unknown-linux-musl/release/kroma" "${PKG_DIR}/bin/vendor/android-arm64/kroma"
 chmod 0755 "${PKG_DIR}/bin/vendor/android-arm64/kroma"
 cp "${ROOT_DIR}/target/aarch64-unknown-linux-musl/release/kroma" "${PKG_DIR}/bin/vendor/linux-arm64/kroma"
