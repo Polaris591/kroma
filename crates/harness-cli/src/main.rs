@@ -447,8 +447,12 @@ where
         return Err("--force-restore requires --undo or --restore-rev".to_string());
     }
     // `--list-skills` is a standalone inspection action: it needs a workspace but no task.
-    // Multi-surface interactive/protocol modes (`repl`, `acp`, `serve`) receive prompts over their
-    // transport rather than requiring `--task` on the command line.
+    // When invoked with no explicit subcommand (`harness` or `harness --allow-write`) and no
+    // `--task` / management / inspection flag, launch the interactive REPL/TUI in the workspace
+    // (defaulting to the current directory `.`), matching Claude Code / Codex / OpenCode ergonomics.
+    if explicit_surface.is_none() && !management && !list_skills && task.is_none() {
+        surface = CliSurface::Repl;
+    }
     if surface == CliSurface::Headless && !management && !list_skills && task.is_none() {
         return Err("missing required --task <prompt>".to_string());
     }
@@ -478,7 +482,8 @@ where
         None => None,
     };
 
-    // `--workspace` is optional when resuming: the WAL header records the workspace root.
+    // `--workspace` defaults to the session WAL's recorded workspace when resuming, or the
+    // current working directory (`.`) when not explicitly specified.
     let workspace = match workspace {
         Some(w) => w,
         None => match resume.as_ref() {
@@ -492,7 +497,7 @@ where
                     ))
                 }
             },
-            None => return Err("missing required --workspace <dir>".to_string()),
+            None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         },
     };
 
@@ -1092,21 +1097,24 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
 }
 
 pub fn usage_text() -> String {
-    "Usage: harness run --workspace <DIR> --task <TASK> [OPTIONS]\n\
-       harness repl --workspace <DIR> [OPTIONS]\n\
-       harness acp --workspace <DIR> [OPTIONS]\n\
-       harness serve --workspace <DIR> [--listen 127.0.0.1:<PORT>] [--auth-token <TOKEN>] [OPTIONS]\n\n\
+    "Usage: harness [OPTIONS]                                  (launch interactive TUI/REPL in current dir)\n\
+       harness --task <TASK> [--workspace <DIR>] [OPTIONS]\n\
+       harness run [--workspace <DIR>] --task <TASK> [OPTIONS]\n\
+       harness repl [--workspace <DIR>] [OPTIONS]\n\
+       harness acp [--workspace <DIR>] [OPTIONS]\n\
+       harness serve [--workspace <DIR>] [--listen 127.0.0.1:<PORT>] [--auth-token <TOKEN>] [OPTIONS]\n\n\
 Surfaces (Gate 6):\n\
-  run                       Headless single-run CLI mode (default)\n\
+  (default with no args)    Interactive multi-turn terminal REPL/TUI in current directory\n\
+  run                       Headless single-run CLI mode\n\
   repl | tui | --interactive Interactive multi-turn terminal REPL/TUI\n\
   acp | --acp               JSON-RPC 2.0 Agent Client Protocol server over stdio\n\
-  serve | --serve <ADDR>    JSON-RPC 2.0 daemon over loopback TCP (or authenticated TCP)\n\
-  --listen <ADDR>           TCP listen address for `harness serve` (default: 127.0.0.1:7878)\n\
+  serve | --serve <ADDR>    JSON-RPC 2.0 daemon over loopback TCP / Unix socket (or authenticated TCP)\n\
+  --listen <ADDR>           Listen endpoint for `harness serve` (default: 127.0.0.1:7878)\n\
   --auth-token <TOKEN>      Required when binding `harness serve` to a non-loopback address\n\
   --output-format <FMT>     Headless output format: text | jsonl (default: text)\n\
   --jsonl                   Shorthand for --output-format jsonl\n\n\
 Options:\n\
-  --workspace <DIR>         Target repository workspace directory\n\
+  --workspace <DIR>         Target repository workspace directory (default: current directory `.`)\n\
   --task <TASK>             Coding or analysis task description"
         .to_string()
         + "
@@ -2344,6 +2352,25 @@ mod tests {
                 listen_addr: "unix:///tmp/harness-test.sock".into()
             }
         );
+
+        // Zero-arg `harness` (and `harness --allow-write`) defaults to interactive REPL in the
+        // current working directory, while `harness --task "..."` runs Headless in current directory.
+        let zero_arg = parse_cli_args(vec!["harness".into()]).unwrap();
+        assert_eq!(zero_arg.surface, CliSurface::Repl);
+        assert!(zero_arg.task.is_none());
+        assert_eq!(
+            zero_arg.workspace,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        );
+
+        let flag_only = parse_cli_args(vec!["harness".into(), "--allow-write".into()]).unwrap();
+        assert_eq!(flag_only.surface, CliSurface::Repl);
+        assert_eq!(flag_only.policy_mode, PolicyMode::AllowWrite);
+
+        let task_only =
+            parse_cli_args(vec!["harness".into(), "--task".into(), "quick fix".into()]).unwrap();
+        assert_eq!(task_only.surface, CliSurface::Headless);
+        assert_eq!(task_only.task.as_deref(), Some("quick fix"));
     }
 }
 

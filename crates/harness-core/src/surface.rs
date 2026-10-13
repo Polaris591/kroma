@@ -1098,6 +1098,7 @@ impl RpcDispatcher {
             ));
         };
         let sessions_dir = self.inner.config.state_dir.join("sessions");
+        let _ = std::fs::create_dir_all(&sessions_dir);
         let journal = if let Some(resume_str) = params.get("resume").and_then(Value::as_str) {
             let raw_path = PathBuf::from(resume_str);
             let canon_sessions = sessions_dir
@@ -1109,7 +1110,9 @@ impl RpcDispatcher {
                     format!("failed to resolve session WAL {}: {}", raw_path.display(), e),
                 )
             })?;
-            if !canon_target.starts_with(&canon_sessions) {
+            if crate::workspace::path_starts_with_and_strip(&canon_target, &canon_sessions)
+                .is_none()
+            {
                 return Err(JsonRpcError::new(
                     JSONRPC_INVALID_PARAMS,
                     format!(
@@ -1125,7 +1128,11 @@ impl RpcDispatcher {
                     format!("failed to open session WAL {}: {}", raw_path.display(), e),
                 )
             })?;
-            if j.workspace_root() != self.inner.env.workspace().root() {
+            if crate::workspace::strip_windows_verbatim_prefix(j.workspace_root())
+                != crate::workspace::strip_windows_verbatim_prefix(
+                    self.inner.env.workspace().root(),
+                )
+            {
                 return Err(JsonRpcError::new(
                     JSONRPC_INVALID_PARAMS,
                     format!(

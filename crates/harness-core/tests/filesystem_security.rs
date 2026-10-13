@@ -676,5 +676,19 @@ fn test_windows_path_normalization_dos_devices_ntfs_ads_and_shell_resolution() {
     );
     assert_eq!(sh3, r"C:\Windows\System32\cmd.exe");
     assert_eq!(args3, vec!["/D", "/S", "/C", "dir"]);
+    assert!(harness_core::process_group::is_cmd_exe(&sh3));
+    assert!(!harness_core::process_group::is_cmd_exe(&sh1));
+
+    // 7. Extended-length verbatim prefix normalization (`\\?\` and `\\?\UNC\`)
+    assert_eq!(
+        harness_core::workspace::strip_windows_verbatim_prefix(Path::new(r"\\?\C:\Users\dev\repo")),
+        Path::new(r"C:\Users\dev\repo")
+    );
+    assert_eq!(
+        harness_core::workspace::strip_windows_verbatim_prefix(Path::new(
+            r"\\?\UNC\server\share\repo"
+        )),
+        Path::new(r"\\server\share\repo")
+    );
 }
 

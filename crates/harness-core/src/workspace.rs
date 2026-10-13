@@ -277,11 +277,17 @@ impl WorkspaceCap {
         {
             if norm_rel == Path::new(".") {
                 let f = open_windows_handle_no_reparse(&self.root, &norm_rel, Some(true))?;
+                let _ = verify_windows_handle_within_root(&f, &self.root, &norm_rel)?;
                 return Ok((norm_rel, f));
             }
             let comps: Vec<_> = norm_rel.components().collect();
             let mut cur_path = self.root.clone();
             let mut ancestor_handles: Vec<File> = Vec::with_capacity(comps.len());
+            ancestor_handles.push(open_windows_handle_no_reparse(
+                &self.root,
+                &norm_rel,
+                Some(true),
+            )?);
             let mut leaf_file: Option<File> = None;
             for (idx, comp) in comps.iter().enumerate() {
                 let is_leaf = idx + 1 == comps.len();
@@ -309,10 +315,11 @@ impl WorkspaceCap {
                     }
                 }
             }
-            drop(ancestor_handles);
             let file = leaf_file.ok_or_else(|| WorkspaceError::InvalidPath {
                 reason: "empty relative path".to_string(),
             })?;
+            let _ = verify_windows_handle_within_root(&file, &self.root, &norm_rel)?;
+            drop(ancestor_handles);
             Ok((norm_rel, file))
         }
     }
@@ -487,7 +494,12 @@ impl WorkspaceCap {
         #[cfg(windows)]
         {
             let mut cur_path = self.root.clone();
-            let mut cur_file: Option<File> = None;
+            let mut ancestor_handles: Vec<File> = Vec::new();
+            ancestor_handles.push(open_windows_handle_no_reparse(
+                &self.root,
+                &norm_rel,
+                Some(true),
+            )?);
             for comp in norm_rel.components() {
                 if let Component::Normal(part) = comp {
                     cur_path.push(part);
@@ -498,17 +510,19 @@ impl WorkspaceCap {
                             },
                             other => other,
                         })?;
-                    cur_file = Some(f);
+                    ancestor_handles.push(f);
                 } else if norm_rel != Path::new(".") {
                     return Err(WorkspaceError::PathEscape {
                         reason: format!("invalid component in '{}'", rel),
                     });
                 }
             }
-            let file = match cur_file {
+            let file = match ancestor_handles.pop() {
                 Some(f) => f,
                 None => open_windows_handle_no_reparse(&self.root, &norm_rel, Some(true))?,
             };
+            let _ = verify_windows_handle_within_root(&file, &self.root, &norm_rel)?;
+            drop(ancestor_handles);
             Ok((norm_rel, file))
         }
     }
@@ -582,12 +596,8 @@ impl WorkspaceCap {
         }
         #[cfg(windows)]
         {
-            let (norm_rel, _dir_file) = self.open_dir_no_symlink(rel)?;
-            let dir_path = if norm_rel == Path::new(".") {
-                self.root.clone()
-            } else {
-                self.root.join(&norm_rel)
-            };
+            let (norm_rel, dir_file) = self.open_dir_no_symlink(rel)?;
+            let dir_path = verify_windows_handle_within_root(&dir_file, &self.root, &norm_rel)?;
             let rd = fs::read_dir(&dir_path).map_err(|e| WorkspaceError::Io {
                 reason: format!("read_dir failed for '{}': {}", norm_rel.display(), e),
             })?;
@@ -609,6 +619,7 @@ impl WorkspaceCap {
                     is_symlink,
                 });
             }
+            drop(dir_file);
             Ok((norm_rel, entries))
         }
     }
@@ -778,7 +789,12 @@ impl WorkspaceCap {
         #[cfg(windows)]
         {
             let mut cur_path = self.root.clone();
-            let mut cur_dir = open_windows_handle_no_reparse(&cur_path, norm_rel, Some(true))?;
+            let mut ancestor_handles: Vec<File> = Vec::new();
+            ancestor_handles.push(open_windows_handle_no_reparse(
+                &cur_path,
+                norm_rel,
+                Some(true),
+            )?);
             if let Some(parent) = norm_rel.parent() {
                 for comp in parent.components() {
                     if let Component::Normal(part) = comp {
@@ -786,10 +802,12 @@ impl WorkspaceCap {
                             continue;
                         }
                         cur_path.push(part);
-                        match open_windows_handle_no_reparse(&cur_path, norm_rel, Some(true)) {
-                            Ok(next_dir) => {
-                                cur_dir = next_dir;
-                            }
+                        let next_dir = match open_windows_handle_no_reparse(
+                            &cur_path,
+                            norm_rel,
+                            Some(true),
+                        ) {
+                            Ok(next_dir) => next_dir,
                             Err(WorkspaceError::NotFound { .. }) if create_missing => {
                                 match fs::create_dir(&cur_path) {
                                     Ok(()) => {}
@@ -804,7 +822,7 @@ impl WorkspaceCap {
                                         });
                                     }
                                 }
-                                cur_dir = open_windows_handle_no_reparse(&cur_path, norm_rel, Some(true))
+                                open_windows_handle_no_reparse(&cur_path, norm_rel, Some(true))
                                     .map_err(|e| match e {
                                         WorkspaceError::InvalidPath { .. } => {
                                             WorkspaceError::SymlinkBlocked {
@@ -815,7 +833,7 @@ impl WorkspaceCap {
                                             }
                                         }
                                         other => other,
-                                    })?;
+                                    })?
                             }
                             Err(WorkspaceError::InvalidPath { .. }) => {
                                 return Err(WorkspaceError::SymlinkBlocked {
@@ -826,10 +844,18 @@ impl WorkspaceCap {
                                 });
                             }
                             Err(e) => return Err(e),
-                        }
+                        };
+                        ancestor_handles.push(next_dir);
                     }
                 }
             }
+            let cur_dir = ancestor_handles
+                .pop()
+                .ok_or_else(|| WorkspaceError::InvalidPath {
+                    reason: "missing parent handle".to_string(),
+                })?;
+            let _ = verify_windows_handle_within_root(&cur_dir, &self.root, norm_rel)?;
+            drop(ancestor_handles);
             Ok((cur_dir, file_name))
         }
     }
@@ -951,7 +977,8 @@ impl WorkspaceCap {
                             ),
                         }
                     })?;
-                    if !canonical_target.starts_with(&self.root) {
+                    let Some(rel_target) = path_starts_with_and_strip(&canonical_target, &self.root)
+                    else {
                         return Err(WorkspaceError::PathEscape {
                             reason: format!(
                                 "symlink '{}' points outside workspace ({})",
@@ -959,11 +986,8 @@ impl WorkspaceCap {
                                 canonical_target.display()
                             ),
                         });
-                    }
-                    let rel_target = canonical_target
-                        .strip_prefix(&self.root)
-                        .unwrap_or(&canonical_target);
-                    if SensitivePathGuard::is_sensitive(rel_target) {
+                    };
+                    if SensitivePathGuard::is_sensitive(&rel_target) {
                         return Err(WorkspaceError::SensitivePath {
                             reason: format!(
                                 "symlink '{}' points to sensitive path '{}'",
@@ -979,13 +1003,12 @@ impl WorkspaceCap {
         let canonical = fs::canonicalize(&cur).map_err(|e| WorkspaceError::Io {
             reason: e.to_string(),
         })?;
-        if !canonical.starts_with(&self.root) {
+        let Some(rel_canonical) = path_starts_with_and_strip(&canonical, &self.root) else {
             return Err(WorkspaceError::PathEscape {
                 reason: format!("resolved path '{}' escapes workspace", norm_rel.display()),
             });
-        }
-        let rel_canonical = canonical.strip_prefix(&self.root).unwrap_or(&canonical);
-        if SensitivePathGuard::is_sensitive(rel_canonical) {
+        };
+        if SensitivePathGuard::is_sensitive(&rel_canonical) {
             return Err(WorkspaceError::SensitivePath {
                 reason: format!(
                     "resolved path '{}' is a sensitive path",
@@ -1037,18 +1060,17 @@ impl WorkspaceCap {
                                     ),
                                 }
                             })?;
-                            if !canonical_target.starts_with(&self.root) {
+                            let Some(rel_target) =
+                                path_starts_with_and_strip(&canonical_target, &self.root)
+                            else {
                                 return Err(WorkspaceError::PathEscape {
                                     reason: format!(
                                         "directory symlink '{}' points outside workspace",
                                         norm_rel.display()
                                     ),
                                 });
-                            }
-                            let rel_target = canonical_target
-                                .strip_prefix(&self.root)
-                                .unwrap_or(&canonical_target);
-                            if SensitivePathGuard::is_sensitive(rel_target) {
+                            };
+                            if SensitivePathGuard::is_sensitive(&rel_target) {
                                 return Err(WorkspaceError::SensitivePath {
                                     reason: format!(
                                         "directory symlink '{}' points to sensitive path '{}'",
@@ -1317,6 +1339,47 @@ pub fn is_windows_reserved_device_name(component: &str) -> bool {
     )
 }
 
+/// Strip `\\?\` or `\\?\UNC\` extended-length path prefixes so canonicalized and non-canonicalized
+/// Windows paths can be compared deterministically.
+pub fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{}", rest))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Compare whether `target` resides inside `base` and return the stripped relative path.
+/// On Windows, strips `\\?\` prefixes and compares path components case-insensitively.
+pub fn path_starts_with_and_strip(target: &Path, base: &Path) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        target.strip_prefix(base).ok().map(Path::to_path_buf)
+    }
+    #[cfg(windows)]
+    {
+        let norm_target = strip_windows_verbatim_prefix(target);
+        let norm_base = strip_windows_verbatim_prefix(base);
+        let mut t_comps = norm_target.components();
+        for b_comp in norm_base.components() {
+            let t_comp = t_comps.next()?;
+            let b_str = b_comp.as_os_str().to_string_lossy();
+            let t_str = t_comp.as_os_str().to_string_lossy();
+            if !b_str.eq_ignore_ascii_case(&t_str) {
+                return None;
+            }
+        }
+        let mut rel = PathBuf::new();
+        for rem in t_comps {
+            rel.push(rem.as_os_str());
+        }
+        Some(rel)
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
     meta.file_type().is_symlink()
@@ -1332,6 +1395,66 @@ pub(crate) fn is_windows_reparse_point(meta: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
     meta.file_type().is_symlink() || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_final_path_by_handle(file: &File) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+
+    let raw = file.as_raw_handle() as HANDLE;
+    let mut cap = 260usize;
+    loop {
+        let mut wbuf = vec![0u16; cap];
+        let written =
+            unsafe { GetFinalPathNameByHandleW(raw, wbuf.as_mut_ptr(), wbuf.len() as u32, 0) };
+        if written == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let written_usize = written as usize;
+        if written_usize < wbuf.len() {
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(
+                &wbuf[..written_usize],
+            )));
+        }
+        cap = written_usize.saturating_add(1);
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn verify_windows_handle_within_root(
+    file: &File,
+    root: &Path,
+    display_rel: &Path,
+) -> Result<PathBuf, WorkspaceError> {
+    let final_path = windows_final_path_by_handle(file).map_err(|e| WorkspaceError::Io {
+        reason: format!(
+            "GetFinalPathNameByHandleW failed for '{}': {}",
+            display_rel.display(),
+            e
+        ),
+    })?;
+    let Some(rel) = path_starts_with_and_strip(&final_path, root) else {
+        return Err(WorkspaceError::PathEscape {
+            reason: format!(
+                "opened handle for '{}' resolved outside workspace ({})",
+                display_rel.display(),
+                final_path.display()
+            ),
+        });
+    };
+    if !rel.as_os_str().is_empty() && SensitivePathGuard::is_sensitive(&rel) {
+        return Err(WorkspaceError::SensitivePath {
+            reason: format!(
+                "opened handle for '{}' resolved to sensitive path '{}'",
+                display_rel.display(),
+                rel.display()
+            ),
+        });
+    }
+    Ok(final_path)
 }
 
 #[cfg(windows)]
@@ -1361,10 +1484,18 @@ pub(crate) fn open_windows_handle_no_reparse(
         }
     }
 
+    // Do not grant FILE_SHARE_DELETE on directory handles during traversal so an ancestor
+    // directory cannot be renamed or unlinked while a child open is in flight.
+    let share_mode = if require_dir == Some(true) {
+        FILE_SHARE_READ | FILE_SHARE_WRITE
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    };
+
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .share_mode(share_mode)
         .open(target_path)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {

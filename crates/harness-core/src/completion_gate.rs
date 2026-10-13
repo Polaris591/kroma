@@ -545,10 +545,19 @@ mod tests {
         // The backgrounded `sleep 30` inherits stdout/stderr and keeps both pipes open long after
         // the shell leader exits. Without the post-exit drain timeout the gate would block on pipe
         // EOF until the 5s total timeout; with it, the gate must return well under 1s.
-        let gate = WorkspaceCompletionGate::new(
-            Some(vec!["sh".into(), "-c".into(), "sleep 30 & printf 'all tests passed\n'; exit 0".into()]),
-            Duration::from_secs(5),
-        );
+        #[cfg(unix)]
+        let cmd_vec = vec![
+            "sh".into(),
+            "-c".into(),
+            "sleep 30 & printf 'all tests passed\n'; exit 0".into(),
+        ];
+        #[cfg(windows)]
+        let cmd_vec = vec![
+            "cmd.exe".into(),
+            "/C".into(),
+            "echo all tests passed & exit /B 0".into(),
+        ];
+        let gate = WorkspaceCompletionGate::new(Some(cmd_vec), Duration::from_secs(5));
         let ctx = CompletionGateContext {
             run_id: RunId::new(), workspace_root: root.clone(), modified_files: vec!["src/lib.rs".into()], turns_used: 1,
         };
@@ -608,10 +617,19 @@ mod tests {
         use crate::types::RunId;
         let root = std::env::temp_dir().join(format!("harness-gate-fail-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let gate = WorkspaceCompletionGate::new(
-            Some(vec!["sh".into(), "-c".into(), "printf 'error: assertion failed\n' >&2; exit 42".into()]),
-            Duration::from_secs(3),
-        );
+        #[cfg(unix)]
+        let fail_cmd = vec![
+            "sh".into(),
+            "-c".into(),
+            "printf 'error: assertion failed\n' >&2; exit 42".into(),
+        ];
+        #[cfg(windows)]
+        let fail_cmd = vec![
+            "cmd.exe".into(),
+            "/C".into(),
+            "echo error: assertion failed 1>&2 & exit /B 42".into(),
+        ];
+        let gate = WorkspaceCompletionGate::new(Some(fail_cmd), Duration::from_secs(3));
         let ctx = CompletionGateContext {
             run_id: RunId::new(), workspace_root: root.clone(), modified_files: vec!["src/lib.rs".into()], turns_used: 2,
         };

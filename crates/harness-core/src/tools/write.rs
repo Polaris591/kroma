@@ -541,14 +541,11 @@ pub fn atomic_write_at(
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::{OsStrExt as WinOsStrExt, OsStringExt};
+        use std::os::windows::ffi::OsStrExt as WinOsStrExt;
         use std::os::windows::fs::OpenOptionsExt;
-        use std::os::windows::io::AsRawHandle;
-        use std::path::PathBuf;
-        use windows_sys::Win32::Foundation::HANDLE;
         use windows_sys::Win32::Storage::FileSystem::{
-            GetFinalPathNameByHandleW, MoveFileExW, FILE_FLAG_OPEN_REPARSE_POINT,
-            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            MoveFileExW, FILE_FLAG_OPEN_REPARSE_POINT, MOVEFILE_REPLACE_EXISTING,
+            MOVEFILE_WRITE_THROUGH,
         };
 
         let file_name_lossy = file_name.to_string_lossy();
@@ -560,30 +557,13 @@ pub fn atomic_write_at(
         }
 
         // Resolve parent directory path directly from the verified open directory HANDLE
-        let raw_parent = parent_dir.as_raw_handle() as HANDLE;
-        let needed = unsafe { GetFinalPathNameByHandleW(raw_parent, std::ptr::null_mut(), 0, 0) };
-        if needed == 0 {
-            return Err((
-                ErrorCode::IoError,
-                format!(
-                    "GetFinalPathNameByHandleW failed: {}",
-                    std::io::Error::last_os_error()
-                ),
-            ));
-        }
-        let mut wbuf = vec![0u16; (needed as usize) + 1];
-        let written =
-            unsafe { GetFinalPathNameByHandleW(raw_parent, wbuf.as_mut_ptr(), needed + 1, 0) };
-        if written == 0 {
-            return Err((
-                ErrorCode::IoError,
-                format!(
-                    "GetFinalPathNameByHandleW read failed: {}",
-                    std::io::Error::last_os_error()
-                ),
-            ));
-        }
-        let parent_path = PathBuf::from(std::ffi::OsString::from_wide(&wbuf[..written as usize]));
+        let parent_path =
+            crate::workspace::windows_final_path_by_handle(parent_dir).map_err(|e| {
+                (
+                    ErrorCode::IoError,
+                    format!("GetFinalPathNameByHandleW failed: {}", e),
+                )
+            })?;
         let short_prefix: String = file_name_lossy.chars().take(64).collect();
         let tmp_name_str = format!(".harness-tmp-{}-{}", short_prefix, Uuid::new_v4());
         let tmp_path = parent_path.join(&tmp_name_str);
@@ -670,12 +650,26 @@ pub fn atomic_write_at(
             ));
         }
 
-        if (mode & 0o222) == 0 {
-            if let Ok(meta) = std::fs::metadata(&target_path) {
-                let mut perms = meta.permissions();
-                perms.set_readonly(true);
-                let _ = std::fs::set_permissions(&target_path, perms);
-            }
+        let want_readonly = (mode & 0o222) == 0;
+        let meta = std::fs::metadata(&target_path).map_err(|e| {
+            (
+                ErrorCode::IoError,
+                format!("metadata failed after write for '{}': {}", file_name_lossy, e),
+            )
+        })?;
+        if meta.permissions().readonly() != want_readonly {
+            let mut perms = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(want_readonly);
+            std::fs::set_permissions(&target_path, perms).map_err(|e| {
+                (
+                    ErrorCode::IoError,
+                    format!(
+                        "set_permissions failed after write for '{}': {}",
+                        file_name_lossy, e
+                    ),
+                )
+            })?;
         }
         Ok(())
     }

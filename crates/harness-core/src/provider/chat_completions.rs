@@ -351,13 +351,37 @@ impl SchannelTlsStream {
                     format!("failed to read HARNESS_CA_BUNDLE '{}': {}", ca_bundle, e),
                 )
             })?;
-            let cert = native_tls::Certificate::from_pem(&pem_bytes).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid PEM in HARNESS_CA_BUNDLE '{}': {}", ca_bundle, e),
-                )
-            })?;
-            builder.add_root_certificate(cert);
+            let pem_text = String::from_utf8_lossy(&pem_bytes);
+            const BEGIN_MARKER: &str = "-----BEGIN CERTIFICATE-----";
+            const END_MARKER: &str = "-----END CERTIFICATE-----";
+            let mut loaded_any = false;
+            let mut cursor = pem_text.as_ref();
+            while let Some(start) = cursor.find(BEGIN_MARKER) {
+                let after_start = &cursor[start..];
+                let Some(end_offset) = after_start.find(END_MARKER) else {
+                    break;
+                };
+                let block_end = end_offset + END_MARKER.len();
+                let block = &after_start[..block_end];
+                let cert = native_tls::Certificate::from_pem(block.as_bytes()).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid PEM in HARNESS_CA_BUNDLE '{}': {}", ca_bundle, e),
+                    )
+                })?;
+                builder.add_root_certificate(cert);
+                loaded_any = true;
+                cursor = &after_start[block_end..];
+            }
+            if !loaded_any {
+                let cert = native_tls::Certificate::from_pem(&pem_bytes).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid PEM in HARNESS_CA_BUNDLE '{}': {}", ca_bundle, e),
+                    )
+                })?;
+                builder.add_root_certificate(cert);
+            }
         }
         let connector = builder
             .build()

@@ -214,9 +214,14 @@ impl ApprovalHandler for TtyApprovalUi {
         }
         #[cfg(windows)]
         loop {
-            use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+            use windows_sys::Win32::Foundation::{
+                INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            };
             use windows_sys::Win32::Storage::FileSystem::ReadFile;
-            use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+            use windows_sys::Win32::System::Console::{
+                GetConsoleMode, GetNumberOfConsoleInputEvents, GetStdHandle, ReadConsoleInputW,
+                 INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE,
+            };
             use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
             if APPROVAL_CANCELLED.load(Ordering::SeqCst) {
@@ -224,7 +229,7 @@ impl ApprovalHandler for TtyApprovalUi {
                 return ApprovalDecision::Deny;
             }
             let h_in = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-            if h_in.is_null() {
+            if h_in.is_null() || h_in == INVALID_HANDLE_VALUE {
                 self.record_resolved(req_id, "deny_io_error");
                 return ApprovalDecision::Deny;
             }
@@ -236,18 +241,77 @@ impl ApprovalHandler for TtyApprovalUi {
                 self.record_resolved(req_id, "deny_io_error");
                 return ApprovalDecision::Deny;
             }
-            let mut b = [0u8; 1];
-            let mut n_read: u32 = 0;
-            let ok = unsafe { ReadFile(h_in, b.as_mut_ptr(), 1, &mut n_read, std::ptr::null_mut()) };
-            if ok == 0 {
-                self.record_resolved(req_id, "deny_io_error");
-                return ApprovalDecision::Deny;
-            }
-            if n_read == 0 || b[0] == b'\n' {
-                break;
-            }
-            if raw_bytes.len() < 256 {
-                raw_bytes.push(b[0]);
+
+            let mut console_mode: u32 = 0;
+            let is_console = unsafe { GetConsoleMode(h_in, &mut console_mode) != 0 };
+            if is_console {
+                let mut unread: u32 = 0;
+                if unsafe { GetNumberOfConsoleInputEvents(h_in, &mut unread) } == 0 {
+                    self.record_resolved(req_id, "deny_io_error");
+                    return ApprovalDecision::Deny;
+                }
+                if unread == 0 {
+                    continue;
+                }
+                let mut rec: INPUT_RECORD = unsafe { std::mem::zeroed() };
+                let mut events_read: u32 = 0;
+                if unsafe { ReadConsoleInputW(h_in, &mut rec, 1, &mut events_read) } == 0
+                    || events_read == 0
+                {
+                    continue;
+                }
+                if rec.EventType != (KEY_EVENT as u16) {
+                    continue;
+                }
+                let key = unsafe { rec.Event.KeyEvent };
+                if key.bKeyDown == 0 {
+                    continue;
+                }
+                let ch_u16 = unsafe { key.uChar.UnicodeChar };
+                if ch_u16 == 0 {
+                    continue;
+                }
+                // Ctrl+C in raw console input
+                if ch_u16 == 3 {
+                    self.record_resolved(req_id, "deny_cancelled");
+                    return ApprovalDecision::Deny;
+                }
+                if ch_u16 == (b'\r' as u16) || ch_u16 == (b'\n' as u16) {
+                    let _ = stderr.write_all(b"\n");
+                    let _ = stderr.flush();
+                    break;
+                }
+                // Backspace
+                if ch_u16 == 8 {
+                    raw_bytes.pop();
+                    continue;
+                }
+                if let Some(ch) = char::from_u32(ch_u16 as u32) {
+                    let mut utf8_buf = [0u8; 4];
+                    let encoded = ch.encode_utf8(&mut utf8_buf);
+                    let _ = stderr.write_all(encoded.as_bytes());
+                    let _ = stderr.flush();
+                    for &b in encoded.as_bytes() {
+                        if raw_bytes.len() < 256 {
+                            raw_bytes.push(b);
+                        }
+                    }
+                }
+            } else {
+                let mut b = [0u8; 1];
+                let mut n_read: u32 = 0;
+                let ok =
+                    unsafe { ReadFile(h_in, b.as_mut_ptr(), 1, &mut n_read, std::ptr::null_mut()) };
+                if ok == 0 {
+                    self.record_resolved(req_id, "deny_io_error");
+                    return ApprovalDecision::Deny;
+                }
+                if n_read == 0 || b[0] == b'\n' {
+                    break;
+                }
+                if raw_bytes.len() < 256 {
+                    raw_bytes.push(b[0]);
+                }
             }
         }
 

@@ -96,8 +96,8 @@ pub async fn execute_bash(
         crate::process_group::resolve_shell_invocation(&args.command);
 
     let mut cmd = Command::new(&shell_bin);
-    cmd.args(&shell_args)
-        .current_dir(workspace_root)
+    crate::process_group::apply_shell_args_tokio(&mut cmd, &shell_bin, &shell_args, &args.command);
+    cmd.current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

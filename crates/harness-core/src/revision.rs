@@ -989,44 +989,70 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
     }
     #[cfg(windows)]
     {
-        let mut cur = PathBuf::new();
-        let mut has_normal = false;
+        let mut prefix_or_root = PathBuf::new();
+        let mut normals: Vec<std::ffi::OsString> = Vec::new();
         for component in dir.components() {
             match component {
-                Component::Prefix(p) => cur.push(p.as_os_str()),
-                Component::RootDir => cur.push(component.as_os_str()),
+                Component::Prefix(p) => {
+                    prefix_or_root.push(p.as_os_str());
+                    normals.clear();
+                }
+                Component::RootDir => {
+                    prefix_or_root.push(component.as_os_str());
+                    normals.clear();
+                }
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    cur.pop();
+                    normals.pop();
                 }
                 Component::Normal(part) => {
-                    has_normal = true;
-                    cur.push(part);
-                    match fs::symlink_metadata(&cur) {
-                        Ok(meta) => {
-                            if crate::workspace::is_windows_reparse_point(&meta) || !meta.is_dir() {
-                                return Err(RevisionError::InvalidStore(format!(
-                                    "snapshot store path '{}' is not a real directory",
-                                    cur.display()
-                                )));
-                            }
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            fs::create_dir(&cur)?;
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
-                    let _ = crate::workspace::open_windows_handle_no_reparse(&cur, &cur, Some(true))
-                        .map_err(|e| RevisionError::InvalidStore(e.to_string()))?;
+                    normals.push(part.to_os_string());
                 }
             }
         }
-        if !has_normal {
+        if normals.is_empty() {
             return Err(RevisionError::InvalidStore(format!(
                 "snapshot store path '{}' has no directory component",
                 dir.display()
             )));
         }
+        let mut collapsed = if prefix_or_root.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            prefix_or_root
+        };
+        for part in &normals {
+            collapsed.push(part);
+        }
+        if let Some(parent) = collapsed.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+            if let Ok(p_meta) = fs::symlink_metadata(parent) {
+                if crate::workspace::is_windows_reparse_point(&p_meta) {
+                    return Err(RevisionError::InvalidStore(format!(
+                        "snapshot store parent '{}' is a reparse point",
+                        parent.display()
+                    )));
+                }
+            }
+        }
+        match fs::symlink_metadata(&collapsed) {
+            Ok(meta) => {
+                if crate::workspace::is_windows_reparse_point(&meta) || !meta.is_dir() {
+                    return Err(RevisionError::InvalidStore(format!(
+                        "snapshot store path '{}' is not a real directory",
+                        collapsed.display()
+                    )));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&collapsed)?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let _ = crate::workspace::open_windows_handle_no_reparse(&collapsed, &collapsed, Some(true))
+            .map_err(|e| RevisionError::InvalidStore(e.to_string()))?;
         Ok(())
     }
 }
@@ -1597,7 +1623,13 @@ pub(crate) fn remove_tracked_file(
             }
             LiveEntryStat::Regular { .. } => {}
         }
-        let target = workspace.root().join(&norm);
+        let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
+            Ok(v) => v,
+            Err(WorkspaceError::NotFound { .. }) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        let parent_path = crate::workspace::windows_final_path_by_handle(&parent_dir)?;
+        let target = parent_path.join(&leaf);
         if let Ok(meta) = fs::symlink_metadata(&target) {
             if meta.permissions().readonly() {
                 let mut perms = meta.permissions();
@@ -1611,6 +1643,7 @@ pub(crate) fn remove_tracked_file(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         }
+        drop(parent_dir);
         prune_empty_ancestors(workspace, &norm)?;
         Ok(true)
     }
@@ -1682,12 +1715,16 @@ fn remove_path_force(workspace: &WorkspaceCap, rel: &str) -> Result<(), Revision
     }
     #[cfg(windows)]
     {
-        let _ = match workspace.open_parent_dir_no_symlink(&norm, false) {
+        let (parent_dir, leaf) = match workspace.open_parent_dir_no_symlink(&norm, false) {
             Ok(v) => v,
             Err(WorkspaceError::NotFound { .. }) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        remove_entry_windows(&workspace.root().join(&norm))
+        let parent_path = crate::workspace::windows_final_path_by_handle(&parent_dir)?;
+        let target = parent_path.join(&leaf);
+        let res = remove_entry_windows(&target);
+        drop(parent_dir);
+        res
     }
 }
 
@@ -1706,10 +1743,15 @@ fn remove_entry_windows(target: &Path) -> Result<(), RevisionError> {
     }
     if crate::workspace::is_windows_reparse_point(&meta) {
         // Never recurse into a junction or directory symlink; remove only the reparse point itself.
-        if fs::remove_file(target).is_err() {
-            let _ = fs::remove_dir(target);
+        match fs::remove_file(target) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => match fs::remove_dir(target) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(e.into()),
+            },
         }
-        return Ok(());
     }
     if meta.is_dir() {
         for entry in fs::read_dir(target)? {

@@ -138,12 +138,8 @@ impl ChildProcessGroup {
         #[cfg(windows)]
         {
             let job = WindowsJobObject::new().ok().and_then(|j| {
-                if let Some(raw) = child.raw_handle() {
-                    let _ = j.assign_raw_process(raw as HANDLE);
-                    Some(j)
-                } else {
-                    None
-                }
+                let raw = child.raw_handle()?;
+                j.assign_raw_process(raw as HANDLE).ok().map(|()| j)
             });
             return Self { pgid, job };
         }
@@ -155,9 +151,10 @@ impl ChildProcessGroup {
         let pgid = child.id() as i32;
         #[cfg(windows)]
         {
-            let job = WindowsJobObject::new().ok().map(|j| {
-                let _ = j.assign_raw_process(child.as_raw_handle() as HANDLE);
-                j
+            let job = WindowsJobObject::new().ok().and_then(|j| {
+                j.assign_raw_process(child.as_raw_handle() as HANDLE)
+                    .ok()
+                    .map(|()| j)
             });
             return Self { pgid, job };
         }
@@ -215,10 +212,6 @@ impl ChildProcessGroup {
             unsafe {
                 let _ = libc::kill(-self.pgid, libc::SIGTERM);
             }
-        }
-        #[cfg(windows)]
-        if let Some(ref job) = self.job {
-            job.terminate(1);
         }
 
         if tokio::time::timeout(grace_period, child.wait())
@@ -414,7 +407,7 @@ fn format_shell_args(shell_bin: &str, command: &str) -> (String, Vec<String>) {
                 command.to_string(),
             ],
         )
-    } else if matches!(leaf.as_str(), "cmd" | "cmd.exe") {
+    } else if is_cmd_exe(&leaf) {
         (
             shell_bin.to_string(),
             vec![
@@ -431,3 +424,33 @@ fn format_shell_args(shell_bin: &str, command: &str) -> (String, Vec<String>) {
         )
     }
 }
+
+/// True when `shell_bin` refers to `cmd` or `cmd.exe`.
+pub fn is_cmd_exe(shell_bin: &str) -> bool {
+    let leaf = shell_bin
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(shell_bin)
+        .to_ascii_lowercase();
+    matches!(leaf.as_str(), "cmd" | "cmd.exe")
+}
+
+/// Attach `shell_args` (or on Windows with `cmd.exe`, a verbatim `/D /S /C "<raw_command>"` raw
+/// argument) so inner double quotes are never mangled by MSVCRT `\"` escaping.
+pub fn apply_shell_args_tokio(
+    cmd: &mut tokio::process::Command,
+    shell_bin: &str,
+    shell_args: &[String],
+    raw_command: &str,
+) {
+    #[cfg(windows)]
+    if is_cmd_exe(shell_bin) {
+        use std::os::windows::process::CommandExt;
+        cmd.as_std_mut()
+            .raw_arg(format!("/D /S /C \"{}\"", raw_command));
+        return;
+    }
+    let _ = (shell_bin, raw_command);
+    cmd.args(shell_args);
+}
+
