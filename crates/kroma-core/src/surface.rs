@@ -28,7 +28,7 @@ use crate::messages::{ToolCall, TranscriptItem};
 use crate::types::ToolCallId;
 use crate::prompt::{sha256_hex64, PromptBuilder};
 use crate::provider::ModelProvider;
-use crate::revision::{RestoreResult, RevisionId, SnapshotStore, WorkspaceRevision};
+use crate::revision::{MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore, WorkspaceRevision};
 use crate::session::{RevisionRecord, SessionJournal};
 use crate::theme::{StatusDot, Theme, ThemeRenderer};
 use crate::tool::policy::{
@@ -874,6 +874,35 @@ impl RpcDispatcher {
             initial_snapshot.activated_skills.push(skill_name.clone());
         }
         drop(journal);
+
+        // F8: a crash midway through a worktree→parent merge leaves the parent workspace
+        // half-updated and a merge intent journal behind; roll it back to the recorded pre-merge
+        // revision before any new run starts, exactly like the restore-intent pre-check handles an
+        // interrupted restore.
+        match snapshot_store.recover_pending_merge(env.workspace()) {
+            Ok(MergeRecoveryOutcome::NothingPending) => {}
+            Ok(MergeRecoveryOutcome::RolledBack {
+                pre_merge_revision,
+                ..
+            }) => {
+                eprintln!(
+                    "[kroma] recovered an interrupted subagent merge; rolled the workspace back to {}",
+                    pre_merge_revision
+                );
+            }
+            Ok(MergeRecoveryOutcome::AlreadyMerged { merged_revision }) => {
+                eprintln!(
+                    "[kroma] cleared a stale subagent merge journal; revision {} had already been merged",
+                    merged_revision
+                );
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to recover an interrupted subagent merge: {}",
+                    e
+                ));
+            }
+        }
 
         let approval_broker = RpcApprovalBroker::new(config.surface_name.clone());
         approval_broker.set_timeout(config.approval_timeout);
@@ -3729,6 +3758,13 @@ impl KromaDaemon {
                             e
                         )
                     })?;
+                    // A Unix socket cannot be `fchmod`-ed: `open` on a socket path fails `ENXIO`,
+                    // `O_PATH` descriptors reject `fchmod` with `EBADF`, and `fchmod` on the bound
+                    // socket fd is a silent no-op on Linux. Setting the process-global `umask`
+                    // around `bind` would race every other thread, so the mode must be set by path.
+                    // The parent directory is created first and the error is propagated (not
+                    // swallowed), so a failed or redirected chmod surfaces instead of silently
+                    // leaving the socket world-accessible.
                     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
                         .map_err(|e| {
                             format!(

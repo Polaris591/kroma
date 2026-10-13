@@ -1083,7 +1083,9 @@ impl IsolatedWorktree {
             // intent is left in place and `RecoveryRequired` is surfaced.
             match snapshot_store.restore_revision(parent_workspace, &pre_merge_rev, None, false) {
                 Ok(crate::revision::RestoreResult::Applied { .. }) => {
-                    let _ = snapshot_store.clear_merge_intent();
+                    // A rollback that leaves its journal behind would re-trigger recovery on the
+                    // next startup, so a failed clear is surfaced rather than swallowed.
+                    snapshot_store.clear_merge_intent()?;
                     return Err(apply_err);
                 }
                 _ => {
@@ -1109,7 +1111,10 @@ impl IsolatedWorktree {
             turn_index,
         )?;
         let merged_revision = merged_manifest.revision_id;
-        let _ = snapshot_store.clear_merge_intent();
+        // The merged revision is durably captured; the journal is cleared only now. A failure to
+        // clear it is reported, and the next startup detects the completed merge (stale journal)
+        // instead of rolling the successful merge back.
+        snapshot_store.clear_merge_intent()?;
 
         if let Some(gate) = post_merge_gate {
             let mut mod_list: Vec<String> = delta_paths.into_iter().collect();
@@ -1144,7 +1149,7 @@ impl IsolatedWorktree {
                 }
                 // F03 (`v1.4.0`): the post-merge rollback (or the absence of one) is complete, so
                 // the merge intent journal can be cleared.
-                let _ = snapshot_store.clear_merge_intent();
+                snapshot_store.clear_merge_intent()?;
                 return Ok(WorktreeMergeResult::VerificationFailed {
                     merged_revision,
                     revision_before: Some(pre_merge_rev),
@@ -1640,7 +1645,15 @@ impl SubagentBackend for ProviderSubagentBackend {
                             globs: globs.clone(),
                         },
                     ));
-                    let _ = registry.register_extension(ext);
+                    // F6: this is the worker's *only* write-scope guardrail. A silent failure here
+                    // would let the worker write anywhere, so a registration failure is propagated
+                    // (as a policy denial) instead of being discarded.
+                    registry.register_extension(ext).map_err(|e| {
+                        format!(
+                            "policy denied: failed to install the worker write-scope guard for allowed_write_globs {:?}: {}",
+                            globs, e
+                        )
+                    })?;
                 }
             }
 
@@ -2449,6 +2462,28 @@ pub async fn run_worktree_tournament(
             )
             .await
             .map_err(|e| format!("tournament merge failed for '{}': {}", label, e))?;
+        // F7: a tournament removes *every* worktree from disk once the race is decided, so a
+        // conflicting candidate cannot keep the worktree that `merge_into_parent` preserves for the
+        // single-worker path. Clear the preserve flag and report the truth instead of advertising a
+        // `preserved_worktree_path` that the cleanup loop below is about to delete.
+        let merge = match merge {
+            WorktreeMergeResult::Conflict {
+                base_revision,
+                conflicting_paths,
+                reasons,
+                ..
+            } => {
+                worktree.preserve_on_drop = false;
+                WorktreeMergeResult::Conflict {
+                    base_revision,
+                    conflicting_paths,
+                    reasons,
+                    worker_worktree_preserved: false,
+                    preserved_worktree_path: None,
+                }
+            }
+            other => other,
+        };
         match &merge {
             WorktreeMergeResult::Applied {
                 merged_revision: rev,

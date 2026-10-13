@@ -190,17 +190,34 @@ pub enum RestoreFault {
     AfterAppliedFiles(usize),
 }
 
+/// Serde default for a per-operation `force` flag that a journal written before the field existed
+/// omitted. Such a journal recorded only the intent-level force, which the previous binary applied
+/// to its removals, so defaulting a missing flag to `true` keeps a forced restore's removals forced
+/// instead of silently degrading them to a no-op on an obstructing symlink/directory (F03). A
+/// journal that does carry the flag (every one this binary writes) is unaffected, so a merge-rollback
+/// `Remove { force: false }` still round-trips as non-forced.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum RestoreOp {
     Write { path: String, sha256: String, mode: u32 },
-    Remove { path: String },
+    /// `force` is carried per operation rather than only on [`RestoreIntent`] so a merge-rollback
+    /// removal can stay non-forced even when the surrounding intent restores forced writes; a
+    /// crash mid-recovery then replays the exact same per-path semantics.
+    Remove {
+        path: String,
+        #[serde(default = "default_true")]
+        force: bool,
+    },
 }
 
 impl RestoreOp {
     fn path(&self) -> &str {
         match self {
-            RestoreOp::Write { path, .. } | RestoreOp::Remove { path } => path,
+            RestoreOp::Write { path, .. } | RestoreOp::Remove { path, .. } => path,
         }
     }
 }
@@ -242,6 +259,23 @@ pub struct MergeIntent {
     /// Parent-relative paths the merge intends to remove.
     #[serde(default)]
     pub removed_files: Vec<String>,
+}
+
+/// F08 (`v1.5.1`): outcome of the startup pre-check for an interrupted worktree→parent merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeRecoveryOutcome {
+    /// No merge intent journal was present; the workspace was left untouched.
+    NothingPending,
+    /// A stale merge intent journal was present but the merge it describes had already been
+    /// captured as `merged_revision`. The journal was cleared and the workspace was left untouched,
+    /// because rolling back a completed merge would silently discard it.
+    AlreadyMerged { merged_revision: RevisionId },
+    /// The interrupted merge was rolled back to its pre-merge revision and the journal cleared.
+    RolledBack {
+        pre_merge_revision: RevisionId,
+        restored_files: Vec<String>,
+        removed_files: Vec<String>,
+    },
 }
 
 impl SnapshotStore {
@@ -304,8 +338,265 @@ impl SnapshotStore {
         sync_dir(&self.root)
     }
 
-    pub fn blob_path(&self, sha256: &str) -> PathBuf {
-        self.root.join(BLOB_DIR).join(&sha256[..2]).join(sha256)
+    /// F08 (`v1.5.1`): the startup counterpart of [`write_merge_intent`].
+    ///
+    /// If a worktree→parent merge was interrupted after its intent journal was written, the parent
+    /// workspace may hold a half-applied merge. Undo exactly the paths the intent recorded —
+    /// restoring each one to its pre-merge content, or removing it when the merge newly created it —
+    /// and then clear both journals. This mirrors [`recover_pending_restore`], which replays the
+    /// operations of an interrupted restore.
+    ///
+    /// The rollback is itself journalled through the restore intent, so a crash *during* recovery is
+    /// recoverable on the next startup exactly like an interrupted explicit restore.
+    ///
+    /// A journal is only stale, not interrupted: a crash between capturing the merged revision and
+    /// clearing the journal leaves the merge fully applied. That case is detected and only the
+    /// journal is dropped ([`MergeRecoveryOutcome::AlreadyMerged`]), because rolling a completed
+    /// merge back would silently discard it.
+    pub fn recover_pending_merge(
+        &self,
+        workspace: &WorkspaceCap,
+    ) -> Result<MergeRecoveryOutcome, RevisionError> {
+        self.ensure_layout()?;
+        let Some(intent) = self.pending_merge_intent()? else {
+            return Ok(MergeRecoveryOutcome::NothingPending);
+        };
+        // A restore intent already on disk means a previous recovery (ours or an explicit restore)
+        // was interrupted; finish it before layering the merge rollback on top of its half-applied
+        // operations. Doing this *before* the completed-merge check keeps an unrelated interrupted
+        // restore (for example a post-merge verification revert) from being mistaken for the merge's
+        // own state.
+        if self.pending_restore()?.is_some() {
+            self.recover_pending_restore(workspace)?;
+        }
+        // F03/F08: a crash between capturing the merged revision and clearing the journal leaves a
+        // *stale* journal even though the merge fully landed. Rolling it back now would silently
+        // discard a successful merge (and desync the workspace from the session WAL), so detect the
+        // completed merge and only drop the journal.
+        if let Some(merged_revision) = self.merge_intent_already_landed(workspace, &intent)? {
+            self.clear_merge_intent()?;
+            return Ok(MergeRecoveryOutcome::AlreadyMerged { merged_revision });
+        }
+        let target = match self.load_revision(&intent.pre_merge_revision) {
+            Ok(t) => t,
+            Err(_) => {
+                return Err(RevisionError::RecoveryRequired {
+                    target_revision: intent.pre_merge_revision.clone(),
+                    journal_path: self.merge_intent_path(),
+                    reason: "the pre-merge revision recorded by the interrupted merge is not in the snapshot store; the parent workspace cannot be rolled back automatically".to_string(),
+                });
+            }
+        };
+        let mut touched: BTreeSet<String> = intent.written_files.iter().cloned().collect();
+        touched.extend(intent.removed_files.iter().cloned());
+        let mut restored_files = Vec::new();
+        let mut removed_files = Vec::new();
+        let mut removals: Vec<String> = Vec::new();
+        let mut writes: Vec<(String, String, u32)> = Vec::new();
+        for path in touched {
+            match target.tracked_files.get(&path) {
+                Some(entry) => {
+                    writes.push((path.clone(), entry.sha256.clone(), entry.mode));
+                    restored_files.push(path);
+                }
+                None => {
+                    removals.push(path.clone());
+                    removed_files.push(path);
+                }
+            }
+        }
+        // The same contract as `restore_inner`: every removal is scheduled before every write,
+        // deepest path first, so a path whose kind changed between revisions (file <-> directory)
+        // is vacated before its replacement lands. `touched` is a `BTreeSet`, so lexicographic order
+        // alone would emit `Write("x")` before `Remove("x/y")` and wedge the next startup in
+        // `ENOTDIR` (`SymlinkBlocked`) after the intent was already persisted.
+        removals.sort_by(|a, b| {
+            let depth = |s: &String| s.matches('/').count();
+            depth(b).cmp(&depth(a)).then_with(|| b.cmp(a))
+        });
+        // Rollback removals are non-forced, so a symlink/special file the user parked on a
+        // merge-created path is left in place. That is harmless on its own, but when a *later write*
+        // needs that same path as a directory (the merge replaced a directory with a file, so the
+        // rollback removes the file and restores the directory's children), the forced write would
+        // hit `SymlinkBlocked` after the journal was already persisted and wedge every future
+        // startup in the rollback replay. Detect it up front and fail with an actionable message
+        // instead. A real directory is not a problem: the forced write lands inside it.
+        for path in &removals {
+            if !writes
+                .iter()
+                .any(|(written, _, _)| is_ancestor_path(path, written))
+            {
+                continue;
+            }
+            if matches!(stat_live_entry(workspace, path)?, LiveEntryStat::NonRegular) {
+                return Err(RevisionError::RecoveryRequired {
+                    target_revision: intent.pre_merge_revision.clone(),
+                    journal_path: self.merge_intent_path(),
+                    reason: format!(
+                        "cannot roll back the interrupted merge: restoring '{}' requires it to be a directory again, but a symlink or special file is in its place; remove it and retry",
+                        path
+                    ),
+                });
+            }
+        }
+        // The removal check above only covers write paths whose own ancestor is scheduled for
+        // removal. Two obstructions on the write path are left, and both would surface *after* the
+        // journal was persisted and then wedge every future startup in the replay:
+        //   * a symlink/special file on a non-touched ancestor component makes
+        //     `open_parent_dir_no_symlink` fail (`SymlinkBlocked`), so the forced write can never
+        //     land;
+        //   * a directory the user parked on the write path itself would be recursively deleted by
+        //     the forced write, destroying external work the merge never created.
+        // Detect both before persisting the journal. A directory is only safe when a scheduled
+        // removal lives inside it: that is the `directory -> file` rollback, where the removal
+        // prunes the merge's own tree before the file is written back.
+        for (path, _, _) in &writes {
+            let mut prefix = String::new();
+            let components: Vec<&str> = path.split('/').collect();
+            for component in &components[..components.len().saturating_sub(1)] {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(component);
+                if matches!(stat_live_entry(workspace, &prefix)?, LiveEntryStat::NonRegular) {
+                    return Err(RevisionError::RecoveryRequired {
+                        target_revision: intent.pre_merge_revision.clone(),
+                        journal_path: self.merge_intent_path(),
+                        reason: format!(
+                            "cannot roll back the interrupted merge: '{}' is blocked by a symlink or special file at '{}'; remove it and retry",
+                            path, prefix
+                        ),
+                    });
+                }
+            }
+            if matches!(stat_live_entry(workspace, path)?, LiveEntryStat::Directory)
+                && !removals.iter().any(|removed| is_ancestor_path(path, removed))
+            {
+                return Err(RevisionError::RecoveryRequired {
+                    target_revision: intent.pre_merge_revision.clone(),
+                    journal_path: self.merge_intent_path(),
+                    reason: format!(
+                        "cannot roll back the interrupted merge: restoring '{}' would recursively delete a directory the merge did not create; remove it and retry",
+                        path
+                    ),
+                });
+            }
+        }
+        let mut operations: Vec<RestoreOp> = Vec::with_capacity(removals.len() + writes.len());
+        // Rollback removals stay non-forced: a merge-created path a user has since replaced with a
+        // directory/symlink is external work and must not be recursively deleted. The writes keep
+        // `force` so the `file -> directory` shape is vacated and restored.
+        for path in removals {
+            operations.push(RestoreOp::Remove { path, force: false });
+        }
+        for (path, sha256, mode) in writes {
+            operations.push(RestoreOp::Write { path, sha256, mode });
+        }
+        let restore_intent = RestoreIntent {
+            version: RESTORE_INTENT_VERSION,
+            target_revision: intent.pre_merge_revision.clone(),
+            parent_revision: None,
+            created_at_ms: now_ms(),
+            force: true,
+            operations,
+        };
+        write_atomic_bytes(
+            &self.intent_path(),
+            &serde_json::to_vec(&restore_intent)?,
+            0o600,
+        )?;
+        sync_dir(&self.root)?;
+        for op in &restore_intent.operations {
+            self.apply_op(workspace, op, true)?;
+        }
+        self.clear_intent()?;
+        self.clear_merge_intent()?;
+        restored_files.sort();
+        removed_files.sort();
+        Ok(MergeRecoveryOutcome::RolledBack {
+            pre_merge_revision: intent.pre_merge_revision,
+            restored_files,
+            removed_files,
+        })
+    }
+
+    /// F03/F08: the merged revision an interrupted worktree→parent merge captured, if the merge
+    /// actually completed *and* the live workspace is still in that revision's state.
+    ///
+    /// The merged manifest is an *unlinked* capture (`wal_entry_id == None`) whose parent is the
+    /// recorded pre-merge revision and whose tracked files include every path the merge wrote, so a
+    /// matching revision is the merge's own capture. Any other revision shape (a WAL-linked capture,
+    /// a different parent, or a manifest missing a written path) is not proof and is skipped.
+    ///
+    /// The manifest alone is not proof of completion: the merge's manifest can survive in the store
+    /// while the workspace was reverted by hand (a post-merge gate rejection with
+    /// `revert_on_verify_failure == false` keeps the merged revision, and `--undo`/`--force-restore`
+    /// never remove it), after which a later merge can crash half-applied. Only a live workspace
+    /// that matches the candidate revision for every path the merge touched is treated as completed;
+    /// otherwise the caller rolls the half-merged workspace back.
+    fn merge_intent_already_landed(
+        &self,
+        workspace: &WorkspaceCap,
+        intent: &MergeIntent,
+    ) -> Result<Option<RevisionId>, RevisionError> {
+        // A merge that wrote and removed nothing has no observable state to prove it landed, so
+        // treat it as not landed rather than matching any unlinked revision with the same parent.
+        if intent.written_files.is_empty() && intent.removed_files.is_empty() {
+            return Ok(None);
+        }
+        for revision in self.list_revisions()? {
+            if revision.parent_revision_id.as_ref() != Some(&intent.pre_merge_revision)
+                || revision.wal_entry_id.is_some()
+                || !intent
+                    .written_files
+                    .iter()
+                    .all(|path| revision.tracked_files.contains_key(path))
+            {
+                continue;
+            }
+            if self.workspace_matches_merged_revision(workspace, &revision, intent)? {
+                return Ok(Some(revision.revision_id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// True when the live workspace holds exactly the state `revision` describes for every path the
+    /// merge touched: each written path is a regular file whose content hash matches the manifest,
+    /// and each removed path is absent. Any other shape (absent, directory, symlink, differing
+    /// content) means the merge did not fully land and must not be treated as completed.
+    fn workspace_matches_merged_revision(
+        &self,
+        workspace: &WorkspaceCap,
+        revision: &WorkspaceRevision,
+        intent: &MergeIntent,
+    ) -> Result<bool, RevisionError> {
+        for path in &intent.written_files {
+            let Some(entry) = revision.tracked_files.get(path) else {
+                return Ok(false);
+            };
+            match live_entry_state(workspace, path)? {
+                LiveEntryState::Regular { sha256, .. } if sha256 == entry.sha256 => {}
+                _ => return Ok(false),
+            }
+        }
+        for path in &intent.removed_files {
+            if !matches!(stat_live_entry(workspace, path)?, LiveEntryStat::Absent) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Path of a content-addressed blob.
+    ///
+    /// `sha256` comes from an on-disk revision manifest, so it is untrusted input: it is validated
+    /// as exactly 64 ASCII hex characters before it is sliced (`&sha256[..2]`) or joined into a
+    /// path. A short/non-ASCII value can therefore no longer panic the process, and a value with
+    /// path separators or `..` can no longer escape the `blobs/` subtree.
+    pub fn blob_path(&self, sha256: &str) -> Result<PathBuf, RevisionError> {
+        validate_blob_sha256(sha256)?;
+        Ok(self.root.join(BLOB_DIR).join(&sha256[..2]).join(sha256))
     }
 
     pub fn revision_path(&self, id: &RevisionId) -> PathBuf {
@@ -493,7 +784,7 @@ impl SnapshotStore {
             self.apply_op(workspace, op, intent.force)?;
             match op {
                 RestoreOp::Write { path, .. } => restored_files.push(path.clone()),
-                RestoreOp::Remove { path } => removed_files.push(path.clone()),
+                RestoreOp::Remove { path, .. } => removed_files.push(path.clone()),
             }
         }
         self.clear_intent()?;
@@ -587,7 +878,7 @@ impl SnapshotStore {
 
         let mut operations: Vec<RestoreOp> = removals
             .into_iter()
-            .map(|path| RestoreOp::Remove { path })
+            .map(|path| RestoreOp::Remove { path, force })
             .collect();
         for (path, entry) in &target.tracked_files {
             operations.push(RestoreOp::Write {
@@ -635,7 +926,7 @@ impl SnapshotStore {
             }
             match op {
                 RestoreOp::Write { path, .. } => restored_files.push(path.clone()),
-                RestoreOp::Remove { path } => removed_files.push(path.clone()),
+                RestoreOp::Remove { path, .. } => removed_files.push(path.clone()),
             }
             if let Some(RestoreFault::AfterAppliedFiles(n)) = fault {
                 if index + 1 >= n {
@@ -668,8 +959,15 @@ impl SnapshotStore {
                 let bytes = self.read_blob(sha256)?;
                 write_tracked_file(workspace, path, &bytes, *mode, force)
             }
-            RestoreOp::Remove { path } => {
-                remove_tracked_file(workspace, path, force)?;
+            // A removal is forced only when both the intent and the operation agree. The per-op
+            // flag keeps a merge rollback's removal non-forced even though the surrounding intent
+            // restores forced writes, so it never recursively deletes a directory/symlink a user
+            // parked on a merge-created path. The intent flag keeps a *legacy* journal (written
+            // before the per-op flag existed, and whose absent flag now defaults to `true`) honest:
+            // an unforced restore must not have its removals silently upgraded to forced just
+            // because the missing per-op field defaulted to `true`.
+            RestoreOp::Remove { path, force: remove_force } => {
+                remove_tracked_file(workspace, path, *remove_force && force)?;
                 Ok(())
             }
         }
@@ -690,7 +988,7 @@ impl SnapshotStore {
     /// onto the CAS path. A crash or `ENOSPC` mid-write therefore leaves at most a stray temporary
     /// file, never a truncated blob that would poison every future revision that references it.
     fn store_blob(&self, sha256: &str, bytes: &[u8]) -> Result<(), RevisionError> {
-        let path = self.blob_path(sha256);
+        let path = self.blob_path(sha256)?;
         let dir = path.parent().ok_or_else(|| {
             RevisionError::InvalidStore("blob path has no parent directory".to_string())
         })?;
@@ -833,7 +1131,7 @@ impl SnapshotStore {
     }
 
     pub fn read_blob(&self, sha256: &str) -> Result<Vec<u8>, RevisionError> {
-        let path = self.blob_path(sha256);
+        let path = self.blob_path(sha256)?;
         let mut file = open_store_file_no_symlink(&path).map_err(|e| {
             RevisionError::InvalidStore(format!("cannot read snapshot blob {}: {}", sha256, e))
         })?;
@@ -942,6 +1240,23 @@ impl SnapshotStore {
             );
         }
         Ok(())
+    }
+}
+
+/// Reject any content hash that is not exactly 64 ASCII hex characters.
+///
+/// [`SnapshotStore::blob_path`] slices this string (`&sha256[..2]`) and joins it into a filesystem
+/// path, so a corrupt/hostile revision manifest could otherwise panic (short or non-ASCII value) or
+/// point outside the blob store (separators or `..`). Store corruption is reported as
+/// [`RevisionError::InvalidStore`] everywhere else, so it is reported as an error here too.
+fn validate_blob_sha256(sha256: &str) -> Result<(), RevisionError> {
+    if sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(RevisionError::InvalidStore(format!(
+            "invalid snapshot blob hash '{}': expected 64 ASCII hex characters",
+            sha256
+        )))
     }
 }
 
@@ -1069,19 +1384,24 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
                 format!("failed to create snapshot store '{}': {}", collapsed.display(), e),
             ))
         })?;
-        let meta = fs::symlink_metadata(&collapsed).map_err(|e| {
-            RevisionError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to inspect snapshot store '{}': {}", collapsed.display(), e),
-            ))
+        // F02: never `chmod` by path. The create above deliberately follows OS-owned symlinked
+        // ancestors (the reason this fallback exists), but between that create and a path-based
+        // `chmod` an attacker could swap the *final* component and redirect the `chmod` to their
+        // target. Open the final component with `O_NOFOLLOW | O_DIRECTORY` and `fchmod` that
+        // descriptor instead: a symlink leaf is refused (`ELOOP`) and a non-directory is refused
+        // (`ENOTDIR`), so only the verified directory itself is ever restricted.
+        let handle = open_real_dir(&collapsed).map_err(|e| match &e {
+            RevisionError::Io(io)
+                if matches!(io.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) =>
+            {
+                RevisionError::InvalidStore(format!(
+                    "snapshot store path '{}' is not a real directory",
+                    collapsed.display()
+                ))
+            }
+            _ => e,
         })?;
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            return Err(RevisionError::InvalidStore(format!(
-                "snapshot store path '{}' is not a real directory",
-                collapsed.display()
-            )));
-        }
-        fs::set_permissions(&collapsed, fs::Permissions::from_mode(0o700)).map_err(|e| {
+        handle.set_permissions(fs::Permissions::from_mode(0o700)).map_err(|e| {
             RevisionError::Io(std::io::Error::new(
                 e.kind(),
                 format!("failed to restrict snapshot store '{}': {}", collapsed.display(), e),
@@ -1157,6 +1477,17 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
             .map_err(|e| RevisionError::InvalidStore(e.to_string()))?;
         Ok(())
     }
+}
+
+/// [`ensure_private_dir`] for callers that only speak `std::io::Error` (e.g. the session WAL
+/// store). A [`RevisionError::Io`] is returned unchanged so callers keep the OS error kind; any
+/// other store error is folded into an `io::Error` with the same message.
+#[cfg(unix)]
+pub(crate) fn ensure_private_dir_io(dir: &Path) -> std::io::Result<()> {
+    ensure_private_dir(dir).map_err(|e| match e {
+        RevisionError::Io(io) => io,
+        other => std::io::Error::new(std::io::ErrorKind::Other, other.to_string()),
+    })
 }
 
 /// Strict dirfd walk: create every missing component with `mkdirat` and re-open each one with
@@ -1779,6 +2110,14 @@ pub(crate) fn remove_tracked_file(
         prune_empty_ancestors(workspace, &norm)?;
         Ok(true)
     }
+}
+
+/// True when `path` is a proper ancestor directory of `descendant` (`path` is `a` and `descendant`
+/// is `a/b/...`), using the `/` separator of the store's normalized, relative paths.
+fn is_ancestor_path(path: &str, descendant: &str) -> bool {
+    descendant.len() > path.len()
+        && descendant.as_bytes().get(path.len()) == Some(&b'/')
+        && descendant.starts_with(path)
 }
 
 /// Best-effort removal of directories the mutation created that are now empty. Stops at the first

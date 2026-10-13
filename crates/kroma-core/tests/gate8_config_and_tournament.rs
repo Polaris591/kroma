@@ -1677,3 +1677,63 @@ async fn test_p1_adaptive_tournament_merge_is_recorded_in_the_session_wal() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+// ---- F07 (v1.5.1): a tournament conflict must not advertise a preserved worktree it deletes ---
+
+#[test]
+fn test_f07_tournament_conflict_reports_no_preserved_worktree_and_cleans_up() {
+    let root = temp_root("f07-conflict-cleanup");
+    let (ws, workspace, store) = baseline_workspace(&root);
+    let baseline = store.capture_revision(&workspace, None, None, 0).unwrap();
+    // A concurrent parent edit makes both candidates conflict on README.md, so no candidate wins and
+    // the tournament's last merge result is the Conflict.
+    fs::write(ws.join("README.md"), "# demo\n// concurrent parent edit\n").unwrap();
+
+    let backend: Arc<dyn SubagentBackend> = ScriptedBackend::new(vec![
+        vec![
+            ("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string()),
+            ("README.md", "# demo\n// c1\n".to_string()),
+        ],
+        vec![
+            ("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string()),
+            ("README.md", "# demo\n// c2\n".to_string()),
+        ],
+    ]);
+    let gate: Arc<dyn CompletionGate> = Arc::new(FixedGate);
+    let mut spec = tournament_spec(&root, 2);
+    spec.candidates = vec![
+        kroma_core::subagents::TournamentCandidate::worker("c1", "edit readme"),
+        kroma_core::subagents::TournamentCandidate::worker("c2", "edit readme"),
+    ];
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime
+        .block_on(run_worktree_tournament(
+            spec,
+            &workspace,
+            &store,
+            backend,
+            Some(&baseline.revision_id),
+            &gate,
+        ))
+        .unwrap();
+
+    assert_eq!(outcome.winner, None, "every candidate conflicts");
+    match outcome.merge {
+        Some(kroma_core::subagents::WorktreeMergeResult::Conflict {
+            worker_worktree_preserved,
+            preserved_worktree_path,
+            ..
+        }) => {
+            assert!(
+                !worker_worktree_preserved,
+                "the tournament must not report a preserved worktree it is about to delete"
+            );
+            assert!(preserved_worktree_path.is_none());
+        }
+        other => panic!("expected a Conflict merge result, got {:?}", other),
+    }
+    assert!(outcome.all_worktrees_cleaned_up);
+    assert!(!root.join("worktrees").join("wt-race-0001").exists());
+    assert!(!root.join("worktrees").join("wt-race-0002").exists());
+    let _ = fs::remove_dir_all(&root);
+}

@@ -256,10 +256,21 @@ impl HeadTailBuffer {
         let mut opts = OpenOptions::new();
         opts.create(true).write(true).truncate(true);
         #[cfg(unix)]
-        opts.mode(0o600);
+        opts.mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         if let Ok(mut f) = opts.open(path) {
+            // `mode` sets 0600 only when the file is created; a pre-existing spill file may be
+            // broader. `fchmod` the descriptor we actually opened rather than `chmod`-ing by path,
+            // which would follow a symlink swapped onto the leaf. Spilling is best-effort, so a
+            // failure is logged instead of propagated.
             #[cfg(unix)]
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            if let Err(e) = f.set_permissions(fs::Permissions::from_mode(0o600)) {
+                eprintln!(
+                    "[WARN kroma] failed to restrict spill file {} to 0600: {}",
+                    path.display(),
+                    e
+                );
+            }
             // Write already-accumulated head + tail to spill file aligned on UTF-8 char boundaries
             let to_write = floor_char_boundary(&self.head_buf, self.spill_cap);
             let _ = f.write_all(&self.head_buf.as_bytes()[..to_write]);
@@ -387,4 +398,41 @@ pub fn ceil_char_boundary(s: &str, index: usize) -> usize {
         i += 1;
     }
     i
+}
+
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn test_spill_file_refuses_a_symlinked_leaf_and_never_touches_its_target() {
+        let dir = std::env::temp_dir().join(format!("kroma-spill-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        let spill = dir.join("spill.log");
+        std::os::unix::fs::symlink(&victim, &spill).unwrap();
+
+        let mut buf = HeadTailBuffer::new(4, 4, 1, 8, Some(spill));
+        buf.push_str("0123456789abcdef");
+
+        assert!(
+            buf.spill_file.is_none(),
+            "a symlinked spill path must be refused, not opened through"
+        );
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"keep",
+            "the symlink target must not be truncated or written"
+        );
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the symlink target's permissions must be left untouched"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

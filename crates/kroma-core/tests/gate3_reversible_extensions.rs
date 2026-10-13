@@ -18,7 +18,7 @@ use kroma_core::budget::BudgetConfig;
 use kroma_core::env::LocalHostEnv;
 use kroma_core::events::{EventLogger, EventPayload};
 use kroma_core::extensions::{
-    discover_skills, execute_activate_skill, CommandObserverHook, CommandPolicyHook,
+    discover_skills, execute_activate_skill, CommandHookRunner, CommandObserverHook, CommandPolicyHook,
     CustomToolContext, CustomToolHandler, ExtensionError, ExtensionManifest,
     ExtensionTrustLevel, HookContext, HookEngine, HookError, HookEvent, ObserverHook, PolicyHook,
     PolicyHookDecision, ScopedExtension, ScopedToolDefinition, SkillEntry, SubtreeContextTracker,
@@ -1955,6 +1955,163 @@ fn test_command_hook_grandchild_holding_stdout_pipe_does_not_hang() {
         started.elapsed()
     );
 
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F4: a hook that exits immediately must still have its stdout delivered. The parent's drain window
+/// is derived from the reader's own deadline, so output already collected is never discarded.
+#[test]
+fn test_command_hook_captures_stdout_from_a_fast_exiting_hook() {
+    let root = temp_root("hook-fast-stdout");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let ctx = HookContext::new(1, ws.clone());
+    let runner = CommandHookRunner::new(vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "echo hook-said-hello; exit 0".into(),
+    ])
+    .with_timeout(Duration::from_millis(2_000));
+
+    let started = std::time::Instant::now();
+    let out = runner.run(HookEvent::PreToolUse, &ctx).unwrap();
+    assert!(
+        out.stdout.contains("hook-said-hello"),
+        "a fast-exiting hook's stdout must be captured, got {:?}",
+        out.stdout
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F4: an `setsid()`ed grandchild escapes the process-group sweep while still holding stdout, so the
+/// reader only returns at its own deadline. The parent must wait for that deadline instead of giving
+/// up after a fixed window, or the output the child already wrote is silently thrown away.
+#[test]
+fn test_command_hook_keeps_output_when_an_escaped_grandchild_holds_stdout() {
+    if std::process::Command::new("setsid")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: setsid is not available");
+        return;
+    }
+    let root = temp_root("hook-escaped-stdout");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let ctx = HookContext::new(1, ws.clone());
+    // `setsid` moves the background `sleep` into a new session, so the sweep cannot reach it; it
+    // keeps the stdout write end open, and the reader therefore sees no EOF.
+    let runner = CommandHookRunner::new(vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "echo escaped-hook-output; setsid sleep 30 & exit 0".into(),
+    ])
+    .with_timeout(Duration::from_millis(300));
+
+    let started = std::time::Instant::now();
+    let out = runner.run(HookEvent::PreToolUse, &ctx).unwrap();
+    assert!(
+        out.stdout.contains("escaped-hook-output"),
+        "output written before the grandchild escaped must not be discarded, got {:?}",
+        out.stdout
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let _ = std::process::Command::new("pkill")
+        .args(["-9", "-f", "sleep 30"])
+        .status();
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Number of live threads in this process. Linux-only: it reads `/proc/self/task`.
+#[cfg(target_os = "linux")]
+fn live_thread_count() -> usize {
+    fs::read_dir("/proc/self/task")
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
+/// Number of open file descriptors in this process. Linux-only: it reads `/proc/self/fd`. The leaked
+/// stdin writer also pins the pipe's write end, so this catches the fd leak even if a thread count is
+/// masked by another concurrently-running test.
+#[cfg(target_os = "linux")]
+fn live_fd_count() -> usize {
+    fs::read_dir("/proc/self/fd")
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
+/// F4: the stdin writer is deadline-bounded too. A hook whose `setsid()`ed grandchild inherits stdin
+/// and never drains it must not pin the writer thread (and its pipe fd) forever once the payload
+/// exceeds the pipe buffer.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_command_hook_stdin_writer_stops_at_its_deadline() {
+    if std::process::Command::new("setsid")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: setsid is not available");
+        return;
+    }
+    let root = temp_root("hook-stdin-deadline");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let mut ctx = HookContext::new(1, ws.clone());
+    // 300 KiB is far larger than the pipe buffer, so an unbounded `write_all` would block.
+    ctx.raw_arguments = Some("x".repeat(300_000));
+    // `exec 3<&0` preserves the stdin pipe on fd 3 (a background job's fd 0 is /dev/null); the
+    // escaped grandchild inherits fd 3 and never reads it.
+    let runner = CommandHookRunner::new(vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "exec 3<&0; setsid sleep 30 0<&3 >/dev/null 2>&1 & exit 0".into(),
+    ])
+    .with_timeout(Duration::from_millis(300));
+
+    // Baseline the *whole* process rather than matching the writer's thread name: a writer reverted
+    // to an anonymous `std::thread::spawn` thread is named after the test binary, so a name match
+    // would count zero and pass even while the thread (and its pipe fd) leaks forever.
+    let threads_before = live_thread_count();
+    let fds_before = live_fd_count();
+
+    let started = std::time::Instant::now();
+    let out = runner.run(HookEvent::PreToolUse, &ctx).unwrap();
+    assert_eq!(out.exit_code, Some(0));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "run must not block on a full stdin pipe (took {:?})",
+        started.elapsed()
+    );
+
+    // Wait past the writer's deadline (timeout + kill grace + drain) and require the process to
+    // return to its pre-run thread/fd baseline while the grandchild is still alive — i.e. no
+    // thread/fd leak. Other tests in this binary run concurrently and briefly add threads/fds, so
+    // poll for a quiet sample instead of demanding one; a leaked writer never settles.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut settled = false;
+    while std::time::Instant::now() < deadline {
+        if live_thread_count() <= threads_before && live_fd_count() <= fds_before {
+            settled = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        settled,
+        "the stdin writer must stop at its deadline instead of leaking its thread and pipe fd \
+         (baseline threads/fds {} / {}, still {} / {})",
+        threads_before,
+        fds_before,
+        live_thread_count(),
+        live_fd_count()
+    );
+
+    let _ = std::process::Command::new("pkill")
+        .args(["-9", "-f", "sleep 30"])
+        .status();
     let _ = fs::remove_dir_all(&root);
 }
 

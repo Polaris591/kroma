@@ -1088,3 +1088,768 @@ async fn test_resumed_run_baseline_survives_undo_rewind() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+// ---- F03 (v1.5.1): blob paths must reject corrupt content hashes, never panic ----------------
+
+#[test]
+fn test_blob_path_rejects_non_hex_content_hash_without_panicking() {
+    let root = temp_root("f3-blob-hash");
+    let store = SnapshotStore::new(root.join("snapshots"));
+    // An on-disk revision manifest can carry a short / non-ASCII / path-escaping hash. `blob_path`
+    // used to panic on `&sha256[..2]` and could point outside `blobs/`; it must now return
+    // `InvalidStore` for both entry points.
+    for bad in [
+        "",
+        "a",
+        "zz",
+        "../../escape",
+        "r-0123456789abcdef0123456789abcdef",
+    ] {
+        match store.blob_path(bad) {
+            Err(kroma_core::revision::RevisionError::InvalidStore(_)) => {}
+            other => panic!("expected InvalidStore from blob_path({:?}), got {:?}", bad, other),
+        }
+        match store.read_blob(bad) {
+            Err(kroma_core::revision::RevisionError::InvalidStore(_)) => {}
+            other => panic!("expected InvalidStore from read_blob({:?}), got {:?}", bad, other),
+        }
+    }
+    // A valid 64-hex hash still resolves beneath `blobs/`.
+    let good = "a".repeat(64);
+    let path = store.blob_path(&good).unwrap();
+    assert!(path.starts_with(root.join("snapshots").join("blobs")));
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- F08 (v1.5.1): startup pre-check rolls back an interrupted merge -------------------------
+
+#[test]
+fn test_startup_recovery_rolls_back_an_interrupted_merge() {
+    let root = temp_root("f8-merge-recovery");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("keep.rs"), "v1\n").unwrap();
+    fs::write(ws_dir.join("edit.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    // Simulate a merge interrupted midway: the durable intent is present, one path was overwritten,
+    // one was removed, and a brand-new file was created.
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["edit.rs".to_string(), "new.rs".to_string()],
+            removed_files: vec!["keep.rs".to_string()],
+        })
+        .unwrap();
+    fs::write(ws_dir.join("edit.rs"), "half-merged\n").unwrap();
+    fs::write(ws_dir.join("new.rs"), "new\n").unwrap();
+    fs::remove_file(ws_dir.join("keep.rs")).unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    match outcome {
+        kroma_core::revision::MergeRecoveryOutcome::RolledBack {
+            pre_merge_revision,
+            ..
+        } => assert_eq!(pre_merge_revision, pre.revision_id),
+        other => panic!("expected RolledBack, got {:?}", other),
+    }
+    assert_eq!(read(ws_dir.join("edit.rs")), "v1\n", "an overwritten file must be restored");
+    assert_eq!(read(ws_dir.join("keep.rs")), "v1\n", "a removed file must be restored");
+    assert!(
+        !ws_dir.join("new.rs").exists(),
+        "a file the merge newly created must be removed"
+    );
+    assert!(store.pending_merge_intent().unwrap().is_none());
+    assert!(store.pending_restore().unwrap().is_none());
+
+    // The pre-check is idempotent: a second startup is a no-op.
+    assert_eq!(
+        store.recover_pending_merge(&workspace).unwrap(),
+        kroma_core::revision::MergeRecoveryOutcome::NothingPending
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: recovery must schedule every removal before every write, deepest first. A merge that turned
+/// the plain file `x` into the directory `x/` holding `x/y` and then crashed before writing `x/y`
+/// leaves the journal `[Write("x/y")]` + `[Remove("x")]`. Lexicographic order emits `Write("x")`
+/// first, which then makes `Remove("x/y")` fail with `ENOTDIR` after the intent is already
+/// persisted — a permanent `EXIT_RESTORE_RECOVERY_REQUIRED` wedge.
+#[test]
+fn test_startup_merge_recovery_orders_removals_before_writes_for_a_file_to_dir_swap() {
+    let root = temp_root("f8-merge-file-dir-order");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("x"), "file-v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["x/y".to_string()],
+            removed_files: vec!["x".to_string()],
+        })
+        .unwrap();
+    // The merge removed the file `x` and created the directory `x`, then crashed before writing
+    // `x/y`.
+    fs::remove_file(ws_dir.join("x")).unwrap();
+    fs::create_dir(ws_dir.join("x")).unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "expected a clean rollback, got {:?}",
+        outcome
+    );
+    assert!(
+        ws_dir.join("x").is_file(),
+        "x must be restored as a plain file, not left as a directory"
+    );
+    assert_eq!(read(ws_dir.join("x")), "file-v1\n");
+    assert!(store.pending_merge_intent().unwrap().is_none());
+    assert!(store.pending_restore().unwrap().is_none());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: a merge-created path the user has since replaced with a directory must survive the
+/// rollback. Rollback removals are non-forced, so a non-regular entry is external work and is left
+/// in place instead of being recursively deleted.
+#[test]
+fn test_startup_merge_recovery_keeps_a_user_directory_that_replaced_a_merged_file() {
+    let root = temp_root("f8-merge-non-forced-remove");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("keep.rs"), "keep\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["new.rs".to_string()],
+            removed_files: Vec::new(),
+        })
+        .unwrap();
+    // The merge created `new.rs`; the user then replaced it with their own directory.
+    fs::create_dir(ws_dir.join("new.rs")).unwrap();
+    fs::write(ws_dir.join("new.rs").join("user.txt"), "mine\n").unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "expected a clean rollback, got {:?}",
+        outcome
+    );
+    assert!(
+        ws_dir.join("new.rs").is_dir(),
+        "a user directory on a merge-created path must not be recursively deleted"
+    );
+    assert_eq!(read(ws_dir.join("new.rs").join("user.txt")), "mine\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F03/F08: a crash between capturing the merged revision and clearing the journal leaves a stale
+/// journal even though the merge landed. Recovery must detect the completed merge and clear the
+/// journal instead of silently rolling the merge back.
+#[test]
+fn test_startup_merge_recovery_detects_a_completed_merge_and_keeps_it() {
+    let root = temp_root("f8-merge-already-landed");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("keep.rs"), "v1\n").unwrap();
+    fs::write(ws_dir.join("edit.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["edit.rs".to_string()],
+            removed_files: vec!["keep.rs".to_string()],
+        })
+        .unwrap();
+    // The merge applied fully and durably captured its merged manifest (unlinked, parented on the
+    // pre-merge revision), then crashed before the journal was cleared.
+    fs::write(ws_dir.join("edit.rs"), "merged\n").unwrap();
+    fs::remove_file(ws_dir.join("keep.rs")).unwrap();
+    let merged = store
+        .capture_revision(&workspace, Some(&pre.revision_id), None, 0)
+        .unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert_eq!(
+        outcome,
+        kroma_core::revision::MergeRecoveryOutcome::AlreadyMerged {
+            merged_revision: merged.revision_id.clone()
+        }
+    );
+    assert_eq!(
+        read(ws_dir.join("edit.rs")),
+        "merged\n",
+        "a completed merge must not be rolled back"
+    );
+    assert!(
+        !ws_dir.join("keep.rs").exists(),
+        "a completed merge must not be rolled back"
+    );
+    assert!(store.pending_merge_intent().unwrap().is_none());
+    assert!(store.pending_restore().unwrap().is_none());
+
+    // Idempotent: the stale journal is gone, so the next startup has nothing to do.
+    assert_eq!(
+        store.recover_pending_merge(&workspace).unwrap(),
+        kroma_core::revision::MergeRecoveryOutcome::NothingPending
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F03/F08: a WAL-linked capture with the same parent is not the merge's unlinked merged manifest,
+/// so it must not be mistaken for a completed merge; the stale journal is still rolled back.
+#[test]
+fn test_startup_merge_recovery_rolls_back_when_only_a_wal_linked_revision_matches() {
+    let root = temp_root("f8-merge-wal-linked");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("keep.rs"), "v1\n").unwrap();
+    fs::write(ws_dir.join("edit.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["edit.rs".to_string()],
+            removed_files: vec!["keep.rs".to_string()],
+        })
+        .unwrap();
+    fs::write(ws_dir.join("edit.rs"), "merged\n").unwrap();
+    fs::remove_file(ws_dir.join("keep.rs")).unwrap();
+    store
+        .capture_revision(&workspace, Some(&pre.revision_id), Some("wal-1"), 0)
+        .unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "a WAL-linked revision is not the merge's own capture; got {:?}",
+        outcome
+    );
+    assert_eq!(read(ws_dir.join("edit.rs")), "v1\n");
+    assert_eq!(read(ws_dir.join("keep.rs")), "v1\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F03/F08: the completed-merge proof requires the matching revision to cover *every* written path;
+/// a manifest missing one is not proof, so the stale journal is still rolled back.
+#[test]
+fn test_startup_merge_recovery_rolls_back_when_the_matching_revision_misses_a_written_path() {
+    let root = temp_root("f8-merge-missing-written");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("edit.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["edit.rs".to_string(), "never-created.rs".to_string()],
+            removed_files: Vec::new(),
+        })
+        .unwrap();
+    fs::write(ws_dir.join("edit.rs"), "half-merged\n").unwrap();
+    store
+        .capture_revision(&workspace, Some(&pre.revision_id), None, 0)
+        .unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "a manifest missing a written path is not proof of completion; got {:?}",
+        outcome
+    );
+    assert_eq!(read(ws_dir.join("edit.rs")), "v1\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: a matching merged manifest is not proof on its own. A post-merge gate rejection with
+/// `revert_on_verify_failure == false` keeps the merged revision M in the store while the user puts
+/// the workspace back by hand; a later merge (same content-addressed pre-merge revision) then
+/// crashes half-applied. Recovery must roll the half-merged workspace back instead of trusting M
+/// and clearing the journal, which would strand the workspace in a state no startup can repair.
+#[test]
+fn test_startup_merge_recovery_rolls_back_a_half_merged_workspace_despite_a_matching_merged_manifest(
+) {
+    let root = temp_root("f8-merge-half-merged-with-matching-manifest");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("edit.rs"), "v1\n").unwrap();
+    fs::write(ws_dir.join("keep.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    let intent = || kroma_core::revision::MergeIntent {
+        version: 1,
+        pre_merge_revision: pre.revision_id.clone(),
+        created_at_ms: 0,
+        written_files: vec!["edit.rs".to_string()],
+        removed_files: vec!["keep.rs".to_string()],
+    };
+
+    // A first merge lands fully and captures the merged manifest M (unlinked, parented on `pre`),
+    // which the post-merge gate rejection deliberately keeps in the store.
+    store.write_merge_intent(&intent()).unwrap();
+    fs::write(ws_dir.join("edit.rs"), "merged\n").unwrap();
+    fs::remove_file(ws_dir.join("keep.rs")).unwrap();
+    store
+        .capture_revision(&workspace, Some(&pre.revision_id), None, 0)
+        .unwrap();
+
+    // The user then reverts the workspace to S0 by hand.
+    fs::write(ws_dir.join("edit.rs"), "v1\n").unwrap();
+    fs::write(ws_dir.join("keep.rs"), "v1\n").unwrap();
+
+    // A second merge (same content-addressed pre-merge revision) writes a fresh journal and crashes
+    // halfway, leaving `edit.rs` half-written.
+    store.write_merge_intent(&intent()).unwrap();
+    fs::write(ws_dir.join("edit.rs"), "half-merged\n").unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "a half-merged workspace must be rolled back, not trusted from a stale manifest; got {:?}",
+        outcome
+    );
+    assert_eq!(read(ws_dir.join("edit.rs")), "v1\n");
+    assert_eq!(read(ws_dir.join("keep.rs")), "v1\n");
+    assert!(store.pending_merge_intent().unwrap().is_none());
+    assert!(store.pending_restore().unwrap().is_none());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: a deletions-only merge records `written_files == []`, so the "every written path is tracked"
+/// proof is vacuously true and matches any unlinked revision with the same parent. The removed path
+/// must actually be absent for the merge to count as landed.
+#[test]
+fn test_startup_merge_recovery_rolls_back_a_deletions_only_merge_whose_removed_path_is_back() {
+    let root = temp_root("f8-merge-deletions-only");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("gone.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    let intent = || kroma_core::revision::MergeIntent {
+        version: 1,
+        pre_merge_revision: pre.revision_id.clone(),
+        created_at_ms: 0,
+        written_files: Vec::new(),
+        removed_files: vec!["gone.rs".to_string()],
+    };
+
+    // The first merge deleted `gone.rs` and captured its merged manifest (no tracked files).
+    store.write_merge_intent(&intent()).unwrap();
+    fs::remove_file(ws_dir.join("gone.rs")).unwrap();
+    store
+        .capture_revision(&workspace, Some(&pre.revision_id), None, 0)
+        .unwrap();
+
+    // The user restores `gone.rs` by hand, then a second merge crashes before deleting it again.
+    fs::write(ws_dir.join("gone.rs"), "user-restored\n").unwrap();
+    store.write_merge_intent(&intent()).unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "a deletions-only merge is not landed while its removed path is present; got {:?}",
+        outcome
+    );
+    assert_eq!(read(ws_dir.join("gone.rs")), "v1\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: a merge that replaced a directory with a file is rolled back by removing the file and
+/// restoring the directory's children. If the user parks a symlink on the directory path, the
+/// non-forced removal is a silent no-op and the forced write would hit `SymlinkBlocked` after the
+/// journal was persisted, wedging every startup. Recovery must fail with an actionable
+/// `RecoveryRequired` (path + reason) instead of looping on the obstruction.
+#[cfg(unix)]
+#[test]
+fn test_startup_merge_recovery_reports_recovery_required_when_a_symlink_blocks_a_restored_directory(
+) {
+    let root = temp_root("f8-merge-symlink-blocks-dir-restore");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(ws_dir.join("p")).unwrap();
+    fs::write(ws_dir.join("p").join("y"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["p".to_string()],
+            removed_files: vec!["p/y".to_string()],
+        })
+        .unwrap();
+    // The merge replaced the directory `p` with the file `p`, then crashed.
+    fs::remove_file(ws_dir.join("p").join("y")).unwrap();
+    fs::remove_dir(ws_dir.join("p")).unwrap();
+    fs::write(ws_dir.join("p"), "merged\n").unwrap();
+    // The user then parks a symlink on `p` before recovery.
+    fs::remove_file(ws_dir.join("p")).unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, ws_dir.join("p")).unwrap();
+
+    let err = store
+        .recover_pending_merge(&workspace)
+        .expect_err("a symlink blocking the restored directory must be an actionable failure");
+    match err {
+        kroma_core::revision::RevisionError::RecoveryRequired { reason, .. } => {
+            assert!(
+                reason.contains("'p'"),
+                "reason must name the blocking path: {}",
+                reason
+            );
+        }
+        other => panic!("expected RecoveryRequired, got {:?}", other),
+    }
+    assert!(
+        store.pending_merge_intent().unwrap().is_some(),
+        "the merge journal must survive so recovery can be retried"
+    );
+    assert!(
+        store.pending_restore().unwrap().is_none(),
+        "no restore intent may be persisted for a rollback that cannot be applied"
+    );
+
+    // Once the user removes the symlink, the same recovery succeeds.
+    fs::remove_file(ws_dir.join("p")).unwrap();
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "expected a clean rollback after the obstruction is removed, got {:?}",
+        outcome
+    );
+    assert_eq!(read(ws_dir.join("p").join("y")), "v1\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: a merge that *modified* a tracked file records a `write` operation. If the user replaces
+/// that file with a directory before the interrupted merge is rolled back, the forced write would
+/// recursively delete the directory — external work the merge never created. Recovery must refuse
+/// with an actionable `RecoveryRequired` and leave the directory and its contents intact.
+#[test]
+fn test_startup_merge_recovery_refuses_to_delete_a_user_directory_on_a_modified_write_path() {
+    let root = temp_root("f8-merge-write-path-user-directory");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("edit.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["edit.rs".to_string()],
+            removed_files: Vec::new(),
+        })
+        .unwrap();
+    // The merge half-wrote `edit.rs`, then the user replaced it with their own directory.
+    fs::remove_file(ws_dir.join("edit.rs")).unwrap();
+    fs::create_dir(ws_dir.join("edit.rs")).unwrap();
+    fs::write(ws_dir.join("edit.rs").join("user.txt"), "mine\n").unwrap();
+
+    let err = store
+        .recover_pending_merge(&workspace)
+        .expect_err("a user directory on a modified write path must be an actionable failure");
+    match err {
+        kroma_core::revision::RevisionError::RecoveryRequired { reason, .. } => {
+            assert!(
+                reason.contains("'edit.rs'"),
+                "reason must name the blocking path: {}",
+                reason
+            );
+        }
+        other => panic!("expected RecoveryRequired, got {:?}", other),
+    }
+    assert!(
+        ws_dir.join("edit.rs").is_dir(),
+        "a user directory on a modified write path must not be recursively deleted"
+    );
+    assert_eq!(read(ws_dir.join("edit.rs").join("user.txt")), "mine\n");
+    assert!(
+        store.pending_restore().unwrap().is_none(),
+        "no restore intent may be persisted for a rollback that cannot be applied"
+    );
+    assert!(
+        store.pending_merge_intent().unwrap().is_some(),
+        "the merge journal must survive so recovery can be retried"
+    );
+
+    // Once the user clears the obstruction, the same recovery succeeds and restores the file.
+    fs::remove_file(ws_dir.join("edit.rs").join("user.txt")).unwrap();
+    fs::remove_dir(ws_dir.join("edit.rs")).unwrap();
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "expected a clean rollback after the obstruction is removed, got {:?}",
+        outcome
+    );
+    assert_eq!(read(ws_dir.join("edit.rs")), "v1\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: a symlink on a non-touched ancestor of a write path makes `open_parent_dir_no_symlink` fail
+/// (`SymlinkBlocked`). Because the rollback journal is persisted before the writes are applied, the
+/// failure would recur on every future startup and wedge recovery. It must be detected up front and
+/// reported as `RecoveryRequired` without persisting a restore intent.
+#[cfg(unix)]
+#[test]
+fn test_startup_merge_recovery_reports_recovery_required_when_a_symlink_blocks_a_modified_write_path(
+) {
+    let root = temp_root("f8-merge-write-path-symlink-ancestor");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(ws_dir.join("p")).unwrap();
+    fs::write(ws_dir.join("p").join("edit.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["p/edit.rs".to_string()],
+            removed_files: Vec::new(),
+        })
+        .unwrap();
+    // The merge half-wrote `p/edit.rs`, then the user replaced the directory `p` with a symlink.
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::remove_file(ws_dir.join("p").join("edit.rs")).unwrap();
+    fs::remove_dir(ws_dir.join("p")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, ws_dir.join("p")).unwrap();
+
+    let err = store
+        .recover_pending_merge(&workspace)
+        .expect_err("a symlink blocking a write path must be an actionable failure");
+    match err {
+        kroma_core::revision::RevisionError::RecoveryRequired { reason, .. } => {
+            assert!(
+                reason.contains("'p/edit.rs'") && reason.contains("'p'"),
+                "reason must name the blocked path and the blocking component: {}",
+                reason
+            );
+        }
+        other => panic!("expected RecoveryRequired, got {:?}", other),
+    }
+    assert!(
+        store.pending_restore().unwrap().is_none(),
+        "the journal must not be persisted for a rollback that cannot be applied"
+    );
+    assert!(
+        store.pending_merge_intent().unwrap().is_some(),
+        "the merge journal must survive so recovery can be retried"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F03: a restore journal written before the per-operation `force` flag existed recorded only the
+/// intent-level force. A forced restore's removal must stay forced; defaulting the missing flag to
+/// `false` would silently no-op on an obstructing symlink while still reporting the path as removed.
+#[cfg(unix)]
+#[test]
+fn test_restore_recovery_forces_a_removal_from_a_journal_without_the_per_operation_force_flag() {
+    let root = temp_root("f3-legacy-remove-force-default");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("keep.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let target = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    // A journal from the previous binary: `force` lived only on the intent, so the `remove`
+    // operation has no per-operation flag.
+    let legacy = serde_json::json!({
+        "version": 1,
+        "target_revision": target.revision_id.as_str(),
+        "parent_revision": null,
+        "created_at_ms": 0,
+        "force": true,
+        "operations": [ { "op": "remove", "path": "merged.rs" } ]
+    });
+    fs::write(store.intent_path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    // The merge-created file was replaced by a user symlink before recovery.
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    create_symlink_file(&elsewhere, ws_dir.join("merged.rs"));
+
+    let result = store.recover_pending_restore(&workspace).unwrap();
+    match result {
+        RestoreResult::Applied { removed_files, .. } => {
+            assert_eq!(removed_files, vec!["merged.rs".to_string()]);
+        }
+        other => panic!("expected Applied, got {:?}", other),
+    }
+    assert!(
+        fs::symlink_metadata(ws_dir.join("merged.rs")).is_err(),
+        "a forced removal from a legacy journal must not degrade to a silent no-op"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F03: the other half of the legacy-journal default. An *unforced* restore (`force == false`) must
+/// keep its removals non-forced: defaulting the absent per-op flag to `true` must not silently
+/// upgrade a no-op removal into a recursive delete of a user directory parked on the managed path.
+#[test]
+fn test_restore_recovery_keeps_a_user_directory_for_a_legacy_unforced_removal() {
+    let root = temp_root("f3-legacy-remove-unforced");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("keep.rs"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let target = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    // A journal from the previous binary: `force` lived only on the intent (here `false`, an
+    // ordinary `--restore-rev`), so the `remove` operation has no per-operation flag.
+    let legacy = serde_json::json!({
+        "version": 1,
+        "target_revision": target.revision_id.as_str(),
+        "parent_revision": null,
+        "created_at_ms": 0,
+        "force": false,
+        "operations": [ { "op": "remove", "path": "merged.rs" } ]
+    });
+    fs::write(store.intent_path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    // The user replaced the merge-created file with their own directory before recovery.
+    fs::create_dir(ws_dir.join("merged.rs")).unwrap();
+    fs::write(ws_dir.join("merged.rs").join("user.txt"), "mine\n").unwrap();
+
+    let result = store.recover_pending_restore(&workspace).unwrap();
+    assert!(
+        matches!(result, RestoreResult::Applied { .. }),
+        "an unforced legacy removal is a no-op, not a failure: {:?}",
+        result
+    );
+    assert!(
+        ws_dir.join("merged.rs").is_dir(),
+        "an unforced legacy removal must not recursively delete a user directory"
+    );
+    assert_eq!(read(ws_dir.join("merged.rs").join("user.txt")), "mine\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- F1 (v1.5.1): session store creation refuses a symlinked leaf ---------------------------
+
+#[cfg(unix)]
+#[test]
+fn test_session_create_refuses_symlinked_session_dir() {
+    let root = temp_root("f1-session-symlink");
+    let real = root.join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = root.join("sessions");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+
+    let err = match SessionJournal::create(&link, &ws) {
+        Ok(_) => panic!("a symlinked session directory must be refused, not chmod-ed through"),
+        Err(e) => e,
+    };
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("not a real directory"),
+        "unexpected error message: {}",
+        msg
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- F2 (v1.5.1): store fallback tolerates symlinked ancestors, refuses symlinked leaf -------
+
+#[cfg(unix)]
+#[test]
+fn test_store_layout_tolerates_symlinked_ancestor_but_refuses_symlinked_leaf() {
+    let root = temp_root("f2-store-symlink");
+    let real = root.join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    // A symlinked *ancestor* (macOS `/var`, Android `/data/data`) must still work: the fallback
+    // creates the store and only constrains the final component.
+    let nested = SnapshotStore::new(link.join("snapshots"));
+    nested
+        .ensure_layout()
+        .expect("a symlinked ancestor must be tolerated");
+    assert!(real.join("snapshots").is_dir());
+
+    // A symlinked *leaf* must be refused rather than chmod-ed through.
+    let leaf = SnapshotStore::new(root.join("link"));
+    let err = leaf
+        .ensure_layout()
+        .expect_err("a symlinked store root must be refused");
+    assert!(
+        format!("{}", err).contains("not a real directory"),
+        "unexpected error: {}",
+        err
+    );
+    let _ = fs::remove_dir_all(&root);
+}

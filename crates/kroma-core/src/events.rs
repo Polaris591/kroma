@@ -336,9 +336,12 @@ impl EventLogger {
         opts.create(true).append(true);
         #[cfg(unix)]
         {
-            opts.mode(0o600);
+            // Open with `O_NOFOLLOW` and `fchmod` the descriptor: a path-based `chmod` would follow
+            // a symlink swapped onto the log path and restrict an arbitrary target instead.
+            opts.mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
             let f = opts.open(log_path)?;
-            let _ = fs::set_permissions(log_path, fs::Permissions::from_mode(0o600));
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
             Ok(f)
         }
         #[cfg(windows)]

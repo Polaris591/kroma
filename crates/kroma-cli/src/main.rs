@@ -8,7 +8,7 @@ use kroma_core::config_file::{ConfigOverrides, ResolvedConfig};
 use kroma_core::env::{AllowAllGate, ExecutionEnv, LocalHostEnv, SharedCompletionGate};
 use kroma_core::events::{ resolve_default_state_dir, EventLogger, EventPayload };
 use kroma_core::prompt::PromptBuilder;
-use kroma_core::revision::{RestoreResult, RevisionId, SnapshotStore};
+use kroma_core::revision::{MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore};
 use kroma_core::session::SessionJournal;
 use kroma_core::workspace::WorkspaceCap;
 use kroma_core::provider::{build_provider, ProviderProtocol, ProviderSettings};
@@ -1109,6 +1109,37 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
         (target, expected, None)
     };
 
+    // F8: an interrupted worktree→parent merge leaves the parent workspace half-updated and a merge
+    // intent journal behind. `--undo` / `--restore-rev` must heal it first: restoring on top of a
+    // half-merged tree (especially with `--force-restore`) would otherwise leave the merge journal
+    // to be replayed on the next normal startup, clobbering the revision the user just restored and
+    // deleting merge-created paths the restored revision legitimately contains.
+    match store.recover_pending_merge(&workspace) {
+        Ok(MergeRecoveryOutcome::NothingPending) => {}
+        Ok(MergeRecoveryOutcome::RolledBack {
+            pre_merge_revision,
+            ..
+        }) => {
+            println!(
+                "recovered an interrupted subagent merge; rolled the workspace back to {}",
+                pre_merge_revision
+            );
+        }
+        Ok(MergeRecoveryOutcome::AlreadyMerged { merged_revision }) => {
+            println!(
+                "cleared a stale subagent merge journal; revision {} had already been merged",
+                merged_revision
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "error: failed to recover an interrupted subagent merge: {}",
+                e
+            );
+            return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
+        }
+    }
+
     // An interrupted restore leaves its intent journal behind. Finishing that restore is the only
     // safe action: applying a *different* target on top of a half-applied tree would compound it.
     let result = match store.pending_restore() {
@@ -1716,6 +1747,37 @@ async fn main() -> ExitCode {
         }
     };
 
+    // F8: a crash midway through a worktree→parent merge leaves a merge intent journal behind and
+    // the parent workspace half-updated. Roll it back to the recorded pre-merge revision before any
+    // new run starts, exactly like the restore-intent pre-check below handles an interrupted
+    // restore.
+    match snapshot_store_for(&state_dir).recover_pending_merge(env.workspace()) {
+        Ok(MergeRecoveryOutcome::NothingPending) => {}
+        Ok(MergeRecoveryOutcome::RolledBack {
+            pre_merge_revision,
+            ..
+        }) => {
+            if !cli.quiet {
+                eprintln!(
+                    "[kroma] recovered an interrupted subagent merge; rolled the workspace back to {}",
+                    pre_merge_revision
+                );
+            }
+        }
+        Ok(MergeRecoveryOutcome::AlreadyMerged { merged_revision }) => {
+            if !cli.quiet {
+                eprintln!(
+                    "[kroma] cleared a stale subagent merge journal; revision {} had already been merged",
+                    merged_revision
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("error: failed to recover an interrupted subagent merge: {}", e);
+            return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
+        }
+    }
+
     // Freeze the workspace orientation block (AGENTS.md/CLAUDE.md + sorted top-level entries)
     // into the static system prefix before `env` is moved into the tool runtime.
     let mut prompt_builder = PromptBuilder::default().with_workspace_context(env.workspace());
@@ -2311,6 +2373,128 @@ mod tests {
             undo
         );
         assert_eq!(fs::read_to_string(ws_dir.join("f.txt")).unwrap(), "v1\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A temp workspace + session WAL with two recorded revisions `r0` (S0) and `r1` (S1), plus a
+    /// merge journal parented on `r1` and a half-applied merge (`edit.rs` half-written). `--undo`
+    /// and `--restore-rev r0` both target `r0` with `r1` as the expected revision.
+    fn pending_merge_revision_management_fixture(
+        tag: &str,
+    ) -> (PathBuf, PathBuf, SnapshotStore, RevisionId, PathBuf) {
+        use kroma_core::messages::{TranscriptItem, UserMessage};
+        use std::fs;
+
+        let root = std::env::temp_dir().join(format!("kroma-cli-{}-{}", tag, uuid::Uuid::new_v4()));
+        let ws_dir = root.join("ws");
+        fs::create_dir_all(&ws_dir).unwrap();
+        fs::write(ws_dir.join("edit.rs"), "v1\n").unwrap();
+        fs::write(ws_dir.join("keep.rs"), "v1\n").unwrap();
+
+        let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+        let store = SnapshotStore::new(root.join("snapshots"));
+        let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
+        journal
+            .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+            .unwrap();
+        let r0 = store.capture_revision(&workspace, None, None, 0).unwrap();
+        journal
+            .record_revision_capture(0, r0.revision_id.as_str(), None, r0.changed_paths.clone(), r0.tracked_files.len())
+            .unwrap();
+
+        fs::write(ws_dir.join("edit.rs"), "v2\n").unwrap();
+        journal
+            .append_item(1, TranscriptItem::User(UserMessage { content: "turn 1".into() }))
+            .unwrap();
+        let r1 = store
+            .capture_revision(&workspace, Some(&r0.revision_id), None, 1)
+            .unwrap();
+        journal
+            .record_revision_capture(1, r1.revision_id.as_str(), Some(r0.revision_id.as_str()), r1.changed_paths.clone(), r1.tracked_files.len())
+            .unwrap();
+
+        // A merge parented on r1 was interrupted halfway: its journal is on disk and `edit.rs` is
+        // half-written.
+        store
+            .write_merge_intent(&kroma_core::revision::MergeIntent {
+                version: 1,
+                pre_merge_revision: r1.revision_id.clone(),
+                created_at_ms: 0,
+                written_files: vec!["edit.rs".to_string()],
+                removed_files: vec!["keep.rs".to_string()],
+            })
+            .unwrap();
+        fs::write(ws_dir.join("edit.rs"), "half-merged\n").unwrap();
+
+        let session_path = journal.path().to_path_buf();
+        (root, ws_dir, store, r0.revision_id, session_path)
+    }
+
+    /// F8: `--restore-rev` must run the merge pre-check before restoring, so a half-merged workspace
+    /// with a pending merge journal is healed (and the journal cleared) instead of making the
+    /// restore conflict — or, with `--force-restore`, leaving the journal to be replayed later.
+    #[test]
+    fn test_restore_rev_recovers_a_pending_merge_before_restoring() {
+        use std::fs;
+
+        let (root, ws_dir, store, r0, session_path) =
+            pending_merge_revision_management_fixture("restore-rev-merge-precheck");
+        let cli = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            ws_dir.to_string_lossy().into_owned(),
+            "--resume".into(),
+            session_path.to_string_lossy().into_owned(),
+            "--restore-rev".into(),
+            r0.as_str().to_string(),
+        ])
+        .unwrap();
+
+        let _ = run_revision_management(&cli, &root);
+
+        assert!(
+            store.pending_merge_intent().unwrap().is_none(),
+            "--restore-rev must clear the merge journal before restoring"
+        );
+        assert_eq!(
+            fs::read_to_string(ws_dir.join("edit.rs")).unwrap(),
+            "v1\n",
+            "the half-merged workspace must be healed before the restore"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// F8: `--undo` shares the same pre-check call site, so a half-merged workspace is healed before
+    /// the undo instead of making the undo conflict on the half-merge.
+    #[test]
+    fn test_undo_recovers_a_pending_merge_before_restoring() {
+        use std::fs;
+
+        let (root, ws_dir, store, _r0, session_path) =
+            pending_merge_revision_management_fixture("undo-merge-precheck");
+        let cli = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            ws_dir.to_string_lossy().into_owned(),
+            "--resume".into(),
+            session_path.to_string_lossy().into_owned(),
+            "--undo".into(),
+        ])
+        .unwrap();
+
+        let _ = run_revision_management(&cli, &root);
+
+        assert!(
+            store.pending_merge_intent().unwrap().is_none(),
+            "--undo must clear the merge journal before restoring"
+        );
+        assert_eq!(
+            fs::read_to_string(ws_dir.join("edit.rs")).unwrap(),
+            "v1\n",
+            "the half-merged workspace must be healed before the undo"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

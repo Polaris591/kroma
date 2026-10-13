@@ -292,3 +292,33 @@ fn test_event_logger_0600_permissions_and_resilient_degradation() {
 
     let _ = fs::remove_dir_all(&tmp_dir);
 }
+
+/// F1/F2: the diagnostic log is a state file, so its `0600` restriction is applied with `fchmod`
+/// on an `O_NOFOLLOW` descriptor. A symlink parked on the log path must degrade logging (refuse to
+/// open) instead of following the link and chmod-ing the link's target.
+#[cfg(unix)]
+#[test]
+fn test_event_logger_refuses_a_symlinked_log_path_instead_of_chmod_ing_its_target() {
+    let tmp_dir = std::env::temp_dir().join(format!("kroma-test-events-symlink-{}", Uuid::new_v4()));
+    fs::create_dir_all(&tmp_dir).unwrap();
+    let victim = tmp_dir.join("victim.txt");
+    fs::write(&victim, b"keep").unwrap();
+    fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let run_id = RunId::new();
+    let log_path = tmp_dir.join(format!("{}.jsonl", run_id));
+    std::os::unix::fs::symlink(&victim, &log_path).unwrap();
+
+    let logger = EventLogger::new(run_id, Some(tmp_dir.clone()), false).unwrap();
+    assert!(
+        logger.is_degraded(),
+        "a symlinked log path must degrade logging rather than follow the link"
+    );
+    assert_eq!(
+        fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644,
+        "the symlink target's permissions must be left untouched"
+    );
+    assert_eq!(fs::read(&victim).unwrap(), b"keep");
+    let _ = fs::remove_dir_all(&tmp_dir);
+}

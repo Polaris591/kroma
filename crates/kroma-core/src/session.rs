@@ -13,12 +13,10 @@ use crate::prompt::sha256_hex64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::fs::DirBuilder;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -195,12 +193,11 @@ impl SessionJournal {
     ) -> Result<Self, SessionError> {
         #[cfg(unix)]
         {
-            DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(session_dir.as_ref())?;
-            // F-08: the session store holds structured transcripts, so keep it user-private (0700).
-            fs::set_permissions(session_dir.as_ref(), fs::Permissions::from_mode(0o700))?;
+            // F1: create/lock the session store with the same dirfd walk as the snapshot store.
+            // Every component is created with `mkdirat` on the verified parent and re-opened with
+            // `O_NOFOLLOW`, and only the verified final descriptor is `fchmod`-ed — never a
+            // path-based `chmod` that would follow a symlinked leaf.
+            crate::revision::ensure_private_dir_io(session_dir.as_ref())?;
         }
         #[cfg(windows)]
         {

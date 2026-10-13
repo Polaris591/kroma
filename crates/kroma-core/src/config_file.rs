@@ -270,7 +270,7 @@ impl KromaConfigFile {
             .ok_or_else(|| format!("invalid configuration path {}", path.display()))?;
         fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
-        restrict_dir_permissions(dir);
+        restrict_dir_permissions(dir)?;
         write_file_atomically(&path, self.to_toml_string().as_bytes())?;
         Ok(path)
     }
@@ -632,7 +632,7 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     {
         let mut file = fs::File::create(&tmp)
             .map_err(|e| format!("cannot create {}: {}", tmp.display(), e))?;
-        restrict_file_permissions(&tmp);
+        restrict_file_permissions(&tmp)?;
         file.write_all(bytes)
             .map_err(|e| format!("cannot write {}: {}", tmp.display(), e))?;
         file.sync_all()
@@ -642,27 +642,51 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = fs::remove_file(&tmp);
         format!("cannot replace {}: {}", path.display(), e)
     })?;
-    restrict_file_permissions(path);
+    restrict_file_permissions(path)?;
     Ok(())
 }
 
+/// Restrict a state file to `0600` without ever `chmod`-ing it by path.
+///
+/// `fs::set_permissions` is a `chmod` that follows symlinks, so a same-user attacker who swaps the
+/// final component between the write and the `chmod` could redirect it to an arbitrary target. Open
+/// the leaf with `O_NOFOLLOW` (refusing a symlink with `ELOOP`) and `fchmod` the resulting
+/// descriptor, exactly like the snapshot and session stores do.
 #[cfg(unix)]
-fn restrict_file_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+fn restrict_file_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| format!("cannot open {} to restrict permissions: {}", path.display(), e))?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("cannot restrict permissions on {}: {}", path.display(), e))
 }
 
 #[cfg(not(unix))]
-fn restrict_file_permissions(_path: &Path) {}
+fn restrict_file_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
 
+/// Directory counterpart of [`restrict_file_permissions`]: open with `O_NOFOLLOW | O_DIRECTORY` and
+/// `fchmod`, so a symlinked final component is refused rather than traversed.
 #[cfg(unix)]
-fn restrict_dir_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+fn restrict_dir_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| format!("cannot open {} to restrict permissions: {}", path.display(), e))?;
+    dir.set_permissions(fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("cannot restrict permissions on {}: {}", path.display(), e))
 }
 
 #[cfg(not(unix))]
-fn restrict_dir_permissions(_path: &Path) {}
+fn restrict_dir_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------------------------
 // Minimal TOML subset parser
@@ -870,4 +894,85 @@ fn toml_quote(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kroma-config-{}-{}", std::process::id(), tag));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_restrict_file_permissions_refuses_a_symlinked_leaf() {
+        let dir = scratch("file-symlink");
+        let victim = dir.join("victim");
+        fs::write(&victim, b"secret").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.join("config.toml");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        restrict_file_permissions(&link)
+            .expect_err("a symlinked config leaf must be refused, not chmod-ed through");
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "a refused chmod must leave the symlink target's own permissions untouched"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_restrict_file_permissions_sets_0600_on_a_regular_file() {
+        let dir = scratch("file-regular");
+        let file = dir.join("config.toml");
+        fs::write(&file, b"x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+
+        restrict_file_permissions(&file).unwrap();
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_restrict_dir_permissions_refuses_a_symlinked_leaf() {
+        let dir = scratch("dir-symlink");
+        let victim = dir.join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.join("kroma");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        restrict_dir_permissions(&link)
+            .expect_err("a symlinked config directory must be refused, not chmod-ed through");
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "a refused chmod must leave the symlink target's own permissions untouched"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_restrict_dir_permissions_sets_0700_on_a_real_directory() {
+        let dir = scratch("dir-real");
+        let sub = dir.join("kroma");
+        fs::create_dir(&sub).unwrap();
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+
+        restrict_dir_permissions(&sub).unwrap();
+        assert_eq!(
+            fs::metadata(&sub).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

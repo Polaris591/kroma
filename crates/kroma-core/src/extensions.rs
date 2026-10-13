@@ -22,7 +22,7 @@ use crate::workspace::{WorkspaceCap, WorkspaceError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1005,14 +1005,26 @@ impl CommandHookRunner {
         })?;
         let proc_group = crate::process_group::ChildProcessGroup::from_std_child(&child);
 
+        // Hard stop shared by every helper thread (the stdin writer and the stdout/stderr
+        // readers). A hook may `setsid()`/double-fork a grandchild that escapes the process-group
+        // sweep while still holding one of our pipe ends open, so a helper must stop by this
+        // deadline even though the peer never closes its end, or the thread and its pipe fd would
+        // leak on every call (F4).
+        let pipe_deadline = Instant::now() + self.timeout + HOOK_KILL_GRACE + HOOK_DRAIN_DEADLINE;
+
         // Feed the JSON context on stdin from a helper thread so a hook that ignores stdin cannot
-        // deadlock the parent on a full pipe.
-        if let Some(mut stdin) = child.stdin.take() {
+        // deadlock the parent on a full pipe. The write is bounded by `pipe_deadline` too: a hook
+        // (or an escaped grandchild) that never drains stdin would otherwise block `write_all`
+        // forever once the payload exceeds the pipe buffer, leaking the thread and its fd.
+        if let Some(stdin) = child.stdin.take() {
             let payload = ctx.to_json();
-            std::thread::spawn(move || {
-                let _ = stdin.write_all(payload.as_bytes());
-                let _ = stdin.flush();
-            });
+            let write_deadline = pipe_deadline;
+            std::thread::Builder::new()
+                .name("kroma-hook-stdin".to_string())
+                .spawn(move || {
+                    write_pipe_bounded(stdin, payload.as_bytes(), write_deadline);
+                })
+                .expect("failed to spawn the hook stdin writer thread");
         }
 
         // Start bounded readers *before* waiting on the child: a hook that writes more than an OS
@@ -1022,10 +1034,11 @@ impl CommandHookRunner {
         match child.stdout.take() {
             Some(out) => {
                 std::thread::spawn(move || {
-                    let mut buf = Vec::new();
-                    let _ = out
-                        .take((HOOK_OUTPUT_LIMIT_BYTES + 1) as u64)
-                        .read_to_end(&mut buf);
+                    let buf = read_pipe_bounded(
+                        out,
+                        (HOOK_OUTPUT_LIMIT_BYTES + 1) as u64,
+                        pipe_deadline,
+                    );
                     let _ = out_tx.send(buf);
                 });
             }
@@ -1036,10 +1049,11 @@ impl CommandHookRunner {
         match child.stderr.take() {
             Some(err) => {
                 std::thread::spawn(move || {
-                    let mut buf = Vec::new();
-                    let _ = err
-                        .take((HOOK_OUTPUT_LIMIT_BYTES + 1) as u64)
-                        .read_to_end(&mut buf);
+                    let buf = read_pipe_bounded(
+                        err,
+                        (HOOK_OUTPUT_LIMIT_BYTES + 1) as u64,
+                        pipe_deadline,
+                    );
                     let _ = err_tx.send(buf);
                 });
             }
@@ -1085,9 +1099,16 @@ impl CommandHookRunner {
 
         let _ = child.wait();
 
-        // Bounded drain: `run` may never block forever, even if a grandchild survived the sweep.
-        let stdout_bytes = out_rx.recv_timeout(HOOK_DRAIN_DEADLINE).unwrap_or_default();
-        let stderr_bytes = err_rx.recv_timeout(HOOK_DRAIN_DEADLINE).unwrap_or_default();
+        // Bounded drain: wait for each reader up to its own hard stop *plus* one drain window, so
+        // output the reader has already collected is not discarded. The previous fixed 200 ms window
+        // gave up before a reader that is only released at `pipe_deadline` (a hook whose escaped
+        // grandchild still holds the pipe) could send. `run` still can never block forever.
+        let stdout_bytes = out_rx
+            .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()) + HOOK_DRAIN_DEADLINE)
+            .unwrap_or_default();
+        let stderr_bytes = err_rx
+            .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()) + HOOK_DRAIN_DEADLINE)
+            .unwrap_or_default();
         let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
         let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
@@ -1104,6 +1125,134 @@ impl CommandHookRunner {
             stdout: message[..cut].to_string(),
         })
     }
+}
+
+/// Read a hook pipe into memory, capped at `limit` bytes and never blocking past `deadline`.
+///
+/// A hook can `setsid()`/double-fork a grandchild that escapes the process-group sweep while still
+/// holding the pipe write end open, so a blocking `read_to_end` would never see EOF and the reader
+/// thread (and the pipe fd) would leak on every call (F4). On Unix the read end is switched to
+/// non-blocking and drained with `poll(2)` bounded by `deadline`, so the thread always exits.
+#[cfg(unix)]
+fn read_pipe_bounded<R>(mut pipe: R, limit: u64, deadline: Instant) -> Vec<u8>
+where
+    R: std::io::Read + std::os::unix::io::AsRawFd,
+{
+    let fd = pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while (buf.len() as u64) < limit {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if rc == 0 {
+            break; // deadline elapsed with no data
+        }
+        match pipe.read(&mut chunk) {
+            Ok(0) => break, // EOF: every write end closed
+            Ok(n) => {
+                let want = (limit as usize).saturating_sub(buf.len());
+                buf.extend_from_slice(&chunk[..n.min(want)]);
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    buf
+}
+
+/// Non-Unix fallback: the Windows Job Object kills the whole process tree on close, so a blocking
+/// read cannot be held open by an escaped grandchild the way `setsid` allows on Unix.
+#[cfg(not(unix))]
+fn read_pipe_bounded<R>(pipe: R, limit: u64, _deadline: Instant) -> Vec<u8>
+where
+    R: std::io::Read,
+{
+    let mut buf = Vec::new();
+    let _ = pipe.take(limit).read_to_end(&mut buf);
+    buf
+}
+
+/// Write a hook's stdin without blocking past `deadline` (Unix).
+///
+/// A hook that `setsid()`s a grandchild inheriting the read end (or simply never reads) would
+/// otherwise block `write_all` forever once the payload exceeds the pipe buffer, leaking the helper
+/// thread and its pipe fd on every call (F4). The write end is switched to non-blocking and drained
+/// with `poll(2)` bounded by `deadline`; the pipe is dropped (closed) when the deadline elapses or
+/// the reader goes away.
+#[cfg(unix)]
+fn write_pipe_bounded<W>(mut pipe: W, payload: &[u8], deadline: Instant)
+where
+    W: std::io::Write + std::os::unix::io::AsRawFd,
+{
+    let fd = pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    }
+    let mut written = 0usize;
+    while written < payload.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if rc == 0 {
+            break; // deadline elapsed with the pipe still full
+        }
+        match pipe.write(&payload[written..]) {
+            Ok(0) => break,
+            Ok(n) => written += n,
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break, // EPIPE: every read end closed
+        }
+    }
+    let _ = pipe.flush();
+}
+
+/// Non-Unix fallback: the Windows Job Object kills the whole process tree on close, so the pipe
+/// read end cannot be held open by an escaped grandchild the way `setsid` allows on Unix.
+#[cfg(not(unix))]
+fn write_pipe_bounded<W>(mut pipe: W, payload: &[u8], _deadline: Instant)
+where
+    W: std::io::Write,
+{
+    let _ = pipe.write_all(payload);
+    let _ = pipe.flush();
 }
 
 /// `PolicyHook` backed by an external command (fail-closed).
@@ -1880,4 +2029,50 @@ pub fn is_subtree_context_tool(tool_name: &str) -> bool {
 /// Error code used when a path is not valid for subtree traversal.
 pub fn subtree_path_error(err: &WorkspaceError) -> ErrorCode {
     err.error_code()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{read_pipe_bounded, write_pipe_bounded};
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    /// F4: a hook can `setsid()` a grandchild that inherits the pipe and never closes it. The
+    /// reader must therefore return at its deadline instead of blocking (and leaking the thread and
+    /// its fd) forever.
+    #[test]
+    fn read_pipe_bounded_returns_by_the_deadline_without_eof() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"hello").unwrap();
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let start = Instant::now();
+        let buf = read_pipe_bounded(reader, 4096, deadline);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the reader must stop at its deadline, not block on a held-open pipe"
+        );
+        assert_eq!(buf, b"hello");
+        // Keep the writer alive until after the read so the pipe never reports EOF.
+        drop(writer);
+    }
+
+    /// F4: the stdin writer is the mirror image. A hook (or an escaped grandchild) that never
+    /// drains stdin would otherwise block `write_all` forever once the payload exceeds the pipe
+    /// buffer, leaking the writer thread and its fd on every call.
+    #[test]
+    fn write_pipe_bounded_returns_by_the_deadline_when_the_reader_stalls() {
+        let (mut reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let start = Instant::now();
+        // 4 MiB is far larger than any socket buffer, so a blocking `write_all` would never return.
+        let payload = vec![b'x'; 4 * 1024 * 1024];
+        write_pipe_bounded(writer, &payload, deadline);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the writer must stop at its deadline, not block on a full pipe"
+        );
+        // The reader was never drained, so the write could only have been partial.
+        let mut probe = [0u8; 4096];
+        assert!(reader.read(&mut probe).unwrap() > 0);
+    }
 }
