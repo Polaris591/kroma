@@ -95,10 +95,36 @@ async function handleSelfUpgrade(args) {
   process.exit(0);
 }
 
+
+function downloadBinaryIfNeeded(destPath, key) {
+  if (fs.existsSync(destPath)) {
+    return true;
+  }
+  console.log(`[kroma] Fetching native pre-built binary for ${key}...`);
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  const tmpTarball = path.join(path.dirname(destPath), "kroma-bundle.tgz");
+  const tarRes = spawnSync("curl", ["-fSL", "--retry", "2", "-o", tmpTarball, MIRROR_TARBALL_URL], { stdio: "inherit" });
+  if (tarRes.status !== 0) {
+    return false;
+  }
+  const subPath = `package/bin/vendor/${key}/${path.basename(destPath)}`;
+  const untarRes = spawnSync("tar", ["-xzf", tmpTarball, "-C", path.dirname(destPath), "--strip-components=4", subPath], { stdio: "inherit" });
+  try { fs.unlinkSync(tmpTarball); } catch (_) {}
+  if (untarRes.status === 0 && fs.existsSync(destPath)) {
+    try { fs.chmodSync(destPath, 0o755); } catch (_) {}
+    return true;
+  }
+  return false;
+}
+
 function resolveBinaryPath() {
   const localBinName = process.platform === "win32" ? "kroma.exe" : "kroma";
   const bundled = path.join(__dirname, "vendor", `${process.platform}-${process.arch}`, localBinName);
   if (fs.existsSync(bundled)) {
+    return bundled;
+  }
+  const key = `${process.platform}-${process.arch}`;
+  if (downloadBinaryIfNeeded(bundled, key)) {
     return bundled;
   }
   console.error(
