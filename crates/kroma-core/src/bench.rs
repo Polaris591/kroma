@@ -23,6 +23,7 @@
 //! synthetic numbers as evidence that a mechanism improves real task resolution.
 
 use crate::budget::BudgetConfig;
+use crate::workspace::WorkspaceCap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -52,15 +53,25 @@ pub struct BenchTask {
 
 impl BenchTask {
     /// Evaluate the task's post-conditions against a materialized workspace.
+    ///
+    /// Every path is re-validated with [`WorkspaceCap::validate_relative_components`] before it is
+    /// joined, so a task whose post-conditions escape the workspace (absolute path, `..`, drive
+    /// prefix, ADS, reserved device name) can never read outside it.
     pub fn is_resolved(&self, workspace: &Path) -> bool {
         for (path, needle) in &self.expect_contains {
-            match std::fs::read_to_string(workspace.join(path)) {
+            let Ok(rel) = WorkspaceCap::validate_relative_components(path) else {
+                return false;
+            };
+            match std::fs::read_to_string(workspace.join(rel)) {
                 Ok(text) if text.contains(needle.as_str()) => {}
                 _ => return false,
             }
         }
         for path in &self.expect_absent {
-            if workspace.join(path).exists() {
+            let Ok(rel) = WorkspaceCap::validate_relative_components(path) else {
+                return false;
+            };
+            if workspace.join(rel).exists() {
                 return false;
             }
         }
@@ -413,11 +424,48 @@ pub fn default_strategy_pair() -> Vec<BenchStrategyConfig> {
 }
 
 /// Load a benchmark suite from a JSON file.
+///
+/// Every workspace-relative path in `files`, `expect_contains` and `expect_absent` is validated up
+/// front (task id + field name in the error) so a hostile suite cannot make an executor write or
+/// read outside the scratch workspace. Failing here — before any arm runs — beats discovering the
+/// escape at the first `fs::write`/`read_to_string`.
 pub fn load_suite(path: &Path) -> Result<Vec<BenchTask>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read benchmark suite {}: {}", path.display(), e))?;
-    serde_json::from_str(&text)
-        .map_err(|e| format!("invalid benchmark suite {}: {}", path.display(), e))
+    let tasks: Vec<BenchTask> = serde_json::from_str(&text)
+        .map_err(|e| format!("invalid benchmark suite {}: {}", path.display(), e))?;
+    for task in &tasks {
+        validate_task_paths(task)
+            .map_err(|e| format!("invalid benchmark suite {}: {}", path.display(), e))?;
+    }
+    Ok(tasks)
+}
+
+/// Validate every workspace-relative path a [`BenchTask`] names, rejecting absolute paths, parent
+/// traversal, Windows drive/UNC prefixes, reserved device names and NTFS Alternate Data Streams.
+fn validate_task_paths(task: &BenchTask) -> Result<(), String> {
+    for path in task.files.keys() {
+        WorkspaceCap::validate_relative_components(path).map_err(|e| {
+            format!("task '{}': invalid path in 'files' '{}': {}", task.id, path, e)
+        })?;
+    }
+    for (path, _) in &task.expect_contains {
+        WorkspaceCap::validate_relative_components(path).map_err(|e| {
+            format!(
+                "task '{}': invalid path in 'expect_contains' '{}': {}",
+                task.id, path, e
+            )
+        })?;
+    }
+    for path in &task.expect_absent {
+        WorkspaceCap::validate_relative_components(path).map_err(|e| {
+            format!(
+                "task '{}': invalid path in 'expect_absent' '{}': {}",
+                task.id, path, e
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Run a paired, budget-locked comparison of `strategies` over `tasks`.
@@ -514,6 +562,101 @@ mod tests {
         );
         assert_eq!(report.executor, SYNTHETIC_EXECUTOR_LABEL);
         assert!(report.render().contains("synthetic executor"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hostile suite must not be able to smuggle a workspace-escaping path through any of the
+    /// three path-bearing fields; `load_suite` rejects it up front and names the task + field.
+    #[test]
+    fn test_load_suite_rejects_escaping_paths_in_every_field() {
+        let dir = std::env::temp_dir().join(format!("kroma-bench-suite-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cases: [(&str, &str); 6] = [
+            ("files", r#"[{"id":"t1","prompt":"p","files":{"../escape.txt":"x"}}]"#),
+            ("files", r#"[{"id":"t1","prompt":"p","files":{"/tmp/abs.txt":"x"}}]"#),
+            (
+                "expect_contains",
+                r#"[{"id":"t2","prompt":"p","expect_contains":[["../escape.txt","x"]]}]"#,
+            ),
+            (
+                "expect_contains",
+                r#"[{"id":"t2","prompt":"p","expect_contains":[["/tmp/abs.txt","x"]]}]"#,
+            ),
+            ("expect_absent", r#"[{"id":"t3","prompt":"p","expect_absent":["../escape.txt"]}]"#),
+            ("expect_absent", r#"[{"id":"t3","prompt":"p","expect_absent":["/tmp/abs.txt"]}]"#),
+        ];
+        for (index, (field, body)) in cases.iter().enumerate() {
+            let path = dir.join(format!("suite-{}.json", index));
+            std::fs::write(&path, body).unwrap();
+            let err = load_suite(&path).expect_err("an escaping path must be rejected");
+            assert!(err.contains("task '"), "error must name the task: {}", err);
+            assert!(err.contains(field), "error must name the field: {}", err);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A legal suite still loads, materializes into its per-arm scratch directory and resolves.
+    #[test]
+    fn test_load_suite_accepts_legal_paths_and_synthetic_arm_materializes_and_resolves() {
+        let dir = std::env::temp_dir().join(format!("kroma-bench-legal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let suite_path = dir.join("suite.json");
+        std::fs::write(
+            &suite_path,
+            r#"[{"id":"fixable-legal","prompt":"p","files":{"src/mod.rs":"fn compute() -> i32 { 0 }\n"},"expect_contains":[["src/mod.rs","fixed"]],"expect_absent":["gone.txt"]}]"#,
+        )
+        .unwrap();
+        let tasks = load_suite(&suite_path).expect("a legal suite must load");
+        assert_eq!(tasks.len(), 1);
+        let workspace_root = dir.join("scratch");
+        let report = run_paired_benchmark(
+            "legal",
+            &tasks,
+            &[BenchStrategyConfig::single_agent()],
+            8_000,
+            &workspace_root,
+            &SyntheticBenchExecutor,
+        );
+        assert_eq!(report.results.len(), 1);
+        assert!(
+            report.results[0].resolved,
+            "the synthetic fixable task must resolve"
+        );
+        assert!(
+            workspace_root
+                .join("single_agent")
+                .join("fixable-legal")
+                .join("src/mod.rs")
+                .exists(),
+            "the legal task file must be materialized inside the arm scratch directory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `is_resolved` is defense in depth: even a task built in code (bypassing `load_suite`) cannot
+    /// use an escaping post-condition path to read outside the workspace.
+    #[test]
+    fn test_is_resolved_rejects_escaping_post_condition_paths() {
+        let dir = std::env::temp_dir().join(format!("kroma-bench-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Plant a file outside the workspace that an escaping `expect_contains` would otherwise read.
+        std::fs::write(dir.join("escape.txt"), "needle").unwrap();
+        let workspace = dir.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let task = BenchTask {
+            id: "hostile".to_string(),
+            prompt: "p".to_string(),
+            files: std::collections::BTreeMap::new(),
+            expect_contains: vec![("../escape.txt".to_string(), "needle".to_string())],
+            expect_absent: vec!["/tmp/kroma-should-not-exist".to_string()],
+            regression_guard: false,
+        };
+        assert!(
+            !task.is_resolved(&workspace),
+            "an escaping post-condition must never count as resolved"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

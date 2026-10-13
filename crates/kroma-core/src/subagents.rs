@@ -1938,8 +1938,10 @@ pub struct TournamentScore {
     pub candidate_index: usize,
     /// Child loop status (`completed`, `failed`, `cancelled`, `budget_exhausted`).
     pub status: String,
-    /// `true` when the candidate's own isolated worktree passed the completion gate
-    /// (`Approved` or `Skipped`); a `Rejected` gate makes a candidate ineligible to win.
+    /// `true` when the candidate's own isolated worktree passed the completion gate (`Approved`).
+    /// A `Skipped` gate (verification never ran) leaves this `false`; read [`Self::gate_status`] to
+    /// tell a skipped verification apart from a failed one. Do not infer "verified" from this
+    /// boolean alone.
     pub gate_passed: bool,
     /// F05 (`v1.4.0`): explicit verification status (never inferred from `gate_passed` alone).
     #[serde(default = "GateVerificationStatus::not_run")]
@@ -1970,17 +1972,26 @@ pub struct TournamentScore {
 }
 
 impl TournamentScore {
-    /// F05 (`v1.4.0`): only a candidate that actually changed files *and* passed its own gate is
-    /// eligible to win and merge. A zero-change candidate must never out-rank a real passing fix.
+    /// `true` when the candidate's gate did not reject it: it actually passed verification, or
+    /// verification was intentionally skipped (no gate configured). A `Skipped` gate is a legitimate
+    /// "cannot verify" outcome the tournament accepts, but it is *not* a pass — read `gate_status`
+    /// when the distinction matters.
+    fn gate_accepted(&self) -> bool {
+        self.gate_passed || self.gate_status == GateVerificationStatus::Skipped
+    }
+
+    /// F05 (`v1.4.0`): only a candidate that actually changed files *and* whose gate accepted it
+    /// (passed, or verification was skipped) is eligible to win and merge. A zero-change candidate
+    /// must never out-rank a real passing fix.
     pub fn eligible_to_win(&self) -> bool {
-        self.has_changes && self.gate_passed
+        self.has_changes && self.gate_accepted()
     }
 
     /// Lexicographic ranking key. Lower sorts better. Ineligible candidates sort last.
     fn rank_key(&self) -> (u8, u8, usize, u8, usize, usize, usize, usize) {
         (
             u8::from(!self.eligible_to_win()),
-            u8::from(!self.gate_passed),
+            u8::from(!self.gate_accepted()),
             self.predictive_warnings,
             u8::from(!self.conflict_free_with_parent),
             self.total_changed_lines,
@@ -2365,7 +2376,9 @@ pub async fn run_worktree_tournament(
                         gate_detail = "verification passed".to_string();
                     }
                     Ok(GateOutcome::Skipped { reason }) => {
-                        gate_passed = true;
+                        // Verification never ran: record it as such and leave `gate_passed` false, so
+                        // a consumer reading only the boolean cannot mistake "not verified" for
+                        // "verified". `gate_accepted()` keeps the tournament's merge eligibility.
                         gate_status = GateVerificationStatus::Skipped;
                         gate_detail = format!("verification skipped: {}", reason);
                     }

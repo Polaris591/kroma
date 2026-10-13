@@ -827,15 +827,37 @@ where
                 }
             }
 
-            // Consume the trailing CRLF after chunk data.
+            // Consume the trailing CRLF after chunk data. This is *not* the end of the body: the
+            // terminating 0-size chunk (and its trailers) has not been seen yet, so a timeout, EOF
+            // or I/O error here means the transfer was cut short, not that it completed cleanly.
+            // Only the reads *after* the 0 chunk may ignore errors.
             let mut crlf = [0u8; 2];
             let crlf_to = step_timeout(deadline, budget.idle_timeout)
                 .map_err(|e| BodyFailure::Stream(ProviderError::IncompleteStream(e.to_string())))?;
-            if tokio::time::timeout(crlf_to, head.reader.read_exact(&mut crlf))
-                .await
-                .is_err()
-            {
-                return Ok(());
+            match tokio::time::timeout(crlf_to, head.reader.read_exact(&mut crlf)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
+                        "unexpected EOF before the chunk-terminating CRLF".to_string(),
+                    )));
+                }
+                Ok(Err(e)) => {
+                    return Err(BodyFailure::Stream(ProviderError::IncompleteStream(format!(
+                        "chunk terminator read error: {}",
+                        e
+                    ))));
+                }
+                Err(_) => {
+                    return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
+                        "idle timeout before the chunk-terminating CRLF".to_string(),
+                    )));
+                }
+            }
+            if crlf != *b"\r\n" {
+                return Err(BodyFailure::Stream(ProviderError::IncompleteStream(format!(
+                    "malformed HTTP chunk terminator: expected CRLF, got {:02x?}",
+                    crlf
+                ))));
             }
         }
     }

@@ -458,28 +458,66 @@ impl SnapshotStore {
                     prefix.push('/');
                 }
                 prefix.push_str(component);
-                if matches!(stat_live_entry(workspace, &prefix)?, LiveEntryStat::NonRegular) {
+                match stat_live_entry(workspace, &prefix)? {
+                    LiveEntryStat::NonRegular => {
+                        return Err(RevisionError::RecoveryRequired {
+                            target_revision: intent.pre_merge_revision.clone(),
+                            journal_path: self.merge_intent_path(),
+                            reason: format!(
+                                "cannot roll back the interrupted merge: '{}' is blocked by a symlink or special file at '{}'; remove it and retry",
+                                path, prefix
+                            ),
+                        });
+                    }
+                    // A plain file on an ancestor component makes `open_parent_dir_no_symlink`
+                    // fail with `ENOTDIR` (`SymlinkBlocked`), which would wedge recovery after the
+                    // journal was persisted. It is only safe when a scheduled removal unlinks it
+                    // first — the `directory -> file` rollback where the merge wrote the file `d`
+                    // and the rollback must restore `d/a`.
+                    LiveEntryStat::Regular { .. } if !removals.iter().any(|r| r == &prefix) => {
+                        return Err(RevisionError::RecoveryRequired {
+                            target_revision: intent.pre_merge_revision.clone(),
+                            journal_path: self.merge_intent_path(),
+                            reason: format!(
+                                "cannot roll back the interrupted merge: '{}' is blocked by a plain file at '{}'; remove it and retry",
+                                path, prefix
+                            ),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(stat_live_entry(workspace, path)?, LiveEntryStat::Directory) {
+                // The forced write recursively deletes the whole live directory, so "any removal
+                // lives below it" is too coarse: an untracked user file inside would be silently
+                // destroyed. Enumerate the actual leaves and require every one of them to be
+                // scheduled for removal. An empty directory is allowed — a merge that crashed
+                // before writing its files legitimately leaves one behind, and removals only ever
+                // name files.
+                let mut leaves: Vec<String> = Vec::new();
+                collect_leaf_entries(workspace, path, &mut leaves).map_err(|e| {
+                    RevisionError::RecoveryRequired {
+                        target_revision: intent.pre_merge_revision.clone(),
+                        journal_path: self.merge_intent_path(),
+                        reason: format!(
+                            "cannot roll back the interrupted merge: '{}' could not be inspected ({}); remove it and retry",
+                            path, e
+                        ),
+                    }
+                })?;
+                if let Some(unaccounted) = leaves
+                    .iter()
+                    .find(|leaf| !removals.iter().any(|removed| removed == *leaf))
+                {
                     return Err(RevisionError::RecoveryRequired {
                         target_revision: intent.pre_merge_revision.clone(),
                         journal_path: self.merge_intent_path(),
                         reason: format!(
-                            "cannot roll back the interrupted merge: '{}' is blocked by a symlink or special file at '{}'; remove it and retry",
-                            path, prefix
+                            "cannot roll back the interrupted merge: restoring '{}' would recursively delete '{}', which the merge did not create; remove it and retry",
+                            path, unaccounted
                         ),
                     });
                 }
-            }
-            if matches!(stat_live_entry(workspace, path)?, LiveEntryStat::Directory)
-                && !removals.iter().any(|removed| is_ancestor_path(path, removed))
-            {
-                return Err(RevisionError::RecoveryRequired {
-                    target_revision: intent.pre_merge_revision.clone(),
-                    journal_path: self.merge_intent_path(),
-                    reason: format!(
-                        "cannot roll back the interrupted merge: restoring '{}' would recursively delete a directory the merge did not create; remove it and retry",
-                        path
-                    ),
-                });
             }
         }
         let mut operations: Vec<RestoreOp> = Vec::with_capacity(removals.len() + writes.len());
@@ -2118,6 +2156,35 @@ fn is_ancestor_path(path: &str, descendant: &str) -> bool {
     descendant.len() > path.len()
         && descendant.as_bytes().get(path.len()) == Some(&b'/')
         && descendant.starts_with(path)
+}
+
+/// Collect the workspace-relative paths of every non-directory entry at or below `rel`, without
+/// following symlinks. Directories that hold no entries contribute nothing: a merge that crashed
+/// before writing its files legitimately leaves an empty directory behind, and the rollback's
+/// removal list only ever names files.
+fn collect_leaf_entries(
+    workspace: &WorkspaceCap,
+    rel: &str,
+    out: &mut Vec<String>,
+) -> Result<(), RevisionError> {
+    let (_, entries) = match workspace.read_dir_no_symlink(rel) {
+        Ok(v) => v,
+        Err(WorkspaceError::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let child = if rel.is_empty() || rel == "." {
+            entry.name.clone()
+        } else {
+            format!("{}/{}", rel, entry.name)
+        };
+        if entry.is_dir {
+            collect_leaf_entries(workspace, &child, out)?;
+        } else {
+            out.push(child);
+        }
+    }
+    Ok(())
 }
 
 /// Best-effort removal of directories the mutation created that are now empty. Stops at the first

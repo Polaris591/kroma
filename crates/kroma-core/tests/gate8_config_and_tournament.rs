@@ -1030,6 +1030,75 @@ fn test_f05_zero_change_candidate_never_wins() {
         outcome.scores[0].gate_status,
         kroma_core::subagents::GateVerificationStatus::Skipped
     );
+    // F05 honesty: a skipped verification is *not* a passed one. The boolean stays false so a
+    // consumer reading only `gate_passed` cannot treat "never verified" as "verified".
+    assert!(!outcome.scores[0].gate_passed);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A completion gate that reports `Skipped` even for a candidate that changed files. The candidate
+/// must stay merge-eligible (skipped is an accepted "cannot verify" outcome) while `gate_passed`
+/// stays `false`, so the boolean never claims a verification that never ran.
+struct SkippedGate;
+
+impl CompletionGate for SkippedGate {
+    fn check<'a>(
+        &'a self,
+        _ctx: &'a CompletionGateContext,
+    ) -> Pin<Box<dyn Future<Output = Result<GateOutcome, String>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(GateOutcome::Skipped {
+                reason: "no verification command configured".to_string(),
+            })
+        })
+    }
+}
+
+#[test]
+fn test_skipped_gate_keeps_gate_passed_false_but_stays_merge_eligible() {
+    let root = temp_root("skipped-gate");
+    let (_ws, workspace, store) = baseline_workspace(&root);
+    // Both candidates apply a real change; only the gate outcome is "skipped".
+    let backend: Arc<dyn SubagentBackend> = ScriptedBackend::new(vec![
+        vec![(
+            "lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n".to_string(),
+        )],
+        vec![(
+            "other.rs",
+            "pub fn sub(a: i32, b: i32) -> i32 { a - b } // fixed\n".to_string(),
+        )],
+    ]);
+    let gate: Arc<dyn CompletionGate> = Arc::new(SkippedGate);
+    let mut spec = tournament_spec(&root, 2);
+    spec.candidates = vec![
+        kroma_core::subagents::TournamentCandidate::worker("c1", "fix it"),
+        kroma_core::subagents::TournamentCandidate::worker("c2", "fix it too"),
+    ];
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime
+        .block_on(run_worktree_tournament(spec, &workspace, &store, backend, None, &gate))
+        .unwrap();
+
+    for score in &outcome.scores {
+        assert_eq!(
+            score.gate_status,
+            kroma_core::subagents::GateVerificationStatus::Skipped
+        );
+        assert!(score.has_changes, "each candidate did change files");
+        assert!(
+            !score.gate_passed,
+            "a skipped gate must not be recorded as a passed one"
+        );
+        assert!(
+            score.eligible_to_win(),
+            "a skipped verification still accepts the candidate for merging"
+        );
+    }
+    assert!(
+        outcome.winner.is_some(),
+        "a skipped-gate candidate must still be able to merge"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 

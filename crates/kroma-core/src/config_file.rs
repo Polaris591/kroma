@@ -621,29 +621,123 @@ fn home_dir_from_account_database() -> Option<String> {
 }
 
 fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_file_atomically_with_suffix(path, bytes, &uuid::Uuid::new_v4().to_string())
+}
+
+/// Atomic write with an explicit temp-file suffix.
+///
+/// The suffix is random in production so a same-user attacker cannot predict the temp name and
+/// pre-plant a symlink on it. `File::create` (`O_CREAT | O_TRUNC`, no `O_NOFOLLOW`) would have
+/// *followed* such a symlink and truncated the link target before the later permission check could
+/// refuse it; [`create_new_config_file_no_symlink`] instead creates the temp file exclusively with
+/// `O_NOFOLLOW`, so an existing entry (symlink or otherwise) makes the open fail with `EEXIST`/
+/// `ELOOP` and nothing is truncated. The suffix is a parameter so the hostile-entry path can be
+/// exercised deterministically in tests.
+fn write_file_atomically_with_suffix(path: &Path, bytes: &[u8], suffix: &str) -> Result<(), String> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = dir.join(format!(
-        ".{}.tmp-{}",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("config.toml"),
-        std::process::id()
-    ));
-    {
-        let mut file = fs::File::create(&tmp)
-            .map_err(|e| format!("cannot create {}: {}", tmp.display(), e))?;
-        restrict_file_permissions(&tmp)?;
+    let base = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.toml");
+
+    let (tmp, mut file) = {
+        let mut created: Option<(PathBuf, fs::File)> = None;
+        for attempt in 0..16u32 {
+            // First attempt honours the caller's suffix; a collision (a leftover temp file from a
+            // crashed write) is retried with a fresh random suffix so it cannot wedge the save.
+            let attempt_suffix = if attempt == 0 {
+                suffix.to_string()
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            };
+            let candidate = dir.join(format!(
+                ".{}.tmp-{}-{}",
+                base,
+                std::process::id(),
+                attempt_suffix
+            ));
+            match create_new_config_file_no_symlink(&candidate) {
+                Ok(file) => {
+                    created = Some((candidate, file));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // A regular leftover is a stale temp file we may skip; anything else (symlink,
+                    // directory, special file) is not ours to clobber, so refuse loudly rather than
+                    // silently retrying past an attacker's plant.
+                    match fs::symlink_metadata(&candidate) {
+                        Ok(meta) if meta.file_type().is_file() => continue,
+                        _ => {
+                            return Err(format!(
+                                "refusing to write through the existing entry at {}: {}",
+                                candidate.display(),
+                                e
+                            ))
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("cannot create {}: {}", candidate.display(), e))
+                }
+            }
+        }
+        created.ok_or_else(|| {
+            format!(
+                "cannot create a temporary file next to {}: too many name collisions",
+                path.display()
+            )
+        })?
+    };
+
+    let write_result = (|| -> Result<(), String> {
         file.write_all(bytes)
             .map_err(|e| format!("cannot write {}: {}", tmp.display(), e))?;
         file.sync_all()
             .map_err(|e| format!("cannot flush {}: {}", tmp.display(), e))?;
+        Ok(())
+    })();
+    drop(file);
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
     }
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         format!("cannot replace {}: {}", path.display(), e)
     })?;
+    // The temp file was created with mode 0600, so the rename already carries that mode; the
+    // explicit pass is kept because `mode` is masked by the process umask and is a no-op on Windows.
     restrict_file_permissions(path)?;
     Ok(())
+}
+
+/// Create a brand-new file exclusively and without following a symlink, at mode `0600` on Unix.
+///
+/// Mirrors the snapshot store's `create_new_store_file_no_symlink`: `create_new(true)` fails if the
+/// path already exists (so a pre-planted symlink is refused with `EEXIST` rather than followed) and
+/// `O_NOFOLLOW` closes the race where the entry is swapped between the existence check and the
+/// open. `mode(0o600)` sets the permissions at creation, so no path-based `chmod` is needed.
+fn create_new_config_file_no_symlink(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
 }
 
 /// Restrict a state file to `0600` without ever `chmod`-ing it by path.
@@ -972,6 +1066,77 @@ mod permission_tests {
         assert_eq!(
             fs::metadata(&sub).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink pre-planted on the temp path must make the write fail without following the link,
+    /// so the victim file is never truncated. The old `File::create` (`O_CREAT | O_TRUNC`, no
+    /// `O_NOFOLLOW`) followed the link and truncated the target before the permission check ran.
+    #[test]
+    fn test_write_file_atomically_refuses_a_symlinked_temp_path_and_keeps_the_target_intact() {
+        let dir = scratch("tmp-symlink");
+        let victim = dir.join("victim");
+        fs::write(&victim, b"ORIGINAL").unwrap();
+        let config = dir.join("config.toml");
+        let suffix = "fixed-suffix";
+        let planted = dir.join(format!(
+            ".config.toml.tmp-{}-{}",
+            std::process::id(),
+            suffix
+        ));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        write_file_atomically_with_suffix(&config, b"new-config-content", suffix)
+            .expect_err("a symlinked temp path must be refused, not followed");
+
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"ORIGINAL",
+            "the symlink target must not be truncated"
+        );
+        assert!(
+            !config.exists(),
+            "a refused write must not leave a config behind"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A stale *regular* temp file is not an attack: the write retries with a fresh name and still
+    /// succeeds, so a crashed previous write cannot permanently wedge `save_config`.
+    #[test]
+    fn test_write_file_atomically_retries_past_a_stale_regular_temp_file() {
+        let dir = scratch("tmp-stale");
+        let config = dir.join("config.toml");
+        let suffix = "fixed-suffix";
+        let stale = dir.join(format!(
+            ".config.toml.tmp-{}-{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::write(&stale, b"leftover").unwrap();
+
+        write_file_atomically_with_suffix(&config, b"payload", suffix)
+            .expect("a stale regular temp file must be retried past");
+        assert_eq!(fs::read(&config).unwrap(), b"payload");
+        assert_eq!(
+            fs::read(&stale).unwrap(),
+            b"leftover",
+            "the stale file must be left untouched, not clobbered"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_file_atomically_writes_and_restricts_permissions() {
+        let dir = scratch("atomic-ok");
+        let config = dir.join("config.toml");
+
+        write_file_atomically(&config, b"model = \"x\"\n").unwrap();
+        assert_eq!(fs::read(&config).unwrap(), b"model = \"x\"\n");
+        assert_eq!(
+            fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
         );
         let _ = fs::remove_dir_all(&dir);
     }

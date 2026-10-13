@@ -2762,6 +2762,7 @@ impl RpcDispatcher {
                 "label": s.label,
                 "status": s.status,
                 "gate_passed": s.gate_passed,
+                "gate_status": s.gate_status.as_str(),
                 "gate_detail": s.gate_detail,
                 "predictive_warnings": s.predictive_warnings,
                 "conflict_free_with_parent": s.conflict_free_with_parent,
@@ -4521,7 +4522,7 @@ impl InteractiveRepl {
                 if let Some(list) = val.get("candidates").and_then(Value::as_array) {
                     for c in list {
                         text.push_str(&format!(
-                            "  {} status={} gate_passed={} warnings={} changed_lines={} turns={}{}\n",
+                            "  {} status={} gate_passed={} gate_status={} warnings={} changed_lines={} turns={}{}\n",
                             sanitize_terminal_text(
                                 c.get("label").and_then(Value::as_str).unwrap_or("-")
                             ),
@@ -4529,6 +4530,9 @@ impl InteractiveRepl {
                                 c.get("status").and_then(Value::as_str).unwrap_or("-")
                             ),
                             c.get("gate_passed").and_then(Value::as_bool).unwrap_or(false),
+                            sanitize_terminal_text(
+                                c.get("gate_status").and_then(Value::as_str).unwrap_or("-")
+                            ),
                             c.get("predictive_warnings").and_then(Value::as_u64).unwrap_or(0),
                             c.get("total_changed_lines").and_then(Value::as_u64).unwrap_or(0),
                             c.get("turns_used").and_then(Value::as_u64).unwrap_or(0),

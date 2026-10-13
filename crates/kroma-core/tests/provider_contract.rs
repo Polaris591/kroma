@@ -600,6 +600,109 @@ async fn test_premature_eof_short_body_is_rejected() {
     }
 }
 
+/// F-04 / transport: a chunked response that delivers one data chunk and then closes *without* the
+/// trailing CRLF and *without* the terminating 0-size chunk was previously accepted as a complete
+/// body, because the CRLF read's timeout/EOF was swallowed. It must be reported as an incomplete
+/// stream. A well-formed chunked response must still succeed.
+#[tokio::test]
+async fn test_chunked_missing_trailing_crlf_is_incomplete_but_wellformed_succeeds() {
+    let body = r#"{"id":"cmpl-1","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+
+    // (a) One chunk, no trailing CRLF, no 0 chunk, then disconnect.
+    let broken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let broken_addr = broken.local_addr().unwrap();
+    let broken_body = body.to_string();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = broken.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}",
+                broken_body.len(),
+                broken_body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+    let broken_client = ChatCompletionsClient::new(ChatCompletionsConfig {
+        base_url: format!("http://127.0.0.1:{}", broken_addr.port()),
+        api_key: "sk-test".into(),
+        model: "gpt-test".into(),
+        max_retries: 0,
+        reasoning_effort: None,
+    })
+    .unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let broken_res = broken_client
+        .complete(
+            ProviderRequest {
+                system_prompt: "sys".into(),
+                tools: Vec::new(),
+                messages: Vec::new(),
+                stream: false,
+                cache_breakpoints: Vec::new(),
+                max_output_tokens: None,
+            },
+            &BudgetConfig::default(),
+            rx,
+        )
+        .await;
+    match broken_res {
+        Err(ProviderError::IncompleteStream(msg)) => {
+            assert!(msg.contains("CRLF"), "unexpected error: {}", msg);
+        }
+        other => panic!(
+            "a chunked body missing its terminator must be incomplete, got {:?}",
+            other.map(|_| ())
+        ),
+    }
+
+    // (b) A well-formed chunked response (data chunk + CRLF + 0 chunk + CRLF) still succeeds.
+    let good = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let good_addr = good.local_addr().unwrap();
+    let good_body = body.to_string();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = good.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+                good_body.len(),
+                good_body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+    let good_client = ChatCompletionsClient::new(ChatCompletionsConfig {
+        base_url: format!("http://127.0.0.1:{}", good_addr.port()),
+        api_key: "sk-test".into(),
+        model: "gpt-test".into(),
+        max_retries: 0,
+        reasoning_effort: None,
+    })
+    .unwrap();
+    let (_tx2, rx2) = watch::channel(false);
+    let good_res = good_client
+        .complete(
+            ProviderRequest {
+                system_prompt: "sys".into(),
+                tools: Vec::new(),
+                messages: Vec::new(),
+                stream: false,
+                cache_breakpoints: Vec::new(),
+                max_output_tokens: None,
+            },
+            &BudgetConfig::default(),
+            rx2,
+        )
+        .await;
+    assert!(
+        good_res.is_ok(),
+        "a well-formed chunked body must still succeed: {:?}",
+        good_res.err()
+    );
+}
+
 /// F-04: an unknown or multi-valued `Transfer-Encoding` (e.g. `gzip, bogus`) must be rejected
 /// rather than mis-parsed as chunked.
 #[tokio::test]

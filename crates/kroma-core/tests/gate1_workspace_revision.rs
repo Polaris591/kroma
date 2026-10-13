@@ -1508,6 +1508,106 @@ fn test_startup_merge_recovery_rolls_back_a_deletions_only_merge_whose_removed_p
     let _ = fs::remove_dir_all(&root);
 }
 
+/// F08: a plain file on an ancestor component of a write path makes `open_parent_dir_no_symlink`
+/// fail with `ENOTDIR` (`SymlinkBlocked`) after the journal was already persisted, wedging every
+/// future startup. It must be detected up front as `RecoveryRequired` without persisting a restore
+/// intent.
+#[test]
+fn test_startup_merge_recovery_reports_recovery_required_when_a_plain_file_blocks_a_write_path() {
+    let root = temp_root("f8-merge-write-path-file-ancestor");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(ws_dir.join("d")).unwrap();
+    fs::write(ws_dir.join("d").join("a"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["d/a".to_string()],
+            removed_files: Vec::new(),
+        })
+        .unwrap();
+    // The merge half-wrote `d/a`; the user then replaced the directory `d` with a plain file.
+    fs::remove_file(ws_dir.join("d").join("a")).unwrap();
+    fs::remove_dir(ws_dir.join("d")).unwrap();
+    fs::write(ws_dir.join("d"), "user file\n").unwrap();
+
+    let err = store
+        .recover_pending_merge(&workspace)
+        .expect_err("a plain file blocking a write path must be an actionable failure");
+    match err {
+        kroma_core::revision::RevisionError::RecoveryRequired { reason, .. } => {
+            assert!(
+                reason.contains("'d/a'") && reason.contains("'d'"),
+                "reason must name the blocked path and the blocking component: {}",
+                reason
+            );
+        }
+        other => panic!("expected RecoveryRequired, got {:?}", other),
+    }
+    assert!(
+        store.pending_restore().unwrap().is_none(),
+        "no restore intent may be persisted for a rollback that cannot be applied"
+    );
+    assert!(
+        store.pending_merge_intent().unwrap().is_some(),
+        "the merge journal must survive so recovery can be retried"
+    );
+    assert_eq!(
+        read(ws_dir.join("d")),
+        "user file\n",
+        "the user's plain file must be left untouched"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: the legal `directory -> file` rollback — the merge wrote the file `d` and the rollback must
+/// restore `d/a` — leaves a plain file at the ancestor `d`, but `d` is scheduled for removal, so it
+/// is unlinked first and the write lands. This exception must keep working.
+#[test]
+fn test_startup_merge_recovery_allows_a_plain_file_ancestor_that_is_scheduled_for_removal() {
+    let root = temp_root("f8-merge-write-path-file-ancestor-removed");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(ws_dir.join("d")).unwrap();
+    fs::write(ws_dir.join("d").join("a"), "v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["d".to_string()],
+            removed_files: vec!["d/a".to_string()],
+        })
+        .unwrap();
+    // The merge removed the directory `d` (its file `d/a`) and wrote the file `d`, then crashed.
+    fs::remove_file(ws_dir.join("d").join("a")).unwrap();
+    fs::remove_dir(ws_dir.join("d")).unwrap();
+    fs::write(ws_dir.join("d"), "merged\n").unwrap();
+
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "expected a clean rollback, got {:?}",
+        outcome
+    );
+    assert!(ws_dir.join("d").is_dir(), "d must be restored as a directory");
+    assert_eq!(read(ws_dir.join("d").join("a")), "v1\n");
+    assert!(store.pending_merge_intent().unwrap().is_none());
+    assert!(store.pending_restore().unwrap().is_none());
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// F08: a merge that replaced a directory with a file is rolled back by removing the file and
 /// restoring the directory's children. If the user parks a symlink on the directory path, the
 /// non-forced removal is a silent no-op and the forced write would hit `SymlinkBlocked` after the
@@ -1649,6 +1749,80 @@ fn test_startup_merge_recovery_refuses_to_delete_a_user_directory_on_a_modified_
         outcome
     );
     assert_eq!(read(ws_dir.join("edit.rs")), "v1\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// F08: a merge that replaced the file `d` with the directory `d` is rolled back by restoring the
+/// file `d`. The old "any removal lives below `d`" check let the forced write recursively delete an
+/// untracked user file the user had dropped into the live directory. Recovery must enumerate the
+/// real leaves and refuse with `RecoveryRequired`, leaving the user's file intact.
+#[test]
+fn test_startup_merge_recovery_refuses_to_delete_an_untracked_user_file_inside_a_restored_directory(
+) {
+    let root = temp_root("f8-merge-dir-user-file");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join("d"), "file-v1\n").unwrap();
+    let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    let pre = store.capture_revision(&workspace, None, None, 0).unwrap();
+
+    store
+        .write_merge_intent(&kroma_core::revision::MergeIntent {
+            version: 1,
+            pre_merge_revision: pre.revision_id.clone(),
+            created_at_ms: 0,
+            written_files: vec!["d/b".to_string()],
+            removed_files: vec!["d".to_string()],
+        })
+        .unwrap();
+    // The merge removed the file `d` and created the directory `d` with its own file `d/b`; the
+    // user then dropped an untracked file into it.
+    fs::remove_file(ws_dir.join("d")).unwrap();
+    fs::create_dir(ws_dir.join("d")).unwrap();
+    fs::write(ws_dir.join("d").join("b"), "merged\n").unwrap();
+    fs::write(ws_dir.join("d").join("user.txt"), "mine\n").unwrap();
+
+    let err = store
+        .recover_pending_merge(&workspace)
+        .expect_err("an untracked file inside the restored directory must be an actionable failure");
+    match err {
+        kroma_core::revision::RevisionError::RecoveryRequired { reason, .. } => {
+            assert!(
+                reason.contains("'d'") && reason.contains("user.txt"),
+                "reason must name the write path and the untracked leaf: {}",
+                reason
+            );
+        }
+        other => panic!("expected RecoveryRequired, got {:?}", other),
+    }
+    assert!(
+        ws_dir.join("d").join("user.txt").exists(),
+        "the user's untracked file must survive"
+    );
+    assert_eq!(read(ws_dir.join("d").join("user.txt")), "mine\n");
+    assert!(
+        store.pending_restore().unwrap().is_none(),
+        "no restore intent may be persisted for a rollback that cannot be applied"
+    );
+    assert!(
+        store.pending_merge_intent().unwrap().is_some(),
+        "the merge journal must survive so recovery can be retried"
+    );
+
+    // Once the user moves their file out, the same recovery succeeds and restores the file `d`.
+    fs::remove_file(ws_dir.join("d").join("user.txt")).unwrap();
+    let outcome = store.recover_pending_merge(&workspace).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            kroma_core::revision::MergeRecoveryOutcome::RolledBack { .. }
+        ),
+        "expected a clean rollback after the untracked file is removed, got {:?}",
+        outcome
+    );
+    assert!(ws_dir.join("d").is_file(), "d must be restored as a file");
+    assert_eq!(read(ws_dir.join("d")), "file-v1\n");
     let _ = fs::remove_dir_all(&root);
 }
 
