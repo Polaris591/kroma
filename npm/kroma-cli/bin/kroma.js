@@ -119,12 +119,19 @@ function downloadBinaryIfNeeded(destPath, key) {
 
 function resolveBinaryPath() {
   const localBinName = process.platform === "win32" ? "kroma.exe" : "kroma";
-  const bundled = path.join(__dirname, "vendor", `${process.platform}-${process.arch}`, localBinName);
+  let platformKey = `${process.platform}-${process.arch}`;
+  // Android Termux runs ARM64 Linux ELF binaries directly
+  let bundled = path.join(__dirname, "vendor", platformKey, localBinName);
+  if (!fs.existsSync(bundled) && process.platform === "android" && process.arch === "arm64") {
+    const fallbackArm = path.join(__dirname, "vendor", "linux-arm64", localBinName);
+    if (fs.existsSync(fallbackArm)) {
+      return fallbackArm;
+    }
+  }
   if (fs.existsSync(bundled)) {
     return bundled;
   }
-  const key = `${process.platform}-${process.arch}`;
-  if (downloadBinaryIfNeeded(bundled, key)) {
+  if (downloadBinaryIfNeeded(bundled, platformKey)) {
     return bundled;
   }
   console.error(
