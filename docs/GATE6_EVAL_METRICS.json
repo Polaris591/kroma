@@ -1,6 +1,6 @@
 {
   "gate": "Gate 6 — Multi-Surface Runtime (v1.0.0)",
-  "harness_version": "1.0.0",
+  "kroma_version": "1.0.0",
   "event_schema_version": "1.0.0",
   "acp_protocol_version": "1.0",
   "jsonrpc_version": "2.0",

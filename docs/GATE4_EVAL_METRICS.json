@@ -7,8 +7,8 @@
     "rustc_target": "unix"
   },
   "framing": "candidate_attribution",
-  "generated_by": "crates/harness-core/tests/gate4_predictive_attribution.rs::test_gate4_eval_corpus_metrics_and_artifact_generation",
-  "harness_version": "0.12.0",
+  "generated_by": "crates/kroma-core/tests/gate4_predictive_attribution.rs::test_gate4_eval_corpus_metrics_and_artifact_generation",
+  "kroma_version": "0.12.0",
   "metrics": {
     "false_positive_probe_files": 5,
     "false_positive_rollback_rate": 0.0,

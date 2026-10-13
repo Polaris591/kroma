@@ -1,9 +1,9 @@
 {
   "gate": "Gate 7",
   "version": "1.2.0",
-  "generated_by": "harness v1.2.0 acceptance run (measured on this machine, not estimated)",
+  "generated_by": "kroma v1.2.0 acceptance run (measured on this machine, not estimated)",
   "repograph_navigation": {
-    "corpus": "/opt/harness (the harness workspace itself)",
+    "corpus": "/opt/harness (the kroma workspace itself)",
     "files_indexed": 62,
     "symbols_extracted": 1436,
     "cross_file_edges": 6234,
@@ -29,52 +29,52 @@
       "results": [
         {
           "query": "WorkspaceCap",
-          "expected": "crates/harness-core/src/workspace.rs",
+          "expected": "crates/kroma-core/src/workspace.rs",
           "rank": 1
         },
         {
           "query": "RepoGraph",
-          "expected": "crates/harness-core/src/repo_graph.rs",
+          "expected": "crates/kroma-core/src/repo_graph.rs",
           "rank": 1
         },
         {
           "query": "SnapshotStore",
-          "expected": "crates/harness-core/src/revision.rs",
+          "expected": "crates/kroma-core/src/revision.rs",
           "rank": 1
         },
         {
           "query": "execute_recall_evidence",
-          "expected": "crates/harness-core/src/tools/recall_evidence.rs",
+          "expected": "crates/kroma-core/src/tools/recall_evidence.rs",
           "rank": 1
         },
         {
           "query": "RpcDispatcher",
-          "expected": "crates/harness-core/src/surface.rs",
+          "expected": "crates/kroma-core/src/surface.rs",
           "rank": 1
         },
         {
           "query": "ProjectionProfile",
-          "expected": "crates/harness-core/src/context_projector.rs",
+          "expected": "crates/kroma-core/src/context_projector.rs",
           "rank": 1
         },
         {
           "query": "PredictiveValidator",
-          "expected": "crates/harness-core/src/attribution.rs",
+          "expected": "crates/kroma-core/src/attribution.rs",
           "rank": 1
         },
         {
           "query": "SubagentRole",
-          "expected": "crates/harness-core/src/subagents.rs",
+          "expected": "crates/kroma-core/src/subagents.rs",
           "rank": 1
         },
         {
           "query": "PolicyEngine",
-          "expected": "crates/harness-core/src/tool/policy.rs",
+          "expected": "crates/kroma-core/src/tool/policy.rs",
           "rank": 1
         },
         {
           "query": "serialize_openai_request_body",
-          "expected": "crates/harness-core/src/provider/chat_completions.rs",
+          "expected": "crates/kroma-core/src/provider/chat_completions.rs",
           "rank": 1
         }
       ]
@@ -184,7 +184,7 @@
   },
   "protocol_selection": {
     "flag": "--protocol",
-    "env": "HARNESS_PROTOCOL",
+    "env": "KROMA_PROTOCOL",
     "values": [
       "auto",
       "chat-completions",
@@ -194,7 +194,7 @@
     "auto_detection": "base URL containing 'anthropic' or a model id prefixed 'claude-' selects anthropic-messages; a base URL containing '/responses' selects openai-responses; otherwise chat-completions (unchanged default)"
   },
   "transport_shared": {
-    "module": "crates/harness-core/src/provider/transport.rs",
+    "module": "crates/kroma-core/src/provider/transport.rs",
     "note": "the hand-written TLS + HTTP/1.1 framing (openat2-free: plain tokio TcpStream + OpenSSL on unix / Schannel on windows) is now shared by all three protocol clients instead of being duplicated",
     "failure_classes": [
       "TransportFailure::Transient",
@@ -208,7 +208,7 @@
     "workspace_tests_passed": 165,
     "workspace_tests_failed": 0,
     "compiler_warnings": 0,
-    "new_test_file": "crates/harness-core/tests/gate7_repograph_vision_protocols.rs",
+    "new_test_file": "crates/kroma-core/tests/gate7_repograph_vision_protocols.rs",
     "new_tests": 12,
     "windows_cross_check": "cargo check --workspace --target x86_64-pc-windows-gnu --all-targets (0 warnings)",
     "new_tests_detail": {

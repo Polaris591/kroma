@@ -1,13 +1,13 @@
 {
   "artifact": "gate2-context-projection-eval",
   "blueprint": "docs/v1_blueprint/IMPLEMENTATION_GATES_AND_EVAL.md#gate-2--context-projection-ab",
-  "generated_by": "crates/harness-core/tests/gate2_evidence_projection.rs::test_projection_profiles_ab_metrics_and_tool_pairing_invariant",
+  "generated_by": "crates/kroma-core/tests/gate2_evidence_projection.rs::test_projection_profiles_ab_metrics_and_tool_pairing_invariant",
   "hard_constraints": {
     "pairing_checks": 20,
-    "tool_call_pairing_validator": "harness_core::context_projector::validate_tool_call_pairing",
+    "tool_call_pairing_validator": "kroma_core::context_projector::validate_tool_call_pairing",
     "tool_call_result_pairing": "100% pass"
   },
-  "harness_version": "1.2.0",
+  "kroma_version": "1.2.0",
   "notes": [
     "estimated_tokens = bytes / 4 (byte-based estimate; provider-reported usage remains the cost authority)",
     "baseline = no compaction (A/B reference); p1 = watermarks + working-set pinning; p2 = p1 + source_entry_id evidence graph (default); p3 = p2 + 25% stricter low-watermark target (experimental, default off)"

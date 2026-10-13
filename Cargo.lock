@@ -153,10 +153,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "harness-cli"
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "kroma-cli"
 version = "1.2.0"
 dependencies = [
- "harness-core",
+ "kroma-core",
  "libc",
  "serde",
  "serde_json",
@@ -166,7 +172,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "harness-core"
+name = "kroma-core"
 version = "1.2.0"
 dependencies = [
  "libc",
@@ -181,12 +187,6 @@ dependencies = [
  "uuid",
  "windows-sys",
 ]
-
-[[package]]
-name = "itoa"
-version = "1.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "libc"

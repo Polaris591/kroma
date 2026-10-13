@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/harness-core",
-    "crates/harness-cli",
+    "crates/kroma-core",
+    "crates/kroma-cli",
 ]
 
 [workspace.package]

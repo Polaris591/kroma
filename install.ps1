@@ -1,25 +1,25 @@
-# Harness v1.1.0 — Windows PowerShell One-Line Installer
-# Installs `harness.exe` into %LOCALAPPDATA%\Programs\Harness\bin and adds it to your User PATH
-# so you can open any PowerShell / Windows Terminal window and type `harness` directly.
+# Kroma v1.2.0 — Windows PowerShell One-Line Installer
+# Installs `kroma.exe` into %USERPROFILE%\.kroma\bin and adds it to your User PATH
+# so you can open any PowerShell / Windows Terminal window and type `kroma` directly.
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $ScriptDir
 
-$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\Harness\bin"
+$InstallDir = Join-Path $env:USERPROFILE ".kroma\bin"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-$Prebuilt = Join-Path $ScriptDir "target\x86_64-pc-windows-gnu\release\harness.exe"
-$NativeRelease = Join-Path $ScriptDir "target\release\harness.exe"
+$Prebuilt = Join-Path $ScriptDir "target\x86_64-pc-windows-gnu\release\kroma.exe"
+$NativeRelease = Join-Path $ScriptDir "target\release\kroma.exe"
 
 if (Test-Path $NativeRelease) {
-    Copy-Item -Force $NativeRelease (Join-Path $InstallDir "harness.exe")
+    Copy-Item -Force $NativeRelease (Join-Path $InstallDir "kroma.exe")
 } elseif (Test-Path $Prebuilt) {
-    Copy-Item -Force $Prebuilt (Join-Path $InstallDir "harness.exe")
+    Copy-Item -Force $Prebuilt (Join-Path $InstallDir "kroma.exe")
 } else {
-    Write-Host "==> Building Harness v1.1.0 (release profile)..."
+    Write-Host "==> Building Kroma v1.2.0 (release profile)..."
     cargo build --workspace --release
-    Copy-Item -Force $NativeRelease (Join-Path $InstallDir "harness.exe")
+    Copy-Item -Force $NativeRelease (Join-Path $InstallDir "kroma.exe")
 }
 
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -32,5 +32,5 @@ if ($PathParts -notcontains $InstallDir) {
     Write-Host "==> Added $InstallDir to your User PATH."
 }
 
-Write-Host "==> Installed harness to $InstallDir\harness.exe"
-Write-Host "==> Done! Open any folder in PowerShell / Windows Terminal and just type: harness"
+Write-Host "==> Installed kroma to $InstallDir\kroma.exe"
+Write-Host "==> Done! Open any folder in PowerShell / Windows Terminal and just type: kroma"
