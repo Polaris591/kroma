@@ -19,6 +19,7 @@ pub mod sensitive_paths;
 pub mod session;
 pub mod subagents;
 pub mod surface;
+pub mod theme;
 pub mod tool;
 pub mod tools;
 pub mod types;

@@ -1485,3 +1485,195 @@ async fn test_f08_missing_usage_is_estimated_conservatively() {
     assert!(summary.total_output_tokens > 0);
     let _ = fs::remove_dir_all(&root);
 }
+
+// ---- P1 (`v1.5.0`): `session.tournament` counts candidates against the session spawn quota -------
+
+#[tokio::test]
+async fn test_p1_rpc_tournament_counts_candidates_against_session_quota() {
+    use kroma_core::surface::{JsonRpcRequest, RpcDispatcher};
+
+    let root = temp_root("p1-rpc-quota");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+
+    let mut cfg = KromaRuntimeConfig::new(&ws, root.join("state"), PolicyMode::FullAutonomous);
+    // Room for exactly one two-candidate race.
+    cfg.max_subagents = 2;
+    let dispatcher = RpcDispatcher::new(cfg, Arc::new(NoopProvider)).unwrap();
+
+    // The first race reserves both allowed spawns. Its own result is irrelevant here (the stub
+    // provider cannot repair anything); only the reservation is asserted below.
+    let _first = dispatcher
+        .handle_request(JsonRpcRequest::new(
+            1,
+            "session.tournament",
+            serde_json::json!({ "task": "fix lib.rs", "candidates": 2 }),
+        ))
+        .await;
+
+    // A second race would need two more spawns (total 4 > max_subagents = 2) and must be refused
+    // before any candidate worktree is materialized.
+    let second = dispatcher
+        .handle_request(JsonRpcRequest::new(
+            2,
+            "session.tournament",
+            serde_json::json!({ "task": "fix lib.rs", "candidates": 2 }),
+        ))
+        .await;
+    let err = second
+        .error
+        .expect("the second race must exceed the session spawn quota")
+        .message;
+    assert!(
+        err.contains("budget exceeded") || err.contains("max_subagents"),
+        "got: {err}"
+    );
+
+    // `session.status` exposes the reserved count so hosts can observe quota consumption.
+    let status = dispatcher
+        .handle_request(JsonRpcRequest::new(3, "session.status", serde_json::json!({})))
+        .await;
+    let val = status.result.unwrap();
+    assert_eq!(
+        val.get("subagents_spawned").and_then(|v| v.as_u64()),
+        Some(2),
+        "status: {val}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ---- P1 (`v1.5.0`): a tournament merge is recorded in the session WAL ---------------------------
+
+/// Provider for the WAL-recording test: it decides purely from the transcript, so it behaves
+/// identically no matter how the concurrent tournament candidates are scheduled.
+///
+/// * Parent: writes a broken `lib.rs` once, then stops.
+/// * Child candidate: writes the real fix once, then stops.
+#[derive(Default)]
+struct WalRecordingProvider;
+
+fn already_wrote(req: &ProviderRequest) -> bool {
+    req.messages.iter().any(|item| match item {
+        TranscriptItem::Assistant(a) => a.tool_calls.iter().any(|tc| tc.name == "write"),
+        _ => false,
+    })
+}
+
+impl ModelProvider for WalRecordingProvider {
+    fn complete<'a>(
+        &'a self,
+        req: ProviderRequest,
+        _budget: &'a BudgetConfig,
+        cancel_rx: watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            if *cancel_rx.borrow() {
+                return Err(ProviderError::Cancelled);
+            }
+            let is_child = req.system_prompt.contains("SUBAGENT ROLE: worker");
+            let turn = if already_wrote(&req) {
+                stop_turn(if is_child { "fixed" } else { "done" })
+            } else if is_child {
+                write_turn(
+                    "lib.rs",
+                    "pub fn add(a: i32, b: i32) -> i32 { a + b } // fixed\n",
+                    "child-write",
+                )
+            } else {
+                write_turn(
+                    "lib.rs",
+                    "pub fn add(a: i32, b: i32) -> i32 { a + b } // broken\n",
+                    "parent-write",
+                )
+            };
+            Ok(ProviderCompletion {
+                turn,
+                request_body_bytes: 0,
+                latency_ms: 0,
+                ttft_ms: Some(0),
+                attempts_used: 1,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_p1_adaptive_tournament_merge_is_recorded_in_the_session_wal() {
+    use kroma_core::agent_loop::{build_runtime_with_registry, AgentRunConfig, AgentRunner};
+    use kroma_core::env::LocalHostEnv;
+    use kroma_core::session::SessionJournal;
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine};
+    use kroma_core::tool::registry::ToolRegistry;
+
+    let root = temp_root("p1-adaptive-wal");
+    let ws = root.join("ws");
+    let state = root.join("state");
+    fs::create_dir_all(&ws).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(ws.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+
+    let env = Arc::new(LocalHostEnv::new(&ws, state.clone()).unwrap());
+    let registry = ToolRegistry::new(None);
+    let policy = PolicyEngine::new(
+        PolicyMode::FullAutonomous,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    let runtime = build_runtime_with_registry(registry, env, policy, BudgetConfig::default());
+
+    let store = Arc::new(SnapshotStore::new(root.join("snapshots")));
+    let journal = SessionJournal::create(state.join("sessions"), &ws).unwrap();
+    let wal_path = journal.path().to_path_buf();
+
+    let provider = Arc::new(WalRecordingProvider);
+    let mut cfg = AgentRunConfig::new("fix lib.rs", BudgetConfig::default());
+    cfg.stream = false;
+    let (_tx, rx) = watch::channel(false);
+    let gate: Arc<dyn CompletionGate> = Arc::new(FixedGate);
+    let runner = AgentRunner::new(cfg, provider, runtime, rx)
+        .with_session_journal(journal)
+        .with_snapshot_store(store)
+        .with_completion_gate(gate)
+        .with_completion_gate_max_retries(5)
+        .with_max_subagents(4)
+        .with_adaptive_tournament_candidates(2);
+
+    let (summary, _logger) =
+        runner
+            .run(
+                kroma_core::events::EventLogger::new(
+                    kroma_core::types::RunId::new(),
+                    None,
+                    false,
+                )
+                .unwrap(),
+            )
+            .await;
+    assert!(
+        fs::read_to_string(ws.join("lib.rs")).unwrap().contains("fixed"),
+        "adaptive escalation did not merge a fix; terminal={:?}",
+        summary.terminal_reason
+    );
+
+    // P1 (`v1.5.0`): the tournament merge must be durably recorded in the WAL so `--undo` can
+    // revert it. Before the fix, `execute_spawn_tournament` advanced `current_revision_id` itself,
+    // so the later capture saw an "unchanged" workspace and silently skipped the record — the WAL
+    // ended with only the baseline and the parent's own broken write.
+    let journal = SessionJournal::open(&wal_path).unwrap();
+    let records = journal.revision_records();
+    assert!(
+        records.len() >= 3,
+        "expected baseline + parent mutation + tournament merge, got {:?}",
+        records
+    );
+    let merged = records.last().unwrap();
+    assert!(merged.leaf_id.is_some(), "merged revision lost its leaf: {merged:?}");
+    assert_eq!(merged.changed_paths, vec!["lib.rs".to_string()]);
+    assert_eq!(
+        journal.latest_revision_id().as_deref(),
+        Some(merged.revision_id.as_str())
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}

@@ -30,6 +30,7 @@ use crate::prompt::{sha256_hex64, PromptBuilder};
 use crate::provider::ModelProvider;
 use crate::revision::{RestoreResult, RevisionId, SnapshotStore, WorkspaceRevision};
 use crate::session::{RevisionRecord, SessionJournal};
+use crate::theme::{StatusDot, Theme, ThemeRenderer};
 use crate::tool::policy::{
     ApprovalDecision, ApprovalHandler, ApprovalRequest, PolicyCheckResult, PolicyEngine, PolicyMode,
 };
@@ -90,6 +91,11 @@ pub fn sanitize_terminal_text(s: &str) -> String {
         }
     }
     out
+}
+
+/// `v1.5.0`: width for the Design D spectrum hairline, clamped to a readable range.
+fn terminal_hairline_width() -> usize {
+    crate::theme::terminal_width().saturating_sub(2).max(20)
 }
 
 /// JSON-RPC 2.0 request envelope.
@@ -795,6 +801,8 @@ struct RuntimeEngineInner {
     active_adaptive_tournament: Mutex<usize>,
     /// `v1.3.0`: layered configuration view, refreshed by `/config set`.
     resolved_config: Mutex<Option<crate::config_file::ResolvedConfig>>,
+    /// `v1.5.0`: active terminal theme (`/theme zen|classic`); Design D (`Zen`) is the default.
+    active_theme: Mutex<Theme>,
 }
 
 struct InFlightPromptGuard {
@@ -910,6 +918,8 @@ impl RpcDispatcher {
         // `/config set adaptive_tournament <N>`).
         let initial_adaptive_tournament = config.adaptive_tournament_candidates;
         let initial_resolved = config.resolved_config.clone();
+        // `v1.5.0`: Design D (`Zen`) is the default terminal theme; `KROMA_UI_THEME` overrides it.
+        let initial_theme = Theme::from_env();
         let inner = Arc::new(RuntimeEngineInner {
             config,
             provider: Mutex::new(provider),
@@ -933,6 +943,7 @@ impl RpcDispatcher {
             active_projection_profile: Mutex::new(initial_projection_profile),
             active_adaptive_tournament: Mutex::new(initial_adaptive_tournament),
             resolved_config: Mutex::new(initial_resolved),
+            active_theme: Mutex::new(initial_theme),
         });
 
         let weak_inner = Arc::downgrade(&inner);
@@ -1063,6 +1074,11 @@ impl RpcDispatcher {
         next.total_input_tokens = guard.total_input_tokens;
         next.total_cached_input_tokens = guard.total_cached_input_tokens;
         next.total_output_tokens = guard.total_output_tokens;
+        // P1 (`v1.5.0`): never let a journal read lower the live spawn count. Spawns reserved by an
+        // RPC `session.tournament` are counted in memory; a checkpoint written before the session's
+        // first transcript entry has no leaf and is invisible to `snapshot_from_journal`, which
+        // would otherwise reset the count to 0 and re-open the `max_subagents` bypass.
+        next.subagents_spawned = next.subagents_spawned.max(guard.subagents_spawned);
         *guard = next;
     }
 
@@ -1439,6 +1455,15 @@ impl RpcDispatcher {
         .with_completion_gate(Arc::clone(&self.inner.config.completion_gate))
         .with_completion_gate_max_retries(self.inner.config.completion_gate_max_retries)
         .with_max_subagents(self.inner.config.max_subagents)
+        // P1 (`v1.5.0`): carry the session's live spawn count into the run so tournaments run
+        // through the RPC surface count against the same `max_subagents` quota as tool spawns.
+        .with_subagents_spawned(
+            self.inner
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .subagents_spawned,
+        )
         .with_adaptive_tournament_candidates(self.adaptive_tournament_candidates());
 
         if let Some(ref pred) = self.inner.config.predict_cmd {
@@ -1489,6 +1514,8 @@ impl RpcDispatcher {
             "total_input_tokens": summary.total_input_tokens,
             "total_cached_input_tokens": summary.total_cached_input_tokens,
             "total_output_tokens": summary.total_output_tokens,
+            "children_input_tokens": summary.children_input_tokens,
+            "children_output_tokens": summary.children_output_tokens,
             "cache_hit_ratio": summary.cache_hit_ratio,
             "modified_files": summary.modified_files,
             "latest_revision_id": snap.latest_revision_id,
@@ -1954,6 +1981,56 @@ impl RpcDispatcher {
             .map_err(|e| e.to_string())
     }
 
+    /// P1 (`v1.5.0`): carry the cumulative `subagents_spawned` count (and the merged revision, when
+    /// one was produced) forward in a checkpoint on the active branch.
+    ///
+    /// Existing checkpoint state is preserved so `--resume` / `--fork` never lose the pinned
+    /// baseline, the subtree directories, or the mutation ledger. A session that has never written a
+    /// checkpoint gets a minimal one, which is harmless because there is no earlier state to keep.
+    fn persist_spawn_count(
+        journal: &mut SessionJournal,
+        spawned: usize,
+        merged_revision: Option<&RevisionId>,
+    ) -> Result<(), String> {
+        let (prev_turn, pinned, last_touched, reasoning_sha, prev_rev, subtree, mutations) =
+            match journal.latest_active_checkpoint() {
+                Some(cp) => (
+                    cp.turn,
+                    cp.pinned_baseline_end,
+                    cp.last_touched.clone(),
+                    cp.reasoning_blocks_sha256.clone(),
+                    cp.workspace_revision_id.clone(),
+                    cp.subtree_dirs.clone(),
+                    cp.mutations.clone(),
+                ),
+                None => (
+                    0,
+                    0,
+                    Vec::new(),
+                    String::new(),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
+        let revision = merged_revision
+            .map(|r| r.as_str().to_string())
+            .or(prev_rev);
+        let turn = journal.max_active_turn().max(prev_turn);
+        journal
+            .checkpoint_with_subagents(
+                turn,
+                pinned,
+                last_touched,
+                reasoning_sha,
+                revision,
+                subtree,
+                mutations,
+                spawned,
+            )
+            .map_err(|e| e.to_string())
+    }
+
     async fn rpc_evidence_recall(&self, params: &Value) -> Result<Value, JsonRpcError> {
         let path = self.session_path();
         let journal = SessionJournal::open(&path).map_err(|e| {
@@ -2236,6 +2313,16 @@ impl RpcDispatcher {
             .clone()
     }
 
+    /// `v1.5.0`: current terminal theme (Design D `Zen` by default).
+    pub fn active_theme(&self) -> Theme {
+        *self.inner.active_theme.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `v1.5.0`: build a [`ThemeRenderer`] for the active theme, auto-detecting colour support.
+    pub fn theme_renderer(&self) -> ThemeRenderer {
+        ThemeRenderer::detect(self.active_theme())
+    }
+
     /// F01 (`v1.4.0`): shared authorization + quota preflight for `session.tournament`.
     ///
     /// Mirrors the `spawn_subagent` tool path exactly: `max_subagents` quota, `PolicyEngine`
@@ -2243,11 +2330,18 @@ impl RpcDispatcher {
     /// interactive approval round-trip for `Ask`. Before this fix the RPC path skipped all of these,
     /// so a `ReadOnly` session could write (and merge) files through `/race`.
     async fn tournament_preflight(&self, candidate_count: usize) -> Result<(), JsonRpcError> {
-        // Quota + policy mode (shared helper, same as the tool path).
+        // Quota + policy mode (shared helper, same as the tool path). P1 (`v1.5.0`): the live
+        // session spawn count is passed in so repeated `/race` calls cannot bypass `max_subagents`.
+        let already_spawned = self
+            .inner
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .subagents_spawned;
         let check = match crate::subagents::subagent_spawn_preflight(
             &self.inner.policy_engine,
             candidate_count,
-            0,
+            already_spawned,
             self.inner.config.max_subagents,
             EffectClass::Mutating,
         ) {
@@ -2396,6 +2490,18 @@ impl RpcDispatcher {
         // BEFORE any candidate worktree is materialized.
         self.tournament_preflight(count).await?;
 
+        // P1 (`v1.5.0`): reserve the candidate budget in the live session counter immediately
+        // after preflight (matching `execute_spawn_tournament`) so a second `/race` on the same
+        // session is measured against what this one is about to spend.
+        {
+            let mut status = self
+                .inner
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            status.subagents_spawned = status.subagents_spawned.saturating_add(count);
+        }
+
         let strategies: Vec<String> = params
             .get("strategies")
             .and_then(Value::as_array)
@@ -2537,54 +2643,76 @@ impl RpcDispatcher {
         .await
         .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
 
-        // Record the winning merge as one WAL revision so `/undo` reverts it atomically.
-        // F04 (`v1.4.0`): the winning merge MUST be durably bound to the WAL. A failure to open or
-        // append the journal is surfaced as an explicit RPC error instead of being silently
-        // swallowed by `if let Ok(...)`, which previously reported success while `/undo` and the
-        // session history had no record of the merged revision.
-        if let Some(rev) = outcome.merged_revision.clone() {
-            let mut journal = SessionJournal::open(&self.session_path()).map_err(|e| {
-                JsonRpcError::new(
-                    JSONRPC_INTERNAL_ERROR,
-                    format!(
-                        "tournament merged revision {} but the session WAL could not be opened ({}); the merge is on disk but unrecorded",
-                        rev.as_str(),
-                        e
-                    ),
-                )
-            })?;
-            let (changed_paths, tracked_file_count) = match store.load_revision(&rev) {
-                Ok(manifest) => (manifest.changed_paths.clone(), manifest.tracked_files.len()),
-                Err(e) => {
+        // P1 (`v1.5.0`): persist the tournament outcome in the session WAL. The winning merge is
+        // recorded as one `RevisionCaptured` record so `/undo` reverts it atomically (F04), and the
+        // cumulative `subagents_spawned` count is carried forward in a checkpoint so later prompt
+        // runs and `--resume` / `--fork` honour `max_subagents`.
+        //
+        // F04 (`v1.4.0`): a WAL failure is an explicit RPC error, never a silent success — when a
+        // merge happened the revision must be durably recorded. When nothing merged the in-memory
+        // count still enforces the quota, so a WAL failure is tolerated.
+        if let Ok(mut journal) = SessionJournal::open(&self.session_path()) {
+            if let Some(rev) = outcome.merged_revision.clone() {
+                match store.load_revision(&rev) {
+                    Ok(manifest) => {
+                        if let Err(e) = journal.record_revision_capture(
+                            journal.max_active_turn(),
+                            rev.as_str(),
+                            Some(base_revision.as_str()),
+                            manifest.changed_paths.clone(),
+                            manifest.tracked_files.len(),
+                        ) {
+                            return Err(JsonRpcError::new(
+                                JSONRPC_INTERNAL_ERROR,
+                                format!(
+                                    "tournament merged revision {} but appending it to the session WAL failed ({}); the merge is on disk but unrecorded",
+                                    rev.as_str(),
+                                    e
+                                ),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(JsonRpcError::new(
+                            JSONRPC_INTERNAL_ERROR,
+                            format!(
+                                "tournament merged revision {} but its manifest could not be loaded ({}); the merge is on disk but unrecorded",
+                                rev.as_str(),
+                                e
+                            ),
+                        ));
+                    }
+                }
+            }
+            let spawned = self
+                .inner
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .subagents_spawned;
+            if let Err(e) =
+                Self::persist_spawn_count(&mut journal, spawned, outcome.merged_revision.as_ref())
+            {
+                if let Some(rev) = &outcome.merged_revision {
                     return Err(JsonRpcError::new(
                         JSONRPC_INTERNAL_ERROR,
                         format!(
-                            "tournament merged revision {} but its manifest could not be loaded ({}); the merge is on disk but unrecorded",
+                            "tournament merged revision {} but its spawn count could not be recorded ({}); the merge is on disk but unrecorded",
                             rev.as_str(),
                             e
                         ),
                     ));
                 }
-            };
-            journal
-                .record_revision_capture(
-                    journal.max_active_turn(),
-                    rev.as_str(),
-                    Some(base_revision.as_str()),
-                    changed_paths,
-                    tracked_file_count,
-                )
-                .map_err(|e| {
-                    JsonRpcError::new(
-                        JSONRPC_INTERNAL_ERROR,
-                        format!(
-                            "tournament merged revision {} but appending it to the session WAL failed ({}); the merge is on disk but unrecorded",
-                            rev.as_str(),
-                            e
-                        ),
-                    )
-                })?;
+            }
             self.update_snapshot_from_journal(&journal);
+        } else if let Some(rev) = &outcome.merged_revision {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                format!(
+                    "tournament merged revision {} but the session WAL could not be opened; the merge is on disk but unrecorded",
+                    rev.as_str()
+                ),
+            ));
         }
 
         let note = JsonRpcNotification::new(
@@ -2663,6 +2791,7 @@ impl RpcDispatcher {
         Ok(json!({
             "active_model": active_model,
             "active_protocol": active_protocol,
+            "ui_theme": self.active_theme().as_str(),
             "hot_swap_available": hot_swap_available,
             "summary": summary,
             "rejected_workspace_keys": rejected,
@@ -2715,10 +2844,25 @@ impl RpcDispatcher {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         // Item #3 (`v1.4.0`): `adaptive_tournament` is also a safe, hot-swappable key.
+        // P2 (`v1.5.0`): `/config set adaptive_tournament 3` arrives as a JSON string (the REPL
+        // forwards raw text), so accept both a number and a numeric string.
         let adaptive_tournament_raw = params
             .get("adaptive_tournament")
-            .and_then(Value::as_u64)
+            .and_then(|v| {
+                v.as_u64().or_else(|| {
+                    v.as_str()
+                        .map(str::trim)
+                        .and_then(|s| s.parse::<u64>().ok())
+                })
+            })
             .map(|n| n as usize);
+        // `v1.5.0`: `ui_theme` is a safe, hot-swappable presentation key (`zen` | `classic`).
+        let ui_theme_raw = params
+            .get("ui_theme")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let save = params.get("save").and_then(Value::as_bool).unwrap_or(false);
 
         if model.is_none()
@@ -2727,13 +2871,21 @@ impl RpcDispatcher {
             && reasoning_raw.is_none()
             && projection_profile_raw.is_none()
             && adaptive_tournament_raw.is_none()
+            && ui_theme_raw.is_none()
         {
             return Err(JsonRpcError::new(
                 JSONRPC_INVALID_PARAMS,
-                "config.set requires at least one of 'model', 'protocol', 'reasoning_effort', 'profile', 'projection_profile' or 'adaptive_tournament'"
+                "config.set requires at least one of 'model', 'protocol', 'reasoning_effort', 'profile', 'projection_profile', 'adaptive_tournament' or 'ui_theme'"
                     .to_string(),
             ));
         }
+
+        let new_theme = match &ui_theme_raw {
+            Some(raw) => Some(
+                Theme::parse(raw).map_err(|e| JsonRpcError::new(JSONRPC_INVALID_PARAMS, e))?,
+            ),
+            None => None,
+        };
 
         let new_projection_profile = match &projection_profile_raw {
             Some(raw) => Some(
@@ -2807,6 +2959,13 @@ impl RpcDispatcher {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = n;
             }
+            if let Some(theme) = new_theme {
+                *self
+                    .inner
+                    .active_theme
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = theme;
+            }
             {
                 let mut guard = self
                     .inner
@@ -2840,6 +2999,7 @@ impl RpcDispatcher {
             return Ok(json!({
                 "projection_profile": new_projection_profile.map(|p| p.as_str()),
                 "adaptive_tournament": adaptive_tournament_raw,
+                "ui_theme": self.active_theme().as_str(),
                 "persisted_to": persisted_to,
             }));
         }
@@ -2905,6 +3065,13 @@ impl RpcDispatcher {
                 .active_adaptive_tournament
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = n;
+        }
+        if let Some(theme) = new_theme {
+            *self
+                .inner
+                .active_theme
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = theme;
         }
         {
             let mut guard = self
@@ -3275,6 +3442,7 @@ impl RpcDispatcher {
                     | "acp.prompt"
                     | "session/prompt"
                     | "session.tournament"
+                    | "session/tournament"
             );
 
             if is_async_prompt {
@@ -3785,13 +3953,65 @@ impl InteractiveRepl {
             .active_protocol()
             .unwrap_or_else(|| "auto".to_string());
 
+        let renderer = self.dispatcher.theme_renderer();
+        if renderer.theme() == Theme::Zen {
+            // Design D (`v1.5.0`): borderless ultra-minimal header, session facts, and a one-line
+            // hint. The facts line keeps the stable `model: / thinking: / protocol: / policy:`
+            // labels that scripts and the existing surface-parity tests key on.
+            let mut banner = renderer.banner(
+                &active_model,
+                &active_thinking,
+                &active_protocol,
+                hit_pct,
+                rev,
+                ws,
+                session_id,
+                policy,
+                turns,
+            );
+            banner.push_str(&format!(
+                "{}\n",
+                renderer.status_line(
+                    StatusDot::Tool,
+                    "tokens",
+                    &format!("in={} cached={} hit={:.1}%", in_tok, cached_tok, hit_pct)
+                )
+            ));
+            banner.push_str(&format!(
+                "{}\n",
+                renderer.status_line(
+                    StatusDot::Thinking,
+                    "thinking",
+                    &format!("effort={}", sanitize_terminal_text(&active_thinking))
+                )
+            ));
+            banner.push_str(&format!(
+                "{}\n",
+                renderer.status_line(
+                    StatusDot::Success,
+                    "gate",
+                    "workspace completion gate armed"
+                )
+            ));
+            banner.push_str(&format!(
+                "{}\n",
+                renderer.status_line(
+                    StatusDot::Alert,
+                    "keys",
+                    "/theme /status /diff /model /thinking /race /undo"
+                )
+            ));
+            banner.push_str(&format!("{}\n", renderer.hairline(terminal_hairline_width())));
+            return banner;
+        }
+
         format!(
             "=== Kroma v{} Interactive REPL ===\n\
              workspace: {} | policy: {} | session: {}\n\
              model: {} | thinking: {} | protocol: {}\n\
              turns: {} | revision: {} | tokens: in={} (cached={}, hit={:.1}%)\n\
              Type a task prompt, or /help for all commands.\n\
-             Key commands: /model  /thinking  /resume  /sessions  /new  /undo  /revisions  /graph  /race  /config  /status  /help  /quit\n",
+             Key commands: /model  /thinking  /resume  /sessions  /new  /undo  /revisions  /graph  /race  /config  /theme  /status  /help  /quit\n",
             crate::version(),
             sanitize_terminal_text(ws),
             sanitize_terminal_text(policy),
@@ -4330,6 +4550,7 @@ impl InteractiveRepl {
                         "  /protocol [<name>]          Show or hot-swap the wire protocol (auto|chat-completions|\n",
                         "                              anthropic-messages|openai-responses)\n",
                         "  /config [show|set <k> <v>|profile <name>]  Inspect or persist layered configuration\n",
+                        "  /theme [zen|classic]        Show or switch the terminal theme (zen = Design D, default)\n",
                         "  /sessions                   List recent sessions in the state directory\n",
                         "  /resume [<latest|id>]       Attach an existing session WAL as the active session\n",
                         "  /new | /clear               Start a fresh session in this workspace\n",
@@ -4383,7 +4604,25 @@ impl InteractiveRepl {
                         .get("subagents_spawned")
                         .and_then(Value::as_u64)
                         .unwrap_or(0);
-                    let out = format!(
+                    // `v1.5.0`: prefix the live view with a Design D status-dot line. The body keeps
+                    // its stable `key: value` lines so scripts and parity tests are unaffected.
+                    let renderer = self.dispatcher.theme_renderer();
+                    let mut out = String::new();
+                    if renderer.theme() == Theme::Zen {
+                        out.push_str(&renderer.status_line(
+                            StatusDot::Tool,
+                            "status",
+                            &format!(
+                                "session={} policy={} turns={} rev={}",
+                                sanitize_terminal_text(sid),
+                                sanitize_terminal_text(policy),
+                                turns,
+                                crate::theme::rev_label(rev),
+                            ),
+                        ));
+                        out.push('\n');
+                    }
+                    out.push_str(&format!(
                         "session_id: {}\npolicy: {}\nturn_count: {}\nlatest_revision: {}\nmutations: {}\nsubagents_spawned: {}\n",
                         sanitize_terminal_text(sid),
                         sanitize_terminal_text(policy),
@@ -4391,11 +4630,84 @@ impl InteractiveRepl {
                         sanitize_terminal_text(rev),
                         mut_count,
                         sub_count,
-                    );
+                    ));
                     Ok(ReplStepOutcome {
                         output: out,
                         should_exit: false,
                     })
+                }
+                "/theme" | "/ui" => {
+                    // `v1.5.0`: show or switch the Design D / classic terminal theme.
+                    let renderer = self.dispatcher.theme_renderer();
+                    let Some(&requested) = rest.first() else {
+                        return Ok(ReplStepOutcome {
+                            output: format!(
+                                "theme: {} (available: zen, classic)\n",
+                                renderer.theme().as_str()
+                            ),
+                            should_exit: false,
+                        });
+                    };
+                    if Theme::parse(requested).is_err() {
+                        return Ok(ReplStepOutcome {
+                            output: format!(
+                                "error: unknown theme '{}'; expected 'zen' or 'classic'\n",
+                                sanitize_terminal_text(requested)
+                            ),
+                            should_exit: false,
+                        });
+                    }
+                    let resp = self
+                        .dispatcher
+                        .handle_request(JsonRpcRequest::new(
+                            1,
+                            "config.set",
+                            json!({ "ui_theme": requested }),
+                        ))
+                        .await;
+                    match resp.result {
+                        Some(val) => {
+                            let theme = val
+                                .get("ui_theme")
+                                .and_then(Value::as_str)
+                                .unwrap_or(requested);
+                            let renderer = self.dispatcher.theme_renderer();
+                            let mut out = String::new();
+                            if renderer.theme() == Theme::Zen {
+                                out.push_str(&renderer.status_line(
+                                    StatusDot::Success,
+                                    "theme",
+                                    &format!("switched to {}", theme),
+                                ));
+                                out.push('\n');
+                            }
+                            out.push_str(&format!(
+                                "theme -> {}{}\n",
+                                sanitize_terminal_text(theme),
+                                if theme == "zen" {
+                                    " (Design D: borderless, ultra-minimal)"
+                                } else {
+                                    ""
+                                }
+                            ));
+                            Ok(ReplStepOutcome {
+                                output: out,
+                                should_exit: false,
+                            })
+                        }
+                        None => Ok(ReplStepOutcome {
+                            output: format!(
+                                "error: {}\n",
+                                sanitize_terminal_text(
+                                    &resp
+                                        .error
+                                        .map(|e| e.message)
+                                        .unwrap_or_else(|| "config.set failed".to_string())
+                                )
+                            ),
+                            should_exit: false,
+                        }),
+                    }
                 }
                 "/revisions" | "/diff" => {
                     let resp = self
@@ -4418,7 +4730,23 @@ impl InteractiveRepl {
                             should_exit: false,
                         });
                     }
-                    let mut out = format!("revisions ({} captured):\n", revs.len());
+                    let mut out = String::new();
+                    if cmd == "/diff" {
+                        // `v1.5.0`: Design D header for the live diff view. The stable
+                        // `revisions (N captured):` body below is preserved for scripts.
+                        let renderer = self.dispatcher.theme_renderer();
+                        if renderer.theme() == Theme::Zen {
+                            out.push_str(&renderer.status_line(
+                                StatusDot::Tool,
+                                "diff",
+                                &format!("{} workspace revision(s) captured", revs.len()),
+                            ));
+                            out.push('\n');
+                            out.push_str(&renderer.hairline(terminal_hairline_width()));
+                            out.push('\n');
+                        }
+                    }
+                    out.push_str(&format!("revisions ({} captured):\n", revs.len()));
                     for r in &revs {
                         let turn = r.get("turn").and_then(Value::as_u64).unwrap_or(0);
                         let rid = r.get("revision_id").and_then(Value::as_str).unwrap_or("-");
@@ -4800,6 +5128,37 @@ impl InteractiveRepl {
                     .get("latest_revision_id")
                     .and_then(Value::as_str)
                     .unwrap_or("<none>");
+                let in_tok = val
+                    .get("total_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let out_tok = val
+                    .get("total_output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let child_in_tok = val
+                    .get("children_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let child_out_tok = val
+                    .get("children_output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let hit_pct = val
+                    .get("cache_hit_ratio")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+                    * 100.0;
+                let modified: Vec<String> = val
+                    .get("modified_files")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(Value::as_str)
+                            .map(sanitize_terminal_text)
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let mut out = String::new();
                 if !text.is_empty() {
                     out.push_str(&sanitize_terminal_text(text));
@@ -4814,6 +5173,38 @@ impl InteractiveRepl {
                     tools,
                     sanitize_terminal_text(rev),
                 ));
+                // `v1.5.0` Design D footer: a spectrum status dot, the files touched, and a
+                // compact telemetry line (`self + child` token spend, cache hit, revision).
+                let renderer = self.dispatcher.theme_renderer();
+                if renderer.theme() == Theme::Zen {
+                    let dot = match status {
+                        "completed" => StatusDot::Success,
+                        "cancelled" => StatusDot::Alert,
+                        _ => StatusDot::Error,
+                    };
+                    out.push_str(&renderer.status_line(
+                        dot,
+                        "run",
+                        &format!("status={} turns={} tools={}", status, turns, tools),
+                    ));
+                    out.push('\n');
+                    if !modified.is_empty() {
+                        out.push_str(&renderer.status_line(
+                            StatusDot::Success,
+                            "edit",
+                            &format!("{} file(s) changed: {}", modified.len(), modified.join(", ")),
+                        ));
+                        out.push('\n');
+                    }
+                    out.push_str(&renderer.telemetry_footer(
+                        in_tok.saturating_add(out_tok),
+                        child_in_tok.saturating_add(child_out_tok),
+                        hit_pct,
+                        rev,
+                        0,
+                    ));
+                    out.push('\n');
+                }
                 Ok(ReplStepOutcome {
                     output: out,
                     should_exit: false,
@@ -4825,6 +5216,247 @@ impl InteractiveRepl {
             }),
             _ => Err("empty response from session.prompt".to_string()),
         }
+    }
+
+    /// `v1.5.0`: map a live `kroma/event` notification to a Design D status line.
+    ///
+    /// Returns `None` for notifications that belong to another session, are not `kroma/event`, or
+    /// carry no terminal-worthy state. This is what makes tool start/complete, model turns, policy
+    /// decisions, predictive checks, revision captures and subagent activity stream live.
+    pub fn render_live_event(&self, note: &JsonRpcNotification) -> Option<String> {
+        if note.method != "kroma/event" {
+            return None;
+        }
+        let params = &note.params;
+        let active_session = self.dispatcher.session_id();
+        if let Some(session) = params.get("session_id").and_then(Value::as_str) {
+            if !active_session.is_empty() && session != active_session {
+                return None;
+            }
+        }
+        // Serde serialises `EventPayload` with the variant name as the tag (`ToolStarted`); accept
+        // the snake_case spelling too so hand-written emitters work as well.
+        let event_type = params.get("event_type").and_then(Value::as_str)?;
+        let event_key = event_type.to_ascii_lowercase().replace('_', "");
+        let payload = params.get("payload").cloned().unwrap_or(Value::Null);
+        let renderer = self.dispatcher.theme_renderer();
+        if renderer.theme() != Theme::Zen {
+            return None;
+        }
+        let str_of = |key: &str| {
+            payload
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let num_of = |key: &str| payload.get(key).and_then(Value::as_u64).unwrap_or(0);
+
+        let line = match event_key.as_str() {
+            "toolstarted" => {
+                let tool = str_of("tool_name");
+                let dot = if matches!(tool.as_str(), "edit" | "write") {
+                    StatusDot::Success
+                } else {
+                    StatusDot::Tool
+                };
+                let path = str_of("relative_path");
+                renderer.status_line(dot, &tool, &path)
+            }
+            "toolcompleted" => {
+                let tool = str_of("tool_name");
+                let outcome = str_of("outcome");
+                let ok = outcome == "success";
+                let dot = if ok { StatusDot::Success } else { StatusDot::Error };
+                let path = str_of("relative_path");
+                let tier = payload
+                    .get("edit_match_tier")
+                    .and_then(Value::as_str)
+                    .map(|t| format!(" [{}]", t))
+                    .unwrap_or_default();
+                let detail = format!(
+                    "{}{} {} {}ms",
+                    if ok { "\u{2713}" } else { "\u{2717}" },
+                    tier,
+                    path,
+                    num_of("duration_ms")
+                );
+                renderer.status_line(dot, &tool, detail.trim())
+            }
+            "modelrequestcompleted" => {
+                let hit = payload
+                    .get("prefix_cache_hit_ratio")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+                    * 100.0;
+                let detail = format!(
+                    "turn {} · in {} (cached {}) / out {} · cache {:.1}% · {}ms",
+                    num_of("turn"),
+                    num_of("input_tokens"),
+                    num_of("cached_input_tokens"),
+                    num_of("output_tokens"),
+                    hit,
+                    num_of("latency_ms")
+                );
+                renderer.status_line(StatusDot::Thinking, "thinking", &detail)
+            }
+            "policydecision" => {
+                let decision = str_of("decision");
+                let dot = if decision.contains("deny") {
+                    StatusDot::Alert
+                } else {
+                    StatusDot::Tool
+                };
+                renderer.status_line(
+                    dot,
+                    "policy",
+                    &format!("{} → {}", str_of("tool_name"), decision),
+                )
+            }
+            "predictivecheck" => {
+                let status = str_of("status");
+                let dot = if status == "ok" {
+                    StatusDot::Success
+                } else if status == "skipped" {
+                    StatusDot::Tool
+                } else {
+                    StatusDot::Alert
+                };
+                renderer.status_line(
+                    dot,
+                    "check",
+                    &format!(
+                        "{} · {} issue(s) · {}ms",
+                        str_of("path"),
+                        num_of("issue_count"),
+                        num_of("duration_ms")
+                    ),
+                )
+            }
+            "revisioncaptured" => {
+                let changed = payload
+                    .get("changed_paths")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                renderer.status_line(
+                    StatusDot::Success,
+                    "revision",
+                    &format!(
+                        "rev {} · {} file(s) · {}",
+                        crate::theme::short_rev(&str_of("revision_id")),
+                        changed,
+                        str_of("trigger")
+                    ),
+                )
+            }
+            "subagentspawned" => renderer.status_line(
+                StatusDot::Thinking,
+                "subagent",
+                &format!(
+                    "{} ({}) · worktree={}",
+                    str_of("subagent_id"),
+                    str_of("role"),
+                    payload
+                        .get("isolated_worktree")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                ),
+            ),
+            "subagentcompleted" => {
+                let status = str_of("status");
+                let dot = if status == "completed" {
+                    StatusDot::Success
+                } else {
+                    StatusDot::Alert
+                };
+                renderer.status_line(
+                    dot,
+                    "subagent",
+                    &format!(
+                        "{} · {} turn(s) · {} tok · {}ms",
+                        status,
+                        num_of("turns_used"),
+                        num_of("tokens_used"),
+                        num_of("duration_ms")
+                    ),
+                )
+            }
+            "approvalrequested" => renderer.status_line(
+                StatusDot::Alert,
+                "approval",
+                &format!("{} awaiting decision on {}", str_of("tool_name"), str_of("surface")),
+            ),
+            "loopguardtriggered" => renderer.status_line(
+                StatusDot::Alert,
+                "loop-guard",
+                &format!("{} blocked ({})", str_of("tool_name"), str_of("guard_kind")),
+            ),
+            "runterminated" => {
+                let status = str_of("status");
+                let dot = if status.to_ascii_lowercase().contains("completed") {
+                    StatusDot::Success
+                } else {
+                    StatusDot::Error
+                };
+                renderer.status_line(
+                    dot,
+                    "gate",
+                    &format!(
+                        "run {} · {} turn(s) · {} tool call(s)",
+                        status,
+                        num_of("turns"),
+                        num_of("total_tool_calls")
+                    ),
+                )
+            }
+            _ => return None,
+        };
+        Some(format!("{}\n", line))
+    }
+
+    /// `v1.5.0`: run one prompt turn while streaming Design D status lines for its live events.
+    ///
+    /// The turn executes on a worker task so this task can drain `kroma/event` notifications and
+    /// print them as they happen; the final [`ReplStepOutcome`] is returned to the caller, which
+    /// owns the summary and telemetry footer.
+    pub async fn run_turn_streaming<W>(
+        &self,
+        prompt: &str,
+        writer: &mut W,
+    ) -> Result<ReplStepOutcome, String>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mut rx = self.dispatcher.subscribe_notifications();
+        let turn_repl = InteractiveRepl::new(self.dispatcher.clone());
+        let prompt_owned = prompt.to_string();
+        let mut handle = tokio::spawn(async move { turn_repl.handle_line(&prompt_owned).await });
+
+        let step = loop {
+            tokio::select! {
+                biased;
+                res = &mut handle => {
+                    break res.map_err(|e| format!("REPL turn task failed: {}", e))??;
+                }
+                maybe = rx.recv() => {
+                    if let Some(note) = maybe {
+                        if let Some(line) = self.render_live_event(&note) {
+                            writer.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+                            writer.flush().await.map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+            }
+        };
+        // Flush any events that were queued just before termination.
+        while let Ok(note) = rx.try_recv() {
+            if let Some(line) = self.render_live_event(&note) {
+                writer.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+            }
+        }
+        writer.flush().await.map_err(|e| e.to_string())?;
+        Ok(step)
     }
 
     /// Drive the interactive REPL loop over arbitrary async buffered reader and writer streams.
@@ -4856,7 +5488,12 @@ impl InteractiveRepl {
         writer.flush().await.map_err(|e| e.to_string())?;
 
         if let Some(prompt) = initial_prompt.map(str::trim).filter(|s| !s.is_empty()) {
-            let step = self.handle_line(prompt).await?;
+            let step = if prompt.starts_with('/') {
+                self.handle_line(prompt).await?
+            } else {
+                // `v1.5.0`: stream Design D status lines for the live events of this turn.
+                self.run_turn_streaming(prompt, &mut writer).await?
+            };
             if !step.output.is_empty() {
                 writer
                     .write_all(step.output.as_bytes())
@@ -4870,8 +5507,16 @@ impl InteractiveRepl {
         }
 
         loop {
+            // P2 (`v1.5.0`): recompute the prefix every iteration so `/theme` and `/ui` switches take
+            // effect on the very next prompt instead of staying stuck on the startup theme.
+            let renderer = self.dispatcher.theme_renderer();
+            let prompt_prefix = if renderer.theme() == Theme::Zen {
+                renderer.prompt_prefix()
+            } else {
+                "kroma> ".to_string()
+            };
             writer
-                .write_all(b"kroma> ")
+                .write_all(prompt_prefix.as_bytes())
                 .await
                 .map_err(|e| e.to_string())?;
             writer.flush().await.map_err(|e| e.to_string())?;
@@ -4880,7 +5525,11 @@ impl InteractiveRepl {
             else {
                 break;
             };
-            let step = self.handle_line(&line).await?;
+            let step = if line.trim_start().starts_with('/') {
+                self.handle_line(&line).await?
+            } else {
+                self.run_turn_streaming(&line, &mut writer).await?
+            };
             if !step.output.is_empty() {
                 writer
                     .write_all(step.output.as_bytes())

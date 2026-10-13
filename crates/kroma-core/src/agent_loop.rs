@@ -288,6 +288,17 @@ impl AgentRunner {
         self
     }
 
+    /// P1 (`v1.5.0`): seed the cumulative subagent spawn count for this session.
+    ///
+    /// A surface tracks spawns it performs outside the agent loop (for example an RPC
+    /// `session.tournament`). Seeding it here means a later prompt run measures its own
+    /// `spawn_subagent` calls against the `max_subagents` quota already consumed instead of
+    /// resetting to whatever the last WAL checkpoint happened to record.
+    pub fn with_subagents_spawned(mut self, spawned: usize) -> Self {
+        self.subagents_spawned = spawned;
+        self
+    }
+
     /// Gate 5: enforce a hard total-token ceiling (input + output) on this runner.
     pub fn with_max_total_tokens(mut self, max_tokens: Option<u64>) -> Self {
         self.max_total_tokens = max_tokens;
@@ -451,7 +462,7 @@ impl AgentRunner {
             if let Some(ref active_revs) = reverted_active_revisions {
                 self.mutation_ledger.prune_reverted_revisions(active_revs);
             }
-            self.subagents_spawned = checkpoint.subagents_spawned;
+            self.subagents_spawned = self.subagents_spawned.max(checkpoint.subagents_spawned);
         }
         // Replay any completed mutating tool result in the active transcript that was persisted
         // after the last checkpoint before an interruption.
@@ -1018,8 +1029,7 @@ impl AgentRunner {
                                         disallow_test_tampering: true,
                                         protected_paths: Vec::new(),
                                     };
-                                    let before_rev = self.current_revision_id.clone();
-                                    let (tournament_out, _label) = self
+                                    let (tournament_out, _label, merged) = self
                                         .execute_spawn_tournament(
                                             request,
                                             absolute_turn,
@@ -1028,7 +1038,11 @@ impl AgentRunner {
                                             "adaptive_tournament".to_string(),
                                         )
                                         .await;
-                                    if self.current_revision_id != before_rev {
+                                    // F10 (`v1.5.0`): the adaptive path never reaches
+                                    // `execute_tool_batch`, so drain the child spend here instead of
+                                    // leaking it when the model stops on the next turn.
+                                    self.drain_children_tokens(&mut budget_tracker);
+                                    if merged {
                                         // A candidate was verified and merged: the stall is broken.
                                         gate_failure_count = 0;
                                         last_gate_failure_hash = None;
@@ -1150,15 +1164,7 @@ impl AgentRunner {
             // F10 (`v1.4.0`): fold any child subagent / tournament token spend accumulated during
             // this batch into the parent budget tracker so the run summary reports
             // `self` + `children` cost.
-            if self.children_tokens_pending_input > 0 || self.children_tokens_pending_output > 0 {
-                budget_tracker.record_children_token_usage(
-                    self.children_tokens_pending_input,
-                    None,
-                    self.children_tokens_pending_output,
-                );
-                self.children_tokens_pending_input = 0;
-                self.children_tokens_pending_output = 0;
-            }
+            self.drain_children_tokens(&mut budget_tracker);
 
             // Gate 1: a batch that mutated files — directly via `edit`/`write`, or indirectly via a
             // `bash` command whose writes the tool cannot report (O1) — gets a fresh revision bound
@@ -2088,6 +2094,27 @@ impl AgentRunner {
     /// Mirrors the `session.tournament` RPC path: every candidate races in its own isolated
     /// worktree, is verified inside that worktree, and only a gate-passing winner is merged. When no
     /// candidate passes, the parent workspace is left byte-for-byte untouched.
+    /// F10 (`v1.5.0`): move any pending child subagent / tournament token spend into the parent
+    /// budget tracker exactly once. Both the post-tool-batch path and the adaptive escalation path
+    /// call this, so child cost is never dropped when a run ends without another tool batch.
+    fn drain_children_tokens(&mut self, budget_tracker: &mut BudgetTracker) {
+        if self.children_tokens_pending_input > 0 || self.children_tokens_pending_output > 0 {
+            budget_tracker.record_children_token_usage(
+                self.children_tokens_pending_input,
+                None,
+                self.children_tokens_pending_output,
+            );
+            self.children_tokens_pending_input = 0;
+            self.children_tokens_pending_output = 0;
+        }
+    }
+
+    /// Run a Best-of-N tournament and merge the winning candidate.
+    ///
+    /// Returns the tool output, the decision label, and whether a candidate was merged into the
+    /// parent workspace. The merged flag lets callers detect a merge without relying on
+    /// `current_revision_id`, which (matching the plain worker path) is left for
+    /// [`Self::capture_workspace_revision`] to advance so the merge is durably recorded in the WAL.
     async fn execute_spawn_tournament(
         &mut self,
         request: TournamentRequest,
@@ -2095,7 +2122,7 @@ impl AgentRunner {
         modified_files_set: &mut HashSet<String>,
         logger: &mut EventLogger,
         decision_label: String,
-    ) -> (ToolExecutionOutput, String) {
+    ) -> (ToolExecutionOutput, String, bool) {
         let store = self.snapshot_store.clone().unwrap_or_else(|| {
             Arc::new(SnapshotStore::new(
                 self.tool_runtime.env().state_dir().join("snapshots"),
@@ -2120,6 +2147,7 @@ impl AgentRunner {
                         ToolResultMeta::default(),
                     ),
                     decision_label,
+                    false,
                 );
             }
         };
@@ -2197,11 +2225,12 @@ impl AgentRunner {
                         ToolResultMeta::default(),
                     ),
                     decision_label,
+                    false,
                 );
             }
         };
 
-        if let Some(rev) = outcome.merged_revision.clone() {
+        let merged = if let Some(rev) = outcome.merged_revision.clone() {
             let written: Vec<String> = store
                 .load_revision(&rev)
                 .map(|m| m.changed_paths.clone())
@@ -2210,8 +2239,19 @@ impl AgentRunner {
                 modified_files_set.insert(path.clone());
             }
             self.batch_mutated = true;
-            self.current_revision_id = Some(rev);
-        }
+            // P1 (`v1.5.0`): mirror the plain worker path. When a snapshot store is present, leave
+            // `current_revision_id` untouched so the next `capture_workspace_revision` observes the
+            // content change, appends a `RevisionCaptured` record to the session WAL, and `/undo`
+            // can revert the merge. Setting it here made the capture see an "unchanged" workspace
+            // and skip the WAL record entirely. Without a store there is nothing to record, so the
+            // in-memory id is advanced for callers that detect merges by revision change.
+            if self.snapshot_store.is_none() {
+                self.current_revision_id = Some(rev);
+            }
+            true
+        } else {
+            false
+        };
 
         // F10 (`v1.4.0`): aggregate the token spend of every tournament candidate, including the
         // losers and any candidate that failed or was cancelled.
@@ -2226,6 +2266,7 @@ impl AgentRunner {
         (
             ToolExecutionOutput::success(report, ToolResultMeta::default()),
             decision_label,
+            merged,
         )
     }
 
@@ -2428,7 +2469,7 @@ impl AgentRunner {
         let absolute_turn = self.session_turn_offset.saturating_add(relative_turn);
 
         if let Some(request) = tournament_request {
-            return self
+            let (output, label, _merged) = self
                 .execute_spawn_tournament(
                     request,
                     absolute_turn,
@@ -2437,6 +2478,7 @@ impl AgentRunner {
                     decision_label,
                 )
                 .await;
+            return (output, label);
         }
 
         // If earlier tools in this same batch mutated the parent workspace, capture a revision now
