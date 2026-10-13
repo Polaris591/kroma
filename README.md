@@ -70,6 +70,57 @@ Kroma reads configuration from environment variables (and, for scripts, from the
 - **Symbol graph navigation** — cross-file `RepoGraph` with personalized PageRank (`code_graph` tool, `/graph` REPL command).
 - **Multimodal read** — PNG/JPEG/GIF/WebP images are decoded into vision model content blocks.
 
+## Configuration (`v1.3.0`)
+
+Kroma reads layered configuration so it runs with zero environment variables:
+
+| Layer (highest first) | Location |
+| --- | --- |
+| CLI flags | `--model`/`--profile`/`--protocol`/`--reasoning-effort`/`--max-subagents` |
+| Environment | `KROMA_*` variables |
+| Workspace file | `<workspace>/.kroma.toml` (untrusted: `model`, `protocol`, `reasoning_effort`, `max_subagents` only) |
+| User file | `~/.kroma/config.toml` (trusted; written `0600`) |
+
+`~/.kroma/config.toml` also holds named profiles:
+
+```toml
+default_profile = "gemini"
+model = "deepseek"
+base_url = "https://example.com/wb/v1"
+api_key = "sk-..."
+
+[profiles.gemini]
+base_url = "https://example.com/v1"
+model = "gemini-3.8-flash-high"
+protocol = "chat-completions"
+reasoning_effort = "high"
+```
+
+A workspace `.kroma.toml` can never set credentials, endpoints, hooks, policy or verification
+commands; rejected keys are reported on stderr and by `/config show`.
+
+## Best-of-N worktree tournament (`v1.3.0`)
+
+Race 2–4 `Worker` candidates on the same task, each in its own isolated worktree. Every candidate is
+verified *inside* its worktree (completion gate + predictive validation) and ranked deterministically
+(gate passed → zero structural warnings → conflict-free → smallest diff). Only the winner is merged,
+the merge is a single revision that `--undo` reverts in one step, and every loser worktree is
+removed. If no candidate passes verification the parent workspace is untouched.
+
+```console
+kroma> /race 3 fix the flaky parser test
+```
+
+Also available as `spawn_subagent {"mode":"tournament","task":"...","candidates":3}` and as the
+`session.tournament` JSON-RPC method.
+
+## Interactive commands (`kroma>`)
+
+`/model [<id>] [--save]`, `/thinking [<lvl>] [--save]`, `/protocol [<name>]`,
+`/config [show|set <k> <v>|profile <name>]`, `/sessions`, `/resume [<latest|id>]`, `/new`,
+`/race <N> <task>`, `/status`, `/revisions`, `/undo`, `/diff`, `/skills`, `/graph`, `/fork`,
+`/inspect`, `/help`, `/quit`.
+
 ## Development
 
 ```bash
