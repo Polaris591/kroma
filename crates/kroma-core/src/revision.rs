@@ -21,7 +21,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
@@ -1044,23 +1044,49 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
             )));
         }
         let anchor = if absolute { Path::new("/") } else { Path::new(".") };
-        let mut handle = open_real_dir(anchor)?;
-        for (index, name) in components.iter().enumerate() {
-            let name_c = CString::new(name.as_bytes()).map_err(|_| {
-                RevisionError::InvalidStore("snapshot store path contains a NUL byte".to_string())
-            })?;
-            let rc = unsafe { libc::mkdirat(handle.as_raw_fd(), name_c.as_ptr(), 0o700) };
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(err.into());
-                }
-            }
-            handle = open_dir_at(handle.as_raw_fd(), &name_c)?;
-            if index + 1 == components.len() {
-                handle.set_permissions(fs::Permissions::from_mode(0o700))?;
-            }
+        let mut collapsed = PathBuf::from(anchor);
+        for name in &components {
+            collapsed.push(name);
         }
+
+        // Fast path: every component is a real directory and we can walk it with dirfds.
+        if walk_private_dir(anchor, &components).is_ok() {
+            return Ok(());
+        }
+
+        // Portable path: some platforms ship OS-owned symlinked ancestors that no user code may
+        // rewrite — Android's `/data/data` is a symlink to `/data/user/0`, and macOS `/var`,
+        // `/tmp` and `/etc` are symlinks too. Refusing those would make the store unusable on
+        // those systems, so fall back to a path-based create that only insists on the *final*
+        // component being a real directory: that is the component an attacker would swap to
+        // redirect the chmod, and pre-existing ancestors keep their own permissions either way.
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder.create(&collapsed).map_err(|e| {
+            RevisionError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to create snapshot store '{}': {}", collapsed.display(), e),
+            ))
+        })?;
+        let meta = fs::symlink_metadata(&collapsed).map_err(|e| {
+            RevisionError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to inspect snapshot store '{}': {}", collapsed.display(), e),
+            ))
+        })?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(RevisionError::InvalidStore(format!(
+                "snapshot store path '{}' is not a real directory",
+                collapsed.display()
+            )));
+        }
+        fs::set_permissions(&collapsed, fs::Permissions::from_mode(0o700)).map_err(|e| {
+            RevisionError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to restrict snapshot store '{}': {}", collapsed.display(), e),
+            ))
+        })?;
         Ok(())
     }
     #[cfg(windows)]
@@ -1131,6 +1157,36 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
             .map_err(|e| RevisionError::InvalidStore(e.to_string()))?;
         Ok(())
     }
+}
+
+/// Strict dirfd walk: create every missing component with `mkdirat` and re-open each one with
+/// `O_NOFOLLOW | O_DIRECTORY`, so a symlinked component is refused rather than traversed. Only the
+/// final component is chmod-ed: pre-existing ancestors (e.g. `/tmp`) keep their own permissions and
+/// are never touched.
+///
+/// Fails on platforms whose *own* system paths contain symlinked ancestors (Android's `/data/data`
+/// -> `/data/user/0`, macOS `/var` -> `/private/var`); callers fall back to [`ensure_private_dir`]'s
+/// portable path-based branch in that case.
+#[cfg(unix)]
+fn walk_private_dir(anchor: &Path, components: &[std::ffi::OsString]) -> Result<(), RevisionError> {
+    let mut handle = open_real_dir(anchor)?;
+    for (index, name) in components.iter().enumerate() {
+        let name_c = CString::new(name.as_bytes()).map_err(|_| {
+            RevisionError::InvalidStore("snapshot store path contains a NUL byte".to_string())
+        })?;
+        let rc = unsafe { libc::mkdirat(handle.as_raw_fd(), name_c.as_ptr(), 0o700) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(err.into());
+            }
+        }
+        handle = open_dir_at(handle.as_raw_fd(), &name_c)?;
+        if index + 1 == components.len() {
+            handle.set_permissions(fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
 }
 
 /// Open `path` as a directory without ever following a final symlink.

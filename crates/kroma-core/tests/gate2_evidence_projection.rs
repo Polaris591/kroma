@@ -767,6 +767,35 @@ async fn test_gate1_o1_o6_polish_items_are_verified() {
         );
     }
 
+    // ---- O3b: a *symlinked ancestor* must be traversed, not refused ----
+    //
+    // Android ships `/data/data` as a symlink to `/data/user/0` (and macOS symlinks `/var`,
+    // `/tmp`, `/etc`), so refusing every symlink component made the snapshot store unusable
+    // there: the very first baseline capture aborted with `Permission denied`. Only the store
+    // directory itself must be a real directory; OS-owned ancestors are not ours to police.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let real_parent = root.join("ancestor-real");
+        fs::create_dir_all(&real_parent).unwrap();
+        let linked_parent = root.join("ancestor-link");
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+        let nested_store = SnapshotStore::new(linked_parent.join("nested").join("snapshots"));
+        nested_store
+            .ensure_layout()
+            .expect("a symlinked ancestor directory must be traversed");
+        assert!(real_parent.join("nested").join("snapshots").is_dir());
+        assert_eq!(
+            fs::metadata(real_parent.join("nested").join("snapshots"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "the created store directory must still be user-private"
+        );
+    }
+
     // ---- O4: revision records are ordered by branch depth, not append order ----
     let o4_root = temp_root("o4");
     let o4_ws = o4_root.join("ws");
