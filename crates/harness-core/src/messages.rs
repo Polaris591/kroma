@@ -114,7 +114,9 @@ impl ToolOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageAttachment {
     pub mime_type: String,
-    pub base64_data: String,
+    /// Shared so projecting a turn never deep-clones a multi-megabyte base64 payload.
+    #[serde(with = "arc_str_serde")]
+    pub base64_data: Arc<str>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -15,7 +15,11 @@ pub const MAX_INLINE_OUTPUT_BYTES: usize = 64 * 1024; // 64 KiB
 pub const MAX_READ_LINES: usize = 2000;
 pub const MAX_SINGLE_LINE_BYTES: usize = 2048; // 2 KiB
 /// Gate 7 (`v1.2.0`): largest image returned as a multimodal attachment (raw bytes, before base64).
-pub const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
+///
+/// Capped at 1 MiB so a single attachment can never, on its own, push the projected request past
+/// `BudgetConfig::context_high_watermark_bytes` (1.5 MiB default): base64 inflates by 4/3, so the
+/// encoded payload stays below 1.4 MiB and the remaining budget still fits the prefix and history.
+pub const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 1024 * 1024; // 1 MiB
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,46 +116,66 @@ pub fn execute_read(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
     // vision-capable model can inspect screenshots, UI mockups and error captures directly. A file
     // that only *claims* to be an image falls through to the text path below and is rejected there,
     // so arbitrary binary data can never smuggle itself in as an attachment.
-    if image_mime_for_path(&rel_str).is_some()
-        && file_size > 0
-        && file_size <= MAX_IMAGE_ATTACHMENT_BYTES
-    {
+    if let Some(expected_mime) = image_mime_for_path(&rel_str) {
+        // A file whose extension claims an image type but exceeds the attachment budget must fail
+        // fast with the real reason: falling through would scan up to `MAX_READ_SCAN_BYTES` (8 MiB)
+        // of binary and report a misleading `BinaryOrInvalidUtf8`.
+        if file_size > MAX_IMAGE_ATTACHMENT_BYTES {
+            return ToolExecutionOutput::error(
+                ErrorCode::InvalidArguments,
+                format!(
+                    "image file '{}' is {} bytes, exceeding the {} byte multimodal attachment limit",
+                    rel_str, file_size, MAX_IMAGE_ATTACHMENT_BYTES
+                ),
+                ToolResultMeta {
+                    relative_path: Some(rel_str),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    ..Default::default()
+                },
+            );
+        }
         // Use a dedicated handle: the sniff below must not advance the primary handle, otherwise a
         // non-image file would be read from a stale offset further down.
-        if let Ok((_, mut image_file)) = workspace.open_existing_no_symlink(&args.path) {
-            let mut bytes = Vec::with_capacity(file_size as usize);
-            let mut limited = (&mut image_file).take(MAX_IMAGE_ATTACHMENT_BYTES + 1);
-            if limited.read_to_end(&mut bytes).is_ok()
-                && bytes.len() as u64 <= MAX_IMAGE_ATTACHMENT_BYTES
-            {
-                if let Some(detected) = sniff_image(&bytes) {
-                    let (width, height) = detected.dimensions;
-                    let attachment = ImageAttachment {
-                        mime_type: detected.mime.to_string(),
-                        base64_data: base64_encode(&bytes),
-                        width: Some(width),
-                        height: Some(height),
-                        byte_len: bytes.len(),
-                    };
-                    let summary = format!(
-                        "Read image file {} [{}, {}x{}, {} bytes]\n",
-                        rel_str,
-                        attachment.mime_type,
-                        width,
-                        height,
-                        bytes.len()
-                    );
-                    return ToolExecutionOutput::success_with_images(
-                        summary,
-                        ToolResultMeta {
-                            relative_path: Some(rel_str),
-                            content_sha256: Some(sha256_hex16(&bytes)),
-                            lines_range: Some((1, 1)),
-                            duration_ms: started.elapsed().as_millis() as u64,
-                            ..Default::default()
-                        },
-                        vec![attachment],
-                    );
+        if file_size > 0 {
+            if let Ok((_, mut image_file)) = workspace.open_existing_no_symlink(&args.path) {
+                let mut bytes = Vec::with_capacity(file_size as usize);
+                let mut limited = (&mut image_file).take(MAX_IMAGE_ATTACHMENT_BYTES + 1);
+                if limited.read_to_end(&mut bytes).is_ok()
+                    && bytes.len() as u64 <= MAX_IMAGE_ATTACHMENT_BYTES
+                {
+                    // The magic bytes must agree with the extension: a `.png` holding JPEG bytes
+                    // is rejected rather than mislabelled on the wire.
+                    if let Some(detected) =
+                        sniff_image(&bytes).filter(|d| d.mime == expected_mime)
+                    {
+                        let (width, height) = detected.dimensions;
+                        let attachment = ImageAttachment {
+                            mime_type: detected.mime.to_string(),
+                            base64_data: std::sync::Arc::from(base64_encode(&bytes)),
+                            width: Some(width),
+                            height: Some(height),
+                            byte_len: bytes.len(),
+                        };
+                        let summary = format!(
+                            "Read image file {} [{}, {}x{}, {} bytes]\n",
+                            rel_str,
+                            attachment.mime_type,
+                            width,
+                            height,
+                            bytes.len()
+                        );
+                        return ToolExecutionOutput::success_with_images(
+                            summary,
+                            ToolResultMeta {
+                                relative_path: Some(rel_str),
+                                content_sha256: Some(sha256_hex16(&bytes)),
+                                lines_range: Some((1, 1)),
+                                duration_ms: started.elapsed().as_millis() as u64,
+                                ..Default::default()
+                            },
+                            vec![attachment],
+                        );
+                    }
                 }
             }
         }
@@ -398,8 +422,10 @@ pub fn sniff_image(bytes: &[u8]) -> Option<DetectedImage> {
         let mut i = 2usize;
         while i + 3 < bytes.len() {
             if bytes[i] != 0xFF {
-                i += 1;
-                continue;
+                // A JPEG payload is a sequence of `0xFF`-prefixed marker segments. A non-marker
+                // byte means the header is corrupt, and any `FF C0..` found later in the raw scan
+                // data would be an accidental match rather than a real frame header.
+                return None;
             }
             let marker = bytes[i + 1];
             // Padding fill bytes before a marker.
@@ -407,8 +433,13 @@ pub fn sniff_image(bytes: &[u8]) -> Option<DetectedImage> {
                 i += 1;
                 continue;
             }
+            // EOI (D9) and SOS (DA) end the marker-segment list: entropy-coded scan data follows
+            // SOS, so a SOF appearing after either marker is a false positive.
+            if matches!(marker, 0xD9 | 0xDA) {
+                return None;
+            }
             // Standalone markers carry no length field.
-            if matches!(marker, 0x01 | 0xD0..=0xD9) {
+            if matches!(marker, 0x01 | 0xD0..=0xD8) {
                 i += 2;
                 continue;
             }
@@ -420,7 +451,9 @@ pub fn sniff_image(bytes: &[u8]) -> Option<DetectedImage> {
             let is_sof = (0xC0..=0xCF).contains(&marker)
                 && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
             if is_sof {
-                if i + 9 > bytes.len() {
+                // A SOF segment is 2 (length) + 1 (precision) + 2 (height) + 2 (width) bytes and
+                // must fit entirely inside the buffer before the dimensions are read.
+                if seg_len < 7 || i + 2 + seg_len > bytes.len() || i + 9 > bytes.len() {
                     return None;
                 }
                 let height = be16(&bytes[i + 5..i + 7])? as u32;

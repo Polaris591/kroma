@@ -223,13 +223,23 @@ pub fn parse_responses_response(body: &str) -> Result<AssistantTurn, ProviderErr
         }
     }
 
-    let status = val.get("status").and_then(Value::as_str).unwrap_or("completed");
-    let finish_reason = if status == "incomplete" {
-        FinishReason::Length
-    } else if !calls.is_empty() {
-        FinishReason::ToolCalls
-    } else {
-        FinishReason::Stop
+    let status = val
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let finish_reason = match status {
+        "completed" if !calls.is_empty() => FinishReason::ToolCalls,
+        "completed" => FinishReason::Stop,
+        "incomplete" => FinishReason::Length,
+        // A failed or cancelled response carries no usable turn: surfacing it as a transport error
+        // is strictly better than reporting a half-empty `Stop`/`ToolCalls` turn as success.
+        "failed" | "cancelled" => {
+            return Err(ProviderError::Transport(format!(
+                "Responses API returned status `{}`",
+                status
+            )))
+        }
+        other => FinishReason::Unknown(other.to_string()),
     };
 
     Ok(AssistantTurn {
@@ -272,6 +282,8 @@ struct ResponsesStreamAssembler {
     usage: Option<TokenUsage>,
     status: Option<String>,
     saw_business: bool,
+    /// Set only on `response.completed` / `response.incomplete`: the explicit end-of-stream signal.
+    saw_terminal_event: bool,
 }
 
 impl ResponsesStreamAssembler {
@@ -379,10 +391,12 @@ impl ResponsesStreamAssembler {
                         self.usage = Some(parse_responses_usage(usage));
                     }
                 }
+                self.saw_terminal_event = true;
                 self.saw_business = true;
             }
             "response.incomplete" => {
                 self.status = Some("incomplete".to_string());
+                self.saw_terminal_event = true;
                 self.saw_business = true;
             }
             "response.failed" | "error" => {
@@ -396,26 +410,26 @@ impl ResponsesStreamAssembler {
         Ok(())
     }
 
-    fn finalize(mut self) -> Result<AssistantTurn, ProviderError> {
+    fn finalize(self) -> Result<AssistantTurn, ProviderError> {
         if !self.saw_business {
             return Err(ProviderError::IncompleteStream(
                 "Responses SSE stream contained no events".to_string(),
             ));
         }
-        // Any call still in flight when the stream ends is still a valid call.
-        let mut leftover: Vec<(usize, (String, String, String))> =
-            self.pending_calls.drain().collect();
-        leftover.sort_by_key(|(idx, _)| *idx);
-        for (_, (call_id, name, args)) in leftover {
-            self.calls.push(ToolCall {
-                call_id: ToolCallId::new(call_id),
-                name,
-                raw_arguments: if args.trim().is_empty() {
-                    "{}".to_string()
-                } else {
-                    args
-                },
-            });
+        // A stream that ends without `response.completed`/`response.incomplete`, or with a
+        // `function_call` whose arguments never finished, is truncated. Promoting those in-flight
+        // calls with `{}` would hand the model a tool invocation it never asked for and silently
+        // execute it, so the turn is rejected instead (§4.3).
+        if !self.saw_terminal_event {
+            return Err(ProviderError::IncompleteStream(
+                "Responses SSE stream ended before response.completed".to_string(),
+            ));
+        }
+        if !self.pending_calls.is_empty() {
+            return Err(ProviderError::IncompleteStream(format!(
+                "Responses SSE stream ended with {} unclosed function_call item(s)",
+                self.pending_calls.len()
+            )));
         }
 
         let finish_reason = if self.status.as_deref() == Some("incomplete") {

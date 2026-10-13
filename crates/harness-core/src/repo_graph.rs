@@ -513,7 +513,14 @@ impl RepoGraph {
     }
 
     fn neighbours(&self, adj: &[Vec<(usize, f64)>], idx: usize) -> Vec<String> {
-        let mut list: Vec<(usize, f64)> = adj[idx].clone();
+        // A file pair is connected by one edge per referenced symbol, so the raw adjacency list
+        // repeats the same neighbour once per symbol. Sum the weights per neighbour first: otherwise
+        // `calls_into` / `called_by` list a path several times and crowd out other neighbours.
+        let mut totals: BTreeMap<usize, f64> = BTreeMap::new();
+        for &(peer, weight) in &adj[idx] {
+            *totals.entry(peer).or_insert(0.0) += weight;
+        }
+        let mut list: Vec<(usize, f64)> = totals.into_iter().collect();
         list.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -802,7 +809,11 @@ fn match_symbol(lang: Lang, trimmed: &str) -> Option<(String, SymbolKind)> {
                 }
             }
             // `const handler = (req) => ...` / `const handler = function ...`
-            if let Some(rest) = decl.strip_prefix("const ") {
+            //
+            // `ident_at` trims leading whitespace before collecting the identifier, so `rest` must
+            // be trimmed first: otherwise `rest[name.len()..]` slices at an offset that ignores the
+            // whitespace and panics inside a multi-byte identifier (`const  函数 = ...`).
+            if let Some(rest) = decl.strip_prefix("const ").map(str::trim_start) {
                 let name = ident_at(rest)?;
                 let after = rest[name.len()..].trim_start();
                 if after.starts_with("= (")
@@ -826,7 +837,7 @@ fn match_symbol(lang: Lang, trimmed: &str) -> Option<(String, SymbolKind)> {
                 };
                 return ident_at(rest).map(|n| (n, SymbolKind::Function));
             }
-            if let Some(rest) = decl.strip_prefix("type ") {
+            if let Some(rest) = decl.strip_prefix("type ").map(str::trim_start) {
                 let name = ident_at(rest)?;
                 let tail = rest[name.len()..].trim_start();
                 let kind = if tail.starts_with("struct") {

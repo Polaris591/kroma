@@ -76,12 +76,17 @@ pub fn serialize_anthropic_request_body(
     sorted_tools.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
 
     // Breakpoint 1: the static system block. It never changes between turns, so caching it is pure
-    // win — this is the largest single saving on a long session.
-    let system = json!([{
-        "type": "text",
-        "text": system_prompt,
-        "cache_control": { "type": CACHE_CONTROL_EPHEMERAL },
-    }]);
+    // win — this is the largest single saving on a long session. Anthropic rejects an empty text
+    // block, so the whole `system` field is omitted when there is no prompt to send.
+    let system_blocks = if system_prompt.trim().is_empty() {
+        None
+    } else {
+        Some(json!([{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": { "type": CACHE_CONTROL_EPHEMERAL },
+        }]))
+    };
 
     let tool_count = sorted_tools.len();
     let tools_json: Vec<Value> = sorted_tools
@@ -106,11 +111,15 @@ pub fn serialize_anthropic_request_body(
         })
         .collect();
 
-    let mut wire_messages = build_anthropic_messages(messages);
+    let (mut wire_messages, item_to_wire) = build_anthropic_messages(messages);
 
     // Breakpoint 3: the frozen-prefix boundary. `PinnedBaselineEnd` is the projector's durable
-    // boundary; `TailWindowStart` is the fallback when no baseline has been pinned yet.
-    if let Some(idx) = pick_prefix_breakpoint_index(cache_breakpoints, wire_messages.len()) {
+    // boundary; `TailWindowStart` is the fallback when no baseline has been pinned yet. The marker
+    // indexes the *transcript*, so it must be translated through the merge map before it can index
+    // the wire messages.
+    if let Some(idx) =
+        pick_prefix_breakpoint_index(cache_breakpoints, &item_to_wire, wire_messages.len())
+    {
         if let Some(Value::Object(msg)) = wire_messages.get_mut(idx) {
             if let Some(Value::Array(blocks)) = msg.get_mut("content") {
                 if let Some(Value::Object(last)) = blocks.last_mut() {
@@ -129,7 +138,9 @@ pub fn serialize_anthropic_request_body(
         "max_tokens".to_string(),
         Value::Number(serde_json::Number::from(max_tokens.max(1))),
     );
-    root.insert("system".to_string(), system);
+    if let Some(system) = system_blocks {
+        root.insert("system".to_string(), system);
+    }
     root.insert("messages".to_string(), Value::Array(wire_messages));
     if !tools_json.is_empty() {
         root.insert("tools".to_string(), Value::Array(tools_json));
@@ -141,6 +152,7 @@ pub fn serialize_anthropic_request_body(
 
 fn pick_prefix_breakpoint_index(
     markers: &[crate::messages::CacheBreakpointMarker],
+    item_to_wire: &[usize],
     message_count: usize,
 ) -> Option<usize> {
     if message_count == 0 {
@@ -154,110 +166,154 @@ fn pick_prefix_breakpoint_index(
                 .iter()
                 .find(|m| m.breakpoint == CacheBreakpoint::TailWindowStart)
         })?;
-    Some(candidate.message_index.min(message_count - 1))
+    let mapped = item_to_wire
+        .get(candidate.message_index)
+        .copied()
+        .unwrap_or(candidate.message_index);
+    Some(mapped.min(message_count - 1))
 }
 
 /// Translate the harness transcript into Anthropic `messages`.
 ///
-/// Consecutive tool results are merged into a single `user` message because Anthropic expects every
-/// `tool_use` block of the preceding assistant turn to be answered in the immediately following
-/// message.
-fn build_anthropic_messages(messages: &[TranscriptItem]) -> Vec<Value> {
+/// Anthropic enforces three wire rules that a naive translation breaks:
+/// 1. `user` and `assistant` roles must strictly alternate, so consecutive same-role messages are
+///    merged into one (with `tool_result` blocks kept ahead of text blocks).
+/// 2. `thinking` / `redacted_thinking` blocks must lead an assistant turn.
+/// 3. Text blocks must be non-empty.
+///
+/// Returns the wire messages plus a transcript-index to wire-index map, because merging changes the
+/// positions the `cache_control` prefix breakpoint indexes.
+fn build_anthropic_messages(messages: &[TranscriptItem]) -> (Vec<Value>, Vec<usize>) {
     let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut item_to_wire: Vec<usize> = Vec::with_capacity(messages.len());
     for item in messages {
-        match item {
-            TranscriptItem::User(u) => {
-                out.push(json!({
-                    "role": "user",
-                    "content": [{ "type": "text", "text": u.content }],
-                }));
+        let (role, blocks) = anthropic_blocks_for_item(item);
+        if blocks.is_empty() {
+            // An item with nothing to say must not emit an empty content array: point the mapping at
+            // the next wire message instead (the caller clamps the final index).
+            item_to_wire.push(out.len());
+            continue;
+        }
+        match out.last() {
+            Some(prev) if prev.get("role").and_then(Value::as_str) == Some(role) => {
+                let idx = out.len() - 1;
+                merge_wire_blocks(&mut out[idx], role, blocks);
+                item_to_wire.push(idx);
             }
-            TranscriptItem::Assistant(a) => {
-                let mut blocks: Vec<Value> = Vec::new();
-                if let Some(text) = a.content.as_ref().filter(|t| !t.is_empty()) {
-                    blocks.push(json!({ "type": "text", "text": text }));
-                }
-                for rb in &a.reasoning_blocks {
-                    match (&rb.text, &rb.opaque_payload) {
-                        (None, Some(data)) => blocks.push(json!({
-                            "type": "redacted_thinking",
-                            "data": data,
-                        })),
-                        _ => {
-                            let mut obj = Map::new();
-                            obj.insert("type".to_string(), Value::String("thinking".to_string()));
-                            if let Some(t) = &rb.text {
-                                obj.insert("thinking".to_string(), Value::String(t.clone()));
-                            }
-                            if let Some(s) = &rb.signature {
-                                obj.insert("signature".to_string(), Value::String(s.clone()));
-                            }
-                            if let Some(p) = &rb.opaque_payload {
-                                obj.insert("data".to_string(), Value::String(p.clone()));
-                            }
-                            blocks.push(Value::Object(obj));
-                        }
-                    }
-                }
-                for tc in &a.tool_calls {
-                    let input = serde_json::from_str::<Value>(&tc.raw_arguments)
-                        .unwrap_or_else(|_| json!({}));
-                    blocks.push(json!({
-                        "type": "tool_use",
-                        "id": tc.call_id.as_str(),
-                        "name": tc.name,
-                        "input": input,
-                    }));
-                }
-                if blocks.is_empty() {
-                    blocks.push(json!({ "type": "text", "text": "" }));
-                }
-                out.push(json!({ "role": "assistant", "content": blocks }));
-            }
-            TranscriptItem::ToolResult(tr) => {
-                let mut blocks: Vec<Value> = vec![json!({
-                    "type": "text",
-                    "text": tr.content.as_ref(),
-                })];
-                for image in &tr.meta.image_attachments {
-                    blocks.push(json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": image.mime_type,
-                            "data": image.base64_data,
-                        }
-                    }));
-                }
-                let block = json!({
-                    "type": "tool_result",
-                    "tool_use_id": tr.call_id.as_str(),
-                    "content": blocks,
-                    "is_error": !tr.outcome.is_success(),
-                });
-                // Append into the previous user turn when it is already a tool-result turn.
-                if let Some(Value::Object(prev)) = out.last_mut() {
-                    let is_tool_turn = prev.get("role").and_then(Value::as_str) == Some("user")
-                        && prev
-                            .get("content")
-                            .and_then(Value::as_array)
-                            .is_some_and(|arr| {
-                                arr.iter().any(|b| {
-                                    b.get("type").and_then(Value::as_str) == Some("tool_result")
-                                })
-                            });
-                    if is_tool_turn {
-                        if let Some(Value::Array(arr)) = prev.get_mut("content") {
-                            arr.push(block);
-                            continue;
-                        }
-                    }
-                }
-                out.push(json!({ "role": "user", "content": [block] }));
+            _ => {
+                out.push(json!({ "role": role, "content": blocks }));
+                item_to_wire.push(out.len() - 1);
             }
         }
     }
-    out
+    (out, item_to_wire)
+}
+
+/// Build the Anthropic content blocks for a single transcript item, or an empty vector when the
+/// item carries nothing Anthropic will accept.
+fn anthropic_blocks_for_item(item: &TranscriptItem) -> (&'static str, Vec<Value>) {
+    match item {
+        TranscriptItem::User(u) => {
+            if u.content.is_empty() {
+                return ("user", Vec::new());
+            }
+            ("user", vec![json!({ "type": "text", "text": u.content })])
+        }
+        TranscriptItem::Assistant(a) => {
+            let mut blocks: Vec<Value> = Vec::new();
+            // Rule 2: extended-thinking blocks lead the assistant turn.
+            for rb in &a.reasoning_blocks {
+                match (&rb.text, &rb.opaque_payload) {
+                    (None, Some(data)) => blocks.push(json!({
+                        "type": "redacted_thinking",
+                        "data": data,
+                    })),
+                    _ => {
+                        let mut obj = Map::new();
+                        obj.insert("type".to_string(), Value::String("thinking".to_string()));
+                        if let Some(t) = &rb.text {
+                            obj.insert("thinking".to_string(), Value::String(t.clone()));
+                        }
+                        if let Some(s) = &rb.signature {
+                            obj.insert("signature".to_string(), Value::String(s.clone()));
+                        }
+                        if let Some(p) = &rb.opaque_payload {
+                            obj.insert("data".to_string(), Value::String(p.clone()));
+                        }
+                        blocks.push(Value::Object(obj));
+                    }
+                }
+            }
+            if let Some(text) = a.content.as_ref().filter(|t| !t.is_empty()) {
+                blocks.push(json!({ "type": "text", "text": text }));
+            }
+            for tc in &a.tool_calls {
+                let input =
+                    serde_json::from_str::<Value>(&tc.raw_arguments).unwrap_or_else(|_| json!({}));
+                blocks.push(json!({
+                    "type": "tool_use",
+                    "id": tc.call_id.as_str(),
+                    "name": tc.name,
+                    "input": input,
+                }));
+            }
+            ("assistant", blocks)
+        }
+        TranscriptItem::ToolResult(tr) => {
+            // Rule 3: an empty text block is rejected, so only non-empty content is sent.
+            let mut content: Vec<Value> = Vec::new();
+            if !tr.content.is_empty() {
+                content.push(json!({ "type": "text", "text": tr.content.as_ref() }));
+            }
+            for image in &tr.meta.image_attachments {
+                content.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.mime_type,
+                        "data": &*image.base64_data,
+                    }
+                }));
+            }
+            if content.is_empty() {
+                return ("user", Vec::new());
+            }
+            (
+                "user",
+                vec![json!({
+                    "type": "tool_result",
+                    "tool_use_id": tr.call_id.as_str(),
+                    "content": content,
+                    "is_error": !tr.outcome.is_success(),
+                })],
+            )
+        }
+    }
+}
+
+/// Append `blocks` into an existing wire message of the same role.
+///
+/// Anthropic requires every `tool_result` block to precede any text/image block inside a `user`
+/// message, so merged `user` turns are re-partitioned rather than naively appended.
+fn merge_wire_blocks(msg: &mut Value, role: &str, mut blocks: Vec<Value>) {
+    let Some(Value::Array(existing)) = msg.get_mut("content") else {
+        return;
+    };
+    if role != "user" {
+        existing.append(&mut blocks);
+        return;
+    }
+    let mut tool_blocks: Vec<Value> = Vec::new();
+    let mut other: Vec<Value> = Vec::new();
+    for block in existing.drain(..).chain(blocks.drain(..)) {
+        if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+            tool_blocks.push(block);
+        } else {
+            other.push(block);
+        }
+    }
+    existing.extend(tool_blocks);
+    existing.extend(other);
 }
 
 pub fn parse_anthropic_response(body: &str) -> Result<AssistantTurn, ProviderError> {
@@ -380,6 +436,8 @@ struct AnthropicStreamAssembler {
     stop_reason: Option<String>,
     usage: Option<TokenUsage>,
     saw_business: bool,
+    /// Set only on `message_stop`: the explicit end-of-stream signal.
+    saw_message_stop: bool,
 }
 
 impl AnthropicStreamAssembler {
@@ -513,6 +571,9 @@ impl AnthropicStreamAssembler {
                     val
                 )));
             }
+            "message_stop" => {
+                self.saw_message_stop = true;
+            }
             _ => {}
         }
         Ok(())
@@ -524,11 +585,26 @@ impl AnthropicStreamAssembler {
                 "Anthropic SSE stream contained no message events".to_string(),
             ));
         }
-        let finish_reason = match self.stop_reason.as_deref() {
-            Some(reason) => FinishReason::from_wire(reason),
-            None if !self.calls.is_empty() => FinishReason::ToolCalls,
-            None => FinishReason::Stop,
+        // A stream that ends before `message_stop` (proxy disconnect, chunked trailer cut short,
+        // idle-timeout abort) carries no usable turn. Defaulting the finish reason here would
+        // silently drop any unclosed `tool_use` block and report a half-answer as success (§4.3).
+        if !self.saw_message_stop {
+            return Err(ProviderError::IncompleteStream(
+                "Anthropic SSE stream ended before message_stop".to_string(),
+            ));
+        }
+        let Some(stop_reason) = self.stop_reason.as_deref() else {
+            return Err(ProviderError::IncompleteStream(
+                "Anthropic SSE stream ended before message_delta carried a stop_reason".to_string(),
+            ));
         };
+        if !self.pending_json.is_empty() {
+            return Err(ProviderError::IncompleteStream(format!(
+                "Anthropic SSE stream ended with {} unclosed tool_use block(s)",
+                self.pending_json.len()
+            )));
+        }
+        let finish_reason = FinishReason::from_wire(stop_reason);
         Ok(AssistantTurn {
             content: if self.text.is_empty() {
                 None

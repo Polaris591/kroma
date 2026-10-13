@@ -18,8 +18,8 @@
 //!    `input_tokens_details.cached_tokens` accounting.
 
 use harness_core::messages::{
-    AssistantTurn, CacheBreakpoint, CacheBreakpointMarker, FinishReason, ToolOutcome, ToolResultMessage,
-    ToolResultMeta, TranscriptItem, UserMessage,
+    AssistantTurn, CacheBreakpoint, CacheBreakpointMarker, FinishReason, ImageAttachment, ToolCall,
+    ToolOutcome, ToolResultMessage, ToolResultMeta, TranscriptItem, UserMessage,
 };
 use harness_core::provider::anthropic_messages::{
     parse_anthropic_response, serialize_anthropic_request_body, AnthropicMessagesClient,
@@ -29,7 +29,10 @@ use harness_core::provider::openai_responses::{
     parse_responses_response, serialize_responses_request_body, OpenAiResponsesClient,
     OpenAiResponsesConfig,
 };
-use harness_core::provider::{build_provider, ModelProvider, ProviderProtocol, ProviderRequest, ProviderSettings};
+use harness_core::provider::{
+    build_provider, ModelProvider, ProviderError, ProviderProtocol, ProviderRequest,
+    ProviderSettings,
+};
 use harness_core::repo_graph::{execute_code_graph, RepoGraph, MAX_GRAPH_FILES};
 use harness_core::tool::definition::builtin_tool_registrations;
 use harness_core::tools::read::{base64_encode, execute_read, sniff_image};
@@ -340,7 +343,7 @@ fn test_multimodal_read_png_jpeg_header_dimensions_and_base64_attachment() {
     assert_eq!(attachment.width, Some(1280));
     assert_eq!(attachment.height, Some(720));
     assert_eq!(attachment.byte_len, png.len());
-    assert_eq!(attachment.base64_data, base64_encode(&png));
+    assert_eq!(&*attachment.base64_data, base64_encode(&png));
     assert!(out.content.contains("image/png"), "{}", out.content);
     assert!(out.content.contains("1280x720"), "{}", out.content);
 
@@ -868,4 +871,613 @@ fn test_protocol_selection_auto_detection_and_provider_factory() {
             build_provider(&settings).expect("factory must build every protocol");
         assert_eq!(resolved, expected);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 5. v1.2.0 post-review regressions
+//
+// Each test pins a defect the 3-way review of `v1.2.0` found: a multimodal image that escaped
+// Step-Down Compaction (and could abort the run), and truncated SSE streams that were accepted as
+// complete turns in both new protocols.
+// ---------------------------------------------------------------------------------------------
+
+fn sse_body(events: &[(&str, &str)]) -> String {
+    let mut body = String::new();
+    for (name, data) in events {
+        body.push_str(&format!("event: {}\ndata: {}\n\n", name, data));
+    }
+    body
+}
+
+fn single_user_request() -> ProviderRequest {
+    ProviderRequest {
+        system_prompt: "You are the harness kernel.".to_string(),
+        tools: Vec::new(),
+        messages: vec![TranscriptItem::User(UserMessage {
+            content: "hello".to_string(),
+        })],
+        stream: true,
+        cache_breakpoints: Vec::new(),
+    }
+}
+
+// ---- RepoGraph: whitespace + CJK identifiers, deduplicated neighbours ------------------------
+
+#[test]
+fn test_repo_graph_multi_space_cjk_identifiers_and_deduplicated_neighbour_lists() {
+    let root = temp_root("repograph-cjk");
+    // Extra whitespace after `const` / `type` used to make `rest[name.len()..]` slice inside a
+    // multi-byte CJK codepoint and panic (`byte index is not a char boundary`).
+    write_file(
+        &root,
+        "src/a.ts",
+        "const  函数 = () => {\n  共享符号();\n  另一个共享();\n};\n",
+    );
+    write_file(
+        &root,
+        "src/b.ts",
+        "export function 共享符号() { return 1; }\nexport function 另一个共享() { return 2; }\n",
+    );
+    write_file(
+        &root,
+        "src/c.go",
+        "package main\n\ntype  名称 struct {\n\tID int\n}\n",
+    );
+
+    let cap = WorkspaceCap::new(&root).unwrap();
+    let graph = RepoGraph::build_from_workspace(&cap, MAX_GRAPH_FILES);
+    assert_eq!(graph.total_files(), 3);
+
+    let find = |name: &str, path: &str| {
+        graph
+            .symbols()
+            .iter()
+            .find(|s| s.name == name && s.file_path == path)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} must be extracted as a definition in {}; got {:?}",
+                    name,
+                    path,
+                    graph
+                        .symbols()
+                        .iter()
+                        .map(|s| (&s.name, &s.file_path, s.kind.as_str()))
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    assert_eq!(find("函数", "src/a.ts").kind.as_str(), "fn");
+    assert_eq!(find("共享符号", "src/b.ts").kind.as_str(), "fn");
+    assert_eq!(find("另一个共享", "src/b.ts").kind.as_str(), "fn");
+    assert_eq!(find("名称", "src/c.go").kind.as_str(), "struct");
+
+    // a.ts references two symbols that both live in b.ts: one file pair, two raw edges. The
+    // neighbour lists must aggregate them into a single entry per file.
+    assert_eq!(
+        graph
+            .edges()
+            .iter()
+            .filter(|e| e.from == "src/a.ts" && e.to == "src/b.ts")
+            .count(),
+        2,
+        "a.ts must carry one edge per referenced b.ts symbol"
+    );
+
+    let report = graph.query(&["共享符号".to_string()], &[], 3);
+    let a = report
+        .ranked
+        .iter()
+        .find(|r| r.path == "src/a.ts")
+        .expect("src/a.ts must be ranked");
+    assert_eq!(
+        a.calls_into.iter().filter(|p| *p == "src/b.ts").count(),
+        1,
+        "calls_into must list each neighbour file once, got {:?}",
+        a.calls_into
+    );
+    let b = report
+        .ranked
+        .iter()
+        .find(|r| r.path == "src/b.ts")
+        .expect("src/b.ts must be ranked");
+    assert_eq!(
+        b.called_by.iter().filter(|p| *p == "src/a.ts").count(),
+        1,
+        "called_by must list each neighbour file once, got {:?}",
+        b.called_by
+    );
+
+    fs::remove_dir_all(&root).ok();
+}
+
+// ---- Context projection: image attachments must be compactable and never abort a run ---------
+
+/// ~192 KiB of base64: far above `MIN_COMPACTABLE_TOOL_BYTES` and far above the test budget.
+fn large_image_attachment() -> ImageAttachment {
+    ImageAttachment {
+        mime_type: "image/png".to_string(),
+        base64_data: Arc::from("QUJDREVGR0g".repeat(24 * 1024).as_str()),
+        width: Some(1280),
+        height: Some(720),
+        byte_len: 144 * 1024,
+    }
+}
+
+fn assistant_turn_with_call(call_id: &str, args: &str, text: &str) -> AssistantTurn {
+    AssistantTurn {
+        content: Some(text.to_string()),
+        reasoning_blocks: Vec::new(),
+        tool_calls: vec![ToolCall {
+            call_id: ToolCallId::new(call_id),
+            name: "read".to_string(),
+            raw_arguments: args.to_string(),
+        }],
+        finish_reason: FinishReason::ToolCalls,
+        usage: None,
+    }
+}
+
+fn image_read_result(call_id: &str, path: &str, image: ImageAttachment) -> ToolResultMessage {
+    ToolResultMessage {
+        call_id: ToolCallId::new(call_id),
+        tool_name: "read".to_string(),
+        outcome: ToolOutcome::Success,
+        content: Arc::from(format!(
+            "Read image file {} [image/png, 1280x720, 147456 bytes]\n",
+            path
+        )),
+        meta: ToolResultMeta {
+            relative_path: Some(path.to_string()),
+            image_attachments: vec![image],
+            ..Default::default()
+        },
+    }
+}
+
+fn text_read_result(call_id: &str, path: &str, body: &str) -> ToolResultMessage {
+    ToolResultMessage {
+        call_id: ToolCallId::new(call_id),
+        tool_name: "read".to_string(),
+        outcome: ToolOutcome::Success,
+        content: Arc::from(body),
+        meta: ToolResultMeta {
+            relative_path: Some(path.to_string()),
+            ..Default::default()
+        },
+    }
+}
+
+fn plain_assistant(text: &str) -> AssistantTurn {
+    AssistantTurn {
+        content: Some(text.to_string()),
+        reasoning_blocks: Vec::new(),
+        tool_calls: Vec::new(),
+        finish_reason: FinishReason::Stop,
+        usage: None,
+    }
+}
+
+/// A budget small enough that one 192 KiB attachment always exceeds the high watermark.
+fn tight_budget() -> harness_core::budget::BudgetConfig {
+    harness_core::budget::BudgetConfig {
+        context_high_watermark_bytes: 64 * 1024,
+        context_low_watermark_bytes: 16 * 1024,
+        context_tail_window_bytes: 512,
+        context_min_tail_turns: 1,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_step_down_compaction_evicts_stale_image_attachments_and_reclaims_budget() {
+    use harness_core::context_projector::{ContextProjector, ProjectionProfile};
+
+    let image = large_image_attachment();
+    let image_bytes = image.encoded_len();
+
+    let mut canonical = vec![
+        TranscriptItem::User(UserMessage {
+            content: "look at the screenshot".to_string(),
+        }),
+        TranscriptItem::Assistant(assistant_turn_with_call(
+            "call_img",
+            r#"{"path":"shot.png"}"#,
+            "reading the screenshot",
+        )),
+        TranscriptItem::ToolResult(image_read_result("call_img", "shot.png", image.clone())),
+        TranscriptItem::Assistant(assistant_turn_with_call(
+            "call_txt",
+            r#"{"path":"notes.md"}"#,
+            "reading notes",
+        )),
+        TranscriptItem::ToolResult(text_read_result("call_txt", "notes.md", "notes body")),
+        TranscriptItem::Assistant(plain_assistant("done")),
+        TranscriptItem::User(UserMessage {
+            content: "carry on".to_string(),
+        }),
+    ];
+    let before: usize = canonical.iter().map(TranscriptItem::estimated_bytes).sum();
+
+    let mut projector = ContextProjector::new().with_profile(ProjectionProfile::P2);
+    let projected = projector
+        .project(&mut canonical, &tight_budget(), 0, None, 3)
+        .expect("compaction must keep the run alive");
+
+    let compacted = match &projected.messages[2] {
+        TranscriptItem::ToolResult(tr) => tr,
+        other => panic!("expected a tool result at index 2, got {:?}", other),
+    };
+    assert!(
+        compacted.meta.image_attachments.is_empty(),
+        "a stale image in the compactable middle region must drop its base64 payload"
+    );
+    assert!(
+        compacted.content.contains("source_entry_id="),
+        "the Outline Stub must keep the evidence pointer: {}",
+        compacted.content
+    );
+    match &canonical[2] {
+        TranscriptItem::ToolResult(tr) => assert!(
+            tr.meta.image_attachments.is_empty(),
+            "the canonical transcript must be cleared in lockstep so the payload is really freed"
+        ),
+        other => panic!("expected a tool result, got {:?}", other),
+    }
+
+    assert!(
+        before - projected.message_history_bytes >= image_bytes - 1024,
+        "compaction must reclaim the image payload: before={} after={} image_bytes={}",
+        before,
+        projected.message_history_bytes,
+        image_bytes
+    );
+    assert!(projector.stats().budget.compacted_stub_bytes > 0);
+    assert!(projector.stats().budget.tool_output_bytes < image_bytes);
+}
+
+#[test]
+fn test_multimodal_read_never_aborts_the_run_with_context_budget_exceeded() {
+    use harness_core::context_projector::{ContextProjector, ProjectionProfile};
+
+    // The image sits in the protected tail window, so no text compaction can reach it.
+    let mut canonical = vec![
+        TranscriptItem::User(UserMessage {
+            content: "look at the screenshot".to_string(),
+        }),
+        TranscriptItem::Assistant(assistant_turn_with_call(
+            "call_txt",
+            r#"{"path":"notes.md"}"#,
+            "reading notes",
+        )),
+        TranscriptItem::ToolResult(text_read_result("call_txt", "notes.md", "notes body")),
+        TranscriptItem::Assistant(assistant_turn_with_call(
+            "call_img",
+            r#"{"path":"shot.png"}"#,
+            "reading the screenshot",
+        )),
+        TranscriptItem::ToolResult(image_read_result(
+            "call_img",
+            "shot.png",
+            large_image_attachment(),
+        )),
+        TranscriptItem::User(UserMessage {
+            content: "carry on".to_string(),
+        }),
+    ];
+
+    let mut projector = ContextProjector::new().with_profile(ProjectionProfile::P2);
+    let projected = projector
+        .project(canonical.as_mut_slice(), &tight_budget(), 0, None, 2)
+        .expect("a valid multimodal read must never abort the run with ContextBudgetExceeded");
+
+    let remaining: usize = projected
+        .messages
+        .iter()
+        .map(|item| match item {
+            TranscriptItem::ToolResult(tr) => tr.image_attachment_bytes(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(
+        remaining, 0,
+        "an image that cannot fit the budget must be evicted rather than failing the projection"
+    );
+    assert!(
+        projected.message_history_bytes <= 64 * 1024,
+        "the projection must end below the high watermark, got {}",
+        projected.message_history_bytes
+    );
+}
+
+// ---- Protocol: truncated SSE streams must be rejected -----------------------------------------
+
+#[tokio::test]
+async fn test_anthropic_truncated_sse_streams_are_rejected() {
+    let truncated_events: &[(&str, &str)] = &[
+        (
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+        ),
+        (
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"bash"}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":"}}"#,
+        ),
+        // No `content_block_stop`, no `message_delta`, no `message_stop`: the proxy cut the stream.
+    ];
+    let (base_url, _rx) = spawn_mock_http_server(
+        "HTTP/1.1 200 OK",
+        vec![("Content-Type", "text/event-stream".to_string())],
+        sse_body(truncated_events),
+    )
+    .await;
+
+    let client = AnthropicMessagesClient::new(AnthropicMessagesConfig {
+        base_url,
+        api_key: "sk-ant-test-key".to_string(),
+        model: "claude-sonnet-4-5".to_string(),
+        max_retries: 0,
+        max_tokens: 4096,
+    })
+    .unwrap();
+
+    let (_tx, cancel_rx) = watch::channel(false);
+    let err = client
+        .complete(
+            single_user_request(),
+            &harness_core::budget::BudgetConfig::default(),
+            cancel_rx,
+        )
+        .await
+        .expect_err("a stream without message_stop must not be accepted as a complete turn");
+    assert!(
+        matches!(err, ProviderError::IncompleteStream(_)),
+        "expected IncompleteStream, got {:?}",
+        err
+    );
+
+    // A stream that does send `message_stop` but leaves a `tool_use` block open must also fail:
+    // the partial JSON would otherwise be executed as a tool call.
+    let unclosed_events: &[(&str, &str)] = &[
+        (
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+        ),
+        (
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_2","name":"bash"}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"ls\"}"}}"#,
+        ),
+        (
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}"#,
+        ),
+        ("message_stop", r#"{"type":"message_stop"}"#),
+    ];
+    let (base_url, _rx) = spawn_mock_http_server(
+        "HTTP/1.1 200 OK",
+        vec![("Content-Type", "text/event-stream".to_string())],
+        sse_body(unclosed_events),
+    )
+    .await;
+    let client = AnthropicMessagesClient::new(AnthropicMessagesConfig {
+        base_url,
+        api_key: "sk-ant-test-key".to_string(),
+        model: "claude-sonnet-4-5".to_string(),
+        max_retries: 0,
+        max_tokens: 4096,
+    })
+    .unwrap();
+    let (_tx, cancel_rx) = watch::channel(false);
+    let err = client
+        .complete(
+            single_user_request(),
+            &harness_core::budget::BudgetConfig::default(),
+            cancel_rx,
+        )
+        .await
+        .expect_err("an unclosed tool_use block must not be accepted");
+    assert!(
+        matches!(err, ProviderError::IncompleteStream(_)),
+        "expected IncompleteStream, got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_openai_responses_truncated_sse_streams_are_rejected() {
+    // (a) The stream ends before `response.completed`.
+    let no_completed: &[(&str, &str)] = &[
+        (
+            "response.created",
+            r#"{"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}"#,
+        ),
+        (
+            "response.output_text.delta",
+            r#"{"type":"response.output_text.delta","delta":"Searching"}"#,
+        ),
+    ];
+    let (base_url, _rx) = spawn_mock_http_server(
+        "HTTP/1.1 200 OK",
+        vec![("Content-Type", "text/event-stream".to_string())],
+        sse_body(no_completed),
+    )
+    .await;
+    let client = OpenAiResponsesClient::new(OpenAiResponsesConfig {
+        base_url,
+        api_key: "sk-openai-test".to_string(),
+        model: "gpt-5.2".to_string(),
+        max_retries: 0,
+        reasoning_effort: None,
+    })
+    .unwrap();
+    let (_tx, cancel_rx) = watch::channel(false);
+    let err = client
+        .complete(
+            single_user_request(),
+            &harness_core::budget::BudgetConfig::default(),
+            cancel_rx,
+        )
+        .await
+        .expect_err("a stream without response.completed must not be accepted");
+    assert!(
+        matches!(err, ProviderError::IncompleteStream(_)),
+        "expected IncompleteStream, got {:?}",
+        err
+    );
+
+    // (b) `response.completed` arrives but the function call never finished streaming its
+    // arguments: promoting it with `{}` would execute a tool the model never fully specified.
+    let unclosed_call: &[(&str, &str)] = &[
+        (
+            "response.created",
+            r#"{"type":"response.created","response":{"id":"resp_2","status":"in_progress"}}"#,
+        ),
+        (
+            "response.output_item.added",
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"bash","arguments":""}}"#,
+        ),
+        (
+            "response.completed",
+            r#"{"type":"response.completed","response":{"id":"resp_2","status":"completed","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+        ),
+    ];
+    let (base_url, _rx) = spawn_mock_http_server(
+        "HTTP/1.1 200 OK",
+        vec![("Content-Type", "text/event-stream".to_string())],
+        sse_body(unclosed_call),
+    )
+    .await;
+    let client = OpenAiResponsesClient::new(OpenAiResponsesConfig {
+        base_url,
+        api_key: "sk-openai-test".to_string(),
+        model: "gpt-5.2".to_string(),
+        max_retries: 0,
+        reasoning_effort: None,
+    })
+    .unwrap();
+    let (_tx, cancel_rx) = watch::channel(false);
+    let err = client
+        .complete(
+            single_user_request(),
+            &harness_core::budget::BudgetConfig::default(),
+            cancel_rx,
+        )
+        .await
+        .expect_err("an unclosed function_call must not be promoted into a `{}` call");
+    assert!(
+        matches!(err, ProviderError::IncompleteStream(_)),
+        "expected IncompleteStream, got {:?}",
+        err
+    );
+}
+
+#[test]
+fn test_responses_non_streaming_failed_status_is_an_error() {
+    let err = parse_responses_response(r#"{"status":"failed","output":[]}"#)
+        .expect_err("a failed response must not be reported as a successful turn");
+    assert!(
+        matches!(err, ProviderError::Transport(_)),
+        "expected Transport, got {:?}",
+        err
+    );
+    let incomplete = parse_responses_response(
+        r#"{"status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}"#,
+    )
+    .unwrap();
+    assert_eq!(incomplete.finish_reason, FinishReason::Length);
+}
+
+#[test]
+fn test_anthropic_wire_messages_alternate_roles_and_lead_with_thinking() {
+    use harness_core::messages::ReasoningBlock;
+
+    let messages = vec![
+        TranscriptItem::User(UserMessage {
+            content: "audit auth".to_string(),
+        }),
+        TranscriptItem::Assistant(AssistantTurn {
+            content: Some("thinking out loud".to_string()),
+            reasoning_blocks: vec![ReasoningBlock {
+                text: Some("consider the sandbox".to_string()),
+                signature: Some("sig-1".to_string()),
+                opaque_payload: None,
+            }],
+            tool_calls: vec![ToolCall {
+                call_id: ToolCallId::new("toolu_1"),
+                name: "read".to_string(),
+                raw_arguments: r#"{"path":"auth.rs"}"#.to_string(),
+            }],
+            finish_reason: FinishReason::ToolCalls,
+            usage: None,
+        }),
+        TranscriptItem::ToolResult(ToolResultMessage {
+            call_id: ToolCallId::new("toolu_1"),
+            tool_name: "read".to_string(),
+            outcome: ToolOutcome::Success,
+            content: Arc::from("fn authenticate() {}"),
+            meta: ToolResultMeta::default(),
+        }),
+        // A steering user message immediately after the tool result: emitting it as its own wire
+        // message would put two `user` messages back to back and Anthropic rejects that.
+        TranscriptItem::User(UserMessage {
+            content: "now check the router".to_string(),
+        }),
+    ];
+
+    let wire = serialize_anthropic_request_body("m", "sys", &[], &messages, &[], false, 1024);
+    let json: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    let wire_messages = json["messages"].as_array().unwrap();
+
+    let roles: Vec<&str> = wire_messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, vec!["user", "assistant", "user"]);
+
+    // Rule 2: thinking leads the assistant turn.
+    let assistant_blocks = wire_messages[1]["content"].as_array().unwrap();
+    assert_eq!(assistant_blocks[0]["type"], "thinking");
+    assert_eq!(assistant_blocks[1]["type"], "text");
+    assert_eq!(assistant_blocks[2]["type"], "tool_use");
+
+    // Rule 1 + tool_result ordering: the merged user turn keeps `tool_result` blocks first.
+    let merged = wire_messages[2]["content"].as_array().unwrap();
+    assert_eq!(merged[0]["type"], "tool_result");
+    assert_eq!(merged[0]["tool_use_id"], "toolu_1");
+    assert_eq!(merged[1]["type"], "text");
+    assert_eq!(merged[1]["text"], "now check the router");
+
+    // Rule 3: an empty system prompt must omit the `system` field rather than send an empty block.
+    let blank = serialize_anthropic_request_body("m", "   ", &[], &messages, &[], false, 1024);
+    let blank_json: serde_json::Value = serde_json::from_str(&blank).unwrap();
+    assert!(blank_json.get("system").is_none(), "{}", blank);
+
+    // The `cache_control` prefix breakpoint indexes the transcript, so it must be translated onto
+    // the merged wire message that actually carries item 1's blocks.
+    let marked = serialize_anthropic_request_body(
+        "m",
+        "sys",
+        &[],
+        &messages,
+        &[CacheBreakpointMarker {
+            breakpoint: CacheBreakpoint::PinnedBaselineEnd,
+            message_index: 1,
+        }],
+        false,
+        1024,
+    );
+    let marked_json: serde_json::Value = serde_json::from_str(&marked).unwrap();
+    let marked_blocks = marked_json["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(
+        marked_blocks.last().unwrap()["cache_control"]["type"],
+        "ephemeral",
+        "the breakpoint must land on the assistant wire message, not drift forward"
+    );
 }

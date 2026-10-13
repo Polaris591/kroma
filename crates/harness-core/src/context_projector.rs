@@ -468,7 +468,11 @@ impl ContextProjector {
             .projected_items
             .iter()
             .filter_map(|item| match item {
-                TranscriptItem::ToolResult(tr) => Some(tr.content.len()),
+                // Gate 7: a multimodal `read` carries its payload in `image_attachments`, so the
+                // tool-output budget must count those bytes or images bypass the cap entirely.
+                TranscriptItem::ToolResult(tr) => {
+                    Some(tr.content.len() + tr.image_attachment_bytes())
+                }
                 _ => None,
             })
             .sum();
@@ -534,6 +538,32 @@ impl ContextProjector {
                     .map(|i| i.estimated_bytes())
                     .sum();
                 after_total_bytes = static_prefix_bytes + after_history_bytes;
+
+                if after_total_bytes > budget.context_high_watermark_bytes {
+                    // Gate 7: base64 image payloads are the one thing no text compaction can
+                    // shrink, and the tail window protects the newest turns by construction. A
+                    // valid multimodal `read` must therefore never abort the run: evict every
+                    // image except the newest one (which the model still needs to see), and only
+                    // if even that is too large drop it too, keeping the one-line summaries.
+                    if self.evict_image_attachments(canonical, 1) > 0 {
+                        after_history_bytes = self
+                            .projected_items
+                            .iter()
+                            .map(|i| i.estimated_bytes())
+                            .sum();
+                        after_total_bytes = static_prefix_bytes + after_history_bytes;
+                    }
+                    if after_total_bytes > budget.context_high_watermark_bytes
+                        && self.evict_image_attachments(canonical, 0) > 0
+                    {
+                        after_history_bytes = self
+                            .projected_items
+                            .iter()
+                            .map(|i| i.estimated_bytes())
+                            .sum();
+                        after_total_bytes = static_prefix_bytes + after_history_bytes;
+                    }
+                }
 
                 if after_total_bytes > budget.context_high_watermark_bytes {
                     return Err(TerminalReason::ContextBudgetExceeded);
@@ -621,7 +651,9 @@ impl ContextProjector {
                 .projected_items
                 .iter()
                 .filter_map(|item| match item {
-                    TranscriptItem::ToolResult(tr) => Some(tr.content.len()),
+                    TranscriptItem::ToolResult(tr) => {
+                        Some(tr.content.len() + tr.image_attachment_bytes())
+                    }
                     _ => None,
                 })
                 .sum(),
@@ -650,6 +682,45 @@ impl ContextProjector {
             message_history_bytes: final_history_bytes,
             compaction_event,
         })
+    }
+
+    /// Gate 7 (`v1.2.0`): drop the base64 payloads of all but the `keep_newest` newest image tool
+    /// results, keeping their one-line summaries in `content`. Returns the bytes reclaimed.
+    ///
+    /// The canonical transcript is cleared in lockstep so the shared payload is actually freed and
+    /// a later `--resume` cannot resurrect megabytes the projection already discarded.
+    fn evict_image_attachments(
+        &mut self,
+        canonical: &mut [TranscriptItem],
+        keep_newest: usize,
+    ) -> usize {
+        let mut with_images: Vec<usize> = self
+            .projected_items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| match item {
+                TranscriptItem::ToolResult(tr) if !tr.meta.image_attachments.is_empty() => {
+                    Some(idx)
+                }
+                _ => None,
+            })
+            .collect();
+        if with_images.len() <= keep_newest {
+            return 0;
+        }
+        with_images.truncate(with_images.len() - keep_newest);
+
+        let mut reclaimed = 0usize;
+        for idx in with_images {
+            if let TranscriptItem::ToolResult(tr) = &mut self.projected_items[idx] {
+                reclaimed += tr.image_attachment_bytes();
+                tr.meta.image_attachments.clear();
+            }
+            if let Some(TranscriptItem::ToolResult(canon_tr)) = canonical.get_mut(idx) {
+                canon_tr.meta.image_attachments.clear();
+            }
+        }
+        reclaimed
     }
 
     fn run_step_down_compaction(
@@ -695,7 +766,9 @@ impl ContextProjector {
                         && pinned_item_indices.contains(&idx)
                         && matches!(
                             &self.projected_items[idx],
-                            TranscriptItem::ToolResult(tr) if tr.content.len() > MIN_COMPACTABLE_TOOL_BYTES
+                            TranscriptItem::ToolResult(tr)
+                                if tr.content.len() + tr.image_attachment_bytes()
+                                    > MIN_COMPACTABLE_TOOL_BYTES
                         )
                     {
                         can_advance_baseline = false;
@@ -738,11 +811,15 @@ impl ContextProjector {
                         TranscriptItem::ToolResult(tr) => tr,
                         _ => continue,
                     };
-                    if tr.content.len() <= MIN_COMPACTABLE_TOOL_BYTES {
+                    // Gate 7: a multimodal `read` keeps only a ~70-byte summary in `content`, so
+                    // testing `content.len()` alone would permanently pin multi-megabyte base64
+                    // payloads inside the frozen prefix. The attachment bytes are part of the
+                    // reclaimable cost.
+                    let old_bytes = tr.content.len() + tr.image_attachment_bytes();
+                    if old_bytes <= MIN_COMPACTABLE_TOOL_BYTES {
                         continue;
                     }
                     // Compact read-only outputs and large bash outputs (preserving exit code & tail)
-                    let old_bytes = tr.content.len();
                     let raw: Arc<str> = Arc::clone(&tr.content);
                     let sid = source_entry_id(idx, &tr.call_id.0);
                     let reason = if superseded {

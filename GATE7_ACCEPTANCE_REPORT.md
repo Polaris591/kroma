@@ -33,10 +33,12 @@ Measured on this repository (`docs/GATE7_EVAL_METRICS.json`): 64 files, 1420 sym
 ## 2. Native multimodal vision input in `read`
 
 `execute_read` now sniffs magic bytes for PNG/JPEG/GIF/WebP and parses exact pixel dimensions in pure
-Rust (PNG IHDR, JPEG SOF0..SOF15, GIF logical screen descriptor, WebP VP8X/VP8/VP8L). Up to 4 MiB of
+Rust (PNG IHDR, JPEG SOF0..SOF15, GIF logical screen descriptor, WebP VP8X/VP8/VP8L). Up to 1 MiB of
 image data is base64-encoded (hand-rolled RFC 4648, zero new dependencies) and attached as an
 `ImageAttachment { mime_type, base64_data, width, height, byte_len }` while `content` keeps a
-one-line summary.
+one-line summary. The sniffed MIME type must also agree with the file extension, and a file that
+claims to be an image but exceeds the cap fails immediately with that reason instead of falling
+through to the 8 MiB binary scanner.
 
 Design note: the attachment list lives on `ToolResultMeta`, which is the metadata struct *inside*
 `ToolResultMessage`. That keeps the field WAL-persisted, projected and byte-accounted with the
@@ -49,8 +51,13 @@ message it belongs to without forcing 29 existing `ToolResultMessage` literals t
 - **Provider projection.** Chat Completions emits `image_url` content parts; Anthropic emits
   `{type:"image", source:{type:"base64"}}` inside `tool_result`; Responses emits a follow-up user turn
   with `input_image` parts (its `function_call_output.output` must stay a string).
-- **Budget.** The base64 length is counted by `TranscriptItem::estimated_bytes`, and Step-Down
-  compaction clears the attachments together with the raw text, so older turns keep only the summary.
+- **Budget.** The base64 length is counted by `TranscriptItem::estimated_bytes`, by
+  `ContextBudgetBreakdown.tool_output_bytes` and by the `max_total_tool_output_bytes` check, and
+  Step-Down Compaction clears the attachments together with the raw text, so older turns keep only
+  the summary. The cap (1 MiB raw → ≤1.4 MiB base64) sits below the default high watermark
+  (1.5 MiB), and if an attachment still cannot fit — e.g. several images in the protected tail
+  window — the projector evicts every image but the newest (then the newest too) instead of
+  returning `ContextBudgetExceeded`, so a valid multimodal `read` can never abort a run.
 
 ## 3. Native Anthropic `/v1/messages` and OpenAI `/v1/responses`
 
@@ -80,15 +87,45 @@ Responses from a `/responses` base URL, and otherwise keeps the existing Chat Co
 agent loop, so the protocol client can pin the frozen prefix without knowing anything about the
 projector.
 
+## 5. Post-review hardening (final `v1.2.0`)
+
+A 3-way independent review of the first `v1.2.0` build found that a multimodal image escaped
+Step-Down Compaction, and that both new protocols accepted truncated SSE streams as complete turns.
+Both classes are fixed and pinned by regression tests in
+`crates/harness-core/tests/gate7_repograph_vision_protocols.rs`.
+
+- **Images were un-compactable.** `run_step_down_compaction` tested `tr.content.len()` (a ~70-byte
+  summary) against `MIN_COMPACTABLE_TOOL_BYTES`, so every image was skipped, the pinned baseline
+  advanced past it, and the base64 payload was locked into the immutable prefix. The test now uses
+  `content.len() + image_attachment_bytes()` and reclaims the full payload on both the projected item
+  and the canonical transcript. `tool_output_bytes` / `raw_tool_bytes` count the payload too.
+- **Images could abort a run.** A 4 MiB cap was 2.7x the 1.5 MiB high watermark, and the tail window
+  protects the newest turns unconditionally, so reading one large screenshot could fail the
+  projection with `ContextBudgetExceeded`. The cap is now 1 MiB and an emergency eviction pass drops
+  the oldest image payloads (then the newest) before that error is ever returned.
+- **Truncated streams were accepted.** OpenAI Responses promoted in-flight `function_call` items to
+  `{}` calls on a stream that never sent `response.completed`; Anthropic ignored a missing
+  `message_stop` and silently dropped unclosed `tool_use` blocks. Both now return
+  `ProviderError::IncompleteStream`, so a half-streamed tool call is never executed.
+- **Anthropic wire validity.** Wire messages now strictly alternate `user`/`assistant` (consecutive
+  same-role turns are merged with `tool_result` blocks first), assistant turns lead with
+  `thinking`/`redacted_thinking`, empty text blocks and an empty `system` field are omitted, and the
+  `cache_control` prefix breakpoint is translated through the transcript→wire merge map instead of
+  drifting forward onto the newest turn.
+- **RepoGraph.** `const `/`type ` prefixes trim leading whitespace before `ident_at` and slicing, so
+  `const  函数 = () => {}` no longer panics on a UTF-8 char boundary, and `called_by` / `calls_into`
+  aggregate edge weights per neighbour file instead of listing the same path once per symbol.
+
 ## Verification
 
 | Check | Result |
 | --- | --- |
-| `cargo test --workspace` | **158 passed, 0 failed, 0 warnings** |
+| `cargo test --workspace` | **165 passed, 0 failed, 0 warnings** |
 | `cargo check --workspace --target x86_64-pc-windows-gnu --all-targets` | 0 errors, 0 warnings |
 | `cargo build --workspace --release` | ok (`harness 1.2.0`) |
 | `cargo build --workspace --target x86_64-pc-windows-gnu --release` | ok (`harness.exe`) |
-| New tests (`tests/gate7_repograph_vision_protocols.rs`) | 5 passed |
+| New tests (`tests/gate7_repograph_vision_protocols.rs`) | 12 passed |
+| Live REPL `/graph <symbol>` on this repository | 10/10 Top-1 (62 files, 1436 symbols, 6234 edges) |
 | Live REPL `/graph authenticate_user` on a scratch workspace | `src/auth.rs` ranked #1 with `db.rs` in `calls_into`, `router.rs` in `called_by` |
 | Live ACP `workspace.graph` over stdio | `capabilities.graph = true`, ranked list returned |
 
