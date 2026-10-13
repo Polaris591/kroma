@@ -35,6 +35,7 @@ use crate::tool::policy::{
 use crate::tool::registry::ToolRegistry;
 use crate::tools::recall_evidence::execute_recall_evidence;
 use crate::types::{EffectClass, RunId, RunStatus};
+use crate::workspace::WorkspaceCap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -970,6 +971,7 @@ impl RpcDispatcher {
             "revision.undo",
             "revision.restore",
             "evidence.recall",
+            "workspace.graph",
             "skills.list",
             "skills.activate",
             "shutdown",
@@ -1010,6 +1012,8 @@ impl RpcDispatcher {
                 self.rpc_revision_restore(&req.params).await
             }
             "evidence.recall" | "evidence/recall" => self.rpc_evidence_recall(&req.params).await,
+            // Gate 7 (v1.2.0): symbol dependency graph + Personalized PageRank navigation.
+            "workspace.graph" | "workspace/graph" => self.rpc_workspace_graph(&req.params).await,
             "skills.list" | "skills/list" => self.rpc_skills_list().await,
             "skills.activate" | "skills/activate" => self.rpc_skills_activate(&req.params).await,
             "shutdown" | "acp.shutdown" => self.rpc_shutdown().await,
@@ -1067,6 +1071,7 @@ impl RpcDispatcher {
                 "revisions": true,
                 "evidence": true,
                 "skills": true,
+                "graph": true,
             },
             "supported_methods": Self::supported_methods(),
             "tools": visible_tools,
@@ -1918,6 +1923,93 @@ impl RpcDispatcher {
         }))
     }
 
+    /// Gate 7: symbol dependency graph + Personalized PageRank navigation for non-terminal surfaces.
+    async fn rpc_workspace_graph(&self, params: &Value) -> Result<Value, JsonRpcError> {
+        let max_nodes = params
+            .get("max_nodes")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize)
+            .unwrap_or(crate::repo_graph::DEFAULT_MAX_NODES)
+            .clamp(1, crate::repo_graph::MAX_MAX_NODES);
+        let query = params
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let query_terms: Vec<String> = query
+            .as_deref()
+            .unwrap_or("")
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':' || c == '.'))
+            .map(str::trim)
+            .filter(|t| t.len() >= 2)
+            .map(str::to_string)
+            .take(16)
+            .collect();
+        let mut focus_files: Vec<String> = Vec::new();
+        if let Some(list) = params.get("focus_files").and_then(Value::as_array) {
+            if list.len() > 32 {
+                return Err(JsonRpcError::new(
+                    JSONRPC_INVALID_PARAMS,
+                    "focus_files accepts at most 32 entries",
+                ));
+            }
+            for entry in list {
+                let Some(raw) = entry.as_str() else {
+                    continue;
+                };
+                let normalized = raw.trim().trim_start_matches("./").replace('\\', "/");
+                if normalized.is_empty() {
+                    continue;
+                }
+                WorkspaceCap::validate_relative_components(&normalized).map_err(|e| {
+                    JsonRpcError::new(
+                        JSONRPC_INVALID_PARAMS,
+                        format!("invalid focus_files entry '{}': {}", raw, e),
+                    )
+                })?;
+                focus_files.push(normalized);
+            }
+        }
+
+        let graph = crate::repo_graph::RepoGraph::build_from_workspace(
+            self.inner.env.workspace(),
+            crate::repo_graph::MAX_GRAPH_FILES,
+        );
+        let report = graph.query(&query_terms, &focus_files, max_nodes);
+        let ranked: Vec<Value> = report
+            .ranked
+            .iter()
+            .map(|node| {
+                json!({
+                    "path": node.path,
+                    "score": node.score,
+                    "symbols": node
+                        .symbols
+                        .iter()
+                        .map(|s| json!({
+                            "name": s.name,
+                            "kind": s.kind.as_str(),
+                            "line": s.line,
+                            "signature": s.signature,
+                        }))
+                        .collect::<Vec<Value>>(),
+                    "called_by": node.called_by,
+                    "calls_into": node.calls_into,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "query_terms": report.query_terms,
+            "focus_files": report.focus_files,
+            "total_files": report.total_files,
+            "total_symbols": report.total_symbols,
+            "total_edges": report.total_edges,
+            "truncated": report.truncated,
+            "skipped_files": graph.skipped_files,
+            "ranked": ranked,
+        }))
+    }
+
     async fn rpc_skills_list(&self) -> Result<Value, JsonRpcError> {
         let discovered = discover_skills(self.inner.env.workspace());
         let activated = self.inner.status.lock().unwrap().activated_skills.clone();
@@ -2623,7 +2715,7 @@ impl InteractiveRepl {
             "=== Harness v{} Interactive REPL ===\n\
              workspace: {} | policy: {} | session: {}\n\
              turns: {} | revision: {} | tokens: in={} (cached={}, hit={:.1}%)\n\
-             Type a task prompt or /help for commands (/status, /revisions, /undo, /skills, /fork, /clear, /quit).\n",
+             Type a task prompt or /help for commands (/status, /revisions, /undo, /skills, /graph, /fork, /clear, /quit).\n",
             crate::version(),
             sanitize_terminal_text(ws),
             sanitize_terminal_text(policy),
@@ -2662,6 +2754,7 @@ impl InteractiveRepl {
                         "  /restore <rev> [--force] Restore workspace to a specific revision ID\n",
                         "  /diff                  Show files changed in the latest revision\n",
                         "  /skills [<name>]       List workspace skills or activate <name>\n",
+                        "  /graph [<query>]       Rank files with Personalized PageRank over the symbol graph\n",
                         "  /fork <turn>           Rewind/branch active session at <turn>\n",
                         "  /inspect <id>          Recall raw tool evidence by source_entry_id\n",
                         "  /clear                 Start a fresh session in this workspace\n",
@@ -2911,6 +3004,78 @@ impl InteractiveRepl {
                             tag,
                             sanitize_terminal_text(desc)
                         ));
+                    }
+                    Ok(ReplStepOutcome {
+                        output: out,
+                        should_exit: false,
+                    })
+                }
+                "/graph" => {
+                    let query = rest.join(" ");
+                    let params = if query.trim().is_empty() {
+                        json!({})
+                    } else {
+                        json!({ "query": query })
+                    };
+                    let resp = self
+                        .dispatcher
+                        .handle_request(JsonRpcRequest::new(1, "workspace.graph", params))
+                        .await;
+                    let val = resp.result.ok_or_else(|| {
+                        resp.error
+                            .map(|e| e.message)
+                            .unwrap_or_else(|| "workspace.graph failed".to_string())
+                    })?;
+                    let total_files = val
+                        .get("total_files")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let total_symbols = val
+                        .get("total_symbols")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let total_edges = val
+                        .get("total_edges")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let ranked = val
+                        .get("ranked")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if ranked.is_empty() {
+                        return Ok(ReplStepOutcome {
+                            output: format!(
+                                "repo graph: {} files, {} symbols, {} edges; no ranked files.\n",
+                                total_files, total_symbols, total_edges
+                            ),
+                            should_exit: false,
+                        });
+                    }
+                    let mut out = format!(
+                        "repo graph: {} files, {} symbols, {} edges\n",
+                        total_files, total_symbols, total_edges
+                    );
+                    for (i, node) in ranked.iter().enumerate() {
+                        let path = node.get("path").and_then(Value::as_str).unwrap_or("-");
+                        let score = node.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+                        out.push_str(&format!(
+                            "  {} {} (score={:.4})\n",
+                            i + 1,
+                            sanitize_terminal_text(path),
+                            score
+                        ));
+                        if let Some(syms) = node.get("symbols").and_then(Value::as_array) {
+                            for s in syms {
+                                let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
+                                let sig = s.get("signature").and_then(Value::as_str).unwrap_or("");
+                                out.push_str(&format!(
+                                    "      {} {}\n",
+                                    kind,
+                                    sanitize_terminal_text(sig)
+                                ));
+                            }
+                        }
                     }
                     Ok(ReplStepOutcome {
                         output: out,

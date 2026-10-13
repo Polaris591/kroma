@@ -617,6 +617,9 @@ impl AgentRunner {
                 tools: visible_tools.clone(),
                 messages: projected.messages,
                 stream: self.config.stream,
+                // Gate 7: hand the projector's logical cache boundaries to the protocol client so
+                // Anthropic-style explicit prompt caching can pin the frozen prefix.
+                cache_breakpoints: projected.breakpoints,
             };
 
             let completion = match self

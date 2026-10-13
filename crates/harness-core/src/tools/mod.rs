@@ -7,7 +7,7 @@ pub mod read;
 pub mod recall_evidence;
 pub mod write;
 
-use crate::messages::{ToolOutcome, ToolResultMeta};
+use crate::messages::{ImageAttachment, ToolOutcome, ToolResultMeta};
 use crate::types::ErrorCode;
 
 #[derive(Debug, Clone)]
@@ -15,6 +15,8 @@ pub struct ToolExecutionOutput {
     pub outcome: ToolOutcome,
     pub content: String,
     pub meta: ToolResultMeta,
+    /// Gate 7 (`v1.2.0`): binary images produced by this tool call (multimodal `read`).
+    pub image_attachments: Vec<ImageAttachment>,
 }
 
 impl ToolExecutionOutput {
@@ -23,6 +25,21 @@ impl ToolExecutionOutput {
             outcome: ToolOutcome::Success,
             content,
             meta,
+            image_attachments: Vec::new(),
+        }
+    }
+
+    /// Gate 7: a successful result that also carries multimodal image payloads.
+    pub fn success_with_images(
+        content: String,
+        meta: ToolResultMeta,
+        images: Vec<ImageAttachment>,
+    ) -> Self {
+        Self {
+            outcome: ToolOutcome::Success,
+            content,
+            meta,
+            image_attachments: images,
         }
     }
 
@@ -35,6 +52,7 @@ impl ToolExecutionOutput {
                 format!("{}: {}", code.as_str(), content)
             },
             meta,
+            image_attachments: Vec::new(),
         }
     }
 }

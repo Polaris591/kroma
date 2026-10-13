@@ -1,5 +1,5 @@
-use crate::messages::ToolResultMeta;
-use crate::prompt::hex_encode;
+use crate::messages::{ImageAttachment, ToolResultMeta};
+use crate::prompt::{hex_encode, sha256_hex16};
 use crate::tool::output_buffer::floor_char_boundary;
 use crate::tools::ToolExecutionOutput;
 use crate::types::ErrorCode;
@@ -14,6 +14,8 @@ pub const MAX_SHA256_FILE_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 pub const MAX_INLINE_OUTPUT_BYTES: usize = 64 * 1024; // 64 KiB
 pub const MAX_READ_LINES: usize = 2000;
 pub const MAX_SINGLE_LINE_BYTES: usize = 2048; // 2 KiB
+/// Gate 7 (`v1.2.0`): largest image returned as a multimodal attachment (raw bytes, before base64).
+pub const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +104,58 @@ pub fn execute_read(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
     }
 
     let file_size = meta.len();
+
+    // Gate 7 (`v1.2.0`): native multimodal image input.
+    //
+    // A file whose extension is an image type AND whose magic bytes agree is returned as an
+    // `ImageAttachment` (base64 + exact pixel dimensions) instead of being rejected as binary, so a
+    // vision-capable model can inspect screenshots, UI mockups and error captures directly. A file
+    // that only *claims* to be an image falls through to the text path below and is rejected there,
+    // so arbitrary binary data can never smuggle itself in as an attachment.
+    if image_mime_for_path(&rel_str).is_some()
+        && file_size > 0
+        && file_size <= MAX_IMAGE_ATTACHMENT_BYTES
+    {
+        // Use a dedicated handle: the sniff below must not advance the primary handle, otherwise a
+        // non-image file would be read from a stale offset further down.
+        if let Ok((_, mut image_file)) = workspace.open_existing_no_symlink(&args.path) {
+            let mut bytes = Vec::with_capacity(file_size as usize);
+            let mut limited = (&mut image_file).take(MAX_IMAGE_ATTACHMENT_BYTES + 1);
+            if limited.read_to_end(&mut bytes).is_ok()
+                && bytes.len() as u64 <= MAX_IMAGE_ATTACHMENT_BYTES
+            {
+                if let Some(detected) = sniff_image(&bytes) {
+                    let (width, height) = detected.dimensions;
+                    let attachment = ImageAttachment {
+                        mime_type: detected.mime.to_string(),
+                        base64_data: base64_encode(&bytes),
+                        width: Some(width),
+                        height: Some(height),
+                        byte_len: bytes.len(),
+                    };
+                    let summary = format!(
+                        "Read image file {} [{}, {}x{}, {} bytes]\n",
+                        rel_str,
+                        attachment.mime_type,
+                        width,
+                        height,
+                        bytes.len()
+                    );
+                    return ToolExecutionOutput::success_with_images(
+                        summary,
+                        ToolResultMeta {
+                            relative_path: Some(rel_str),
+                            content_sha256: Some(sha256_hex16(&bytes)),
+                            lines_range: Some((1, 1)),
+                            duration_ms: started.elapsed().as_millis() as u64,
+                            ..Default::default()
+                        },
+                        vec![attachment],
+                    );
+                }
+            }
+        }
+    }
     let compute_hash = file_size <= MAX_SHA256_FILE_BYTES;
     let mut hasher = compute_hash.then(Sha256::new);
 
@@ -293,4 +347,204 @@ pub fn execute_read(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
             ..Default::default()
         },
     )
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 7 (`v1.2.0`): pure-Rust image sniffing, dimension parsing and base64 encoding
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectedImage {
+    pub mime: &'static str,
+    pub dimensions: (u32, u32),
+}
+
+/// Map a workspace-relative path to the image MIME type its extension claims.
+pub fn image_mime_for_path(rel: &str) -> Option<&'static str> {
+    let ext = rel
+        .rsplit('/')
+        .next()
+        .unwrap_or(rel)
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Identify an image by magic bytes and parse its exact pixel dimensions from the container header.
+///
+/// Returns `None` when the bytes are not a recognised image: callers then treat the file as binary.
+pub fn sniff_image(bytes: &[u8]) -> Option<DetectedImage> {
+    if bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") && &bytes[12..16] == b"IHDR" {
+        // IHDR: width and height are big-endian u32 at offsets 16 and 20.
+        let width = be32(&bytes[16..20])?;
+        let height = be32(&bytes[20..24])?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        return Some(DetectedImage {
+            mime: "image/png",
+            dimensions: (width, height),
+        });
+    }
+
+    if bytes.len() >= 4 && bytes.starts_with(b"\xFF\xD8\xFF") {
+        let mut i = 2usize;
+        while i + 3 < bytes.len() {
+            if bytes[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = bytes[i + 1];
+            // Padding fill bytes before a marker.
+            if marker == 0xFF {
+                i += 1;
+                continue;
+            }
+            // Standalone markers carry no length field.
+            if matches!(marker, 0x01 | 0xD0..=0xD9) {
+                i += 2;
+                continue;
+            }
+            let seg_len = be16(&bytes[i + 2..i + 4])? as usize;
+            if seg_len < 2 {
+                return None;
+            }
+            // SOF0..SOF15 except DHT (C4), JPG (C8) and DAC (CC).
+            let is_sof = (0xC0..=0xCF).contains(&marker)
+                && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+            if is_sof {
+                if i + 9 > bytes.len() {
+                    return None;
+                }
+                let height = be16(&bytes[i + 5..i + 7])? as u32;
+                let width = be16(&bytes[i + 7..i + 9])? as u32;
+                if width == 0 || height == 0 {
+                    return None;
+                }
+                return Some(DetectedImage {
+                    mime: "image/jpeg",
+                    dimensions: (width, height),
+                });
+            }
+            i += 2 + seg_len;
+        }
+        return None;
+    }
+
+    if bytes.len() >= 10 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        let width = le16(&bytes[6..8])? as u32;
+        let height = le16(&bytes[8..10])? as u32;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        return Some(DetectedImage {
+            mime: "image/gif",
+            dimensions: (width, height),
+        });
+    }
+
+    if bytes.len() >= 30 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        match &bytes[12..16] {
+            // Extended format: canvas size minus one, 24-bit little-endian.
+            b"VP8X" => {
+                let width = le24(&bytes[24..27])? + 1;
+                let height = le24(&bytes[27..30])? + 1;
+                return Some(DetectedImage {
+                    mime: "image/webp",
+                    dimensions: (width, height),
+                });
+            }
+            // Lossy: the frame header starts with the 0x9D 0x01 0x2A start code.
+            b"VP8 " => {
+                if bytes.len() < 30 || &bytes[23..26] != b"\x9D\x01\x2A" {
+                    return None;
+                }
+                let width = (le16(&bytes[26..28])? & 0x3FFF) as u32;
+                let height = (le16(&bytes[28..30])? & 0x3FFF) as u32;
+                if width == 0 || height == 0 {
+                    return None;
+                }
+                return Some(DetectedImage {
+                    mime: "image/webp",
+                    dimensions: (width, height),
+                });
+            }
+            // Lossless: 14-bit width-1 then 14-bit height-1, packed little-endian from offset 21.
+            b"VP8L" => {
+                if bytes.len() < 25 || bytes[20] != 0x2F {
+                    return None;
+                }
+                let bits = u32::from_le_bytes([bytes[21], bytes[22], bytes[23], bytes[24]]);
+                let width = (bits & 0x3FFF) + 1;
+                let height = ((bits >> 14) & 0x3FFF) + 1;
+                if width == 0 || height == 0 {
+                    return None;
+                }
+                return Some(DetectedImage {
+                    mime: "image/webp",
+                    dimensions: (width, height),
+                });
+            }
+            _ => return None,
+        }
+    }
+
+    None
+}
+
+fn be16(b: &[u8]) -> Option<u16> {
+    Some(u16::from_be_bytes([*b.first()?, *b.get(1)?]))
+}
+
+fn be32(b: &[u8]) -> Option<u32> {
+    Some(u32::from_be_bytes([
+        *b.first()?,
+        *b.get(1)?,
+        *b.get(2)?,
+        *b.get(3)?,
+    ]))
+}
+
+fn le16(b: &[u8]) -> Option<u16> {
+    Some(u16::from_le_bytes([*b.first()?, *b.get(1)?]))
+}
+
+fn le24(b: &[u8]) -> Option<u32> {
+    Some(
+        (*b.first()? as u32) | ((*b.get(1)? as u32) << 8) | ((*b.get(2)? as u32) << 16),
+    )
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 (RFC 4648, padded). Hand-rolled so the harness keeps zero extra dependencies.
+pub fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(BASE64_ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(BASE64_ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(BASE64_ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(BASE64_ALPHABET[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }

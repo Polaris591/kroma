@@ -243,12 +243,13 @@ async fn test_scout_subagent_is_strictly_read_only_and_cannot_spawn_recursively(
     let (summary, logger) = runner.run(logger).await;
     assert_eq!(summary.status, RunStatus::Completed);
 
-    // 1. Scout only sees the 6 read-only tools and never sees `spawn_subagent`, `edit`, `write`, `bash`.
+    // 1. Scout only sees the 7 read-only tools and never sees `spawn_subagent`, `edit`, `write`, `bash`.
     let visible = scout_visible_tools.lock().unwrap().clone();
     assert_eq!(
         visible,
         vec![
             "activate_skill",
+            "code_graph",
             "find",
             "grep",
             "ls",

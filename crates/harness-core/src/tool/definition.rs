@@ -56,6 +56,36 @@ pub fn builtin_tool_registrations() -> Vec<RegisteredTool> {
         },
         RegisteredTool {
             definition: ToolDefinition {
+                name: "code_graph".to_string(),
+                description: "Rank workspace files with Personalized PageRank over a symbol dependency graph. Returns the highest-signal files for a task with their key symbol signatures, callers (`called_by`) and callees (`calls_into`), so cross-file call chains are visible before reading any file.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Optional task keywords or a symbol name (e.g. 'authenticate_user token refresh')."
+                        },
+                        "focus_files": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional workspace-relative files to personalise the ranking toward (max 32)."
+                        },
+                        "max_nodes": {
+                            "type": "integer",
+                            "description": "Maximum ranked files to return (default 12, max 40)."
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            metadata: ToolMetadata {
+                effect_class: EffectClass::ReadOnly,
+                default_timeout_sec: 60,
+                inline_output_cap_bytes: 64 * 1024,
+            },
+        },
+        RegisteredTool {
+            definition: ToolDefinition {
                 name: "edit".to_string(),
                 description: "Apply 1-16 deterministic replacements to a workspace file against a single snapshot with Tier 1/2 matching and actionable mismatch diagnostics.".to_string(),
                 parameters: json!({
@@ -182,7 +212,7 @@ pub fn builtin_tool_registrations() -> Vec<RegisteredTool> {
         RegisteredTool {
             definition: ToolDefinition {
                 name: "read".to_string(),
-                description: "Read a workspace text file with bounded streaming, line numbers, and 16-char SHA256 fingerprint.".to_string(),
+                description: "Read a workspace text file with bounded streaming, line numbers, and 16-char SHA256 fingerprint. Image files (PNG/JPEG/GIF/WebP) are returned as multimodal attachments with exact pixel dimensions for vision-capable models.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

@@ -756,9 +756,15 @@ impl ContextProjector {
                     if new_bytes < old_bytes {
                         let stub_arc: Arc<str> = Arc::from(stub);
                         tr.content = Arc::clone(&stub_arc);
+                        // Gate 7: the raw image payload is dropped with the raw text. Older turns keep
+                        // only the one-line summary (already inside the stub) so the context budget
+                        // does not keep paying for base64 megabytes, while recent turns still carry
+                        // the multimodal block.
+                        tr.meta.image_attachments.clear();
                         // Synchronize stub to canonical transcript so shared memory is freed (§7.1)
                         if let Some(TranscriptItem::ToolResult(canon_tr)) = canonical.get_mut(idx) {
                             canon_tr.content = stub_arc;
+                            canon_tr.meta.image_attachments.clear();
                         }
                         read_path = if tr.tool_name == "read" {
                             tr.meta.relative_path.clone()

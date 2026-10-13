@@ -1317,7 +1317,7 @@ impl SubagentBackend for ProviderSubagentBackend {
 
             let role_banner = match req.spec.role {
                 SubagentRole::Scout => {
-                    "\n\n[SUBAGENT ROLE: scout — Strictly read-only exploration subagent. You may only use read-only tools (`read`, `grep`, `find`, `ls`, `activate_skill`, `recall_evidence`). `spawn_subagent`, `edit`, `write`, and `bash` are disabled. Return a concise factual summary with relevant file paths and line numbers.]"
+                    "\n\n[SUBAGENT ROLE: scout — Strictly read-only exploration subagent. You may only use read-only tools (`code_graph`, `read`, `grep`, `find`, `ls`, `activate_skill`, `recall_evidence`). `spawn_subagent`, `edit`, `write`, and `bash` are disabled. Start with `code_graph` to locate the relevant call chain, then `read` only the files it ranks. Return a concise factual summary with relevant file paths and line numbers.]"
                 }
                 SubagentRole::Worker => {
                     "\n\n[SUBAGENT ROLE: worker — Isolated worktree mutation subagent. You are operating inside an isolated copy of the workspace; `spawn_subagent` is disabled. Make minimal, targeted changes within your assigned scope and summarize the modified files.]"

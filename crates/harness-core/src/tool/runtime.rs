@@ -581,6 +581,10 @@ impl ToolRuntime {
             "ls" => execute_ls(self.env.workspace(), &effective_raw_args),
             "find" => execute_find(self.env.workspace(), &effective_raw_args),
             "grep" => execute_grep(self.env.workspace(), &effective_raw_args),
+            // Gate 7 (v1.2.0): symbol dependency graph + Personalized PageRank navigation.
+            "code_graph" => {
+                crate::repo_graph::execute_code_graph(self.env.workspace(), &effective_raw_args)
+            }
             // Gate 3: on-demand skill activation, read-only and visible under every policy mode.
             "activate_skill" => {
                 execute_activate_skill(&self.registry.skills(), &effective_raw_args)
@@ -738,12 +742,18 @@ impl ToolRuntime {
     }
 
     fn into_message(call: &ToolCall, out: ToolExecutionOutput) -> ToolResultMessage {
+        let mut meta = out.meta;
+        // Gate 7: multimodal attachments travel with the result message so they are persisted in the
+        // session WAL and can be projected into the next provider request.
+        if !out.image_attachments.is_empty() {
+            meta.image_attachments = out.image_attachments;
+        }
         ToolResultMessage {
             call_id: call.call_id.clone(),
             tool_name: call.name.clone(),
             outcome: out.outcome,
             content: Arc::from(out.content),
-            meta: out.meta,
+            meta,
         }
     }
 }

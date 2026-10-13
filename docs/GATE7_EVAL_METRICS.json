@@ -1,0 +1,92 @@
+{
+  "gate": "Gate 7",
+  "version": "1.2.0",
+  "generated_by": "harness v1.2.0 acceptance run (measured on this machine, not estimated)",
+  "repograph_navigation": {
+    "corpus": "/opt/harness (the harness workspace itself)",
+    "files_indexed": 64,
+    "symbols_extracted": 1420,
+    "cross_file_edges": 6331,
+    "files_skipped": 0,
+    "truncated": false,
+    "full_graph_build_ms": 58,
+    "avg_query_ms": 0.1,
+    "pagerank": {
+      "cold_start_damping": 0.85,
+      "seeded_damping": 0.35,
+      "iterations": 15,
+      "seed_weights": { "path_match": 60.0, "symbol_definition": 150.0, "focus_file": 400.0, "one_hop_neighbour": 30.0 }
+    },
+    "symbol_query_benchmark": {
+      "cases": 10,
+      "top1_accuracy": 1.0,
+      "top3_recall": 1.0,
+      "results": [
+        { "query": "WorkspaceCap", "expected": "crates/harness-core/src/workspace.rs", "rank": 1 },
+        { "query": "RepoGraph", "expected": "crates/harness-core/src/repo_graph.rs", "rank": 1 },
+        { "query": "SnapshotStore", "expected": "crates/harness-core/src/revision.rs", "rank": 1 },
+        { "query": "execute_recall_evidence", "expected": "crates/harness-core/src/tools/recall_evidence.rs", "rank": 1 },
+        { "query": "RpcDispatcher", "expected": "crates/harness-core/src/surface.rs", "rank": 1 },
+        { "query": "ProjectionProfile", "expected": "crates/harness-core/src/context_projector.rs", "rank": 1 },
+        { "query": "PredictiveValidator", "expected": "crates/harness-core/src/attribution.rs", "rank": 1 },
+        { "query": "SubagentRole", "expected": "crates/harness-core/src/subagents.rs", "rank": 1 },
+        { "query": "PolicyEngine", "expected": "crates/harness-core/src/tool/policy.rs", "rank": 1 },
+        { "query": "serialize_openai_request_body", "expected": "crates/harness-core/src/provider/chat_completions.rs", "rank": 1 }
+      ]
+    },
+    "languages": ["rust", "python", "typescript", "javascript", "go", "c", "cpp", "java"],
+    "kernel_tool": { "name": "code_graph", "effect_class": "read_only", "builtin_tool_count": 11 }
+  },
+  "multimodal_read": {
+    "supported_formats": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    "header_dimension_parse_correctness": 1.0,
+    "formats_verified": 4,
+    "max_attachment_bytes": 4194304,
+    "base64_encoding": "RFC 4648 standard alphabet with padding (hand-rolled, zero new dependencies)",
+    "binary_rejection_preserved": true,
+    "masquerade_rejection": "a .png whose magic bytes are not PNG is still rejected as binary",
+    "provider_projection": {
+      "chat_completions": "tool message content becomes [{type:text},{type:image_url}]",
+      "anthropic_messages": "tool_result content becomes [{type:text},{type:image,source:{type:base64}}]",
+      "openai_responses": "function_call_output text plus a follow-up user turn with input_image parts"
+    },
+    "context_budget": "base64 payload length is counted in TranscriptItem::estimated_bytes and dropped together with the raw output on Step-Down compaction"
+  },
+  "anthropic_messages_protocol": {
+    "path": "/v1/messages",
+    "headers": ["x-api-key", "anthropic-version: 2023-06-01", "anthropic-beta: prompt-caching-2024-07-31"],
+    "explicit_cache_breakpoints": 3,
+    "breakpoint_locations": ["static system block", "last tool definition", "projector frozen-prefix boundary (PinnedBaselineEnd, TailWindowStart fallback)"],
+    "sse_events_handled": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop", "error"],
+    "delta_types_handled": ["text_delta", "thinking_delta", "signature_delta", "input_json_delta"],
+    "cache_accounting": "input_tokens = input + cache_read + cache_creation; cached_input_tokens = cache_read_input_tokens",
+    "verified_cache_hit_ratio_in_test": 0.8713
+  },
+  "openai_responses_protocol": {
+    "path": "/v1/responses",
+    "request_shape": ["model", "instructions", "input[]", "tools[]", "reasoning.effort", "stream", "store=false"],
+    "input_item_types": ["message(input_text/output_text)", "reasoning", "function_call", "function_call_output", "input_image"],
+    "sse_events_handled": ["response.created", "response.in_progress", "response.output_item.added", "response.output_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed", "response.incomplete", "response.failed", "error"],
+    "cache_accounting": "usage.input_tokens_details.cached_tokens"
+  },
+  "protocol_selection": {
+    "flag": "--protocol",
+    "env": "HARNESS_PROTOCOL",
+    "values": ["auto", "chat-completions", "anthropic-messages", "openai-responses"],
+    "auto_detection": "base URL containing 'anthropic' or a model id prefixed 'claude-' selects anthropic-messages; a base URL containing '/responses' selects openai-responses; otherwise chat-completions (unchanged default)"
+  },
+  "transport_shared": {
+    "module": "crates/harness-core/src/provider/transport.rs",
+    "note": "the hand-written TLS + HTTP/1.1 framing (openat2-free: plain tokio TcpStream + OpenSSL on unix / Schannel on windows) is now shared by all three protocol clients instead of being duplicated",
+    "failure_classes": ["TransportFailure::Transient", "TransportFailure::Fatal", "BodyFailure::Fatal", "BodyFailure::Stream"],
+    "mid_stream_retry_policy": "a mid-stream failure is never retried once business data has been observed (§4.3), preserved for all three protocols"
+  },
+  "test_suite": {
+    "workspace_tests_passed": 158,
+    "workspace_tests_failed": 0,
+    "compiler_warnings": 0,
+    "new_test_file": "crates/harness-core/tests/gate7_repograph_vision_protocols.rs",
+    "new_tests": 5,
+    "windows_cross_check": "cargo check --workspace --target x86_64-pc-windows-gnu --all-targets (0 warnings)"
+  }
+}

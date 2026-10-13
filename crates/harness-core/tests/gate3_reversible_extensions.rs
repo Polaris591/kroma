@@ -338,6 +338,7 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
         vec![
             "activate_skill",
             "bash",
+            "code_graph",
             "echo_note",
             "edit",
             "find",

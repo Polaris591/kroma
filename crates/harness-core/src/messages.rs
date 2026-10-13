@@ -106,6 +106,43 @@ impl ToolOutcome {
     }
 }
 
+/// Gate 7 (`v1.2.0`): a binary image payload carried alongside a tool result so a vision-capable
+/// model can inspect screenshots, UI mockups and design references without a second round trip.
+///
+/// Stored on [`ToolResultMeta`] so it is persisted in the session WAL and travels with the message
+/// it belongs to. The base64 payload is never written into the human-readable `content` string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub mime_type: String,
+    pub base64_data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// Decoded byte length of the original image (not the base64 length).
+    pub byte_len: usize,
+}
+
+impl ImageAttachment {
+    /// `data:image/png;base64,...` form used by the OpenAI `image_url` content part.
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime_type, self.base64_data)
+    }
+
+    /// Base64 payload length, used for context-budget accounting.
+    pub fn encoded_len(&self) -> usize {
+        self.base64_data.len()
+    }
+
+    /// One-line summary safe to render in any surface.
+    pub fn describe(&self) -> String {
+        match (self.width, self.height) {
+            (Some(w), Some(h)) => format!("{}, {}x{}, {} bytes", self.mime_type, w, h, self.byte_len),
+            _ => format!("{}, {} bytes", self.mime_type, self.byte_len),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ToolResultMeta {
     pub relative_path: Option<String>,
@@ -118,6 +155,9 @@ pub struct ToolResultMeta {
     pub edit_match_tier: Option<EditMatchTier>,
     pub diag_kind: Option<EditDiagKind>,
     pub modified_file: bool,
+    /// Gate 7: images attached to this tool result (multimodal `read`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_attachments: Vec<ImageAttachment>,
     /// Gate 4: the spans this call mutated plus its post-mutation predictive-check summary.
     /// `serde(default)` keeps pre-Gate-4 WAL transcripts readable.
     #[serde(default)]
@@ -132,6 +172,22 @@ pub struct ToolResultMessage {
     #[serde(with = "arc_str_serde")]
     pub content: Arc<str>,
     pub meta: ToolResultMeta,
+}
+
+impl ToolResultMessage {
+    /// Gate 7: multimodal attachments carried by this tool result.
+    pub fn image_attachments(&self) -> &[ImageAttachment] {
+        &self.meta.image_attachments
+    }
+
+    /// Gate 7: byte cost of the attached base64 image payloads.
+    pub fn image_attachment_bytes(&self) -> usize {
+        self.meta
+            .image_attachments
+            .iter()
+            .map(ImageAttachment::encoded_len)
+            .sum()
+    }
 }
 
 pub mod arc_str_serde {
@@ -185,7 +241,11 @@ impl TranscriptItem {
                 c_len + r_len + tc_len + 48
             }
             TranscriptItem::ToolResult(tr) => {
-                tr.call_id.0.len() + tr.tool_name.len() + tr.content.len() + 48
+                tr.call_id.0.len()
+                    + tr.tool_name.len()
+                    + tr.content.len()
+                    + tr.image_attachment_bytes()
+                    + 48
             }
         }
     }

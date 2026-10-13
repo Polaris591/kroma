@@ -10,7 +10,7 @@ use harness_core::prompt::PromptBuilder;
 use harness_core::revision::{RestoreResult, RevisionId, SnapshotStore};
 use harness_core::session::SessionJournal;
 use harness_core::workspace::WorkspaceCap;
-use harness_core::provider::chat_completions::{ ChatCompletionsClient, ChatCompletionsConfig };
+use harness_core::provider::{build_provider, ProviderProtocol, ProviderSettings};
 use harness_core::extensions::{
     discover_skills, CommandObserverHook, CommandPolicyHook, ExtensionManifest, ScopedExtension,
     SubtreeContextTracker,
@@ -80,6 +80,9 @@ pub struct CliArgs {
     pub output_format: String,
     /// Gate 6: optional authentication token for `harness serve`.
     pub auth_token: Option<String>,
+    /// Gate 7 (`v1.2.0`): wire protocol for the model endpoint
+    /// (`auto` | `chat-completions` | `anthropic-messages` | `openai-responses`).
+    pub protocol: String,
 }
 
 impl CliArgs {
@@ -141,6 +144,7 @@ where
     let mut strict_log = false;
     let mut tool_filter: Option<Vec<String>> = None;
     let mut reasoning_effort: Option<String> = None;
+    let mut protocol = "auto".to_string();
     let mut quiet = false;
     let mut resume: Option<PathBuf> = None;
     let mut fork_turn: Option<usize> = None;
@@ -299,6 +303,15 @@ where
                     return Err("empty value for --reasoning-effort".to_string());
                 }
                 reasoning_effort = Some(trimmed);
+            }
+            "--protocol" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --protocol".to_string())?;
+                // Validate here so a typo fails fast, before any credentials are read.
+                let parsed = ProviderProtocol::parse(&val)
+                    .map_err(|e| e.to_string())?;
+                protocol = parsed.as_str().to_string();
             }
             "--quiet" | "-q" => {
                 quiet = true;
@@ -534,6 +547,7 @@ where
         max_subagents,
         output_format,
         auth_token,
+        protocol,
     })
 }
 
@@ -1122,6 +1136,7 @@ Options:\n\
   --allow-write             Auto-allow workspace file mutations (edit/write)
   --allow-shell             Auto-allow supervised shell commands (bash)
   --reasoning-effort <LVL>  Reasoning effort level (e.g. low, medium, high)
+  --protocol <NAME>         Wire protocol: auto | chat-completions | anthropic-messages | openai-responses
   --quiet, -q               Suppress live progress output on stderr
   --no-stream               Fallback to non-streaming JSON requests
   --strict-log              Fail-closed if diagnostic JSONL event logging fails
@@ -1156,6 +1171,7 @@ Environment Credentials:
   HARNESS_API_KEY           Provider API key (stripped from child shell environments)
   HARNESS_BASE_URL          OpenAI-compatible base URL (HTTPS required for remote hosts)
   HARNESS_MODEL             Model identifier
+  HARNESS_PROTOCOL          Wire protocol override (auto | chat-completions | anthropic-messages | openai-responses)
   HARNESS_REASONING_EFFORT  Reasoning effort fallback when --reasoning-effort is not set
   HARNESS_VERIFY_COMMAND   Optional argv-style completion check, e.g. \"cargo test --workspace\"
   HARNESS_VERIFY_TIMEOUT_SECS  Completion check timeout (default 180)
@@ -1242,19 +1258,40 @@ async fn main() -> ExitCode {
             .filter(|s| !s.is_empty())
     });
 
-    let provider = match ChatCompletionsClient::new(ChatCompletionsConfig {
+    // Gate 7: one settings struct feeds all three wire protocols. `--protocol` / `HARNESS_PROTOCOL`
+    // override auto-detection from the base URL and model id.
+    let protocol = match std::env::var("HARNESS_PROTOCOL") {
+        Ok(raw) if !raw.trim().is_empty() => match ProviderProtocol::parse(&raw) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: invalid HARNESS_PROTOCOL: {}", e);
+                return ExitCode::from(2);
+            }
+        },
+        _ => ProviderProtocol::parse(&cli.protocol).unwrap_or(ProviderProtocol::Auto),
+    };
+    let provider_settings = ProviderSettings {
         base_url,
         api_key,
         model,
         max_retries: 2,
         reasoning_effort,
-    }) {
-        Ok(c) => Arc::new(c),
+        protocol,
+        max_tokens: 0,
+    };
+    let (resolved_protocol, provider) = match build_provider(&provider_settings) {
+        Ok(pair) => pair,
         Err(e) => {
             eprintln!("error: invalid provider configuration: {}", e);
             return ExitCode::from(2);
         }
     };
+    if !cli.quiet && resolved_protocol != ProviderProtocol::ChatCompletions {
+        eprintln!(
+            "[harness] provider protocol: {}",
+            resolved_protocol.as_str()
+        );
+    }
 
     let budget = BudgetConfig::default();
     let gate_choice = match choose_completion_gate(&cli, std::env::var("HARNESS_VERIFY_COMMAND").ok()) {

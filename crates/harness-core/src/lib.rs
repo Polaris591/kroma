@@ -11,6 +11,7 @@ pub mod messages;
 pub mod process_group;
 pub mod prompt;
 pub mod provider;
+pub mod repo_graph;
 pub mod revision;
 pub mod sensitive_paths;
 pub mod session;

@@ -1,8 +1,12 @@
+pub mod anthropic_messages;
 pub mod chat_completions;
+pub mod endpoint;
+pub mod openai_responses;
 pub mod sse;
+mod transport;
 
 use crate::budget::BudgetConfig;
-use crate::messages::{AssistantTurn, FinishReason, TranscriptItem};
+use crate::messages::{AssistantTurn, CacheBreakpointMarker, FinishReason, TranscriptItem};
 use crate::tool::definition::ToolDefinition;
 use crate::types::TerminalReason;
 use std::collections::{HashSet, VecDeque};
@@ -52,6 +56,76 @@ pub struct ProviderRequest {
     pub tools: Vec<ToolDefinition>,
     pub messages: Vec<TranscriptItem>,
     pub stream: bool,
+    /// Gate 7 (`v1.2.0`): logical cache boundaries from the context projector. Protocols with an
+    /// explicit prompt-cache API (Anthropic Messages) place `cache_control` breakpoints here so the
+    /// frozen prefix is cached instead of re-billed every turn. Empty for callers that do not
+    /// project context (tests, subagent runs without a projector).
+    pub cache_breakpoints: Vec<CacheBreakpointMarker>,
+}
+
+/// Gate 7 (`v1.2.0`): the wire protocol used to talk to a model endpoint.
+///
+/// `Auto` keeps the historical behaviour: an OpenAI-compatible gateway on `/v1/chat/completions`
+/// unless the base URL or model id clearly names another protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProviderProtocol {
+    #[default]
+    Auto,
+    ChatCompletions,
+    AnthropicMessages,
+    OpenAiResponses,
+}
+
+impl ProviderProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderProtocol::Auto => "auto",
+            ProviderProtocol::ChatCompletions => "chat-completions",
+            ProviderProtocol::AnthropicMessages => "anthropic-messages",
+            ProviderProtocol::OpenAiResponses => "openai-responses",
+        }
+    }
+
+    /// Parse a `--protocol` / `HARNESS_PROTOCOL` value.
+    pub fn parse(value: &str) -> Result<Self, ProviderError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(ProviderProtocol::Auto),
+            "chat-completions" | "chat_completions" | "openai" | "openai-chat" => {
+                Ok(ProviderProtocol::ChatCompletions)
+            }
+            "anthropic-messages" | "anthropic_messages" | "anthropic" | "claude" => {
+                Ok(ProviderProtocol::AnthropicMessages)
+            }
+            "openai-responses" | "openai_responses" | "responses" => {
+                Ok(ProviderProtocol::OpenAiResponses)
+            }
+            other => Err(ProviderError::Transport(format!(
+                "unknown provider protocol '{}'; expected auto|chat-completions|anthropic-messages|openai-responses",
+                other
+            ))),
+        }
+    }
+
+    /// Resolve `Auto` into a concrete protocol from the base URL path and the model id.
+    pub fn detect(base_url: &str, model: &str) -> Self {
+        let url = base_url.to_ascii_lowercase();
+        let model = model.to_ascii_lowercase();
+        if url.contains("anthropic") || model.starts_with("claude") {
+            return ProviderProtocol::AnthropicMessages;
+        }
+        if url.contains("/responses") || url.contains("openai-responses") {
+            return ProviderProtocol::OpenAiResponses;
+        }
+        ProviderProtocol::ChatCompletions
+    }
+
+    /// Resolve this selection against the configured endpoint and model.
+    pub fn resolve(self, base_url: &str, model: &str) -> Self {
+        match self {
+            ProviderProtocol::Auto => ProviderProtocol::detect(base_url, model),
+            concrete => concrete,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -255,4 +329,63 @@ impl ModelProvider for FakeProvider {
             })
         })
     }
+}
+
+/// Gate 7 (`v1.2.0`): protocol-agnostic provider settings. One struct feeds all three wire
+/// protocols so the CLI, the ACP/serve surfaces and subagent runs cannot drift apart.
+#[derive(Debug, Clone)]
+pub struct ProviderSettings {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub max_retries: usize,
+    pub reasoning_effort: Option<String>,
+    pub protocol: ProviderProtocol,
+    pub max_tokens: u32,
+}
+
+/// Build the [`ModelProvider`] for the resolved protocol.
+///
+/// `Auto` is resolved against the base URL and model id, and the concrete protocol is returned so
+/// callers can surface which wire format is in use.
+pub fn build_provider(
+    settings: &ProviderSettings,
+) -> Result<(ProviderProtocol, Arc<dyn ModelProvider>), ProviderError> {
+    let resolved = settings
+        .protocol
+        .resolve(&settings.base_url, &settings.model);
+    let provider: Arc<dyn ModelProvider> = match resolved {
+        ProviderProtocol::ChatCompletions | ProviderProtocol::Auto => {
+            Arc::new(chat_completions::ChatCompletionsClient::new(
+                chat_completions::ChatCompletionsConfig {
+                    base_url: settings.base_url.clone(),
+                    api_key: settings.api_key.clone(),
+                    model: settings.model.clone(),
+                    max_retries: settings.max_retries,
+                    reasoning_effort: settings.reasoning_effort.clone(),
+                },
+            )?)
+        }
+        ProviderProtocol::AnthropicMessages => Arc::new(
+            anthropic_messages::AnthropicMessagesClient::new(
+                anthropic_messages::AnthropicMessagesConfig {
+                    base_url: settings.base_url.clone(),
+                    api_key: settings.api_key.clone(),
+                    model: settings.model.clone(),
+                    max_retries: settings.max_retries,
+                    max_tokens: settings.max_tokens,
+                },
+            )?,
+        ),
+        ProviderProtocol::OpenAiResponses => Arc::new(openai_responses::OpenAiResponsesClient::new(
+            openai_responses::OpenAiResponsesConfig {
+                base_url: settings.base_url.clone(),
+                api_key: settings.api_key.clone(),
+                model: settings.model.clone(),
+                max_retries: settings.max_retries,
+                reasoning_effort: settings.reasoning_effort.clone(),
+            },
+        )?),
+    };
+    Ok((resolved, provider))
 }
