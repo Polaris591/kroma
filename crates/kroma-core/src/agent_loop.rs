@@ -193,6 +193,24 @@ struct SubagentBatchPlan<'a> {
 }
 
 
+/// State produced by [`AgentRunner::prepare_run`] and consumed by the main loop.
+///
+/// Split out of `run_inner` (1104 lines): the fields are the locals the loop body needs,
+/// so the body itself did not have to change.
+struct RunPrep {
+    budget_tracker: BudgetTracker,
+    visible_tools: Vec<crate::tool::definition::ToolDefinition>,
+    static_prefix: crate::prompt::StaticPrefixMetadata,
+    transcript: Vec<TranscriptItem>,
+    projector: ContextProjector,
+    loop_guard: LoopGuard,
+    modified_files_set: HashSet<String>,
+    last_input_tokens: Option<u64>,
+    last_assistant_text: Option<String>,
+    gate_failure_count: usize,
+    last_gate_failure_hash: Option<String>,
+}
+
 impl AgentRunner {
     pub fn new(
         config: AgentRunConfig,
@@ -367,205 +385,24 @@ impl AgentRunner {
         (summary, logger)
     }
 
-    async fn run_inner(mut self, mut logger: EventLogger) -> (RunSummary, EventLogger) {
-        let mut budget_tracker = match BudgetTracker::new(self.config.budget.clone()) {
-            Ok(b) => b,
-            Err(e) => {
-                let reason = TerminalReason::ProviderProtocolError(e.to_string());
-                return self.finish_run(
-                    reason,
-                    &BudgetTracker::new(BudgetConfig::default()).unwrap(),
-                    &ContextProjector::new(),
-                    Vec::new(),
-                    None,
-                    Vec::new(),
-                    logger,
-                );
-            }
+    async fn run_inner(mut self, logger: EventLogger) -> (RunSummary, EventLogger) {
+        let (prep, mut logger) = match self.prepare_run(logger).await {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
         };
-
-        let policy_engine = self.tool_runtime.policy_engine();
-        let policy_mode = policy_engine.mode();
-        let mut visible_tools = self
-            .tool_runtime
-            .registry()
-            .visible_definitions_for_engine(policy_engine);
-        if self.max_subagent_spawns == 0 {
-            visible_tools.retain(|t| t.name != "spawn_subagent");
-        }
-        let static_prefix = self.prompt_builder.build_static_prefix(&visible_tools);
-
-        if let Err(e) = logger.log(EventPayload::RunStarted {
-            prompt_hash: static_prefix.prompt_hash.clone(),
-            tool_schema_hash: static_prefix.tool_schema_hash.clone(),
-            static_prefix_bytes: static_prefix.static_prefix_bytes,
-            policy: policy_mode.as_str().to_string(),
-            budget_config: self.config.budget.clone(),
-        }) {
-            return self.finish_run(
-                TerminalReason::StrictLogFailure(e.to_string()),
-                &budget_tracker,
-                &ContextProjector::new(),
-                Vec::new(),
-                None,
-                Vec::new(),
-                logger,
-            );
-        }
-
-        let mut transcript = self.session_journal.as_ref()
-            .map(SessionJournal::active_transcript)
-            .unwrap_or_default();
-        self.session_turn_offset = self.session_journal.as_ref()
-            .map(SessionJournal::max_active_turn)
-            .unwrap_or(0);
-        let is_new_session = transcript.is_empty();
-        if !is_new_session {
-            if let Err(err) = self.recover_trailing_tool_batch(&mut transcript) {
-                return self.finish_run(
-                    TerminalReason::ProviderProtocolError(format!("session recovery failed: {}", err)),
-                    &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
-                );
-            }
-        }
-        let task_turn = if is_new_session { 0 } else { 1 };
-        let initial_task_item = TranscriptItem::User(UserMessage { content: self.config.task.clone() });
-        // If `--restore-rev` (or an intra-turn `--undo`) reverted the workspace to an earlier
-        // revision on the active branch, compute the surviving revision set before the new baseline
-        // capture appends to `revision_records()`.
-        let reverted_active_revisions = self.session_journal.as_ref().and_then(|journal| {
-            let records = journal.revision_records();
-            let last = records.last()?;
-            let first_idx = records.iter().position(|r| r.revision_id == last.revision_id)?;
-            if first_idx + 1 < records.len() {
-                Some(
-                    records[..=first_idx]
-                        .iter()
-                        .map(|r| r.revision_id.clone())
-                        .collect::<std::collections::BTreeSet<String>>(),
-                )
-            } else {
-                None
-            }
-        });
-        // Gate 1: capture the pre-mutation workspace state BEFORE the new `UserMessage` becomes the
-        // WAL leaf, so `--undo` after this resumed turn rewinds to the same leaf the baseline was
-        // recorded at and cannot evict the baseline revision from the active branch.
-        let baseline_turn = self.session_turn_offset;
-        self.capture_workspace_revision(baseline_turn, "baseline", &mut logger);
-        if let Some(err) = self.revision_error.clone() {
-            return self.finish_run(
-                TerminalReason::StrictLogFailure(err),
-                &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
-            );
-        }
-        self.record_transcript_item(&mut transcript, initial_task_item, task_turn);
-        if let Some(err) = self.session_persist_error.clone() {
-            return self.finish_run(
-                TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
-            );
-        }
-        let mut projector = ContextProjector::new();
-        // B2 (`v1.4.0`): honour a configured projection profile (default `P2`).
-        if let Some(profile) = self.config.projection_profile {
-            projector = projector.with_profile(profile);
-        }
-        // Freeze the system-prefix / tool-schema byte split so the Gate 2 budget breakdown can
-        // report them separately instead of one opaque `static_prefix_bytes`.
-        projector.set_prefix_breakdown(
-            static_prefix.system_prompt.len(),
-            static_prefix.tools_json.len(),
-        );
-        if let Some(checkpoint) = self.session_journal.as_ref()
-            .and_then(SessionJournal::latest_active_checkpoint).cloned()
-        {
-            projector.restore_pinned_baseline_end(checkpoint.pinned_baseline_end);
-            projector.restore_last_touched(
-                checkpoint.last_touched.into_iter().map(|item| (item.path, item.last_touched_turn))
-            );
-            // Gate 3: restore the subtree directories whose JIT guidance is already present in the
-            // restored (still active) transcript, so `--resume` / `--fork` never re-inject it.
-            self.subtree_tracker
-                .restore_loaded_dirs(checkpoint.subtree_dirs.iter().cloned());
-            // Gate 4: restore the branch's mutation ledger, then drop every record from a turn the
-            // active branch never reached. A `--fork <TURN>` rewind selects an earlier leaf, so
-            // attribution can never blame a mutation that only exists on an abandoned branch.
-            self.mutation_ledger.restore(checkpoint.mutations.clone());
-            self.mutation_ledger
-                .prune_after_turn(self.session_turn_offset as u32);
-            if let Some(ref active_revs) = reverted_active_revisions {
-                self.mutation_ledger.prune_reverted_revisions(active_revs);
-            }
-            self.subagents_spawned = self.subagents_spawned.max(checkpoint.subagents_spawned);
-        }
-        // Replay any completed mutating tool result in the active transcript that was persisted
-        // after the last checkpoint before an interruption.
-        for (idx, item) in transcript.iter().enumerate() {
-            if let TranscriptItem::ToolResult(tr) = item {
-                if tr.tool_name == "spawn_subagent" && tr.outcome.is_success() {
-                    // Advance `subagents_spawned` past any `<subagent_report ... id="sub-XXXX">`
-                    // present on the active branch so resumed/forked sessions never reuse IDs.
-                    let mut search_from = 0usize;
-                    while let Some(pos) = tr.content[search_from..].find("id=\"sub-") {
-                        let start = search_from + pos + "id=\"sub-".len();
-                        let digits: String = tr.content[start..]
-                            .chars()
-                            .take_while(|c| c.is_ascii_digit())
-                            .collect();
-                        if let Ok(parsed_id) = digits.parse::<usize>() {
-                            self.subagents_spawned = self.subagents_spawned.max(parsed_id);
-                        }
-                        search_from = start;
-                    }
-                }
-                if tr.outcome.is_success() && !self.mutation_ledger.has_call_id(tr.call_id.as_str()) {
-                    if let Some(MutationTelemetry { spans, .. }) = tr.meta.mutation.clone() {
-                        self.mutation_ledger.record_mutation(
-                            self.session_turn_offset as u32,
-                            tr.tool_name.clone(),
-                            tr.call_id.as_str().to_string(),
-                            Some(source_entry_id(idx, tr.call_id.as_str())),
-                            self.current_revision_id.clone(),
-                            spans,
-                        );
-                    }
-                }
-            }
-        }
-        // Gate 2: re-seed the raw-evidence store from the WAL so `recall_evidence` can still resolve
-        // stubs compacted in an earlier process. The WAL keeps the pre-overlay (raw) item for every
-        // entry while `active_entries()` yields the compacted stub, so the raw bytes survive resume.
-        self.seed_evidence_from_journal(&mut projector);
-        let mut loop_guard = LoopGuard::new();
-        // Reconstruct dirty files from the selected session branch so a resumed run cannot
-        // bypass CompletionGate merely because the write happened before this process started.
-        let mut modified_files_set: HashSet<String> = self.session_journal.as_ref()
-            .map(SessionJournal::modified_files_since_last_resolution)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        let persisted_gate_feedback = self.session_journal.as_ref()
-            .map(SessionJournal::completion_feedback_since_last_resolution)
-            .unwrap_or_default();
-        let mut last_input_tokens: Option<u64> = None;
-        let mut last_assistant_text: Option<String> = None;
-        let mut gate_failure_count = persisted_gate_feedback.len();
-        let mut last_gate_failure_hash: Option<String> = persisted_gate_feedback.last()
-            .and_then(|message| Self::completion_gate_feedback_payload(message))
-            .map(failure_fingerprint);
-
-        if gate_failure_count >= self.completion_gate_max_retries && !modified_files_set.is_empty() {
-            return self.finish_run(
-                TerminalReason::ProviderProtocolError(format!(
-                    "CompletionGate already rejected this unresolved session {} times (max retries={}); fork before the failed attempts or start a new session to reset the retry budget",
-                    gate_failure_count, self.completion_gate_max_retries
-                )),
-                &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                None, transcript, logger,
-            );
-        }
-
+        let RunPrep {
+            mut budget_tracker,
+            visible_tools,
+            static_prefix,
+            mut transcript,
+            mut projector,
+            mut loop_guard,
+            mut modified_files_set,
+            mut last_input_tokens,
+            mut last_assistant_text,
+            mut gate_failure_count,
+            mut last_gate_failure_hash,
+        } = prep;
         loop {
             if *self.cancel_rx.borrow() {
                 return self.finish_run(
@@ -1471,6 +1308,233 @@ impl AgentRunner {
             }
         }
     }
+
+    /// Restore session state, capture the baseline revision and build everything the main
+    /// loop needs, so `run_inner` reads as "prepare, then loop".
+    ///
+    /// Returns the prepared state together with `logger` (which an early exit consumes via
+    /// `finish_run`), or the finished run summary when preparation itself fails.
+    async fn prepare_run(
+        &mut self,
+        mut logger: EventLogger,
+    ) -> Result<(RunPrep, EventLogger), (RunSummary, EventLogger)> {
+        let budget_tracker = match BudgetTracker::new(self.config.budget.clone()) {
+            Ok(b) => b,
+            Err(e) => {
+                let reason = TerminalReason::ProviderProtocolError(e.to_string());
+                return Err(self.finish_run(
+                    reason,
+                    &BudgetTracker::new(BudgetConfig::default()).unwrap(),
+                    &ContextProjector::new(),
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    logger,
+                ));
+            }
+        };
+
+        let policy_engine = self.tool_runtime.policy_engine();
+        let policy_mode = policy_engine.mode();
+        let mut visible_tools = self
+            .tool_runtime
+            .registry()
+            .visible_definitions_for_engine(policy_engine);
+        if self.max_subagent_spawns == 0 {
+            visible_tools.retain(|t| t.name != "spawn_subagent");
+        }
+        let static_prefix = self.prompt_builder.build_static_prefix(&visible_tools);
+
+        if let Err(e) = logger.log(EventPayload::RunStarted {
+            prompt_hash: static_prefix.prompt_hash.clone(),
+            tool_schema_hash: static_prefix.tool_schema_hash.clone(),
+            static_prefix_bytes: static_prefix.static_prefix_bytes,
+            policy: policy_mode.as_str().to_string(),
+            budget_config: self.config.budget.clone(),
+        }) {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(e.to_string()),
+                &budget_tracker,
+                &ContextProjector::new(),
+                Vec::new(),
+                None,
+                Vec::new(),
+                logger,
+            ));
+        }
+
+        let mut transcript = self.session_journal.as_ref()
+            .map(SessionJournal::active_transcript)
+            .unwrap_or_default();
+        self.session_turn_offset = self.session_journal.as_ref()
+            .map(SessionJournal::max_active_turn)
+            .unwrap_or(0);
+        let is_new_session = transcript.is_empty();
+        if !is_new_session {
+            if let Err(err) = self.recover_trailing_tool_batch(&mut transcript) {
+                return Err(self.finish_run(
+                    TerminalReason::ProviderProtocolError(format!("session recovery failed: {}", err)),
+                    &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
+                ));
+            }
+        }
+        let task_turn = if is_new_session { 0 } else { 1 };
+        let initial_task_item = TranscriptItem::User(UserMessage { content: self.config.task.clone() });
+        // If `--restore-rev` (or an intra-turn `--undo`) reverted the workspace to an earlier
+        // revision on the active branch, compute the surviving revision set before the new baseline
+        // capture appends to `revision_records()`.
+        let reverted_active_revisions = self.session_journal.as_ref().and_then(|journal| {
+            let records = journal.revision_records();
+            let last = records.last()?;
+            let first_idx = records.iter().position(|r| r.revision_id == last.revision_id)?;
+            if first_idx + 1 < records.len() {
+                Some(
+                    records[..=first_idx]
+                        .iter()
+                        .map(|r| r.revision_id.clone())
+                        .collect::<std::collections::BTreeSet<String>>(),
+                )
+            } else {
+                None
+            }
+        });
+        // Gate 1: capture the pre-mutation workspace state BEFORE the new `UserMessage` becomes the
+        // WAL leaf, so `--undo` after this resumed turn rewinds to the same leaf the baseline was
+        // recorded at and cannot evict the baseline revision from the active branch.
+        let baseline_turn = self.session_turn_offset;
+        self.capture_workspace_revision(baseline_turn, "baseline", &mut logger);
+        if let Some(err) = self.revision_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(err),
+                &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
+            ));
+        }
+        self.record_transcript_item(&mut transcript, initial_task_item, task_turn);
+        if let Some(err) = self.session_persist_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                &budget_tracker, &ContextProjector::new(), Vec::new(), None, transcript, logger,
+            ));
+        }
+        let mut projector = ContextProjector::new();
+        // B2 (`v1.4.0`): honour a configured projection profile (default `P2`).
+        if let Some(profile) = self.config.projection_profile {
+            projector = projector.with_profile(profile);
+        }
+        // Freeze the system-prefix / tool-schema byte split so the Gate 2 budget breakdown can
+        // report them separately instead of one opaque `static_prefix_bytes`.
+        projector.set_prefix_breakdown(
+            static_prefix.system_prompt.len(),
+            static_prefix.tools_json.len(),
+        );
+        if let Some(checkpoint) = self.session_journal.as_ref()
+            .and_then(SessionJournal::latest_active_checkpoint).cloned()
+        {
+            projector.restore_pinned_baseline_end(checkpoint.pinned_baseline_end);
+            projector.restore_last_touched(
+                checkpoint.last_touched.into_iter().map(|item| (item.path, item.last_touched_turn))
+            );
+            // Gate 3: restore the subtree directories whose JIT guidance is already present in the
+            // restored (still active) transcript, so `--resume` / `--fork` never re-inject it.
+            self.subtree_tracker
+                .restore_loaded_dirs(checkpoint.subtree_dirs.iter().cloned());
+            // Gate 4: restore the branch's mutation ledger, then drop every record from a turn the
+            // active branch never reached. A `--fork <TURN>` rewind selects an earlier leaf, so
+            // attribution can never blame a mutation that only exists on an abandoned branch.
+            self.mutation_ledger.restore(checkpoint.mutations.clone());
+            self.mutation_ledger
+                .prune_after_turn(self.session_turn_offset as u32);
+            if let Some(ref active_revs) = reverted_active_revisions {
+                self.mutation_ledger.prune_reverted_revisions(active_revs);
+            }
+            self.subagents_spawned = self.subagents_spawned.max(checkpoint.subagents_spawned);
+        }
+        // Replay any completed mutating tool result in the active transcript that was persisted
+        // after the last checkpoint before an interruption.
+        for (idx, item) in transcript.iter().enumerate() {
+            if let TranscriptItem::ToolResult(tr) = item {
+                if tr.tool_name == "spawn_subagent" && tr.outcome.is_success() {
+                    // Advance `subagents_spawned` past any `<subagent_report ... id="sub-XXXX">`
+                    // present on the active branch so resumed/forked sessions never reuse IDs.
+                    let mut search_from = 0usize;
+                    while let Some(pos) = tr.content[search_from..].find("id=\"sub-") {
+                        let start = search_from + pos + "id=\"sub-".len();
+                        let digits: String = tr.content[start..]
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect();
+                        if let Ok(parsed_id) = digits.parse::<usize>() {
+                            self.subagents_spawned = self.subagents_spawned.max(parsed_id);
+                        }
+                        search_from = start;
+                    }
+                }
+                if tr.outcome.is_success() && !self.mutation_ledger.has_call_id(tr.call_id.as_str()) {
+                    if let Some(MutationTelemetry { spans, .. }) = tr.meta.mutation.clone() {
+                        self.mutation_ledger.record_mutation(
+                            self.session_turn_offset as u32,
+                            tr.tool_name.clone(),
+                            tr.call_id.as_str().to_string(),
+                            Some(source_entry_id(idx, tr.call_id.as_str())),
+                            self.current_revision_id.clone(),
+                            spans,
+                        );
+                    }
+                }
+            }
+        }
+        // Gate 2: re-seed the raw-evidence store from the WAL so `recall_evidence` can still resolve
+        // stubs compacted in an earlier process. The WAL keeps the pre-overlay (raw) item for every
+        // entry while `active_entries()` yields the compacted stub, so the raw bytes survive resume.
+        self.seed_evidence_from_journal(&mut projector);
+        let loop_guard = LoopGuard::new();
+        // Reconstruct dirty files from the selected session branch so a resumed run cannot
+        // bypass CompletionGate merely because the write happened before this process started.
+        let modified_files_set: HashSet<String> = self.session_journal.as_ref()
+            .map(SessionJournal::modified_files_since_last_resolution)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let persisted_gate_feedback = self.session_journal.as_ref()
+            .map(SessionJournal::completion_feedback_since_last_resolution)
+            .unwrap_or_default();
+        let last_input_tokens: Option<u64> = None;
+        let last_assistant_text: Option<String> = None;
+        let gate_failure_count = persisted_gate_feedback.len();
+        let last_gate_failure_hash: Option<String> = persisted_gate_feedback.last()
+            .and_then(|message| Self::completion_gate_feedback_payload(message))
+            .map(failure_fingerprint);
+
+        if gate_failure_count >= self.completion_gate_max_retries && !modified_files_set.is_empty() {
+            return Err(self.finish_run(
+                TerminalReason::ProviderProtocolError(format!(
+                    "CompletionGate already rejected this unresolved session {} times (max retries={}); fork before the failed attempts or start a new session to reset the retry budget",
+                    gate_failure_count, self.completion_gate_max_retries
+                )),
+                &budget_tracker, &projector, modified_files_set.into_iter().collect(),
+                None, transcript, logger,
+            ));
+        }
+
+
+        Ok((
+            RunPrep {
+                budget_tracker,
+                visible_tools,
+                static_prefix,
+                transcript,
+                projector,
+                loop_guard,
+                modified_files_set,
+                last_input_tokens,
+                last_assistant_text,
+                gate_failure_count,
+                last_gate_failure_hash,
+            },
+            logger,
+        ))
+    }
+
 
     /// Close a trailing tool batch interrupted by a process crash before sending another request.
     /// Existing completed results are retained; only the missing suffix is synthesized and logged.
