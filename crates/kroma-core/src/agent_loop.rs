@@ -171,6 +171,28 @@ pub struct AgentRunner {
     adaptive_tournament_attempted: bool,
 }
 
+/// Inputs for [`AgentRunner::run_subagent_batch`], grouped so the extracted phase takes a single
+/// argument instead of the dozen locals it needs.
+struct SubagentBatchPlan<'a> {
+    prepared: Vec<(
+        String,
+        crate::subagents::SubagentSpec,
+        Option<crate::subagents::IsolatedWorktree>,
+    )>,
+    subagents_state_base: std::path::PathBuf,
+    workspace_skills: Vec<crate::extensions::SkillEntry>,
+    parent_budget: BudgetConfig,
+    parent_policy_mode: crate::tool::policy::PolicyMode,
+    predictive_check: bool,
+    store: Arc<SnapshotStore>,
+    absolute_turn: usize,
+    decision_label: String,
+    logger: &'a mut EventLogger,
+    modified_files_set: &'a mut HashSet<String>,
+    started: std::time::Instant,
+}
+
+
 impl AgentRunner {
     pub fn new(
         config: AgentRunConfig,
@@ -2664,6 +2686,47 @@ impl AgentRunner {
             prepared.push((subagent_id, spec, worktree));
         }
 
+        self.run_subagent_batch(SubagentBatchPlan {
+            prepared,
+            subagents_state_base,
+            workspace_skills,
+            parent_budget,
+            parent_policy_mode,
+            predictive_check,
+            store,
+            absolute_turn,
+            decision_label,
+            logger,
+            modified_files_set,
+            started,
+        })
+        .await
+    }
+
+    /// Materialise, run and collect the isolated worktree workers for a single `spawn_subagent`
+    /// call, then merge the surviving child edits back into the parent workspace.
+    ///
+    /// Split out of [`Self::execute_spawn_subagent_inner`] (which was 717 lines). The inputs travel
+    /// in a [`SubagentBatchPlan`] so this phase takes one argument, and the body below is the
+    /// original code verbatim — the destructuring `let` re-binds the same local names.
+    async fn run_subagent_batch(
+        &mut self,
+        plan: SubagentBatchPlan<'_>,
+    ) -> (ToolExecutionOutput, String) {
+        let SubagentBatchPlan {
+            prepared,
+            subagents_state_base,
+            workspace_skills,
+            parent_budget,
+            parent_policy_mode,
+            predictive_check,
+            store,
+            absolute_turn,
+            decision_label,
+            logger,
+            modified_files_set,
+            started,
+        } = plan;
         let mut join_handles = Vec::with_capacity(prepared.len());
         let mut worktree_slots: Vec<(String, crate::subagents::SubagentSpec, Option<IsolatedWorktree>)> =
             Vec::with_capacity(prepared.len());
@@ -3076,6 +3139,7 @@ impl AgentRunner {
 
         (ToolExecutionOutput::success(report_text, meta), decision_label)
     }
+
 
     /// Gate 4: append a `MutationRecord` for one successful tool result.
     ///
