@@ -197,7 +197,7 @@ struct SubagentBatchPlan<'a> {
 ///
 /// Split out of `run_inner` (1104 lines): the fields are the locals the loop body needs,
 /// so the body itself did not have to change.
-struct RunPrep {
+struct TurnState {
     budget_tracker: BudgetTracker,
     visible_tools: Vec<crate::tool::definition::ToolDefinition>,
     static_prefix: crate::prompt::StaticPrefixMetadata,
@@ -386,44 +386,31 @@ impl AgentRunner {
     }
 
     async fn run_inner(mut self, logger: EventLogger) -> (RunSummary, EventLogger) {
-        let (prep, mut logger) = match self.prepare_run(logger).await {
+        let (mut state, mut logger) = match self.prepare_run(logger).await {
             Ok(value) => value,
             Err(outcome) => return outcome,
         };
-        let RunPrep {
-            mut budget_tracker,
-            visible_tools,
-            static_prefix,
-            mut transcript,
-            mut projector,
-            mut loop_guard,
-            mut modified_files_set,
-            mut last_input_tokens,
-            mut last_assistant_text,
-            mut gate_failure_count,
-            mut last_gate_failure_hash,
-        } = prep;
         loop {
             if *self.cancel_rx.borrow() {
                 return self.finish_run(
                     TerminalReason::UserCancelled,
-                    &budget_tracker,
-                    &projector,
-                    modified_files_set.into_iter().collect(),
-                    last_assistant_text,
-                    transcript,
+                    &state.budget_tracker,
+                    &state.projector,
+                    state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
 
-            if budget_tracker.is_deadline_exceeded() {
+            if state.budget_tracker.is_deadline_exceeded() {
                 return self.finish_run(
                     TerminalReason::RunDeadlineExceeded,
-                    &budget_tracker,
-                    &projector,
-                    modified_files_set.into_iter().collect(),
-                    last_assistant_text,
-                    transcript,
+                    &state.budget_tracker,
+                    &state.projector,
+                    state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
@@ -431,32 +418,32 @@ impl AgentRunner {
             // F08 (`v1.4.0`): budget accounting covers `self` *and* child subagent spend, and the
             // stop reason is a dedicated `TokenBudgetExhausted` (not `MaxTurns`).
             if let Some(max_tok) = self.max_total_tokens {
-                if budget_tracker.all_total_tokens() >= max_tok {
+                if state.budget_tracker.all_total_tokens() >= max_tok {
                     return self.finish_run(
                         TerminalReason::TokenBudgetExhausted,
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
             }
 
-            if !budget_tracker.try_begin_turn() {
+            if !state.budget_tracker.try_begin_turn() {
                 return self.finish_run(
                     TerminalReason::MaxTurns,
-                    &budget_tracker,
-                    &projector,
-                    modified_files_set.into_iter().collect(),
-                    last_assistant_text,
-                    transcript,
+                    &state.budget_tracker,
+                    &state.projector,
+                    state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
 
-            let current_turn = budget_tracker.turns_used();
+            let current_turn = state.budget_tracker.turns_used();
             // `current_turn` is relative to this process; the projector's turn accounting is over
             // the whole session transcript, so it must receive the absolute session turn. On a
             // `--resume` run `current_turn` starts at 1 again while the restored transcript already
@@ -465,22 +452,22 @@ impl AgentRunner {
             let absolute_turn = self.session_turn_offset.saturating_add(current_turn);
 
             // Project context (100% Append-Only unless watermark crossed)
-            let projected = match projector.project(
-                &mut transcript,
-                budget_tracker.config(),
-                static_prefix.static_prefix_bytes,
-                last_input_tokens,
+            let projected = match state.projector.project(
+                &mut state.transcript,
+                state.budget_tracker.config(),
+                state.static_prefix.static_prefix_bytes,
+                state.last_input_tokens,
                 absolute_turn,
             ) {
                 Ok(p) => p,
                 Err(term_reason) => {
                     return self.finish_run(
                         term_reason,
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
@@ -495,51 +482,51 @@ impl AgentRunner {
                 }) {
                     return self.finish_run(
                         TerminalReason::StrictLogFailure(e.to_string()),
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
             }
 
-            self.persist_session_checkpoint(&projector, &transcript, current_turn);
+            self.persist_session_checkpoint(&state.projector, &state.transcript, current_turn);
             if let Some(err) = self.session_persist_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
-                    &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                    last_assistant_text, transcript, logger,
+                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text, state.transcript, logger,
                 );
             }
 
-            if !budget_tracker.try_record_request_attempt() {
+            if !state.budget_tracker.try_record_request_attempt() {
                 return self.finish_run(
                     TerminalReason::MaxRequestAttempts,
-                    &budget_tracker,
-                    &projector,
-                    modified_files_set.into_iter().collect(),
-                    last_assistant_text,
-                    transcript,
+                    &state.budget_tracker,
+                    &state.projector,
+                    state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
 
             if let Err(e) = logger.log(EventPayload::ModelRequestStarted {
                 turn: current_turn,
-                attempt: budget_tracker.request_attempts_used(),
-                request_body_bytes: static_prefix.static_prefix_bytes
+                attempt: state.budget_tracker.request_attempts_used(),
+                request_body_bytes: state.static_prefix.static_prefix_bytes
                     + projected.message_history_bytes,
                 message_history_bytes: projected.message_history_bytes,
             }) {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(e.to_string()),
-                    &budget_tracker,
-                    &projector,
-                    modified_files_set.into_iter().collect(),
-                    last_assistant_text,
-                    transcript,
+                    &state.budget_tracker,
+                    &state.projector,
+                    state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
@@ -551,20 +538,20 @@ impl AgentRunner {
             // `static_prefix_bytes` already includes `system_prompt.len()` (see
             // `prompt.rs::build_static_prefix`), so it must not be added again here.
             let estimated_input_tokens = estimate_prompt_input_tokens(
-                static_prefix.static_prefix_bytes,
+                state.static_prefix.static_prefix_bytes,
                 projected.message_history_bytes,
             );
             let max_output_tokens = if let Some(max_tok) = self.max_total_tokens {
-                let spent = budget_tracker.all_total_tokens();
+                let spent = state.budget_tracker.all_total_tokens();
                 let projected_total = spent.saturating_add(estimated_input_tokens);
                 if projected_total >= max_tok {
                     return self.finish_run(
                         TerminalReason::TokenBudgetExhausted,
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
@@ -574,8 +561,8 @@ impl AgentRunner {
             };
 
             let req = ProviderRequest {
-                system_prompt: static_prefix.system_prompt.clone(),
-                tools: visible_tools.clone(),
+                system_prompt: state.static_prefix.system_prompt.clone(),
+                tools: state.visible_tools.clone(),
                 messages: projected.messages,
                 stream: self.config.stream,
                 // Gate 7: hand the projector's logical cache boundaries to the protocol client so
@@ -587,32 +574,32 @@ impl AgentRunner {
 
             let completion = match self
                 .provider
-                .complete(req, budget_tracker.config(), self.cancel_rx.clone())
+                .complete(req, state.budget_tracker.config(), self.cancel_rx.clone())
                 .await
             {
                 Ok(c) => c,
                 Err(err) => {
                     return self.finish_run(
                         err.into_terminal_reason(),
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
             };
 
             for _ in 1..completion.attempts_used {
-                if !budget_tracker.try_record_request_attempt() {
+                if !state.budget_tracker.try_record_request_attempt() {
                     return self.finish_run(
                         TerminalReason::MaxRequestAttempts,
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
@@ -620,12 +607,12 @@ impl AgentRunner {
 
             let assistant_turn = completion.turn;
             if let Some(usage) = assistant_turn.usage {
-                budget_tracker.record_token_usage(
+                state.budget_tracker.record_token_usage(
                     usage.input_tokens,
                     usage.cached_input_tokens,
                     usage.output_tokens,
                 );
-                last_input_tokens = Some(usage.input_tokens);
+                state.last_input_tokens = Some(usage.input_tokens);
                 if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
                     turn: current_turn,
                     input_tokens: usage.input_tokens,
@@ -639,11 +626,11 @@ impl AgentRunner {
                 }) {
                     return self.finish_run(
                         TerminalReason::StrictLogFailure(e.to_string()),
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
@@ -665,8 +652,8 @@ impl AgentRunner {
                                 .sum::<usize>(),
                         ),
                 );
-                budget_tracker.record_token_usage(est_input, None, est_output);
-                last_input_tokens = Some(est_input);
+                state.budget_tracker.record_token_usage(est_input, None, est_output);
+                state.last_input_tokens = Some(est_input);
                 if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
                     turn: current_turn,
                     input_tokens: est_input,
@@ -680,11 +667,11 @@ impl AgentRunner {
                 }) {
                     return self.finish_run(
                         TerminalReason::StrictLogFailure(e.to_string()),
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
@@ -693,35 +680,35 @@ impl AgentRunner {
             // §4.1: Pre-dispatch batch validation BEFORE adding to transcript or running any tools!
             if let Err(batch_err) = validate_assistant_turn_batch(
                 &assistant_turn,
-                budget_tracker.config(),
+                state.budget_tracker.config(),
                 self.config.allow_tool_calls_on_stop,
             ) {
                 return self.finish_run(
                     batch_err.into_terminal_reason(),
-                    &budget_tracker,
-                    &projector,
-                    modified_files_set.into_iter().collect(),
-                    last_assistant_text,
-                    transcript,
+                    &state.budget_tracker,
+                    &state.projector,
+                    state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
 
             if let Some(ref c) = assistant_turn.content {
-                last_assistant_text = Some(c.clone());
+                state.last_assistant_text = Some(c.clone());
             }
 
             let tool_calls = assistant_turn.tool_calls.clone();
             self.record_transcript_item(
-                &mut transcript,
+                &mut state.transcript,
                 TranscriptItem::Assistant(assistant_turn),
                 current_turn,
             );
             if let Some(err) = self.session_persist_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                    &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                    last_assistant_text, transcript, logger,
+                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text, state.transcript, logger,
                 );
             }
 
@@ -747,25 +734,25 @@ impl AgentRunner {
                     }
                 };
                 if let Some(reason) = pre_completion_denial {
-                    gate_failure_count = gate_failure_count.saturating_add(1);
-                    let mut mod_list: Vec<String> = modified_files_set.iter().cloned().collect();
+                    state.gate_failure_count = state.gate_failure_count.saturating_add(1);
+                    let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
                     mod_list.sort();
-                    if gate_failure_count >= self.completion_gate_max_retries {
+                    if state.gate_failure_count >= self.completion_gate_max_retries {
                         return self.finish_run(
                             TerminalReason::ProviderProtocolError(format!(
                                 "PreCompletion policy hook denied completion {} times (max retries={}): {}",
-                                gate_failure_count, self.completion_gate_max_retries, reason
+                                state.gate_failure_count, self.completion_gate_max_retries, reason
                             )),
-                            &budget_tracker, &projector, mod_list, last_assistant_text,
-                            transcript, logger,
+                            &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
+                            state.transcript, logger,
                         );
                     }
                     self.record_transcript_item(
-                        &mut transcript,
+                        &mut state.transcript,
                         TranscriptItem::User(UserMessage {
                             content: format!(
                                 "[PreCompletion policy hook denied completion, attempt {}/{}]: {}\nAddress the denial before finishing.",
-                                gate_failure_count, self.completion_gate_max_retries, reason
+                                state.gate_failure_count, self.completion_gate_max_retries, reason
                             ),
                         }),
                         current_turn.saturating_add(1),
@@ -773,14 +760,14 @@ impl AgentRunner {
                     if let Some(err) = self.session_persist_error.clone() {
                         return self.finish_run(
                             TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                            &budget_tracker, &projector, mod_list, last_assistant_text,
-                            transcript, logger,
+                            &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
+                            state.transcript, logger,
                         );
                     }
                     continue;
                 }
-                if !modified_files_set.is_empty() {
-                    let mut mod_list: Vec<String> = modified_files_set.iter().cloned().collect();
+                if !state.modified_files_set.is_empty() {
+                    let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
                     mod_list.sort();
                     let gate_ctx = CompletionGateContext {
                         run_id: self.config.run_id,
@@ -803,8 +790,8 @@ impl AgentRunner {
                             if let Some(err) = self.session_persist_error.clone() {
                                 return self.finish_run(
                                     TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
-                                    &budget_tracker, &projector, mod_list, last_assistant_text,
-                                    transcript, logger,
+                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
+                                    state.transcript, logger,
                                 );
                             }
                         }
@@ -820,19 +807,19 @@ impl AgentRunner {
                             if let Some(err) = self.session_persist_error.clone() {
                                 return self.finish_run(
                                     TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
-                                    &budget_tracker, &projector, mod_list, last_assistant_text,
-                                    transcript, logger,
+                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
+                                    state.transcript, logger,
                                 );
                             }
                         }
                         Ok(GateOutcome::Rejected { feedback }) => {
-                            gate_failure_count = gate_failure_count.saturating_add(1);
+                            state.gate_failure_count = state.gate_failure_count.saturating_add(1);
                             let fingerprint = failure_fingerprint(&feedback);
-                            let repeated = last_gate_failure_hash.as_deref() == Some(fingerprint.as_str());
-                            last_gate_failure_hash = Some(fingerprint.clone());
+                            let repeated = state.last_gate_failure_hash.as_deref() == Some(fingerprint.as_str());
+                            state.last_gate_failure_hash = Some(fingerprint.clone());
                             let mut gate_message = format!(
                                 "[CompletionGate Rejected, attempt {}/{}]: {}\nFix the reported issue before finishing.",
-                                gate_failure_count, self.completion_gate_max_retries, feedback
+                                state.gate_failure_count, self.completion_gate_max_retries, feedback
                             );
                             if repeated {
                                 gate_message.push_str(
@@ -854,19 +841,19 @@ impl AgentRunner {
                                 gate_message.push_str(&block);
                             }
                             self.record_transcript_item(
-                                &mut transcript,
+                                &mut state.transcript,
                                 TranscriptItem::User(UserMessage { content: gate_message }),
                                 current_turn.saturating_add(1),
                             );
                             self.drain_steering_messages(
-                                &mut transcript,
+                                &mut state.transcript,
                                 current_turn.saturating_add(1),
                             );
                             if let Some(err) = self.session_persist_error.clone() {
                                 return self.finish_run(
                                     TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                                    &budget_tracker, &projector, mod_list, last_assistant_text,
-                                    transcript, logger,
+                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
+                                    state.transcript, logger,
                                 );
                             }
                             // Item #3 (`v1.4.0`): adaptive escalation. Instead of tripping the
@@ -874,7 +861,7 @@ impl AgentRunner {
                             // race N diverse repair candidates in isolated worktrees and merge the
                             // best verified one.
                             if !self.adaptive_tournament_attempted
-                                && gate_failure_count >= 2
+                                && state.gate_failure_count >= 2
                                 && self.adaptive_tournament_candidates
                                     >= crate::subagents::MIN_TOURNAMENT_CANDIDATES
                                 && self.max_subagent_spawns > 0
@@ -893,7 +880,7 @@ impl AgentRunner {
                                     let request = crate::subagents::TournamentRequest {
                                         task: format!(
                                             "{}\n\n[ADAPTIVE ESCALATION] The single-agent attempt failed verification {} time(s). Race independent repair strategies. Last verification failure:\n{}",
-                                            self.config.task, gate_failure_count, excerpt
+                                            self.config.task, state.gate_failure_count, excerpt
                                         ),
                                         candidates: self.adaptive_tournament_candidates,
                                         allowed_write_globs: None,
@@ -906,7 +893,7 @@ impl AgentRunner {
                                         .execute_spawn_tournament(
                                             request,
                                             absolute_turn,
-                                            &mut modified_files_set,
+                                            &mut state.modified_files_set,
                                             &mut logger,
                                             "adaptive_tournament".to_string(),
                                         )
@@ -914,13 +901,13 @@ impl AgentRunner {
                                     // F10 (`v1.5.0`): the adaptive path never reaches
                                     // `execute_tool_batch`, so drain the child spend here instead of
                                     // leaking it when the model stops on the next turn.
-                                    self.drain_children_tokens(&mut budget_tracker);
+                                    self.drain_children_tokens(&mut state.budget_tracker);
                                     if merged {
                                         // A candidate was verified and merged: the stall is broken.
-                                        gate_failure_count = 0;
-                                        last_gate_failure_hash = None;
+                                        state.gate_failure_count = 0;
+                                        state.last_gate_failure_hash = None;
                                         self.record_transcript_item(
-                                            &mut transcript,
+                                            &mut state.transcript,
                                             TranscriptItem::User(UserMessage {
                                                 content: format!(
                                                     "[ADAPTIVE TOURNAMENT MERGED] {}",
@@ -943,7 +930,7 @@ impl AgentRunner {
                                             &mut logger,
                                         );
                                         for path in &merged_changed_paths {
-                                            modified_files_set.insert(path.clone());
+                                            state.modified_files_set.insert(path.clone());
                                         }
                                         if !merged_changed_paths.is_empty() {
                                             let spans = build_worker_mutation_spans(
@@ -977,17 +964,17 @@ impl AgentRunner {
                                         if let Some(err) = self.revision_error.clone() {
                                             return self.finish_run(
                                                 TerminalReason::StrictLogFailure(err),
-                                                &budget_tracker,
-                                                &projector,
-                                                modified_files_set.into_iter().collect(),
-                                                last_assistant_text,
-                                                transcript,
+                                                &state.budget_tracker,
+                                                &state.projector,
+                                                state.modified_files_set.into_iter().collect(),
+                                                state.last_assistant_text,
+                                                state.transcript,
                                                 logger,
                                             );
                                         }
                                         self.persist_session_checkpoint(
-                                            &projector,
-                                            &transcript,
+                                            &state.projector,
+                                            &state.transcript,
                                             current_turn,
                                         );
                                         if let Some(err) = self.session_persist_error.clone() {
@@ -996,11 +983,11 @@ impl AgentRunner {
                                                     "session checkpoint failed: {}",
                                                     err
                                                 )),
-                                                &budget_tracker,
-                                                &projector,
-                                                modified_files_set.into_iter().collect(),
-                                                last_assistant_text,
-                                                transcript,
+                                                &state.budget_tracker,
+                                                &state.projector,
+                                                state.modified_files_set.into_iter().collect(),
+                                                state.last_assistant_text,
+                                                state.transcript,
                                                 logger,
                                             );
                                         }
@@ -1008,15 +995,15 @@ impl AgentRunner {
                                     }
                                 }
                             }
-                            if gate_failure_count >= self.completion_gate_max_retries {
+                            if state.gate_failure_count >= self.completion_gate_max_retries {
                                 let excerpt: String = feedback.chars().take(1600).collect();
                                 return self.finish_run(
                                     TerminalReason::ProviderProtocolError(format!(
                                         "CompletionGate rejected completion {} times (max retries={}); fingerprint={}; last failure:\n{}",
-                                        gate_failure_count, self.completion_gate_max_retries, fingerprint, excerpt
+                                        state.gate_failure_count, self.completion_gate_max_retries, fingerprint, excerpt
                                     )),
-                                    &budget_tracker, &projector, mod_list, last_assistant_text,
-                                    transcript, logger,
+                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
+                                    state.transcript, logger,
                                 );
                             }
                             continue;
@@ -1027,11 +1014,11 @@ impl AgentRunner {
                                     "CompletionGate error: {}",
                                     err
                                 )),
-                                &budget_tracker,
-                                &projector,
+                                &state.budget_tracker,
+                                &state.projector,
                                 mod_list,
-                                last_assistant_text,
-                                transcript,
+                                state.last_assistant_text,
+                                state.transcript,
                                 logger,
                             );
                         }
@@ -1046,24 +1033,24 @@ impl AgentRunner {
                 if let Some(err) = self.revision_error.clone() {
                     return self.finish_run(
                         TerminalReason::StrictLogFailure(err),
-                        &budget_tracker,
-                        &projector,
-                        modified_files_set.into_iter().collect(),
-                        last_assistant_text,
-                        transcript,
+                        &state.budget_tracker,
+                        &state.projector,
+                        state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text,
+                        state.transcript,
                         logger,
                     );
                 }
 
-                let mut mod_list: Vec<String> = modified_files_set.into_iter().collect();
+                let mut mod_list: Vec<String> = state.modified_files_set.into_iter().collect();
                 mod_list.sort();
                 return self.finish_run(
                     TerminalReason::ModelStop,
-                    &budget_tracker,
-                    &projector,
+                    &state.budget_tracker,
+                    &state.projector,
                     mod_list,
-                    last_assistant_text,
-                    transcript,
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
@@ -1077,16 +1064,16 @@ impl AgentRunner {
                     &tool_calls,
                     ErrorCode::NotExecutedCancelled,
                     "NOT_EXECUTED_CANCELLED: strict log failure",
-                    &mut transcript,
+                    &mut state.transcript,
                     current_turn,
                 );
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(e.to_string()),
-                    &budget_tracker,
-                    &projector,
-                    modified_files_set.into_iter().collect(),
-                    last_assistant_text,
-                    transcript,
+                    &state.budget_tracker,
+                    &state.projector,
+                    state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
@@ -1098,21 +1085,21 @@ impl AgentRunner {
             let batch_abort = self
                 .execute_tool_batch(
                     &tool_calls,
-                    &mut transcript,
-                    &mut budget_tracker,
-                    &mut loop_guard,
-                    &mut projector,
-                    &mut modified_files_set,
+                    &mut state.transcript,
+                    &mut state.budget_tracker,
+                    &mut state.loop_guard,
+                    &mut state.projector,
+                    &mut state.modified_files_set,
                     &mut logger,
                 )
                 .await;
 
-            debug_assert!(verify_tool_call_pairing(&transcript));
+            debug_assert!(verify_tool_call_pairing(&state.transcript));
 
             // F10 (`v1.4.0`): fold any child subagent / tournament token spend accumulated during
             // this batch into the parent budget tracker so the run summary reports
             // `self` + `children` cost.
-            self.drain_children_tokens(&mut budget_tracker);
+            self.drain_children_tokens(&mut state.budget_tracker);
 
             // Gate 1: a batch that mutated files — directly via `edit`/`write`, or indirectly via a
             // `bash` command whose writes the tool cannot report (O1) — gets a fresh revision bound
@@ -1123,7 +1110,7 @@ impl AgentRunner {
                 Vec::new()
             };
             for path in &batch_changed_paths {
-                modified_files_set.insert(path.clone());
+                state.modified_files_set.insert(path.clone());
                 self.batch_mutated = true;
             }
             // Gate 4: bind the post-batch revision (and any `changed_paths` discovered by the
@@ -1138,41 +1125,41 @@ impl AgentRunner {
             if let Some(err) = self.revision_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(err),
-                    &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                    last_assistant_text, transcript, logger,
+                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text, state.transcript, logger,
                 );
             }
 
             if let Some(err) = self.session_persist_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                    &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                    last_assistant_text, transcript, logger,
+                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text, state.transcript, logger,
                 );
             }
 
             // Gate 3: checkpoint the post-batch leaf so the `subtree_dirs` (and pinned baseline /
             // last-touched ledger) loaded by *this* batch survive a later `--resume` / `--fork`,
             // even when the run ends here (`MaxTurns`, `MaxToolCalls`, `LoopDetected`, cancellation).
-            self.persist_session_checkpoint(&projector, &transcript, current_turn);
+            self.persist_session_checkpoint(&state.projector, &state.transcript, current_turn);
             if let Some(err) = self.session_persist_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
-                    &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                    last_assistant_text, transcript, logger,
+                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text, state.transcript, logger,
                 );
             }
 
             if let Some(abort_reason) = batch_abort {
-                let mut mod_list: Vec<String> = modified_files_set.into_iter().collect();
+                let mut mod_list: Vec<String> = state.modified_files_set.into_iter().collect();
                 mod_list.sort();
                 return self.finish_run(
                     abort_reason,
-                    &budget_tracker,
-                    &projector,
+                    &state.budget_tracker,
+                    &state.projector,
                     mod_list,
-                    last_assistant_text,
-                    transcript,
+                    state.last_assistant_text,
+                    state.transcript,
                     logger,
                 );
             }
@@ -1189,7 +1176,7 @@ impl AgentRunner {
             {
                 self.predict_cmd_runs += 1;
                 let gate = self.predict_cmd.clone().expect("checked above");
-                let mut mod_list: Vec<String> = modified_files_set.iter().cloned().collect();
+                let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
                 mod_list.sort();
                 let ctx = CompletionGateContext {
                     run_id: self.config.run_id,
@@ -1201,14 +1188,14 @@ impl AgentRunner {
                 let predict_changed =
                     self.capture_workspace_revision(absolute_turn, "predict_cmd", &mut logger);
                 if !predict_changed.is_empty() {
-                    modified_files_set.extend(predict_changed);
+                    state.modified_files_set.extend(predict_changed);
                     post_batch_updated = true;
                 }
                 if let Some(err) = self.revision_error.clone() {
                     return self.finish_run(
                         TerminalReason::StrictLogFailure(err),
-                        &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                        last_assistant_text, transcript, logger,
+                        &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text, state.transcript, logger,
                     );
                 }
                 if let Ok(GateOutcome::Rejected { feedback }) = check_res {
@@ -1241,7 +1228,7 @@ impl AgentRunner {
                         message.push_str(&block);
                     }
                     self.record_transcript_item(
-                        &mut transcript,
+                        &mut state.transcript,
                         TranscriptItem::User(UserMessage { content: message }),
                         current_turn.saturating_add(1),
                     );
@@ -1249,36 +1236,36 @@ impl AgentRunner {
                     if let Some(err) = self.session_persist_error.clone() {
                         return self.finish_run(
                             TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                            &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                            last_assistant_text, transcript, logger,
+                            &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                            state.last_assistant_text, state.transcript, logger,
                         );
                     }
                 }
             }
 
             // §3.2 V6-07: Mid-Run Steering — non-blocking check on `steer_rx.try_recv()` after 1:1 tool closure
-            let pre_steer_len = transcript.len();
+            let pre_steer_len = state.transcript.len();
             self.drain_steering_messages(
-                &mut transcript,
+                &mut state.transcript,
                 current_turn.saturating_add(1),
             );
-            if transcript.len() != pre_steer_len {
+            if state.transcript.len() != pre_steer_len {
                 post_batch_updated = true;
             }
             if let Some(err) = self.session_persist_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                    &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                    last_assistant_text, transcript, logger,
+                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                    state.last_assistant_text, state.transcript, logger,
                 );
             }
             if post_batch_updated {
-                self.persist_session_checkpoint(&projector, &transcript, current_turn);
+                self.persist_session_checkpoint(&state.projector, &state.transcript, current_turn);
                 if let Some(err) = self.session_persist_error.clone() {
                     return self.finish_run(
                         TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
-                        &budget_tracker, &projector, modified_files_set.into_iter().collect(),
-                        last_assistant_text, transcript, logger,
+                        &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
+                        state.last_assistant_text, state.transcript, logger,
                     );
                 }
             }
@@ -1317,7 +1304,7 @@ impl AgentRunner {
     async fn prepare_run(
         &mut self,
         mut logger: EventLogger,
-    ) -> Result<(RunPrep, EventLogger), (RunSummary, EventLogger)> {
+    ) -> Result<(TurnState, EventLogger), (RunSummary, EventLogger)> {
         let budget_tracker = match BudgetTracker::new(self.config.budget.clone()) {
             Ok(b) => b,
             Err(e) => {
@@ -1518,7 +1505,7 @@ impl AgentRunner {
 
 
         Ok((
-            RunPrep {
+            TurnState {
                 budget_tracker,
                 visible_tools,
                 static_prefix,
