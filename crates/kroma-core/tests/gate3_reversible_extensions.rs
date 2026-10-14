@@ -2032,13 +2032,25 @@ fn live_thread_count() -> usize {
         .unwrap_or(0)
 }
 
-/// Number of open file descriptors in this process. Linux-only: it reads `/proc/self/fd`. The leaked
-/// stdin writer also pins the pipe's write end, so this catches the fd leak even if a thread count is
-/// masked by another concurrently-running test.
+/// Number of *pipe* file descriptors open in this process. Linux-only: it reads `/proc/self/fd`.
+///
+/// Only pipes are counted, because the absolute fd count is not comparable across a test's lifetime:
+/// the harness opens its own sockets and log files as tests run, so a later sample is naturally
+/// higher than an earlier one even with no leak at all (that made this test flaky). A leaked stdin
+/// writer is what pins a *pipe* write end, and the harness never uses pipes for output capture.
 #[cfg(target_os = "linux")]
-fn live_fd_count() -> usize {
+fn live_pipe_fd_count() -> usize {
     fs::read_dir("/proc/self/fd")
-        .map(|entries| entries.count())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    fs::read_link(e.path())
+                        .map(|target| target.to_string_lossy().starts_with("pipe:"))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -2075,7 +2087,7 @@ fn test_command_hook_stdin_writer_stops_at_its_deadline() {
     // to an anonymous `std::thread::spawn` thread is named after the test binary, so a name match
     // would count zero and pass even while the thread (and its pipe fd) leaks forever.
     let threads_before = live_thread_count();
-    let fds_before = live_fd_count();
+    let pipe_fds_before = live_pipe_fd_count();
 
     let started = std::time::Instant::now();
     let out = runner.run(HookEvent::PreToolUse, &ctx).unwrap();
@@ -2098,7 +2110,7 @@ fn test_command_hook_stdin_writer_stops_at_its_deadline() {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut settled = false;
     while std::time::Instant::now() < deadline {
-        if live_thread_count() <= threads_before && live_fd_count() <= fds_before {
+        if live_thread_count() <= threads_before && live_pipe_fd_count() <= pipe_fds_before {
             settled = true;
             break;
         }
@@ -2107,11 +2119,11 @@ fn test_command_hook_stdin_writer_stops_at_its_deadline() {
     assert!(
         settled,
         "the stdin writer must stop at its deadline instead of leaking its thread and pipe fd \
-         (baseline threads/fds {} / {}, still {} / {})",
+         (baseline threads/pipe-fds {} / {}, still {} / {})",
         threads_before,
-        fds_before,
+        pipe_fds_before,
         live_thread_count(),
-        live_fd_count()
+        live_pipe_fd_count()
     );
 
     let _ = std::process::Command::new("pkill")
