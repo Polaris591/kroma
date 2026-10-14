@@ -1,3 +1,4 @@
+use crate::repo_graph::RepoGraphCache;
 use crate::sensitive_paths::SensitivePathGuard;
 use crate::types::ErrorCode;
 use std::collections::HashMap;
@@ -45,11 +46,52 @@ impl WorkspaceError {
     }
 }
 
+/// Proof that the operator approved one tool call's access to a specific sensitive path.
+///
+/// Minted only by the tool runtime (crate-internal constructor) after an interactive `Ask` prompt
+/// is answered with an allow, and consumed by a short-lived [`WorkspaceCap`] clone produced by
+/// [`WorkspaceCap::with_approval`] that is passed to exactly one tool execution. It is neither
+/// `Clone` nor constructible outside this crate, and it names the exact relative path it approved,
+/// so a grant can never be replayed, cached, forged, or widened to a different file.
+#[derive(Debug)]
+pub struct SensitivePathApproval {
+    relative_path: PathBuf,
+}
+
+impl SensitivePathApproval {
+    /// Crate-internal: the tool runtime is the only component allowed to record a user approval.
+    pub(crate) fn new(relative_path: impl Into<PathBuf>) -> Self {
+        Self {
+            relative_path: relative_path.into(),
+        }
+    }
+}
+
+/// Whether `path` is blocked by the sensitive-path guard, honouring an approval that names the
+/// exact path (BUG-08). Every other sensitive path stays blocked, so an approval for one file can
+/// never open a different one.
+fn sensitive_path_is_blocked(approval: Option<&SensitivePathApproval>, path: &Path) -> bool {
+    if !SensitivePathGuard::is_sensitive(path) {
+        return false;
+    }
+    match approval {
+        Some(approval) => approval.relative_path != path,
+        None => true,
+    }
+}
+
 /// Capability-oriented workspace directory handle enforcing path containment and symlink rules.
 #[derive(Debug, Clone)]
 pub struct WorkspaceCap {
     root: PathBuf,
     root_dir_fd: Arc<File>,
+    /// BUG-06: per-workspace incremental `RepoGraph` parse cache, shared by every clone of this
+    /// handle so repeated `code_graph` / `/graph` builds do not re-parse unchanged files. Entries
+    /// are content-addressed (verified by SHA-256), so reuse can never return a stale graph.
+    repo_graph_cache: Arc<Mutex<RepoGraphCache>>,
+    /// BUG-08: set only on the short-lived clone handed to one approved tool call. `None` on the
+    /// workspace every other caller sees, so an unapproved call can never bypass the guard.
+    sensitive_path_approval: Option<Arc<SensitivePathApproval>>,
 }
 
 impl WorkspaceCap {
@@ -88,6 +130,8 @@ impl WorkspaceCap {
             Ok(Self {
                 root,
                 root_dir_fd: Arc::new(dir_fd),
+                repo_graph_cache: Arc::new(Mutex::new(RepoGraphCache::new())),
+                sensitive_path_approval: None,
             })
         }
         #[cfg(windows)]
@@ -99,6 +143,8 @@ impl WorkspaceCap {
             Ok(Self {
                 root,
                 root_dir_fd: Arc::new(dir_fd),
+                repo_graph_cache: Arc::new(Mutex::new(RepoGraphCache::new())),
+                sensitive_path_approval: None,
             })
         }
     }
@@ -111,12 +157,31 @@ impl WorkspaceCap {
         &self.root_dir_fd
     }
 
+    /// BUG-06: the incremental `RepoGraph` parse cache shared by every clone of this handle.
+    pub fn repo_graph_cache(&self) -> &Arc<Mutex<RepoGraphCache>> {
+        &self.repo_graph_cache
+    }
+
+    /// BUG-08: build a short-lived clone carrying an interactive approval for `approval`'s path.
+    /// The runtime passes this clone to exactly one tool execution and drops it afterwards, so the
+    /// grant cannot leak into any later call.
+    pub fn with_approval(&self, approval: SensitivePathApproval) -> Self {
+        let mut clone = self.clone();
+        clone.sensitive_path_approval = Some(Arc::new(approval));
+        clone
+    }
+
+    /// Whether `path` is blocked by the sensitive-path guard, honouring this handle's approval.
+    fn sensitive_path_blocked(&self, path: &Path) -> bool {
+        sensitive_path_is_blocked(self.sensitive_path_approval.as_deref(), path)
+    }
+
     /// Race-free kernel-enforced file open relative to `root_dir_fd` rejecting all symlink components and `..` escapes.
     /// Uses Linux `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` when supported, falling back to step-by-step
     /// `openat(..., O_RDONLY | O_NOFOLLOW | O_CLOEXEC)` on `ENOSYS` or non-Linux platforms.
     pub fn open_existing_no_symlink(&self, rel: &str) -> Result<(PathBuf, File), WorkspaceError> {
         let norm_rel = Self::validate_relative_components(rel)?;
-        if norm_rel != Path::new(".") && SensitivePathGuard::is_sensitive(&norm_rel) {
+        if norm_rel != Path::new(".") && self.sensitive_path_blocked(&norm_rel) {
             return Err(WorkspaceError::SensitivePath {
                 reason: format!("access to sensitive path '{}' is blocked", norm_rel.display()),
             });
@@ -277,7 +342,12 @@ impl WorkspaceCap {
         {
             if norm_rel == Path::new(".") {
                 let f = open_windows_handle_no_reparse(&self.root, &norm_rel, Some(true))?;
-                let _ = verify_windows_handle_within_root(&f, &self.root, &norm_rel)?;
+                let _ = verify_windows_handle_within_root(
+                    &f,
+                    &self.root,
+                    &norm_rel,
+                    self.sensitive_path_approval.as_deref(),
+                )?;
                 return Ok((norm_rel, f));
             }
             let comps: Vec<_> = norm_rel.components().collect();
@@ -318,7 +388,12 @@ impl WorkspaceCap {
             let file = leaf_file.ok_or_else(|| WorkspaceError::InvalidPath {
                 reason: "empty relative path".to_string(),
             })?;
-            let _ = verify_windows_handle_within_root(&file, &self.root, &norm_rel)?;
+            let _ = verify_windows_handle_within_root(
+                &file,
+                &self.root,
+                &norm_rel,
+                self.sensitive_path_approval.as_deref(),
+            )?;
             drop(ancestor_handles);
             Ok((norm_rel, file))
         }
@@ -332,7 +407,7 @@ impl WorkspaceCap {
     /// attacker that swaps the directory for a symlink between check and use.
     pub fn open_dir_no_symlink(&self, rel: &str) -> Result<(PathBuf, File), WorkspaceError> {
         let norm_rel = Self::validate_relative_components(rel)?;
-        if norm_rel != Path::new(".") && SensitivePathGuard::is_sensitive(&norm_rel) {
+        if norm_rel != Path::new(".") && self.sensitive_path_blocked(&norm_rel) {
             return Err(WorkspaceError::SensitivePath {
                 reason: format!("access to sensitive path '{}' is blocked", norm_rel.display()),
             });
@@ -521,7 +596,12 @@ impl WorkspaceCap {
                 Some(f) => f,
                 None => open_windows_handle_no_reparse(&self.root, &norm_rel, Some(true))?,
             };
-            let _ = verify_windows_handle_within_root(&file, &self.root, &norm_rel)?;
+            let _ = verify_windows_handle_within_root(
+                &file,
+                &self.root,
+                &norm_rel,
+                self.sensitive_path_approval.as_deref(),
+            )?;
             drop(ancestor_handles);
             Ok((norm_rel, file))
         }
@@ -597,7 +677,12 @@ impl WorkspaceCap {
         #[cfg(windows)]
         {
             let (norm_rel, dir_file) = self.open_dir_no_symlink(rel)?;
-            let dir_path = verify_windows_handle_within_root(&dir_file, &self.root, &norm_rel)?;
+            let dir_path = verify_windows_handle_within_root(
+                &dir_file,
+                &self.root,
+                &norm_rel,
+                self.sensitive_path_approval.as_deref(),
+            )?;
             let rd = fs::read_dir(&dir_path).map_err(|e| WorkspaceError::Io {
                 reason: format!("read_dir failed for '{}': {}", norm_rel.display(), e),
             })?;
@@ -854,7 +939,12 @@ impl WorkspaceCap {
                 .ok_or_else(|| WorkspaceError::InvalidPath {
                     reason: "missing parent handle".to_string(),
                 })?;
-            let _ = verify_windows_handle_within_root(&cur_dir, &self.root, norm_rel)?;
+            let _ = verify_windows_handle_within_root(
+                &cur_dir,
+                &self.root,
+                norm_rel,
+                self.sensitive_path_approval.as_deref(),
+            )?;
             drop(ancestor_handles);
             Ok((cur_dir, file_name))
         }
@@ -936,7 +1026,7 @@ impl WorkspaceCap {
         if norm_rel == Path::new(".") {
             return Ok((norm_rel, self.root.clone()));
         }
-        if SensitivePathGuard::is_sensitive(&norm_rel) {
+        if self.sensitive_path_blocked(&norm_rel) {
             return Err(WorkspaceError::SensitivePath {
                 reason: format!("access to sensitive path '{}' is blocked", norm_rel.display()),
             });
@@ -987,7 +1077,7 @@ impl WorkspaceCap {
                             ),
                         });
                     };
-                    if SensitivePathGuard::is_sensitive(&rel_target) {
+                    if self.sensitive_path_blocked(&rel_target) {
                         return Err(WorkspaceError::SensitivePath {
                             reason: format!(
                                 "symlink '{}' points to sensitive path '{}'",
@@ -1008,7 +1098,7 @@ impl WorkspaceCap {
                 reason: format!("resolved path '{}' escapes workspace", norm_rel.display()),
             });
         };
-        if SensitivePathGuard::is_sensitive(&rel_canonical) {
+        if self.sensitive_path_blocked(&rel_canonical) {
             return Err(WorkspaceError::SensitivePath {
                 reason: format!(
                     "resolved path '{}' is a sensitive path",
@@ -1029,7 +1119,7 @@ impl WorkspaceCap {
                 reason: "cannot write to workspace root directory '.'".to_string(),
             });
         }
-        if SensitivePathGuard::is_sensitive(&norm_rel) {
+        if self.sensitive_path_blocked(&norm_rel) {
             return Err(WorkspaceError::SensitivePath {
                 reason: format!("writing to sensitive path '{}' is blocked", norm_rel.display()),
             });
@@ -1070,7 +1160,7 @@ impl WorkspaceCap {
                                     ),
                                 });
                             };
-                            if SensitivePathGuard::is_sensitive(&rel_target) {
+                            if self.sensitive_path_blocked(&rel_target) {
                                 return Err(WorkspaceError::SensitivePath {
                                     reason: format!(
                                         "directory symlink '{}' points to sensitive path '{}'",
@@ -1428,6 +1518,7 @@ pub(crate) fn verify_windows_handle_within_root(
     file: &File,
     root: &Path,
     display_rel: &Path,
+    approval: Option<&SensitivePathApproval>,
 ) -> Result<PathBuf, WorkspaceError> {
     let final_path = windows_final_path_by_handle(file).map_err(|e| WorkspaceError::Io {
         reason: format!(
@@ -1445,7 +1536,7 @@ pub(crate) fn verify_windows_handle_within_root(
             ),
         });
     };
-    if !rel.as_os_str().is_empty() && SensitivePathGuard::is_sensitive(&rel) {
+    if !rel.as_os_str().is_empty() && sensitive_path_is_blocked(approval, &rel) {
         return Err(WorkspaceError::SensitivePath {
             reason: format!(
                 "opened handle for '{}' resolved to sensitive path '{}'",

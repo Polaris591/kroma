@@ -16,5 +16,9 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+# native-tls (Schannel on Windows, Security.framework on macOS) is used for the platforms where
+# the hand-written OpenSSL FFI below is not available.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 native-tls.workspace = true
 tokio-native-tls.workspace = true

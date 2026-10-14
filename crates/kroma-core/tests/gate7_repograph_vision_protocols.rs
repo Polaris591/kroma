@@ -33,7 +33,7 @@ use kroma_core::provider::{
     build_provider, ModelProvider, ProviderError, ProviderProtocol, ProviderRequest,
     ProviderSettings,
 };
-use kroma_core::repo_graph::{execute_code_graph, RepoGraph, MAX_GRAPH_FILES};
+use kroma_core::repo_graph::{execute_code_graph, extract_reference_tokens, RepoGraph, MAX_GRAPH_FILES};
 use kroma_core::tool::definition::builtin_tool_registrations;
 use kroma_core::tools::read::{base64_encode, execute_read, sniff_image};
 use kroma_core::types::{EffectClass, ToolCallId};
@@ -506,6 +506,113 @@ fn anthropic_sse_body() -> String {
         body.push_str(&format!("event: {}\ndata: {}\n\n", name, data));
     }
     body
+}
+
+/// BUG-05: `redacted_thinking` blocks carry an encrypted payload in `data`, and a `thinking`
+/// block's signature can be split across several `signature_delta` events.
+fn anthropic_reasoning_sse_body() -> String {
+    let events = [
+        (
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+        ),
+        (
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED_PAYLOAD"}}"#,
+        ),
+        (
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+        ),
+        (
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"step 1"}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"AAA"}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"BBB"}}"#,
+        ),
+        (
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":1}"#,
+        ),
+        (
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#,
+        ),
+        ("message_stop", r#"{"type":"message_stop"}"#),
+    ];
+    let mut body = String::new();
+    for (name, data) in events {
+        body.push_str(&format!("event: {}\ndata: {}\n\n", name, data));
+    }
+    body
+}
+
+#[tokio::test]
+async fn test_anthropic_stream_assembles_redacted_thinking_and_concatenates_split_signatures() {
+    let (base_url, mut rx) = spawn_mock_http_server(
+        "HTTP/1.1 200 OK",
+        vec![("Content-Type", "text/event-stream".to_string())],
+        anthropic_reasoning_sse_body(),
+    )
+    .await;
+
+    let client = AnthropicMessagesClient::new(AnthropicMessagesConfig {
+        base_url,
+        api_key: "sk-ant-test-key".to_string(),
+        model: "claude-sonnet-4-5".to_string(),
+        max_retries: 0,
+        max_tokens: 4096,
+    })
+    .unwrap();
+
+    let req = ProviderRequest {
+        system_prompt: "sys".to_string(),
+        tools: Vec::new(),
+        messages: vec![TranscriptItem::User(UserMessage {
+            content: "hi".to_string(),
+        })],
+        stream: true,
+        cache_breakpoints: Vec::new(),
+        max_output_tokens: None,
+    };
+    let (_tx, cancel_rx) = watch::channel(false);
+    let completion = client
+        .complete(req, &kroma_core::budget::BudgetConfig::default(), cancel_rx)
+        .await
+        .expect("anthropic reasoning stream should succeed");
+    let _ = recv_request(&mut rx).await;
+
+    let turn = completion.turn;
+    assert_eq!(
+        turn.reasoning_blocks.len(),
+        2,
+        "both reasoning blocks must survive: {:?}",
+        turn.reasoning_blocks
+    );
+    let redacted = &turn.reasoning_blocks[0];
+    assert_eq!(
+        redacted.opaque_payload.as_deref(),
+        Some("ENCRYPTED_PAYLOAD")
+    );
+    assert!(redacted.text.is_none());
+    let thinking = &turn.reasoning_blocks[1];
+    assert_eq!(thinking.text.as_deref(), Some("step 1"));
+    assert_eq!(
+        thinking.signature.as_deref(),
+        Some("AAABBB"),
+        "a signature split across events must be concatenated, not overwritten"
+    );
+    assert_eq!(turn.finish_reason, FinishReason::Stop);
 }
 
 #[tokio::test]
@@ -1677,6 +1784,112 @@ fn test_b1_repo_graph_incremental_cache_and_typed_edges() {
         "expected a typed edge, got {:?}",
         second.edges()
     );
+}
+
+/// BUG-06: the production entry point (`build_from_workspace`, used by `code_graph` and
+/// `/workspace/graph`) must reuse the per-workspace cache instead of building a throwaway one, and
+/// must invalidate by content rather than trusting `(len, mtime)` alone.
+#[test]
+fn test_bug06_production_graph_build_reuses_workspace_cache_by_content() {
+    let root = temp_root("bug06-graph-cache");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(ws_dir.join("src")).unwrap();
+    // Same byte length for both versions, so a stale `(len, mtime)`-only key would go unnoticed.
+    fs::write(
+        ws_dir.join("src/lib.rs"),
+        "pub fn alpha_fn() {}\npub fn beta_fn() { alpha_fn(); }\n",
+    )
+    .unwrap();
+    let cap = WorkspaceCap::new(&ws_dir).unwrap();
+
+    let first = RepoGraph::build_from_workspace(&cap, MAX_GRAPH_FILES);
+    assert_eq!(first.cache_hits, 0, "first build parses everything");
+    let second = RepoGraph::build_from_workspace(&cap, MAX_GRAPH_FILES);
+    assert!(
+        second.cache_hits > 0,
+        "the production path must reuse the persistent cache"
+    );
+    assert_eq!(second.total_symbols(), first.total_symbols());
+    assert_eq!(second.total_edges(), first.total_edges());
+
+    // Changing the content (same length) must not serve the stale parse.
+    fs::write(
+        ws_dir.join("src/lib.rs"),
+        "pub fn gamma_fn() {}\npub fn delta_fn() { gamma_fn(); }\n",
+    )
+    .unwrap();
+    let third = RepoGraph::build_from_workspace(&cap, MAX_GRAPH_FILES);
+    assert!(third.symbols().iter().any(|s| s.name == "gamma_fn"));
+    assert!(!third.symbols().iter().any(|s| s.name == "alpha_fn"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// P2: the persistent per-workspace `RepoGraphCache` must be pruned on every build — a path that
+/// disappears (or is no longer indexed) must not keep its entry for the whole process lifetime.
+/// The pruning already exists via `RepoGraphCache::retain_paths`, called at the end of every build;
+/// this test locks that behaviour so a future change cannot silently reintroduce unbounded growth.
+#[test]
+fn test_repo_graph_cache_prunes_paths_that_are_no_longer_indexed() {
+    let root = temp_root("repograph-cache-prune");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(ws_dir.join("src")).unwrap();
+    fs::write(ws_dir.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+    fs::write(ws_dir.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+    let cap = WorkspaceCap::new(&ws_dir).unwrap();
+    let cache = cap.repo_graph_cache().clone();
+
+    let _ = RepoGraph::build_from_workspace(&cap, MAX_GRAPH_FILES);
+    assert_eq!(
+        cache.lock().unwrap().len(),
+        2,
+        "both files must be indexed and cached"
+    );
+
+    // Deleting a file must drop its cache entry on the next build.
+    fs::remove_file(ws_dir.join("src/b.rs")).unwrap();
+    let _ = RepoGraph::build_from_workspace(&cap, MAX_GRAPH_FILES);
+    {
+        let c = cache.lock().unwrap();
+        assert_eq!(c.len(), 1, "the deleted file's cache entry must be pruned");
+        assert!(c.content_sha256("src/a.rs").is_some());
+    }
+
+    // The surviving unchanged file is still served from the cache, so pruning did not break reuse.
+    let rebuilt = RepoGraph::build_from_workspace(&cap, MAX_GRAPH_FILES);
+    assert!(rebuilt.cache_hits >= 1, "reuse must survive pruning");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// BUG-06: a Rust lifetime (`'a`, `'static`) is not a string opener. Before the fix the rest of the
+/// line was erased, dropping the call/identifier tokens the graph is built from. Single-quoted
+/// Python / JS strings must still be stripped.
+#[test]
+fn test_bug06_reference_tokens_survive_rust_lifetimes_and_still_strip_python_js_strings() {
+    // Each line carries exactly one `'`, so the old code erased everything after it.
+    let rust_src = "fn check<T>(x: T) -> usize where T: 'static { count_items(x) }\n\
+                    fn f(x: &'a str) -> usize { compute_len(x) }\n";
+    let tokens = extract_reference_tokens("src/lib.rs", rust_src);
+    assert!(tokens.contains("count_items"), "tokens: {:?}", tokens);
+    assert!(tokens.contains("compute_len"), "tokens: {:?}", tokens);
+
+    // A real char literal is still stripped, and the code after it is preserved.
+    let with_char = "fn g() -> char { let c = 'x'; marker_fn() }\n";
+    let tokens = extract_reference_tokens("src/lib.rs", with_char);
+    assert!(tokens.contains("marker_fn"), "tokens: {:?}", tokens);
+
+    // Python single-quoted strings are still removed.
+    let py = "def f():\n    call_marker('hidden_py_symbol')\n    after_fn()\n";
+    let tokens = extract_reference_tokens("a.py", py);
+    assert!(tokens.contains("after_fn"), "tokens: {:?}", tokens);
+    assert!(!tokens.contains("hidden_py_symbol"), "tokens: {:?}", tokens);
+
+    // JS single-quoted strings are still removed.
+    let js = "const x = 'hidden_js_symbol';\njs_after();\n";
+    let tokens = extract_reference_tokens("a.js", js);
+    assert!(tokens.contains("js_after"), "tokens: {:?}", tokens);
+    assert!(!tokens.contains("hidden_js_symbol"), "tokens: {:?}", tokens);
 }
 
 #[test]

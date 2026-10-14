@@ -433,6 +433,9 @@ struct AnthropicStreamAssembler {
     current_kind: std::collections::HashMap<usize, String>,
     current_id: std::collections::HashMap<usize, String>,
     current_name: std::collections::HashMap<usize, String>,
+    /// SSE content-block index → position in [`Self::reasoning`], so streamed `thinking_delta` /
+    /// `signature_delta` events append to the block their `content_block_start` opened.
+    reasoning_index: std::collections::HashMap<usize, usize>,
     stop_reason: Option<String>,
     usage: Option<TokenUsage>,
     saw_business: bool,
@@ -482,6 +485,27 @@ impl AnthropicStreamAssembler {
                                 .to_string(),
                         );
                         self.pending_json.insert(index, String::new());
+                    } else if kind == "thinking" || kind == "redacted_thinking" {
+                        // Extended thinking arrives as its own content block. Capture it up-front
+                        // so a streamed `signature_delta` / `thinking_delta` can append to it, and
+                        // so a `redacted_thinking` block (encrypted payload in `data`) is not
+                        // dropped — losing it would break the multi-turn signature check.
+                        self.reasoning.push(ReasoningBlock {
+                            text: block
+                                .get("thinking")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            signature: block
+                                .get("signature")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            opaque_payload: block
+                                .get("data")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        });
+                        self.reasoning_index
+                            .insert(index, self.reasoning.len() - 1);
                     }
                 }
                 self.saw_business = true;
@@ -497,22 +521,21 @@ impl AnthropicStreamAssembler {
                         }
                         Some("thinking_delta") => {
                             if let Some(t) = delta.get("thinking").and_then(Value::as_str) {
-                                if let Some(last) = self.reasoning.last_mut() {
-                                    last.text.get_or_insert_with(String::new).push_str(t);
-                                } else {
-                                    self.reasoning.push(ReasoningBlock {
-                                        text: Some(t.to_string()),
-                                        signature: None,
-                                        opaque_payload: None,
-                                    });
-                                }
+                                self.reasoning_for_index(index)
+                                    .text
+                                    .get_or_insert_with(String::new)
+                                    .push_str(t);
                             }
                         }
                         Some("signature_delta") => {
                             if let Some(s) = delta.get("signature").and_then(Value::as_str) {
-                                if let Some(last) = self.reasoning.last_mut() {
-                                    last.signature = Some(s.to_string());
-                                }
+                                // A signature can be split across several `signature_delta` events;
+                                // append so the reconstructed signature stays complete instead of
+                                // keeping only the last fragment (which corrupts verification).
+                                self.reasoning_for_index(index)
+                                    .signature
+                                    .get_or_insert_with(String::new)
+                                    .push_str(s);
                             }
                         }
                         Some("input_json_delta") => {
@@ -542,6 +565,7 @@ impl AnthropicStreamAssembler {
                     });
                 }
                 self.current_kind.remove(&index);
+                self.reasoning_index.remove(&index);
             }
             "message_delta" => {
                 if let Some(reason) = val
@@ -577,6 +601,18 @@ impl AnthropicStreamAssembler {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Reasoning block for an SSE content-block index, opening a fresh block when a delta arrives
+    /// without a preceding `content_block_start` so streamed thinking is never silently dropped.
+    fn reasoning_for_index(&mut self, index: usize) -> &mut ReasoningBlock {
+        if let Some(&pos) = self.reasoning_index.get(&index) {
+            return &mut self.reasoning[pos];
+        }
+        self.reasoning.push(ReasoningBlock::default());
+        let pos = self.reasoning.len() - 1;
+        self.reasoning_index.insert(index, pos);
+        &mut self.reasoning[pos]
     }
 
     fn finalize(self) -> Result<AssistantTurn, ProviderError> {

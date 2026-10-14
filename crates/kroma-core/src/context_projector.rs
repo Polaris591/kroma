@@ -13,6 +13,14 @@ pub const MIN_COMPACTABLE_TOOL_BYTES: usize = 1024; // > 1 KiB
 pub const WORKING_SET_PIN_TURNS: usize = 8;
 pub const MAX_OUTLINE_SYMBOLS: usize = 12;
 pub const MAX_OUTLINE_STUB_BYTES: usize = 400;
+/// BUG-07: hard cap on the total raw bytes retained for `recall_evidence`.
+///
+/// Compaction archives every reclaimable tool output, so without a cap a long session would pin
+/// all of them for its whole lifetime. When the cap is exceeded the oldest archived entries (by
+/// transcript position) are dropped deterministically. Their [`EvidenceLink`]s stay addressable, so
+/// a later `recall_evidence` reports that the raw bytes are no longer retained instead of failing
+/// opaquely or panicking.
+pub const MAX_EVIDENCE_BYTES: usize = 16 * 1024 * 1024;
 /// Why a tool result was replaced by an Outline Stub (Gate 2 evidence provenance).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -219,6 +227,8 @@ pub struct ContextProjector {
     last_touched_turns: HashMap<String, usize>,
     /// Raw tool output retained for `recall_evidence`, keyed by `source_entry_id`.
     evidence: HashMap<String, Arc<str>>,
+    /// Total bytes currently retained in `evidence`, used to enforce [`MAX_EVIDENCE_BYTES`].
+    evidence_bytes: usize,
     /// `call_id` → `source_entry_id`, so a model may recall by either identifier.
     evidence_call_index: HashMap<String, String>,
     /// Deterministic, ordered evidence graph for the current projection.
@@ -251,6 +261,7 @@ impl ContextProjector {
             last_pinned_baseline_end: 0,
             last_touched_turns: HashMap::new(),
             evidence: HashMap::new(),
+            evidence_bytes: 0,
             evidence_call_index: HashMap::new(),
             evidence_links: Vec::new(),
             last_budget: ContextBudgetBreakdown::default(),
@@ -326,7 +337,14 @@ impl ContextProjector {
     pub fn register_evidence(&mut self, link: EvidenceLink, raw: Arc<str>) {
         self.evidence_call_index
             .insert(link.call_id.clone(), link.source_entry_id.clone());
-        self.evidence.insert(link.source_entry_id.clone(), raw);
+        let raw_len = raw.len();
+        if let Some(previous) = self
+            .evidence
+            .insert(link.source_entry_id.clone(), raw)
+        {
+            self.evidence_bytes = self.evidence_bytes.saturating_sub(previous.len());
+        }
+        self.evidence_bytes = self.evidence_bytes.saturating_add(raw_len);
         self.compacted_indices.insert(link.canonical_index);
         if link.tool_name == "read" {
             if let Some(path) = link.relative_path.clone() {
@@ -341,6 +359,33 @@ impl ContextProjector {
                 .cmp(&b.canonical_index)
                 .then_with(|| a.source_entry_id.cmp(&b.source_entry_id))
         });
+        self.evict_evidence_over_cap();
+    }
+
+    /// BUG-07: keep the retained raw-evidence total under [`MAX_EVIDENCE_BYTES`]. Entries are
+    /// dropped oldest-first by transcript position (ties broken by id, so eviction is deterministic
+    /// and replay-stable). Only the raw bytes are dropped: the [`EvidenceLink`] and the
+    /// `call_id`→`source_entry_id` index survive, so `recall_evidence` still resolves the stub and
+    /// reports that the bytes are no longer retained.
+    fn evict_evidence_over_cap(&mut self) {
+        if self.evidence_bytes <= MAX_EVIDENCE_BYTES {
+            return;
+        }
+        let mut order: Vec<(usize, String)> = self
+            .evidence_links
+            .iter()
+            .filter(|link| self.evidence.contains_key(&link.source_entry_id))
+            .map(|link| (link.canonical_index, link.source_entry_id.clone()))
+            .collect();
+        order.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, id) in order {
+            if self.evidence_bytes <= MAX_EVIDENCE_BYTES {
+                break;
+            }
+            if let Some(dropped) = self.evidence.remove(&id) {
+                self.evidence_bytes = self.evidence_bytes.saturating_sub(dropped.len());
+            }
+        }
     }
 
     /// Look up raw evidence by `source_entry_id` or by the originating tool `call_id`.
@@ -353,15 +398,22 @@ impl ContextProjector {
     }
 
     /// Evidence-graph metadata for `source_entry_id` (or the originating tool `call_id`).
+    ///
+    /// Resolved from [`Self::evidence_links`] first, so a link stays addressable even after its raw
+    /// bytes were evicted by the [`MAX_EVIDENCE_BYTES`] cap — `recall_evidence` can then report that
+    /// the bytes are gone instead of claiming the id is unknown.
     pub fn evidence_link(&self, id: &str) -> Option<&EvidenceLink> {
-        let canonical = if self.evidence.contains_key(id) {
-            id
-        } else {
-            self.evidence_call_index.get(id).map(String::as_str)?
-        };
+        if let Some(link) = self
+            .evidence_links
+            .iter()
+            .find(|link| link.source_entry_id == id)
+        {
+            return Some(link);
+        }
+        let canonical = self.evidence_call_index.get(id)?;
         self.evidence_links
             .iter()
-            .find(|link| link.source_entry_id == canonical)
+            .find(|link| link.source_entry_id == *canonical)
     }
 
     /// Stable index of the append-only pinned baseline prefix. Persisted by the session WAL.
@@ -457,7 +509,9 @@ impl ContextProjector {
                 }
             });
             for link in stale {
-                self.evidence.remove(&link.source_entry_id);
+                if let Some(dropped) = self.evidence.remove(&link.source_entry_id) {
+                    self.evidence_bytes = self.evidence_bytes.saturating_sub(dropped.len());
+                }
                 if self.evidence_call_index.get(&link.call_id).map(String::as_str)
                     == Some(link.source_entry_id.as_str())
                 {
@@ -796,22 +850,38 @@ impl ContextProjector {
                     self.last_pinned_baseline_end = self.last_pinned_baseline_end.max(idx + 1);
                 }
 
-                // A later `read` of the same path supersedes this output. Computed from an
+                // A later `read` of the same path supersedes this output only when it actually
+                // covers the same lines, or when a successful `edit`/`write` on the file landed in
+                // between. Paging through a file (1-200, then 201-400) is *not* supersession, so
+                // it must not be flagged nor inflate `compaction_reread_count`. Computed from an
                 // immutable borrow so the mutable borrow below stays short-lived.
                 let superseded = match &self.projected_items[idx] {
-                    TranscriptItem::ToolResult(tr) => {
-                        tr.tool_name == "read"
-                            && tr.meta.relative_path.as_deref().is_some_and(|path| {
-                                self.projected_items[idx + 1..].iter().any(|later| {
-                                    matches!(
-                                        later,
-                                        TranscriptItem::ToolResult(t)
-                                            if t.tool_name == "read"
-                                                && t.outcome.is_success()
-                                                && t.meta.relative_path.as_deref() == Some(path)
-                                    )
-                                })
+                    TranscriptItem::ToolResult(tr) if tr.tool_name == "read" => {
+                        let this_range = tr.meta.lines_range;
+                        tr.meta.relative_path.as_deref().is_some_and(|path| {
+                            self.projected_items[idx + 1..].iter().any(|later| {
+                                let TranscriptItem::ToolResult(t) = later else {
+                                    return false;
+                                };
+                                if !t.outcome.is_success()
+                                    || t.meta.relative_path.as_deref() != Some(path)
+                                {
+                                    return false;
+                                }
+                                match t.tool_name.as_str() {
+                                    // A successful mutation after this read invalidates it.
+                                    "edit" | "write" => true,
+                                    "read" => match (this_range, t.meta.lines_range) {
+                                        (Some((start, end)), Some((later_start, later_end))) => {
+                                            later_start <= start && later_end >= end
+                                        }
+                                        // Unknown range: fall back to the conservative reading.
+                                        _ => true,
+                                    },
+                                    _ => false,
+                                }
                             })
+                        })
                     }
                     _ => false,
                 };

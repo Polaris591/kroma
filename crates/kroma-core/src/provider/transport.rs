@@ -12,7 +12,7 @@
 use crate::budget::BudgetConfig;
 use crate::provider::endpoint::ValidatedEndpoint;
 use crate::provider::ProviderError;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::ffi::CString;
 use std::io;
 use std::pin::Pin;
@@ -51,14 +51,14 @@ pub(crate) enum BodyFailure {
 // TLS
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::os::unix::io::AsRawFd;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::ffi::{c_char, c_int, c_long, c_void};
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use tokio::io::unix::AsyncFd;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[link(name = "ssl")]
 #[link(name = "crypto")]
 extern "C" {
@@ -71,10 +71,10 @@ extern "C" {
         ca_file: *const c_char,
         ca_path: *const c_char,
     ) -> c_int;
-    fn SSL_CTX_set_verify(ctx: *mut c_void, mode: c_int, cb: Option<extern "C" fn(c_int, *mut c_void) -> c_int>);
     fn SSL_new(ctx: *mut c_void) -> *mut c_void;
     fn SSL_free(ssl: *mut c_void);
     fn SSL_set_fd(ssl: *mut c_void, fd: c_int) -> c_int;
+    fn SSL_set_verify(ssl: *mut c_void, mode: c_int, cb: Option<extern "C" fn(c_int, *mut c_void) -> c_int>);
     fn SSL_ctrl(ssl: *mut c_void, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
     fn SSL_set1_host(ssl: *mut c_void, hostname: *const c_char) -> c_int;
     fn SSL_get_verify_result(ssl: *const c_void) -> c_long;
@@ -83,41 +83,122 @@ extern "C" {
     fn SSL_write(ssl: *mut c_void, buf: *const c_void, num: c_int) -> c_int;
     fn SSL_shutdown(ssl: *mut c_void) -> c_int;
     fn SSL_get_error(ssl: *const c_void, ret_code: c_int) -> c_int;
+    /// Clear the calling thread's OpenSSL error queue before an I/O call, so `SSL_get_error`
+    /// classifies *this* call rather than a stale error left by an earlier one.
+    fn ERR_clear_error();
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const SSL_VERIFY_NONE: c_int = 0x00;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const SSL_VERIFY_PEER: c_int = 0x01;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const X509_V_OK: c_long = 0;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const TLSEXT_NAMETYPE_HOST_NAME: c_long = 0;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const SSL_ERROR_WANT_READ: c_int = 2;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const SSL_ERROR_WANT_WRITE: c_int = 3;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const SSL_ERROR_SYSCALL: c_int = 5;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const SSL_ERROR_ZERO_RETURN: c_int = 6;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) struct OpenSslStream {
-    ctx: *mut c_void,
     ssl: *mut c_void,
     async_fd: AsyncFd<std::net::TcpStream>,
 }
 
-#[cfg(unix)]
-// Safety: Each OpenSslStream owns a dedicated SSL* and SSL_CTX* accessed exclusively by &mut self.
+/// Process-lifetime holder for the shared client `SSL_CTX`. `*mut c_void` is neither `Send` nor
+/// `Sync`, so it is wrapped to make the `OnceLock` usable from a `static`.
+#[cfg(all(unix, not(target_os = "macos")))]
+struct SharedSslCtx(*mut c_void);
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe impl Send for SharedSslCtx {}
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe impl Sync for SharedSslCtx {}
+
+/// Build (once) and return the shared client `SSL_CTX` with the default and platform CA bundles
+/// loaded.
+///
+/// The context is immutable after creation — per-connection verification mode is set on the `SSL`,
+/// not the context — so it is safe to share across threads: OpenSSL 1.1+ permits `SSL_new` from a
+/// shared `SSL_CTX`. It is intentionally never freed: it lives for the whole process, which also
+/// means every `SSL` created from it always outlives its parent context.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn shared_client_ssl_ctx() -> io::Result<*mut c_void> {
+    static CTX: std::sync::OnceLock<SharedSslCtx> = std::sync::OnceLock::new();
+    if let Some(ctx) = CTX.get() {
+        return Ok(ctx.0);
+    }
+    let created = unsafe {
+        let method = TLS_client_method();
+        if method.is_null() {
+            return Err(io::Error::other("TLS_client_method returned null"));
+        }
+        let ctx = SSL_CTX_new(method);
+        if ctx.is_null() {
+            return Err(io::Error::other("SSL_CTX_new returned null"));
+        }
+        let _ = SSL_CTX_set_default_verify_paths(ctx);
+        if let Ok(ca_bundle) = std::env::var("KROMA_CA_BUNDLE") {
+            if let Ok(c_ca) = CString::new(ca_bundle) {
+                let _ = SSL_CTX_load_verify_locations(ctx, c_ca.as_ptr(), std::ptr::null());
+            }
+        } else {
+            const KNOWN_CA_FILES: &[&str] = &[
+                "/data/data/com.termux/files/usr/etc/tls/cert.pem",
+                "/data/data/com.termux/files/usr/etc/ssl/cert.pem",
+                "/etc/ssl/certs/ca-certificates.crt",
+                "/etc/pki/tls/certs/ca-bundle.crt",
+                "/etc/ssl/ca-bundle.pem",
+                "/etc/pki/tls/cacert.pem",
+                "/etc/ssl/cert.pem",
+            ];
+            for file_path in KNOWN_CA_FILES {
+                if std::path::Path::new(file_path).is_file() {
+                    if let Ok(c_path) = CString::new(*file_path) {
+                        if SSL_CTX_load_verify_locations(ctx, c_path.as_ptr(), std::ptr::null()) == 1 {
+                            break;
+                        }
+                    }
+                }
+            }
+            const KNOWN_CA_DIRS: &[&str] = &["/system/etc/security/cacerts", "/etc/ssl/certs"];
+            for dir_path in KNOWN_CA_DIRS {
+                if std::path::Path::new(dir_path).is_dir() {
+                    if let Ok(c_path) = CString::new(*dir_path) {
+                        let _ = SSL_CTX_load_verify_locations(ctx, std::ptr::null(), c_path.as_ptr());
+                    }
+                }
+            }
+        }
+        ctx
+    };
+    if CTX.set(SharedSslCtx(created)).is_ok() {
+        Ok(created)
+    } else {
+        // Lost the initialization race: free the duplicate and reuse the winner.
+        unsafe { SSL_CTX_free(created) };
+        Ok(CTX
+            .get()
+            .expect("OnceLock::set failed, so another thread must have won the race")
+            .0)
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+// Safety: Each OpenSslStream owns a dedicated SSL* accessed exclusively by &mut self. The shared
+// SSL_CTX is immutable after creation and lives for the whole process.
 unsafe impl Send for OpenSslStream {}
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 unsafe impl Sync for OpenSslStream {}
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl Drop for OpenSslStream {
     fn drop(&mut self) {
         unsafe {
@@ -125,14 +206,11 @@ impl Drop for OpenSslStream {
                 let _ = SSL_shutdown(self.ssl);
                 SSL_free(self.ssl);
             }
-            if !self.ctx.is_null() {
-                SSL_CTX_free(self.ctx);
-            }
         }
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl OpenSslStream {
     async fn connect(tcp: TcpStream, host: &str) -> io::Result<Self> {
         let std_tcp = tcp.into_std()?;
@@ -154,61 +232,17 @@ impl OpenSslStream {
             SSL_VERIFY_PEER
         };
 
-        let (ctx, ssl) = unsafe {
-            let method = TLS_client_method();
-            if method.is_null() {
-                return Err(io::Error::other("TLS_client_method returned null"));
-            }
-            let ctx = SSL_CTX_new(method);
-            if ctx.is_null() {
-                return Err(io::Error::other("SSL_CTX_new returned null"));
-            }
-            let _ = SSL_CTX_set_default_verify_paths(ctx);
-            if let Ok(ca_bundle) = std::env::var("KROMA_CA_BUNDLE") {
-                if let Ok(c_ca) = CString::new(ca_bundle) {
-                    let _ = SSL_CTX_load_verify_locations(ctx, c_ca.as_ptr(), std::ptr::null());
-                }
-            } else {
-                const KNOWN_CA_FILES: &[&str] = &[
-                    "/data/data/com.termux/files/usr/etc/tls/cert.pem",
-                    "/data/data/com.termux/files/usr/etc/ssl/cert.pem",
-                    "/etc/ssl/certs/ca-certificates.crt",
-                    "/etc/pki/tls/certs/ca-bundle.crt",
-                    "/etc/ssl/ca-bundle.pem",
-                    "/etc/pki/tls/cacert.pem",
-                    "/etc/ssl/cert.pem",
-                ];
-                for file_path in KNOWN_CA_FILES {
-                    if std::path::Path::new(file_path).is_file() {
-                        if let Ok(c_path) = CString::new(*file_path) {
-                            if SSL_CTX_load_verify_locations(ctx, c_path.as_ptr(), std::ptr::null()) == 1 {
-                                break;
-                            }
-                        }
-                    }
-                }
-                const KNOWN_CA_DIRS: &[&str] = &[
-                    "/system/etc/security/cacerts",
-                    "/etc/ssl/certs",
-                ];
-                for dir_path in KNOWN_CA_DIRS {
-                    if std::path::Path::new(dir_path).is_dir() {
-                        if let Ok(c_path) = CString::new(*dir_path) {
-                            let _ = SSL_CTX_load_verify_locations(ctx, std::ptr::null(), c_path.as_ptr());
-                        }
-                    }
-                }
-            }
-            SSL_CTX_set_verify(ctx, verify_mode, None);
-
+        // Reuse the process-wide context; only the CA bundles are loaded there (never the verify
+        // mode), so per-connection settings stay on this SSL.
+        let ctx = shared_client_ssl_ctx()?;
+        let ssl = unsafe {
             let ssl = SSL_new(ctx);
             if ssl.is_null() {
-                SSL_CTX_free(ctx);
                 return Err(io::Error::other("SSL_new returned null"));
             }
+            SSL_set_verify(ssl, verify_mode, None);
             if SSL_set_fd(ssl, async_fd.get_ref().as_raw_fd()) != 1 {
                 SSL_free(ssl);
-                SSL_CTX_free(ctx);
                 return Err(io::Error::other("SSL_set_fd failed"));
             }
             if SSL_ctrl(
@@ -219,20 +253,21 @@ impl OpenSslStream {
             ) != 1
             {
                 SSL_free(ssl);
-                SSL_CTX_free(ctx);
                 return Err(io::Error::other("SSL_ctrl(SNI) failed"));
             }
             if SSL_set1_host(ssl, c_host.as_ptr()) != 1 {
                 SSL_free(ssl);
-                SSL_CTX_free(ctx);
                 return Err(io::Error::other("SSL_set1_host failed"));
             }
-            (ctx, ssl)
+            ssl
         };
 
-        let stream = Self { ctx, ssl, async_fd };
+        let stream = Self { ssl, async_fd };
         loop {
-            let ret = unsafe { SSL_connect(stream.ssl) };
+            let ret = unsafe {
+                ERR_clear_error();
+                SSL_connect(stream.ssl)
+            };
             if ret == 1 {
                 if verify_mode == SSL_VERIFY_PEER {
                     let verify_res = unsafe { SSL_get_verify_result(stream.ssl) };
@@ -269,7 +304,7 @@ impl OpenSslStream {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl AsyncRead for OpenSslStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -282,7 +317,10 @@ impl AsyncRead for OpenSslStream {
                 return Poll::Ready(Ok(()));
             }
             let cap = slice.len().min(i32::MAX as usize) as c_int;
-            let ret = unsafe { SSL_read(self.ssl, slice.as_mut_ptr() as *mut c_void, cap) };
+            let ret = unsafe {
+                ERR_clear_error();
+                SSL_read(self.ssl, slice.as_mut_ptr() as *mut c_void, cap)
+            };
             if ret > 0 {
                 buf.advance(ret as usize);
                 return Poll::Ready(Ok(()));
@@ -318,7 +356,7 @@ impl AsyncRead for OpenSslStream {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl AsyncWrite for OpenSslStream {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -330,7 +368,10 @@ impl AsyncWrite for OpenSslStream {
         }
         loop {
             let len = buf.len().min(i32::MAX as usize) as c_int;
-            let ret = unsafe { SSL_write(self.ssl, buf.as_ptr() as *const c_void, len) };
+            let ret = unsafe {
+                ERR_clear_error();
+                SSL_write(self.ssl, buf.as_ptr() as *const c_void, len)
+            };
             if ret > 0 {
                 return Poll::Ready(Ok(ret as usize));
             }
@@ -374,13 +415,15 @@ impl AsyncWrite for OpenSslStream {
     }
 }
 
-#[cfg(windows)]
-pub(crate) struct SchannelTlsStream {
+/// native-tls-backed stream for the platforms that do not link OpenSSL: Schannel on Windows and
+/// Security.framework on macOS. Both share the same PEM-bundle / insecure-tls handling below.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) struct NativeTlsStream {
     inner: tokio_native_tls::TlsStream<TcpStream>,
 }
 
-#[cfg(windows)]
-impl SchannelTlsStream {
+#[cfg(any(windows, target_os = "macos"))]
+impl NativeTlsStream {
     async fn connect(tcp: TcpStream, host: &str) -> io::Result<Self> {
         let clean_host = host.trim_start_matches('[').trim_end_matches(']');
         let mut builder = native_tls::TlsConnector::builder();
@@ -434,7 +477,7 @@ impl SchannelTlsStream {
         }
         let connector = builder
             .build()
-            .map_err(|e| io::Error::other(format!("Windows Schannel TLS init failed: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("native TLS init failed: {}", e)))?;
         let async_connector = tokio_native_tls::TlsConnector::from(connector);
         let stream = async_connector.connect(clean_host, tcp).await.map_err(|e| {
             io::Error::new(
@@ -446,8 +489,8 @@ impl SchannelTlsStream {
     }
 }
 
-#[cfg(windows)]
-impl AsyncRead for SchannelTlsStream {
+#[cfg(any(windows, target_os = "macos"))]
+impl AsyncRead for NativeTlsStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -457,8 +500,8 @@ impl AsyncRead for SchannelTlsStream {
     }
 }
 
-#[cfg(windows)]
-impl AsyncWrite for SchannelTlsStream {
+#[cfg(any(windows, target_os = "macos"))]
+impl AsyncWrite for NativeTlsStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -476,10 +519,10 @@ impl AsyncWrite for SchannelTlsStream {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) type PlatformTlsStream = OpenSslStream;
-#[cfg(windows)]
-pub(crate) type PlatformTlsStream = SchannelTlsStream;
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) type PlatformTlsStream = NativeTlsStream;
 
 pub(crate) enum MaybeTlsStream {
     Plain(TcpStream),

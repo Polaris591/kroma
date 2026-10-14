@@ -53,6 +53,19 @@ pub(crate) fn approx_tokens(bytes: usize) -> u64 {
     ((bytes as u64).saturating_add(3)) / 4
 }
 
+/// Estimated input tokens for one model request: the static prefix plus the projected message
+/// history.
+///
+/// BUG-09: `static_prefix_bytes` already includes `system_prompt.len()` (see
+/// `prompt.rs::build_static_prefix`), so the system prompt must not be counted a second time here —
+/// doing so would trip `max_total_tokens` early on a long system prompt.
+pub(crate) fn estimate_prompt_input_tokens(
+    static_prefix_bytes: usize,
+    message_history_bytes: usize,
+) -> u64 {
+    approx_tokens(static_prefix_bytes.saturating_add(message_history_bytes))
+}
+
 #[derive(Debug, Clone)]
 pub struct RunSummary {
     pub run_id: RunId,
@@ -676,10 +689,11 @@ impl AgentRunner {
             // input tokens from the projected byte size and refuse to start a request that would
             // already blow the remaining budget; otherwise cap this request's output so a single
             // completion cannot overshoot what is left.
-            let estimated_input_tokens = approx_tokens(
-                static_prefix.static_prefix_bytes
-                    .saturating_add(projected.message_history_bytes)
-                    .saturating_add(static_prefix.system_prompt.len()),
+            // `static_prefix_bytes` already includes `system_prompt.len()` (see
+            // `prompt.rs::build_static_prefix`), so it must not be added again here.
+            let estimated_input_tokens = estimate_prompt_input_tokens(
+                static_prefix.static_prefix_bytes,
+                projected.message_history_bytes,
             );
             let max_output_tokens = if let Some(max_tok) = self.max_total_tokens {
                 let spent = budget_tracker.all_total_tokens();
@@ -1056,6 +1070,81 @@ impl AgentRunner {
                                             }),
                                             current_turn.saturating_add(1),
                                         );
+                                        // BUG-02 (`v1.5.1`): the merge already landed on disk, but
+                                        // this branch `continue`s past the post-tool-batch
+                                        // capture/ledger/checkpoint block. Record it here so the
+                                        // merge is durably in the WAL (and `--undo` can revert it)
+                                        // even when the run ends via MaxTurns/cancel before another
+                                        // completion-gate cycle, and so Gate 4 can attribute a
+                                        // tournament-introduced regression to a mutation.
+                                        let revision_before = self.current_revision_id.clone();
+                                        let merged_changed_paths = self.capture_workspace_revision(
+                                            absolute_turn,
+                                            "mutation",
+                                            &mut logger,
+                                        );
+                                        for path in &merged_changed_paths {
+                                            modified_files_set.insert(path.clone());
+                                        }
+                                        if !merged_changed_paths.is_empty() {
+                                            let spans = build_worker_mutation_spans(
+                                                self.tool_runtime.env().workspace(),
+                                                "adaptive_tournament",
+                                                &merged_changed_paths,
+                                                &[],
+                                            );
+                                            self.mutation_ledger.record_mutation(
+                                                absolute_turn as u32,
+                                                "adaptive_tournament",
+                                                format!("adaptive-tournament-{}", absolute_turn),
+                                                None,
+                                                revision_before,
+                                                spans,
+                                            );
+                                        }
+                                        self.mutation_ledger.backfill_revision_and_paths(
+                                            absolute_turn as u32,
+                                            self.current_revision_id.clone(),
+                                            &merged_changed_paths,
+                                            self.snapshot_store.is_some()
+                                                && (self.batch_mutated
+                                                    || self.batch_ran_side_effect
+                                                    || !merged_changed_paths.is_empty()),
+                                        );
+                                        // The merge is captured; clear the batch flags so a later
+                                        // read-only turn cannot re-trigger a stale capture.
+                                        self.batch_mutated = false;
+                                        self.batch_ran_side_effect = false;
+                                        if let Some(err) = self.revision_error.clone() {
+                                            return self.finish_run(
+                                                TerminalReason::StrictLogFailure(err),
+                                                &budget_tracker,
+                                                &projector,
+                                                modified_files_set.into_iter().collect(),
+                                                last_assistant_text,
+                                                transcript,
+                                                logger,
+                                            );
+                                        }
+                                        self.persist_session_checkpoint(
+                                            &projector,
+                                            &transcript,
+                                            current_turn,
+                                        );
+                                        if let Some(err) = self.session_persist_error.clone() {
+                                            return self.finish_run(
+                                                TerminalReason::StrictLogFailure(format!(
+                                                    "session checkpoint failed: {}",
+                                                    err
+                                                )),
+                                                &budget_tracker,
+                                                &projector,
+                                                modified_files_set.into_iter().collect(),
+                                                last_assistant_text,
+                                                transcript,
+                                                logger,
+                                            );
+                                        }
                                         continue;
                                     }
                                 }
@@ -3206,4 +3295,32 @@ pub fn build_runtime_with_registry(
     budget: BudgetConfig,
 ) -> ToolRuntime {
     ToolRuntime::new(registry, policy_engine, env, budget)
+}
+
+#[cfg(test)]
+mod budget_estimation_tests {
+    use super::{approx_tokens, estimate_prompt_input_tokens};
+    use crate::prompt::PromptBuilder;
+
+    /// BUG-09: the request-input estimate must count the system prompt exactly once. It is already
+    /// part of `static_prefix_bytes`, so adding `system_prompt.len()` again would inflate the
+    /// estimate and trip `max_total_tokens` early on a long system prompt.
+    #[test]
+    fn test_bug09_input_estimate_does_not_double_count_the_system_prompt() {
+        let system_prompt = "S".repeat(40_000);
+        let prefix = PromptBuilder::new(system_prompt.clone()).build_static_prefix(&[]);
+        assert!(
+            prefix.static_prefix_bytes >= system_prompt.len(),
+            "static_prefix_bytes must already include the system prompt"
+        );
+
+        let history = 5_000usize;
+        let estimate = estimate_prompt_input_tokens(prefix.static_prefix_bytes, history);
+        assert_eq!(estimate, approx_tokens(prefix.static_prefix_bytes + history));
+        assert_ne!(
+            estimate,
+            approx_tokens(prefix.static_prefix_bytes + history + system_prompt.len()),
+            "the system prompt must not be counted twice"
+        );
+    }
 }

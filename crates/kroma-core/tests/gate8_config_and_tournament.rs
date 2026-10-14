@@ -8,7 +8,7 @@
 //! 5. `test_best_of_n_tournament_all_fail_preserves_parent_workspace`
 
 use kroma_core::config_file::{
-    ConfigOverrides, KromaConfigFile, ResolvedConfig, REDACTED_API_KEY,
+    collect_env, ConfigOverrides, KromaConfigFile, ResolvedConfig, REDACTED_API_KEY,
 };
 use kroma_core::env::{CompletionGate, CompletionGateContext, GateOutcome};
 use kroma_core::provider::{
@@ -39,6 +39,40 @@ fn temp_root(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("kroma-gate8-{}-{}", tag, Uuid::new_v4()));
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Serializes tests that mutate process-global environment variables: `std::env::set_var` is
+/// process-wide, so parallel test threads would otherwise observe each other's values.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Sets (or removes) one environment variable and restores the previous value on drop, so a
+/// failing assertion cannot leak a value into a sibling test.
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+
+    fn remove(name: &'static str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::remove_var(name);
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(prev) => std::env::set_var(self.name, prev),
+            None => std::env::remove_var(self.name),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -399,6 +433,53 @@ base_url = "http://attacker.example.com/v1"
     // (g) A malformed file is an error rather than a silent behaviour change.
     assert!(KromaConfigFile::parse_str("model = unquoted-bare-string").is_err());
     assert!(KromaConfigFile::parse_str("[unterminated\nmodel = \"x\"").is_err());
+}
+
+/// BUG-04: the workspace `.kroma.toml` is read from an untrusted repository, so a symlink, a
+/// non-regular file, or an oversized file must be rejected explicitly instead of hanging / OOMing
+/// startup. A normal workspace config must still load.
+#[cfg(unix)]
+#[test]
+fn test_workspace_config_rejects_symlink_fifo_and_oversized_files() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("wsconfig-hardening");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+
+    // (a) A normal workspace config still loads.
+    fs::write(ws.join(".kroma.toml"), "model = \"ws-model\"\n").unwrap();
+    let loaded = KromaConfigFile::load_workspace(&ws).expect("normal config must load");
+    assert_eq!(loaded.model.as_deref(), Some("ws-model"));
+
+    // (b) A symlink to a sensitive file is rejected rather than followed.
+    fs::write(root.join("outside.toml"), "model = \"stolen\"\n").unwrap();
+    fs::remove_file(ws.join(".kroma.toml")).unwrap();
+    symlink(root.join("outside.toml"), ws.join(".kroma.toml")).unwrap();
+    let err = KromaConfigFile::load_workspace(&ws).expect_err("symlink must be rejected");
+    assert!(err.contains("symbolic link"), "unexpected error: {}", err);
+
+    // (c) A FIFO is rejected instead of blocking the read forever.
+    fs::remove_file(ws.join(".kroma.toml")).unwrap();
+    let fifo = std::ffi::CString::new(ws.join(".kroma.toml").as_os_str().as_encoded_bytes())
+        .unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    let err = KromaConfigFile::load_workspace(&ws).expect_err("fifo must be rejected");
+    assert!(err.contains("not a regular file"), "unexpected error: {}", err);
+
+    // (d) A file above the 64 KiB cap is rejected instead of being slurped into memory.
+    fs::remove_file(ws.join(".kroma.toml")).unwrap();
+    let oversized = format!("model = \"{}\"\n", "x".repeat(70 * 1024));
+    fs::write(ws.join(".kroma.toml"), oversized).unwrap();
+    let err = KromaConfigFile::load_workspace(&ws).expect_err("oversized config must be rejected");
+    assert!(err.contains("exceeding"), "unexpected error: {}", err);
+
+    // A missing workspace config is still the empty default (unchanged behaviour).
+    fs::remove_file(ws.join(".kroma.toml")).unwrap();
+    let empty = KromaConfigFile::load_workspace(&ws).expect("missing config is default");
+    assert!(empty.model.is_none());
+
+    let _ = fs::remove_dir_all(&root);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1510,6 +1591,99 @@ fn test_b2_invalid_projection_profile_is_rejected_at_parse_time() {
     assert!(err.contains("projection_profile"), "got: {}", err);
 }
 
+// ---- BUG-01: `collect_env` / serialization / `set_user_global_key` cover every config key -----
+
+#[test]
+fn test_collect_env_captures_openai_anthropic_and_kroma_projection_and_tournament_variables() {
+    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // Clear the higher-precedence `KROMA_*` aliases so an ambient CI value cannot mask the
+    // fallbacks under test.
+    let _no_kroma_key = EnvVarGuard::remove("KROMA_API_KEY");
+    let _no_kroma_base = EnvVarGuard::remove("KROMA_BASE_URL");
+    let _openai_key = EnvVarGuard::set("OPENAI_API_KEY", "sk-openai-env");
+    let _anthropic_key = EnvVarGuard::set("ANTHROPIC_API_KEY", "sk-anthropic-env");
+    let _openai_base = EnvVarGuard::set("OPENAI_BASE_URL", "https://openai-env.example.com/v1");
+    let _projection = EnvVarGuard::set("KROMA_PROJECTION_PROFILE", "p3");
+    let _tournament = EnvVarGuard::set("KROMA_ADAPTIVE_TOURNAMENT", "3");
+
+    // `ResolvedConfig::load` snapshots the environment through `collect_env`; assert on that
+    // production snapshot rather than a hand-built map that bypasses the collection step.
+    let env = collect_env();
+    assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str), Some("sk-openai-env"));
+    assert_eq!(env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-anthropic-env"));
+    assert_eq!(
+        env.get("OPENAI_BASE_URL").map(String::as_str),
+        Some("https://openai-env.example.com/v1")
+    );
+    assert_eq!(env.get("KROMA_PROJECTION_PROFILE").map(String::as_str), Some("p3"));
+    assert_eq!(env.get("KROMA_ADAPTIVE_TOURNAMENT").map(String::as_str), Some("3"));
+
+    // The collected snapshot must actually drive resolution, not merely contain the keys.
+    let resolved = ResolvedConfig::resolve(
+        &KromaConfigFile::default(),
+        &KromaConfigFile::default(),
+        &env,
+        &ConfigOverrides::default(),
+        None,
+        PathBuf::from(".kroma.toml"),
+    );
+    assert_eq!(resolved.api_key.as_deref(), Some("sk-openai-env"));
+    assert_eq!(
+        resolved.base_url.as_deref(),
+        Some("https://openai-env.example.com/v1")
+    );
+    assert_eq!(resolved.projection_profile.as_deref(), Some("p3"));
+    assert_eq!(resolved.adaptive_tournament, Some(3));
+}
+
+#[test]
+fn test_config_serialization_round_trips_projection_profile_and_adaptive_tournament() {
+    let file = KromaConfigFile {
+        model: Some("gpt-4o".to_string()),
+        projection_profile: Some("p3".to_string()),
+        adaptive_tournament: Some(3),
+        ..Default::default()
+    };
+
+    let serialized = file.to_toml_string();
+    assert!(
+        serialized.contains("projection_profile = \"p3\""),
+        "projection_profile was dropped on save:\n{serialized}"
+    );
+    assert!(
+        serialized.contains("adaptive_tournament = 3"),
+        "adaptive_tournament was dropped on save:\n{serialized}"
+    );
+
+    let reparsed = KromaConfigFile::parse_str(&serialized).expect("round-trip must reparse");
+    assert_eq!(reparsed.model.as_deref(), Some("gpt-4o"));
+    assert_eq!(reparsed.projection_profile.as_deref(), Some("p3"));
+    assert_eq!(reparsed.adaptive_tournament, Some(3));
+}
+
+#[test]
+fn test_set_user_global_key_supports_projection_profile_and_adaptive_tournament() {
+    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let root = temp_root("set-config-key");
+    let _home = EnvVarGuard::set("KROMA_HOME", root.to_str().unwrap());
+
+    KromaConfigFile::set_user_global_key("projection_profile", "p3").unwrap();
+    KromaConfigFile::set_user_global_key("adaptive_tournament", "3").unwrap();
+    let loaded = KromaConfigFile::load_user_global().unwrap();
+    assert_eq!(loaded.projection_profile.as_deref(), Some("p3"));
+    assert_eq!(loaded.adaptive_tournament, Some(3));
+
+    assert!(
+        KromaConfigFile::set_user_global_key("adaptive_tournament", "many").is_err(),
+        "a non-numeric adaptive_tournament must be rejected"
+    );
+    let err = KromaConfigFile::set_user_global_key("bogus_key", "1").unwrap_err();
+    assert!(err.contains("projection_profile"), "got: {err}");
+    assert!(err.contains("adaptive_tournament"), "got: {err}");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 // ---- F08: missing provider usage is estimated, not ignored ------------------------------------
 
 #[tokio::test]
@@ -1669,7 +1843,7 @@ impl ModelProvider for WalRecordingProvider {
 }
 
 #[tokio::test]
-async fn test_p1_adaptive_tournament_merge_is_recorded_in_the_session_wal() {
+async fn test_p1_adaptive_tournament_merge_is_recorded_in_the_session_wal_and_mutation_ledger() {
     use kroma_core::agent_loop::{build_runtime_with_registry, AgentRunConfig, AgentRunner};
     use kroma_core::env::LocalHostEnv;
     use kroma_core::session::SessionJournal;
@@ -1742,6 +1916,21 @@ async fn test_p1_adaptive_tournament_merge_is_recorded_in_the_session_wal() {
     assert_eq!(
         journal.latest_revision_id().as_deref(),
         Some(merged.revision_id.as_str())
+    );
+
+    // BUG-02 (`v1.5.1`): the merge must also be attributed in the Gate 4 mutation ledger, or a
+    // tournament-introduced regression would be invisible to `AttributionEngine`.
+    let checkpoint = journal
+        .latest_active_checkpoint()
+        .expect("the run must persist a checkpoint carrying the mutation ledger");
+    assert!(
+        checkpoint.mutations.iter().any(|m| {
+            m.tool_name == "adaptive_tournament"
+                && m.touched_paths().contains(&"lib.rs")
+                && m.revision_after.is_some()
+        }),
+        "the adaptive tournament merge must be recorded in the mutation ledger: {:?}",
+        checkpoint.mutations
     );
 
     let _ = fs::remove_dir_all(&root);

@@ -9,7 +9,7 @@ use kroma_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner}
 use kroma_core::budget::BudgetConfig;
 use kroma_core::context_projector::{
     validate_tool_call_pairing, verify_tool_call_pairing, CompactionReason, ContextProjector,
-    EvidenceLink, ProjectionProfile, MIN_COMPACTABLE_TOOL_BYTES,
+    EvidenceLink, ProjectionProfile, MAX_EVIDENCE_BYTES, MIN_COMPACTABLE_TOOL_BYTES,
 };
 use kroma_core::env::LocalHostEnv;
 use kroma_core::events::EventLogger;
@@ -996,6 +996,215 @@ fn test_superseded_read_recall_returns_the_earlier_read_bytes() {
 // Post-Gemini-audit Gate 2 regressions (v0.10.0 final): branch isolation, resume bookkeeping,
 // UTF-8 / byte-cap recall pagination, and the four-profile A/B evaluation record.
 // ---------------------------------------------------------------------------------------------
+
+/// A successful `read` tool result carrying an explicit line window.
+fn paged_read(call_id: &str, path: &str, start: usize, end: usize, body: String) -> TranscriptItem {
+    TranscriptItem::ToolResult(ToolResultMessage {
+        call_id: ToolCallId::new(call_id),
+        tool_name: "read".into(),
+        outcome: ToolOutcome::Success,
+        content: Arc::from(body),
+        meta: ToolResultMeta {
+            relative_path: Some(path.to_string()),
+            lines_range: Some((start, end)),
+            ..Default::default()
+        },
+    })
+}
+
+/// BUG-07: paging through one file (1-200, then 201-400, then 401-600) must not be mistaken for a
+/// later read superseding the earlier one, and must not inflate the reread-regret counter per page.
+#[test]
+fn test_bug07_paged_reads_are_not_superseded_and_do_not_inflate_reread_regret() {
+    let budget = compaction_budget();
+    let mut items = vec![TranscriptItem::User(UserMessage {
+        content: "page through a file".into(),
+    })];
+    items.push(assistant_with(&[
+        ("call_p1", "read"),
+        ("call_p2", "read"),
+        ("call_p3", "read"),
+    ]));
+    items.push(paged_read(
+        "call_p1",
+        "src/paged.rs",
+        1,
+        200,
+        big_rust_source_with("page1_marker"),
+    ));
+    items.push(paged_read(
+        "call_p2",
+        "src/paged.rs",
+        201,
+        400,
+        big_rust_source_with("page2_marker"),
+    ));
+    items.push(paged_read(
+        "call_p3",
+        "src/paged.rs",
+        401,
+        600,
+        big_rust_source_with("page3_marker"),
+    ));
+    for turn in 0..6 {
+        push_read_turn(&mut items, "tail", turn);
+    }
+    let mut projector = ContextProjector::new();
+    let _ = projector.project(&mut items, &budget, 2048, None, 8).unwrap();
+
+    let paged_reasons: Vec<CompactionReason> = projector
+        .evidence_links()
+        .iter()
+        .filter(|link| link.call_id.starts_with("call_p"))
+        .map(|link| link.reason)
+        .collect();
+    assert!(
+        !paged_reasons.is_empty(),
+        "paginated reads should have been archived"
+    );
+    assert!(
+        paged_reasons
+            .iter()
+            .all(|reason| *reason != CompactionReason::SupersededRead),
+        "paging must not be misread as supersession: {:?}",
+        paged_reasons
+    );
+
+    // Re-reading the file after compaction is regret, counted once per compaction — not once per
+    // page.
+    let before = projector.compaction_reread_count();
+    projector.notify_file_read("src/paged.rs");
+    projector.notify_file_read("src/paged.rs");
+    projector.notify_file_read("src/paged.rs");
+    assert_eq!(
+        projector.compaction_reread_count(),
+        before + 1,
+        "three paged reads must not each inflate the reread-regret counter"
+    );
+}
+
+/// BUG-07: the two cases that *do* supersede an earlier read must still be detected — a later read
+/// whose window covers the earlier one, and a successful `edit` between two reads.
+#[test]
+fn test_bug07_covering_read_and_intervening_edit_still_supersede() {
+    let budget = compaction_budget();
+
+    // (a) A later read covering the earlier window supersedes it.
+    let mut items = vec![TranscriptItem::User(UserMessage {
+        content: "cover".into(),
+    })];
+    items.push(assistant_with(&[("call_a", "read"), ("call_b", "read")]));
+    items.push(paged_read(
+        "call_a",
+        "src/cover.rs",
+        1,
+        200,
+        big_rust_source_with("early_marker"),
+    ));
+    items.push(paged_read(
+        "call_b",
+        "src/cover.rs",
+        1,
+        400,
+        big_rust_source_with("wide_marker"),
+    ));
+    for turn in 0..6 {
+        push_read_turn(&mut items, "tail", turn);
+    }
+    let mut projector = ContextProjector::new();
+    let _ = projector.project(&mut items, &budget, 2048, None, 8).unwrap();
+    let a = projector
+        .evidence_links()
+        .iter()
+        .find(|link| link.call_id == "call_a")
+        .expect("the earlier read must be archived");
+    assert_eq!(a.reason, CompactionReason::SupersededRead);
+
+    // (b) A successful `edit` between reads supersedes the earlier read.
+    let mut items = vec![TranscriptItem::User(UserMessage {
+        content: "edit".into(),
+    })];
+    items.push(assistant_with(&[("call_e1", "read"), ("call_ed", "edit")]));
+    items.push(paged_read(
+        "call_e1",
+        "src/edited.rs",
+        1,
+        200,
+        big_rust_source_with("before_edit"),
+    ));
+    items.push(TranscriptItem::ToolResult(ToolResultMessage {
+        call_id: ToolCallId::new("call_ed"),
+        tool_name: "edit".into(),
+        outcome: ToolOutcome::Success,
+        content: Arc::from("edited"),
+        meta: ToolResultMeta {
+            relative_path: Some("src/edited.rs".into()),
+            ..Default::default()
+        },
+    }));
+    for turn in 0..6 {
+        push_read_turn(&mut items, "tail", turn);
+    }
+    let mut projector = ContextProjector::new();
+    let _ = projector.project(&mut items, &budget, 2048, None, 8).unwrap();
+    let e1 = projector
+        .evidence_links()
+        .iter()
+        .find(|link| link.call_id == "call_e1")
+        .expect("the pre-edit read must be archived");
+    assert_eq!(e1.reason, CompactionReason::SupersededRead);
+}
+
+/// BUG-07: the raw-evidence store is capped. When it overflows, the oldest entries are evicted and
+/// `recall_evidence` returns an understandable error rather than panicking or returning empty.
+#[test]
+fn test_bug07_evidence_cap_evicts_oldest_and_recall_reports_unretained_bytes() {
+    let mut projector = ContextProjector::new();
+    let big = "x".repeat(MAX_EVIDENCE_BYTES / 2 + 1024);
+    let make_link = |source_entry_id: &str, canonical_index: usize, call_id: &str, path: &str| {
+        EvidenceLink {
+            source_entry_id: source_entry_id.to_string(),
+            canonical_index,
+            call_id: call_id.to_string(),
+            tool_name: "read".to_string(),
+            relative_path: Some(path.to_string()),
+            original_sha256: sha256_hex64(big.as_bytes()),
+            original_bytes: big.len(),
+            original_lines: 1,
+            stub_bytes: 10,
+            reason: CompactionReason::StepDownArchive,
+        }
+    };
+    projector.register_evidence(
+        make_link("ev-0000-old", 0, "call_old", "src/old.rs"),
+        Arc::from(big.as_str()),
+    );
+    projector.register_evidence(
+        make_link("ev-0001-new", 1, "call_new", "src/new.rs"),
+        Arc::from(big.as_str()),
+    );
+
+    assert!(
+        projector.evidence_lookup("ev-0000-old").is_none(),
+        "the oldest entry's raw bytes must be evicted"
+    );
+    assert!(
+        projector.evidence_lookup("ev-0001-new").is_some(),
+        "the newest entry's raw bytes must be retained"
+    );
+    assert!(
+        projector.evidence_link("ev-0000-old").is_some(),
+        "the evicted entry must stay addressable"
+    );
+
+    let out = execute_recall_evidence(&projector, r#"{"source_entry_id":"ev-0000-old"}"#);
+    assert!(!out.outcome.is_success(), "{}", out.content);
+    assert!(
+        out.content.contains("no longer retained"),
+        "expected an understandable 'bytes gone' error, got: {}",
+        out.content
+    );
+}
 
 const FIRST_BRANCH_SECRET: &str = "FIRST_BRANCH_SECRET";
 const ABANDONED_BRANCH_SECRET: &str = "ABANDONED_BRANCH_SECRET";

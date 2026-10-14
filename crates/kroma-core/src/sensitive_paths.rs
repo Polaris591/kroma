@@ -18,17 +18,19 @@ impl SensitivePathGuard {
             })
             .collect();
 
-        // Check directory components for .aws, .ssh, .kube, .gnupg, .docker, and .git/hooks or .git/config
-        for (i, s) in comps.iter().enumerate() {
-            if matches!(s.as_str(), ".aws" | ".ssh" | ".kube" | ".gnupg" | ".docker") {
+        // Check directory components for the credential/key dot-directories. Any component named
+        // `.git` marks the whole subtree sensitive: git internals are not workspace content and the
+        // file tools (read/write/edit/grep/find/ls) must never touch them. Git state that the agent
+        // legitimately needs is reached through the `bash` tool, not through this guard. Blocking
+        // only `.git/hooks|config|credentials` left `.git/modules/<sub>/hooks/*` (submodule hook
+        // execution), `.git/info/attributes` (malicious `filter=` drivers) and `.git/HEAD` /
+        // `.git/refs/*` writable. `to_ascii_lowercase` above already folds Windows `.GIT`.
+        for s in &comps {
+            if matches!(
+                s.as_str(),
+                ".aws" | ".ssh" | ".kube" | ".gnupg" | ".docker" | ".git"
+            ) {
                 return true;
-            }
-            if s == ".git" {
-                if let Some(next) = comps.get(i + 1) {
-                    if matches!(next.as_str(), "hooks" | "config" | "credentials") {
-                        return true;
-                    }
-                }
             }
         }
 

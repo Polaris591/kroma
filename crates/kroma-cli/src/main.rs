@@ -586,7 +586,12 @@ where
 
     let policy_mode = PolicyMode::from_flags(policy_flag.as_deref(), allow_write, allow_shell)?;
     if no_subagents {
+        // BUG-09 (`v1.5.1`): `--no-subagents` is an explicit operator capability disable, so it
+        // must outrank any workspace-controlled `max_subagents` (a key an untrusted repo may set in
+        // `.kroma.toml`). Marking it explicit routes it through `ConfigOverrides` instead of
+        // falling back to `workspace.max_subagents` during `ResolvedConfig::resolve`.
         max_subagents = 0;
+        max_subagents_explicit = true;
     }
 
     Ok(CliArgs {
@@ -622,6 +627,38 @@ where
         protocol_explicit,
         max_subagents_explicit,
     })
+}
+
+/// Build the CLI-override layer from parsed arguments. Precedence is CLI flags > `KROMA_*` env vars
+/// > workspace `.kroma.toml` (benign keys only) > `~/.kroma/config.toml`.
+///
+/// BUG-09 (`v1.5.1`): `--no-subagents` marks [`CliArgs::max_subagents_explicit`], so its explicit
+/// `0` is carried here as an override and cannot be outranked by a workspace-controlled
+/// `max_subagents`.
+fn config_overrides_for(cli: &CliArgs) -> ConfigOverrides {
+    ConfigOverrides {
+        profile: cli.profile.clone(),
+        model: None,
+        base_url: None,
+        api_key: None,
+        protocol: if cli.protocol_explicit {
+            Some(cli.protocol.clone())
+        } else {
+            None
+        },
+        reasoning_effort: cli.reasoning_effort.clone(),
+        verify_command: cli.verify_cmd.clone(),
+        max_subagents: if cli.max_subagents_explicit {
+            Some(cli.max_subagents)
+        } else {
+            None
+        },
+        // B2 (`v1.4.0`): a `--projection-profile` CLI flag is not exposed yet; the value comes from
+        // `config.toml` / `.kroma.toml` / `KROMA_PROJECTION_PROFILE` / `/config set`.
+        projection_profile: None,
+        // Item #3 (`v1.4.0`): adaptive tournament escalation comes from config, not a CLI flag.
+        adaptive_tournament: None,
+    }
 }
 
 /// Resolve a `--resume` argument into a concrete session WAL path.
@@ -1488,29 +1525,7 @@ async fn main() -> ExitCode {
     // v1.3.0: layered configuration. Precedence is CLI flags > KROMA_* env vars >
     // workspace `.kroma.toml` (benign keys only) > `~/.kroma/config.toml`. A workspace file can
     // never contribute credentials, endpoints, hooks or verification commands.
-    let overrides = ConfigOverrides {
-        profile: cli.profile.clone(),
-        model: None,
-        base_url: None,
-        api_key: None,
-        protocol: if cli.protocol_explicit {
-            Some(cli.protocol.clone())
-        } else {
-            None
-        },
-        reasoning_effort: cli.reasoning_effort.clone(),
-        verify_command: cli.verify_cmd.clone(),
-        max_subagents: if cli.max_subagents_explicit {
-            Some(cli.max_subagents)
-        } else {
-            None
-        },
-        // B2 (`v1.4.0`): a `--projection-profile` CLI flag is not exposed yet; the value comes from
-        // `config.toml` / `.kroma.toml` / `KROMA_PROJECTION_PROFILE` / `/config set`.
-        projection_profile: None,
-        // Item #3 (`v1.4.0`): adaptive tournament escalation comes from config, not a CLI flag.
-        adaptive_tournament: None,
-    };
+    let overrides = config_overrides_for(&cli);
     let resolved_config = match ResolvedConfig::load(&cli.workspace, &overrides) {
         Ok(c) => c,
         Err(e) => {
@@ -1590,7 +1605,10 @@ async fn main() -> ExitCode {
     }
 
     let budget = BudgetConfig::default();
-    let gate_choice = match choose_completion_gate(&cli, std::env::var("KROMA_VERIFY_COMMAND").ok()) {
+    // The resolved config already encodes the documented precedence (CLI `--verify-cmd` >
+    // `KROMA_VERIFY_COMMAND` > `~/.kroma/config.toml`), so passing it here is what makes a
+    // `verify_command` written to the config file actually take effect in headless mode.
+    let gate_choice = match choose_completion_gate(&cli, resolved_config.verify_command.clone()) {
         Ok(choice) => choice,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -1863,8 +1881,11 @@ async fn main() -> ExitCode {
 
     // Gate 3: the registry carries the reversible extension mount points, the workspace skill
     // catalog, and the CLI-declared hooks.
+    // BUG-01 (`v1.5.1`): the headless path must honour the same resolved `max_subagents` as the
+    // REPL/serve path (`resolved_config` already merges CLI > env > workspace > user file).
+    let max_subagents = resolved_config.max_subagents.unwrap_or(cli.max_subagents);
     let mut registry = ToolRegistry::new(cli.tool_filter.clone()).with_workspace_skills(workspace_skills);
-    if cli.max_subagents == 0 {
+    if max_subagents == 0 {
         registry = registry.without_subagents();
     }
     match build_cli_extension(&cli) {
@@ -1928,7 +1949,7 @@ async fn main() -> ExitCode {
         .with_subtree_context(subtree_tracker)
         .with_completion_gate(build_completion_gate(gate_choice))
         .with_completion_gate_max_retries(max_gate_retries)
-        .with_max_subagents(cli.max_subagents)
+        .with_max_subagents(max_subagents)
         // Item #3 (`v1.4.0`): adaptive tournament escalation on repeated verification failure.
         .with_adaptive_tournament_candidates(
             resolved_config.adaptive_tournament.unwrap_or(0),
@@ -2728,6 +2749,88 @@ mod tests {
             "not-a-number".into(),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn test_no_subagents_outranks_workspace_config() {
+        // BUG-09 (`v1.5.1`): `--no-subagents` is an explicit operator capability disable. A
+        // workspace `.kroma.toml` (untrusted repo input) may set `max_subagents`, but it must not
+        // silently re-enable subagents behind the operator's back.
+        let workspace_cfg = kroma_core::config_file::KromaConfigFile::parse_str("max_subagents = 5")
+            .expect("workspace config parses");
+        let user_cfg = kroma_core::config_file::KromaConfigFile::default();
+        let env = std::collections::BTreeMap::new();
+        let workspace_path = PathBuf::from(".kroma.toml");
+
+        let resolve = |cli: &CliArgs| {
+            let overrides = config_overrides_for(cli);
+            ResolvedConfig::resolve(
+                &user_cfg,
+                &workspace_cfg,
+                &env,
+                &overrides,
+                None,
+                workspace_path.clone(),
+            )
+        };
+
+        let disabled = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "check".into(),
+            "--no-subagents".into(),
+        ])
+        .unwrap();
+        let disabled_resolved = resolve(&disabled);
+        assert_eq!(
+            disabled_resolved
+                .max_subagents
+                .unwrap_or(disabled.max_subagents),
+            0,
+            "--no-subagents must not be overridden by a workspace-controlled max_subagents"
+        );
+
+        // Normal path: without the flag the workspace file's value still applies.
+        let default_cli = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "check".into(),
+        ])
+        .unwrap();
+        let default_resolved = resolve(&default_cli);
+        assert_eq!(
+            default_resolved
+                .max_subagents
+                .unwrap_or(default_cli.max_subagents),
+            5,
+            "without --no-subagents the workspace max_subagents must still apply"
+        );
+
+        // An explicit --max-subagents still outranks the workspace file.
+        let explicit = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "check".into(),
+            "--max-subagents".into(),
+            "3".into(),
+        ])
+        .unwrap();
+        let explicit_resolved = resolve(&explicit);
+        assert_eq!(
+            explicit_resolved
+                .max_subagents
+                .unwrap_or(explicit.max_subagents),
+            3,
+        );
     }
 
     #[test]

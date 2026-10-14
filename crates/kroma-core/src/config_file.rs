@@ -28,8 +28,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+/// Hard cap on the size of a workspace `.kroma.toml`.
+///
+/// The file lives inside an untrusted repository, so a symlink to an oversized file must not be
+/// able to exhaust memory while the process starts. 64 KiB is far more than the allow-listed key
+/// set can ever need.
+pub const MAX_WORKSPACE_CONFIG_BYTES: u64 = 64 * 1024;
 
 /// Top-level keys a workspace `.kroma.toml` is allowed to contribute. Everything else — including
 /// credentials, endpoint overrides, verification commands, hooks and policy switches — is ignored.
@@ -69,6 +76,11 @@ const ENV_PROFILE: &str = "KROMA_PROFILE";
 const ENV_PROJECTION_PROFILE: &str = "KROMA_PROJECTION_PROFILE";
 /// Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
 const ENV_ADAPTIVE_TOURNAMENT: &str = "KROMA_ADAPTIVE_TOURNAMENT";
+/// Conventional OpenAI-compatible variables accepted as fallbacks for the endpoint/credential.
+/// They must be collected by [`collect_env`] or [`ResolvedConfig::load`] would never see them.
+const ENV_OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
+const ENV_OPENAI_API_KEY: &str = "OPENAI_API_KEY";
+const ENV_ANTHROPIC_API_KEY: &str = "ANTHROPIC_API_KEY";
 
 /// Placeholder shown instead of a real credential by [`ResolvedConfig::redacted_summary`].
 pub const REDACTED_API_KEY: &str = "sk-***";
@@ -217,8 +229,74 @@ impl KromaConfigFile {
     }
 
     /// Load the workspace configuration file, if one exists.
+    ///
+    /// Unlike the trusted user global file, `<workspace>/.kroma.toml` comes from an untrusted
+    /// repository, so it is read defensively: a missing file yields the empty default, but a
+    /// symlink, a non-regular file (a FIFO would hang startup; a device could block forever), a
+    /// file larger than [`MAX_WORKSPACE_CONFIG_BYTES`], or non-UTF-8 content is an explicit error
+    /// rather than a silent ignore, so a hostile repository is visible instead of quietly changing
+    /// behaviour. The workspace config is deliberately *not* added to [`crate::sensitive_paths`]:
+    /// the agent must still be able to edit its own project configuration.
     pub fn load_workspace(workspace_root: &Path) -> Result<Self, String> {
-        Self::load(&Self::workspace_config_path(workspace_root))
+        let path = Self::workspace_config_path(workspace_root);
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => {
+                return Err(format!(
+                    "cannot read configuration file {}: {}",
+                    path.display(),
+                    err
+                ))
+            }
+        };
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to load configuration file {}: it is a symbolic link (a workspace config must be a regular file)",
+                path.display()
+            ));
+        }
+        if !meta.file_type().is_file() {
+            return Err(format!(
+                "refusing to load configuration file {}: it is not a regular file",
+                path.display()
+            ));
+        }
+        if meta.len() > MAX_WORKSPACE_CONFIG_BYTES {
+            return Err(workspace_config_too_large(&path, meta.len()));
+        }
+
+        // Bound the read as well: the file could grow between the `stat` above and the read, and a
+        // regular file can be arbitrarily large on disk.
+        let mut file = fs::File::open(&path).map_err(|err| {
+            format!(
+                "cannot read configuration file {}: {}",
+                path.display(),
+                err
+            )
+        })?;
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(MAX_WORKSPACE_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|err| {
+                format!(
+                    "cannot read configuration file {}: {}",
+                    path.display(),
+                    err
+                )
+            })?;
+        if bytes.len() as u64 > MAX_WORKSPACE_CONFIG_BYTES {
+            return Err(workspace_config_too_large(&path, bytes.len() as u64));
+        }
+        let text = String::from_utf8(bytes).map_err(|_| {
+            format!(
+                "cannot read configuration file {}: content is not valid UTF-8",
+                path.display()
+            )
+        })?;
+        Self::parse_str(&text)
+            .map_err(|e| format!("invalid configuration file {}: {}", path.display(), e))
     }
 
     /// Serialize back to the supported TOML subset.
@@ -236,6 +314,7 @@ impl KromaConfigFile {
             ("reasoning_effort", self.reasoning_effort.as_ref()),
             ("policy", self.policy.as_ref()),
             ("verify_command", self.verify_command.as_ref()),
+            ("projection_profile", self.projection_profile.as_ref()),
         ] {
             if let Some(v) = value {
                 out.push_str(&format!("{} = {}\n", label, toml_quote(v)));
@@ -243,6 +322,9 @@ impl KromaConfigFile {
         }
         if let Some(n) = self.max_subagents {
             out.push_str(&format!("max_subagents = {}\n", n));
+        }
+        if let Some(n) = self.adaptive_tournament {
+            out.push_str(&format!("adaptive_tournament = {}\n", n));
         }
         for (name, profile) in &self.profiles {
             out.push_str(&format!("\n[profiles.{}]\n", name));
@@ -278,7 +360,8 @@ impl KromaConfigFile {
     /// Read-modify-write a single top-level key in the user global file.
     ///
     /// `key` accepts the same names as the file format (`model`, `base_url`, `api_key`, `protocol`,
-    /// `reasoning_effort`, `policy`, `verify_command`, `default_profile`, `max_subagents`).
+    /// `reasoning_effort`, `policy`, `verify_command`, `default_profile`, `max_subagents`,
+    /// `projection_profile`, `adaptive_tournament`).
     pub fn set_user_global_key(key: &str, value: &str) -> Result<PathBuf, String> {
         let mut file = Self::load_user_global()?;
         let key = key.trim();
@@ -301,9 +384,17 @@ impl KromaConfigFile {
                     .map_err(|_| format!("'{}' is not a valid max_subagents value", value))?;
                 file.max_subagents = Some(parsed);
             }
+            "projection_profile" => file.projection_profile = Some(value.to_string()),
+            "adaptive_tournament" => {
+                let parsed = value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| format!("'{}' is not a valid adaptive_tournament value", value))?;
+                file.adaptive_tournament = Some(parsed);
+            }
             other => {
                 return Err(format!(
-                    "unknown configuration key '{}'; expected one of: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents",
+                    "unknown configuration key '{}'; expected one of: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents, projection_profile, adaptive_tournament",
                     other
                 ));
             }
@@ -419,15 +510,15 @@ impl ResolvedConfig {
                 .base_url
                 .clone()
                 .or_else(|| env_string(ENV_BASE_URL))
-                .or_else(|| env_string("OPENAI_BASE_URL"))
+                .or_else(|| env_string(ENV_OPENAI_BASE_URL))
                 .or_else(|| profile.and_then(|p| p.base_url.clone()))
                 .or_else(|| user.base_url.clone()),
             api_key: overrides
                 .api_key
                 .clone()
                 .or_else(|| env_string(ENV_API_KEY))
-                .or_else(|| env_string("OPENAI_API_KEY"))
-                .or_else(|| env_string("ANTHROPIC_API_KEY"))
+                .or_else(|| env_string(ENV_OPENAI_API_KEY))
+                .or_else(|| env_string(ENV_ANTHROPIC_API_KEY))
                 .or_else(|| profile.and_then(|p| p.api_key.clone()))
                 .or_else(|| user.api_key.clone()),
             protocol: overrides
@@ -543,6 +634,15 @@ fn overrides_absent(user_value: &Option<String>, env_value: Option<String>) -> O
     env_value.or_else(|| user_value.clone())
 }
 
+fn workspace_config_too_large(path: &Path, len: u64) -> String {
+    format!(
+        "refusing to load configuration file {}: it is {} bytes, exceeding the {} byte workspace config limit",
+        path.display(),
+        len,
+        MAX_WORKSPACE_CONFIG_BYTES
+    )
+}
+
 fn env_get(env: &BTreeMap<String, String>, name: &str) -> Option<String> {
     env.get(name)
         .map(|v| v.trim().to_string())
@@ -562,6 +662,11 @@ pub fn collect_env() -> BTreeMap<String, String> {
         ENV_MAX_SUBAGENTS,
         ENV_PROFILE,
         "KROMA_POLICY",
+        ENV_PROJECTION_PROFILE,
+        ENV_ADAPTIVE_TOURNAMENT,
+        ENV_OPENAI_BASE_URL,
+        ENV_OPENAI_API_KEY,
+        ENV_ANTHROPIC_API_KEY,
     ] {
         if let Ok(value) = std::env::var(name) {
             out.insert(name.to_string(), value);

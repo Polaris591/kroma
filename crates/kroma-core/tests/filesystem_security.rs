@@ -3,7 +3,10 @@ use kroma_core::budget::BudgetConfig;
 use kroma_core::env::LocalHostEnv;
 use kroma_core::messages::{ToolCall, ToolOutcome};
 use kroma_core::sensitive_paths::SensitivePathGuard;
-use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
+use kroma_core::tool::policy::{
+    ApprovalDecision, ApprovalHandler, ApprovalRequest, NonInteractiveApprovalHandler, PolicyEngine,
+    PolicyMode,
+};
 use kroma_core::types::{ErrorCode, ToolCallId};
 use kroma_core::workspace::{
     is_windows_reserved_device_name, InodeMutationLock, WorkspaceCap, WorkspaceError,
@@ -45,6 +48,23 @@ fn test_sensitive_path_guard_rules_and_exemptions() {
     assert!(SensitivePathGuard::is_sensitive(Path::new(".npmrc")));
     assert!(SensitivePathGuard::is_sensitive(Path::new("gcp-credentials-prod.json")));
     assert!(SensitivePathGuard::is_sensitive(Path::new("terraform.tfstate.backup")));
+
+    // BUG-04: the whole `.git` subtree is sensitive, not just `.git/hooks|config|credentials`.
+    // `.git/modules/<sub>/hooks/*` runs on checkout, `.git/info/attributes` can install a malicious
+    // `filter=` driver, and `.git/HEAD` / `.git/refs/*` are writable state.
+    assert!(SensitivePathGuard::is_sensitive(Path::new(".git/HEAD")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(".git/config")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(".git/hooks/post-checkout")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(".git/info/attributes")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        ".git/modules/x/hooks/post-checkout"
+    )));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(".git/refs/heads/main")));
+    // Windows folds case, so the uppercase variant is covered by the same rule.
+    assert!(SensitivePathGuard::is_sensitive(Path::new(".GIT/HEAD")));
+    // Only the exact `.git` component is blocked; lookalikes stay ordinary files.
+    assert!(!SensitivePathGuard::is_sensitive(Path::new(".gitignore")));
+    assert!(!SensitivePathGuard::is_sensitive(Path::new("src/.gitmodules")));
 
     // Explicitly exempted templates
     assert!(!SensitivePathGuard::is_sensitive(Path::new(".env.example")));
@@ -197,6 +217,212 @@ async fn test_workspace_boundary_blocks_parent_traversal_absolute_and_external_s
             code: ErrorCode::SensitivePathBlocked
         }
     );
+
+    let _ = fs::remove_dir_all(&tmp_root);
+}
+
+/// Test approval handler: interactive, returns a fixed decision, and counts how many prompts were
+/// raised so the test can prove a grant was per-call rather than cached.
+struct CountingApprovalHandler {
+    decision: ApprovalDecision,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ApprovalHandler for CountingApprovalHandler {
+    fn request_approval(&self, _req: &ApprovalRequest) -> ApprovalDecision {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.decision
+    }
+
+    fn is_interactive(&self) -> bool {
+        true
+    }
+}
+
+/// Test approval handler that approves only the *first* prompt (`AllowOnce`) and denies every later
+/// one. Reusing a single runtime with this handler proves a grant is scoped to the one call it was
+/// given for, rather than leaking to a later sensitive-path access.
+struct FirstCallOnlyApprovalHandler {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ApprovalHandler for FirstCallOnlyApprovalHandler {
+    fn request_approval(&self, _req: &ApprovalRequest) -> ApprovalDecision {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n == 0 {
+            ApprovalDecision::AllowOnce
+        } else {
+            ApprovalDecision::Deny
+        }
+    }
+
+    fn is_interactive(&self) -> bool {
+        true
+    }
+}
+
+/// BUG-08: an interactive approval must let the tool reach the *one* sensitive path the operator
+/// approved, while leaving every other path (and every unapproved or non-interactive call) blocked.
+#[tokio::test]
+async fn test_approved_sensitive_path_read_succeeds_but_stays_scoped_to_the_call() {
+    let tmp_root = std::env::temp_dir().join(format!("kroma-approve-{}", Uuid::new_v4()));
+    let ws_dir = tmp_root.join("ws");
+    let state_dir = tmp_root.join("state");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::write(ws_dir.join(".env"), "SECRET=1\n").unwrap();
+    fs::write(ws_dir.join(".npmrc"), "//registry:_authToken=x\n").unwrap();
+
+    let read_env = ToolCall {
+        call_id: ToolCallId::new("r1"),
+        name: "read".into(),
+        raw_arguments: r#"{"path":".env"}"#.into(),
+    };
+
+    // (a) `AllowOnce` grants this call: the read succeeds. The handler approves only the first
+    // prompt, so reusing this same runtime in (b) proves the grant is scoped to this single call.
+    let allow = Arc::new(FirstCallOnlyApprovalHandler {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let env = Arc::new(LocalHostEnv::new(&ws_dir, &state_dir).unwrap());
+    let runtime = build_default_runtime(
+        env,
+        PolicyEngine::new(PolicyMode::Ask, allow.clone()),
+        BudgetConfig::default(),
+        None,
+    );
+    let (_tx, rx) = watch::channel(false);
+    let (approved, label, _) = runtime.execute_call(&read_env, 0, rx.clone()).await;
+    assert_eq!(label, "ask_approved");
+    assert_eq!(approved.outcome, ToolOutcome::Success);
+    assert!(approved.content.contains("SECRET=1"));
+    assert_eq!(allow.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // (b) BUG-08 scope: the *same* runtime reading a different sensitive path must prompt again
+    // and, once denied, be blocked — the earlier `.env` grant does not leak to `.npmrc`.
+    let read_npmrc = ToolCall {
+        call_id: ToolCallId::new("r2"),
+        name: "read".into(),
+        raw_arguments: r#"{"path":".npmrc"}"#.into(),
+    };
+    let (blocked, _, _) = runtime.execute_call(&read_npmrc, 0, rx.clone()).await;
+    assert_eq!(
+        blocked.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::SensitivePathBlocked
+        }
+    );
+    assert_eq!(allow.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    // (c) `AllowCategoryForRun` is not cached for sensitive paths: a second read prompts again
+    // (the policy engine never records a sensitive path as an allowed category) and both succeed.
+    let category = Arc::new(CountingApprovalHandler {
+        decision: ApprovalDecision::AllowCategoryForRun,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let runtime_cat = build_default_runtime(
+        Arc::new(LocalHostEnv::new(&ws_dir, &state_dir).unwrap()),
+        PolicyEngine::new(PolicyMode::Ask, category.clone()),
+        BudgetConfig::default(),
+        None,
+    );
+    for call_id in ["c1", "c2"] {
+        let (out, label, _) = runtime_cat
+            .execute_call(
+                &ToolCall {
+                    call_id: ToolCallId::new(call_id),
+                    name: "read".into(),
+                    raw_arguments: r#"{"path":".env"}"#.into(),
+                },
+                0,
+                rx.clone(),
+            )
+            .await;
+        assert_eq!(label, "ask_approved");
+        assert_eq!(out.outcome, ToolOutcome::Success);
+    }
+    assert_eq!(category.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    // (e) BUG-08 scope across tools: the same runtime already granted a `read` of `.env`, but a
+    // `write` to a *different* sensitive path (`.npmrc`) must still prompt and, when denied, be
+    // blocked — a grant for one call never authorizes a later one.
+    let (w_blocked, _, _) = runtime
+        .execute_call(
+            &ToolCall {
+                call_id: ToolCallId::new("w1"),
+                name: "write".into(),
+                raw_arguments: r#"{"path":".npmrc","content":"//registry:_authToken=y\n"}"#.into(),
+            },
+            0,
+            rx.clone(),
+        )
+        .await;
+    assert_eq!(
+        w_blocked.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::SensitivePathBlocked
+        }
+    );
+    assert_eq!(allow.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+    // (f) BUG-08 scope for a *write* grant: approving a `write` to a new sensitive file
+    // (`.env.local` matches the `.env.` prefix and does not exist yet) must not authorize a
+    // subsequent `write` to another sensitive path.
+    let write_allow = Arc::new(FirstCallOnlyApprovalHandler {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let runtime_write = build_default_runtime(
+        Arc::new(LocalHostEnv::new(&ws_dir, &state_dir).unwrap()),
+        PolicyEngine::new(PolicyMode::Ask, write_allow.clone()),
+        BudgetConfig::default(),
+        None,
+    );
+    let (w_ok, w_label, _) = runtime_write
+        .execute_call(
+            &ToolCall {
+                call_id: ToolCallId::new("w2"),
+                name: "write".into(),
+                raw_arguments: r#"{"path":".env.local","content":"SECRET=2\n"}"#.into(),
+            },
+            0,
+            rx.clone(),
+        )
+        .await;
+    assert_eq!(w_label, "ask_approved");
+    assert_eq!(w_ok.outcome, ToolOutcome::Success);
+    let (w2_blocked, _, _) = runtime_write
+        .execute_call(
+            &ToolCall {
+                call_id: ToolCallId::new("w3"),
+                name: "write".into(),
+                raw_arguments: r#"{"path":".npmrc","content":"//registry:_authToken=y\n"}"#.into(),
+            },
+            0,
+            rx.clone(),
+        )
+        .await;
+    assert_eq!(
+        w2_blocked.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::SensitivePathBlocked
+        }
+    );
+    assert_eq!(write_allow.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    // (d) Non-interactive mode denies outright, without prompting.
+    let runtime_ni = build_default_runtime(
+        Arc::new(LocalHostEnv::new(&ws_dir, &state_dir).unwrap()),
+        PolicyEngine::new(PolicyMode::Ask, Arc::new(NonInteractiveApprovalHandler)),
+        BudgetConfig::default(),
+        None,
+    );
+    let (denied, label_ni, _) = runtime_ni.execute_call(&read_env, 0, rx).await;
+    assert_eq!(
+        denied.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::SensitivePathBlocked
+        }
+    );
+    assert!(label_ni.starts_with("deny:"));
 
     let _ = fs::remove_dir_all(&tmp_root);
 }

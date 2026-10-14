@@ -249,11 +249,19 @@ impl RepoGraphCache {
         self.entries.is_empty()
     }
 
-    fn get_fresh(&mut self, rel: &str, len: u64, mtime_ns: u64) -> Option<&CachedFileParse> {
-        let hit = self
-            .entries
-            .get(rel)
-            .is_some_and(|e| e.len == len && e.mtime_ns == mtime_ns);
+    fn get_fresh(
+        &mut self,
+        rel: &str,
+        len: u64,
+        mtime_ns: u64,
+        content_sha256: &str,
+    ) -> Option<&CachedFileParse> {
+        // BUG-06: the content hash is part of the key, so a persistent cross-call cache cannot
+        // serve a stale parse when a file's bytes changed but its `(len, mtime_ns)` fingerprint
+        // happened to stay the same.
+        let hit = self.entries.get(rel).is_some_and(|e| {
+            e.len == len && e.mtime_ns == mtime_ns && e.content_sha256 == content_sha256
+        });
         if hit {
             self.hits = self.hits.saturating_add(1);
             self.entries.get(rel)
@@ -369,7 +377,14 @@ impl RepoGraph {
     /// Files are indexed in deterministic lexicographic order and the walk stops at `max_files`
     /// (or the byte caps), setting `truncated` so callers can report partial coverage honestly.
     pub fn build_from_workspace(cap: &WorkspaceCap, max_files: usize) -> RepoGraph {
-        let mut cache = RepoGraphCache::new();
+        // BUG-06: reuse the per-workspace cache instead of building a throwaway one, so repeated
+        // `code_graph` / `/graph` calls within a session do not re-parse unchanged files. The lock
+        // is held only for this synchronous build; the cache is content-addressed, so sharing it
+        // across threads / Env instances cannot return a stale graph.
+        let mut cache = cap
+            .repo_graph_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Self::build_from_workspace_cached(cap, max_files, &mut cache)
     }
 
@@ -432,8 +447,22 @@ impl RepoGraph {
             let len = meta.len();
             let mtime_ns = mtime_nanos(&meta);
 
-            // B1: reuse the cached parse when the cheap `(len, mtime_ns)` fingerprint matches.
-            if let Some(cached) = cache.get_fresh(&rel, len, mtime_ns) {
+            let mut file = file;
+            let mut bytes = Vec::with_capacity(len as usize);
+            let mut limited = (&mut file).take(MAX_GRAPH_FILE_BYTES + 1);
+            if limited.read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_GRAPH_FILE_BYTES {
+                skipped_files += 1;
+                continue;
+            }
+            let Ok(text) = String::from_utf8(bytes) else {
+                skipped_files += 1;
+                continue;
+            };
+            let content_sha256 = crate::prompt::sha256_hex64(text.as_bytes());
+
+            // B1: reuse the cached parse when the content hash matches, so a cache shared across
+            // builds never serves a stale graph.
+            if let Some(cached) = cache.get_fresh(&rel, len, mtime_ns, &content_sha256) {
                 cache_hits += 1;
                 total_bytes = total_bytes.saturating_add(cached.byte_len);
                 let mut indices = Vec::with_capacity(cached.symbols.len());
@@ -448,17 +477,6 @@ impl RepoGraph {
                 continue;
             }
 
-            let mut file = file;
-            let mut bytes = Vec::with_capacity(len as usize);
-            let mut limited = (&mut file).take(MAX_GRAPH_FILE_BYTES + 1);
-            if limited.read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_GRAPH_FILE_BYTES {
-                skipped_files += 1;
-                continue;
-            }
-            let Ok(text) = String::from_utf8(bytes) else {
-                skipped_files += 1;
-                continue;
-            };
             if total_bytes.saturating_add(text.len()) > MAX_GRAPH_TOTAL_BYTES {
                 truncated = true;
                 break;
@@ -490,7 +508,7 @@ impl RepoGraph {
                 CachedFileParse {
                     len,
                     mtime_ns,
-                    content_sha256: crate::prompt::sha256_hex64(text.as_bytes()),
+                    content_sha256,
                     byte_len: text.len(),
                     symbols: cached_symbols,
                     tokens,
@@ -1202,6 +1220,50 @@ pub fn extract_reference_tokens(rel: &str, content: &str) -> BTreeSet<String> {
     tokens
 }
 
+/// Length (in chars) of a Rust char or byte literal starting at `chars[i]`, or `None` when the
+/// `'` opens a lifetime (`'a`, `'static`) rather than a literal. A lifetime must not be treated as
+/// a string opener: doing so erases the rest of the line (everything up to the next `'` or the
+/// newline), which drops the symbols and call edges the graph is built from.
+fn rust_char_literal_len(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) != Some(&'\'') {
+        return None;
+    }
+    let mut j = i + 1;
+    if chars.get(j) == Some(&'\\') {
+        j += 1;
+        match chars.get(j) {
+            // `'\u{1F600}'` / `'\u{41}'`.
+            Some('u') if chars.get(j + 1) == Some(&'{') => {
+                let mut k = j + 2;
+                while k < chars.len() && chars[k] != '}' && chars[k] != '\n' {
+                    k += 1;
+                }
+                return (chars.get(k) == Some(&'}') && chars.get(k + 1) == Some(&'\''))
+                    .then(|| k + 2 - i);
+            }
+            // `'\x41'` (byte literal).
+            Some('x')
+                if chars.get(j + 1).is_some_and(|c| c.is_ascii_hexdigit())
+                    && chars.get(j + 2).is_some_and(|c| c.is_ascii_hexdigit())
+                    && chars.get(j + 3) == Some(&'\'') =>
+            {
+                return Some(j + 4 - i);
+            }
+            // `'\n'`, `'\''`, `'\\'`, …
+            Some(c) if *c != '\n' && chars.get(j + 1) == Some(&'\'') => {
+                return Some(j + 2 - i);
+            }
+            _ => return None,
+        }
+    }
+    match chars.get(j) {
+        Some(c) if *c != '\'' && *c != '\n' && chars.get(j + 1) == Some(&'\'') => {
+            Some(j + 2 - i)
+        }
+        _ => None,
+    }
+}
+
 fn strip_comments_and_strings(lang: Lang, content: &str) -> String {
     let hash_comments = matches!(lang, Lang::Python);
     let mut out = String::with_capacity(content.len());
@@ -1225,6 +1287,19 @@ fn strip_comments_and_strings(lang: Lang, content: &str) -> String {
             }
             i = (i + 2).min(n);
             out.push(' ');
+            continue;
+        }
+        // Rust char / byte literals (`'x'`, `'\n'`, `'\u{1F600}'`) are literals, but a lone `'`
+        // is a lifetime (`fn f<'a>(x: &'a str)`, `where T: 'static`). Only consume the literal
+        // form; leave the lifetime quote in place so the rest of the line is not erased.
+        if lang == Lang::Rust && c == '\'' {
+            if let Some(len) = rust_char_literal_len(&bytes, i) {
+                i += len;
+                out.push(' ');
+                continue;
+            }
+            out.push(c);
+            i += 1;
             continue;
         }
         // String literals (double, single, backtick). Triple-quoted Python strings degrade to a

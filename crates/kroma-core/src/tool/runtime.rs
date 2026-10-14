@@ -20,7 +20,7 @@ use crate::tools::{
     read::execute_read, write::execute_write, ToolExecutionOutput,
 };
 use crate::types::{EffectClass, ErrorCode};
-use crate::workspace::WorkspaceCap;
+use crate::workspace::{SensitivePathApproval, WorkspaceCap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -362,6 +362,10 @@ impl ToolRuntime {
         );
 
         let mut effective_raw_args = call.raw_arguments.clone();
+        // BUG-08: a user approval for a sensitive path is scoped to exactly this call. The token
+        // is minted only in the `ask_approved` arm below and consumed by a short-lived workspace
+        // clone at dispatch; nothing outside this call can reuse it.
+        let mut sensitive_approval: Option<SensitivePathApproval> = None;
 
         let decision_label = match check {
             PolicyCheckResult::Allow => "allow".to_string(),
@@ -538,6 +542,20 @@ impl ToolRuntime {
                                 }
                             }
                         }
+                        // BUG-08: record the approved sensitive path so the dispatched tool
+                        // execution may reach exactly that file. `AllowCategoryForRun` is treated
+                        // identically here because the policy engine never records a sensitive path
+                        // as an allowed *category* (`PolicyEngine::prompt_approval` skips
+                        // `is_sensitive_path`), so a sensitive grant is always per-call.
+                        if is_sensitive {
+                            if let Some(rel) = rel_path_opt.as_deref() {
+                                if let Ok(norm) =
+                                    WorkspaceCap::validate_relative_components(rel)
+                                {
+                                    sensitive_approval = Some(SensitivePathApproval::new(norm));
+                                }
+                            }
+                        }
                         "ask_approved".to_string()
                     }
                 }
@@ -545,11 +563,18 @@ impl ToolRuntime {
         };
 
         // Dispatch to concrete tool implementation
+        // BUG-08: hand the approved clone only to the tools whose sensitive-path detection set
+        // `is_sensitive`; every other tool (and every unapproved call) keeps the plain workspace.
+        let approved_workspace = sensitive_approval
+            .map(|approval| self.env.workspace().with_approval(approval));
+        let tool_workspace: &WorkspaceCap = approved_workspace
+            .as_ref()
+            .unwrap_or_else(|| self.env.workspace());
         let exec_out = match call.name.as_str() {
-            "read" => execute_read(self.env.workspace(), &effective_raw_args),
+            "read" => execute_read(tool_workspace, &effective_raw_args),
             "edit" => {
                 execute_edit(
-                    self.env.workspace(),
+                    tool_workspace,
                     self.env.inode_locks(),
                     &effective_raw_args,
                     self.budget.max_edit_file_bytes,
@@ -559,7 +584,7 @@ impl ToolRuntime {
             }
             "write" => {
                 execute_write(
-                    self.env.workspace(),
+                    tool_workspace,
                     self.env.inode_locks(),
                     &effective_raw_args,
                     self.budget.max_write_content_bytes,
