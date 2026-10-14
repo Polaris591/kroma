@@ -14,6 +14,7 @@
 //!    HTTP/browser request rejection, and connection concurrency limits.
 
 
+//!
 //! Physical module split: one file per responsibility (no behaviour change).
 
 mod approval;

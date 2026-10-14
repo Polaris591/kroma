@@ -419,7 +419,7 @@ pub fn atomic_write_at(
             libc::openat(
                 parent_fd,
                 c_tmp.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | crate::secure_fs::NO_FOLLOW_CUSTOM_FLAGS,
                 (mode & 0o7777) as libc::c_uint,
             )
         };
@@ -704,7 +704,7 @@ pub fn atomic_write_file(
         let parent_fd = unsafe {
             libc::open(
                 c_parent.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                crate::secure_fs::OPEN_DIR_NO_FOLLOW,
             )
         };
         if parent_fd < 0 {

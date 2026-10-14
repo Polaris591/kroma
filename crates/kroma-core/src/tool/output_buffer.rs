@@ -256,8 +256,9 @@ impl HeadTailBuffer {
         let mut opts = OpenOptions::new();
         opts.create(true).write(true).truncate(true);
         #[cfg(unix)]
-        opts.mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        opts.mode(0o600);
+        // Previously Unix-only here, so a Windows spill file was opened without the reparse flag.
+        crate::secure_fs::apply_no_follow(&mut opts);
         if let Ok(mut f) = opts.open(path) {
             // `mode` sets 0600 only when the file is created; a pre-existing spill file may be
             // broader. `fchmod` the descriptor we actually opened rather than `chmod`-ing by path,

@@ -16,12 +16,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::ffi::{CString, OsStr};
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
@@ -310,7 +312,7 @@ impl SnapshotStore {
     /// F03 (`v1.4.0`): read the pending merge intent journal, if one is present.
     pub fn pending_merge_intent(&self) -> Result<Option<MergeIntent>, RevisionError> {
         let path = self.merge_intent_path();
-        let mut file = match open_store_file_no_symlink(&path) {
+        let mut file = match crate::secure_fs::open_existing_no_symlink(&path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -721,7 +723,7 @@ impl SnapshotStore {
 
     pub fn load_revision(&self, id: &RevisionId) -> Result<WorkspaceRevision, RevisionError> {
         let path = self.revision_path(id);
-        let mut file = open_store_file_no_symlink(&path)
+        let mut file = crate::secure_fs::open_existing_no_symlink(&path)
             .map_err(|_| RevisionError::UnknownRevision(id.as_str().to_string()))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
@@ -761,7 +763,7 @@ impl SnapshotStore {
     /// Read the unrecovered restore intent journal, if one is present.
     pub fn pending_restore(&self) -> Result<Option<RestoreIntent>, RevisionError> {
         let path = self.intent_path();
-        let mut file = match open_store_file_no_symlink(&path) {
+        let mut file = match crate::secure_fs::open_existing_no_symlink(&path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -1055,7 +1057,7 @@ impl SnapshotStore {
 
         let tmp_path = dir.join(format!(".{}.tmp-{}", sha256, Uuid::new_v4()));
         let write_result = (|| -> Result<(), RevisionError> {
-            let mut file = create_new_store_file_no_symlink(&tmp_path, 0o600)?;
+            let mut file = crate::secure_fs::create_new_no_symlink(&tmp_path, 0o600)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             Ok(())
@@ -1170,7 +1172,7 @@ impl SnapshotStore {
 
     pub fn read_blob(&self, sha256: &str) -> Result<Vec<u8>, RevisionError> {
         let path = self.blob_path(sha256)?;
-        let mut file = open_store_file_no_symlink(&path).map_err(|e| {
+        let mut file = crate::secure_fs::open_existing_no_symlink(&path).map_err(|e| {
             RevisionError::InvalidStore(format!("cannot read snapshot blob {}: {}", sha256, e))
         })?;
         let mut bytes = Vec::new();
@@ -1297,224 +1299,23 @@ fn validate_blob_sha256(sha256: &str) -> Result<(), RevisionError> {
         )))
     }
 }
-
-fn open_store_file_no_symlink(path: &Path) -> std::io::Result<File> {
-    #[cfg(unix)]
-    {
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        };
-        let sym = fs::symlink_metadata(path)?;
-        if crate::workspace::is_windows_reparse_point(&sym) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "refusing to open reparse point in snapshot store",
-            ));
+impl From<crate::secure_fs::SecureFsError> for RevisionError {
+    fn from(err: crate::secure_fs::SecureFsError) -> Self {
+        match err {
+            crate::secure_fs::SecureFsError::InvalidPath(reason) => {
+                RevisionError::InvalidStore(reason)
+            }
+            crate::secure_fs::SecureFsError::Io(io) => RevisionError::Io(io),
         }
-        let f = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .open(path)?;
-        let opened_meta = f.metadata()?;
-        if crate::workspace::is_windows_reparse_point(&opened_meta) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "refusing to open reparse point in snapshot store",
-            ));
-        }
-        Ok(f)
-    }
-}
-
-fn create_new_store_file_no_symlink(path: &Path, mode: u32) -> std::io::Result<File> {
-    #[cfg(unix)]
-    {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-    }
-    #[cfg(windows)]
-    {
-        let _ = mode;
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
     }
 }
 
 /// Create (if needed) and lock down a private store directory (O3).
 ///
-/// Create `dir` as a real, symlink-free directory at mode 0700.
-///
-/// `DirBuilder::recursive(true)` follows symlinked ancestors, and path-based `fs::set_permissions`
-/// is a `chmod` that follows them too — so a symlinked store path (or a symlinked ancestor swapped
-/// in between the check and the chmod) could redirect the chmod to an attacker-chosen target.
-/// Instead every component is created with `mkdirat` on the *verified* parent descriptor and then
-/// re-opened with `O_NOFOLLOW | O_DIRECTORY`, so a symlinked component is refused rather than
-/// traversed. Only the final component is chmod-ed: pre-existing ancestors (e.g. `/tmp`) keep their
-/// own permissions and are never touched.
+/// The hardening walk itself lives in [`crate::secure_fs::ensure_private_dir`] so the policy exists
+/// exactly once; this wrapper only maps the shared error type onto [`RevisionError`].
 pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
-    #[cfg(unix)]
-    {
-        // Lexically normalize (resolving `.` / `..`) and split into (anchor, components). Every
-        // intermediate component is re-opened with `O_NOFOLLOW`, so it is always a real directory and
-        // lexical `..` resolution matches what the filesystem would do.
-        let mut absolute = false;
-        let mut components: Vec<std::ffi::OsString> = Vec::new();
-        for component in dir.components() {
-            match component {
-                Component::RootDir => {
-                    absolute = true;
-                    components.clear();
-                }
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    components.pop();
-                }
-                other => components.push(other.as_os_str().to_os_string()),
-            }
-        }
-        if components.is_empty() {
-            return Err(RevisionError::InvalidStore(format!(
-                "snapshot store path '{}' has no directory component",
-                dir.display()
-            )));
-        }
-        let anchor = if absolute { Path::new("/") } else { Path::new(".") };
-        let mut collapsed = PathBuf::from(anchor);
-        for name in &components {
-            collapsed.push(name);
-        }
-
-        // Fast path: every component is a real directory and we can walk it with dirfds.
-        if walk_private_dir(anchor, &components).is_ok() {
-            return Ok(());
-        }
-
-        // Portable path: some platforms ship OS-owned symlinked ancestors that no user code may
-        // rewrite — Android's `/data/data` is a symlink to `/data/user/0`, and macOS `/var`,
-        // `/tmp` and `/etc` are symlinks too. Refusing those would make the store unusable on
-        // those systems, so fall back to a path-based create that only insists on the *final*
-        // component being a real directory: that is the component an attacker would swap to
-        // redirect the chmod, and pre-existing ancestors keep their own permissions either way.
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        builder.mode(0o700);
-        builder.create(&collapsed).map_err(|e| {
-            RevisionError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to create snapshot store '{}': {}", collapsed.display(), e),
-            ))
-        })?;
-        // F02: never `chmod` by path. The create above deliberately follows OS-owned symlinked
-        // ancestors (the reason this fallback exists), but between that create and a path-based
-        // `chmod` an attacker could swap the *final* component and redirect the `chmod` to their
-        // target. Open the final component with `O_NOFOLLOW | O_DIRECTORY` and `fchmod` that
-        // descriptor instead: a symlink leaf is refused (`ELOOP`) and a non-directory is refused
-        // (`ENOTDIR`), so only the verified directory itself is ever restricted.
-        let handle = open_real_dir(&collapsed).map_err(|e| match &e {
-            RevisionError::Io(io)
-                if matches!(io.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) =>
-            {
-                RevisionError::InvalidStore(format!(
-                    "snapshot store path '{}' is not a real directory",
-                    collapsed.display()
-                ))
-            }
-            _ => e,
-        })?;
-        handle.set_permissions(fs::Permissions::from_mode(0o700)).map_err(|e| {
-            RevisionError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to restrict snapshot store '{}': {}", collapsed.display(), e),
-            ))
-        })?;
-        Ok(())
-    }
-    #[cfg(windows)]
-    {
-        let mut prefix_or_root = PathBuf::new();
-        let mut normals: Vec<std::ffi::OsString> = Vec::new();
-        for component in dir.components() {
-            match component {
-                Component::Prefix(p) => {
-                    prefix_or_root.push(p.as_os_str());
-                    normals.clear();
-                }
-                Component::RootDir => {
-                    prefix_or_root.push(component.as_os_str());
-                    normals.clear();
-                }
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    normals.pop();
-                }
-                Component::Normal(part) => {
-                    normals.push(part.to_os_string());
-                }
-            }
-        }
-        if normals.is_empty() {
-            return Err(RevisionError::InvalidStore(format!(
-                "snapshot store path '{}' has no directory component",
-                dir.display()
-            )));
-        }
-        let mut collapsed = if prefix_or_root.as_os_str().is_empty() {
-            PathBuf::from(".")
-        } else {
-            prefix_or_root
-        };
-        for part in &normals {
-            collapsed.push(part);
-        }
-        if let Some(parent) = collapsed.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                fs::create_dir_all(parent)?;
-            }
-            if let Ok(p_meta) = fs::symlink_metadata(parent) {
-                if crate::workspace::is_windows_reparse_point(&p_meta) {
-                    return Err(RevisionError::InvalidStore(format!(
-                        "snapshot store parent '{}' is a reparse point",
-                        parent.display()
-                    )));
-                }
-            }
-        }
-        match fs::symlink_metadata(&collapsed) {
-            Ok(meta) => {
-                if crate::workspace::is_windows_reparse_point(&meta) || !meta.is_dir() {
-                    return Err(RevisionError::InvalidStore(format!(
-                        "snapshot store path '{}' is not a real directory",
-                        collapsed.display()
-                    )));
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&collapsed)?;
-            }
-            Err(e) => return Err(e.into()),
-        }
-        let _ = crate::workspace::open_windows_handle_no_reparse(&collapsed, &collapsed, Some(true))
-            .map_err(|e| RevisionError::InvalidStore(e.to_string()))?;
-        Ok(())
-    }
+    crate::secure_fs::ensure_private_dir(dir).map_err(RevisionError::from)
 }
 
 /// [`ensure_private_dir`] for callers that only speak `std::io::Error` (e.g. the session WAL
@@ -1522,83 +1323,9 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
 /// other store error is folded into an `io::Error` with the same message.
 #[cfg(unix)]
 pub(crate) fn ensure_private_dir_io(dir: &Path) -> std::io::Result<()> {
-    ensure_private_dir(dir).map_err(|e| match e {
-        RevisionError::Io(io) => io,
-        other => std::io::Error::new(std::io::ErrorKind::Other, other.to_string()),
-    })
+    crate::secure_fs::ensure_private_dir_io(dir)
 }
 
-/// Strict dirfd walk: create every missing component with `mkdirat` and re-open each one with
-/// `O_NOFOLLOW | O_DIRECTORY`, so a symlinked component is refused rather than traversed. Only the
-/// final component is chmod-ed: pre-existing ancestors (e.g. `/tmp`) keep their own permissions and
-/// are never touched.
-///
-/// Fails on platforms whose *own* system paths contain symlinked ancestors (Android's `/data/data`
-/// -> `/data/user/0`, macOS `/var` -> `/private/var`); callers fall back to [`ensure_private_dir`]'s
-/// portable path-based branch in that case.
-#[cfg(unix)]
-fn walk_private_dir(anchor: &Path, components: &[std::ffi::OsString]) -> Result<(), RevisionError> {
-    let mut handle = open_real_dir(anchor)?;
-    for (index, name) in components.iter().enumerate() {
-        let name_c = CString::new(name.as_bytes()).map_err(|_| {
-            RevisionError::InvalidStore("snapshot store path contains a NUL byte".to_string())
-        })?;
-        let rc = unsafe { libc::mkdirat(handle.as_raw_fd(), name_c.as_ptr(), 0o700) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(err.into());
-            }
-        }
-        handle = open_dir_at(handle.as_raw_fd(), &name_c)?;
-        if index + 1 == components.len() {
-            handle.set_permissions(fs::Permissions::from_mode(0o700))?;
-        }
-    }
-    Ok(())
-}
-
-/// Open `path` as a directory without ever following a final symlink.
-#[cfg(unix)]
-fn open_real_dir(path: &Path) -> Result<File, RevisionError> {
-    let handle = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
-    verify_is_real_dir(&handle, &path.display().to_string())?;
-    Ok(handle)
-}
-
-/// `openat` a child directory of an already-verified directory descriptor, refusing symlinks.
-#[cfg(unix)]
-fn open_dir_at(parent_fd: RawFd, name: &CString) -> Result<File, RevisionError> {
-    let fd = unsafe {
-        libc::openat(
-            parent_fd,
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let handle = unsafe { File::from_raw_fd(fd) };
-    verify_is_real_dir(&handle, &name.to_string_lossy())?;
-    Ok(handle)
-}
-
-/// `fstat` the open descriptor and reject anything that is not a directory.
-#[cfg(unix)]
-fn verify_is_real_dir(handle: &File, display: &str) -> Result<(), RevisionError> {
-    let meta = handle.metadata()?;
-    if !meta.is_dir() {
-        return Err(RevisionError::InvalidStore(format!(
-            "snapshot store path '{}' is not a real directory",
-            display
-        )));
-    }
-    Ok(())
-}
 
 fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), RevisionError> {
     let dir = path.parent().ok_or_else(|| {
@@ -1611,7 +1338,7 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Revisi
     tmp_name.push(format!(".tmp-{}", Uuid::new_v4()));
     let tmp_path = dir.join(&tmp_name);
     let write_result = (|| -> Result<(), RevisionError> {
-        let mut file = create_new_store_file_no_symlink(&tmp_path, mode)?;
+        let mut file = crate::secure_fs::create_new_no_symlink(&tmp_path, mode)?;
         file.write_all(bytes)?;
         #[cfg(unix)]
         file.set_permissions(fs::Permissions::from_mode(mode))?;
@@ -1836,7 +1563,7 @@ fn classify_blocked_parent(
         libc::openat(
             workspace.root_dir_fd().as_raw_fd(),
             c_dot.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            crate::secure_fs::OPEN_DIR_NO_FOLLOW,
         )
     };
     if root_dup < 0 {
@@ -1855,7 +1582,7 @@ fn classify_blocked_parent(
             libc::openat(
                 cur.as_raw_fd(),
                 c_part.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                crate::secure_fs::OPEN_DIR_NO_FOLLOW,
             )
         };
         if fd < 0 {
@@ -2339,7 +2066,7 @@ fn remove_entry_at(dir_fd: RawFd, name: &OsStr) -> Result<(), RevisionError> {
         libc::openat(
             dir_fd,
             c_name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            crate::secure_fs::OPEN_DIR_NO_FOLLOW,
         )
     };
     if child_fd < 0 {

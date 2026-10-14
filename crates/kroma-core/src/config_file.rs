@@ -815,77 +815,43 @@ fn write_file_atomically_with_suffix(path: &Path, bytes: &[u8], suffix: &str) ->
     restrict_file_permissions(path)?;
     Ok(())
 }
-
-/// Create a brand-new file exclusively and without following a symlink, at mode `0600` on Unix.
+/// Create a brand-new config file exclusively and without following a symlink, at mode `0600` on
+/// Unix.
 ///
-/// Mirrors the snapshot store's `create_new_store_file_no_symlink`: `create_new(true)` fails if the
-/// path already exists (so a pre-planted symlink is refused with `EEXIST` rather than followed) and
-/// `O_NOFOLLOW` closes the race where the entry is swapped between the existence check and the
-/// open. `mode(0o600)` sets the permissions at creation, so no path-based `chmod` is needed.
+/// Thin wrapper over [`crate::secure_fs::create_new_no_symlink`] so the hardening policy lives in
+/// one place: `create_new(true)` refuses a pre-planted symlink with `EEXIST` rather than following
+/// it, and `O_NOFOLLOW` closes the swap race.
 fn create_new_config_file_no_symlink(path: &Path) -> std::io::Result<fs::File> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-    }
+    crate::secure_fs::create_new_no_symlink(path, 0o600)
 }
 
 /// Restrict a state file to `0600` without ever `chmod`-ing it by path.
-///
-/// `fs::set_permissions` is a `chmod` that follows symlinks, so a same-user attacker who swaps the
-/// final component between the write and the `chmod` could redirect it to an arbitrary target. Open
-/// the leaf with `O_NOFOLLOW` (refusing a symlink with `ELOOP`) and `fchmod` the resulting
-/// descriptor, exactly like the snapshot and session stores do.
 #[cfg(unix)]
 fn restrict_file_permissions(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|e| format!("cannot open {} to restrict permissions: {}", path.display(), e))?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
+    crate::secure_fs::restrict_file_no_follow(path, 0o600)
         .map_err(|e| format!("cannot restrict permissions on {}: {}", path.display(), e))
 }
 
 #[cfg(not(unix))]
-fn restrict_file_permissions(_path: &Path) -> Result<(), String> {
-    Ok(())
+fn restrict_file_permissions(path: &Path) -> Result<(), String> {
+    crate::secure_fs::restrict_file_no_follow(path, 0o600)
+        .map_err(|e| format!("cannot restrict permissions on {}: {}", path.display(), e))
 }
 
 /// Directory counterpart of [`restrict_file_permissions`]: open with `O_NOFOLLOW | O_DIRECTORY` and
 /// `fchmod`, so a symlinked final component is refused rather than traversed.
 #[cfg(unix)]
 fn restrict_dir_permissions(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let dir = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|e| format!("cannot open {} to restrict permissions: {}", path.display(), e))?;
-    dir.set_permissions(fs::Permissions::from_mode(0o700))
+    crate::secure_fs::restrict_dir_no_follow(path, 0o700)
         .map_err(|e| format!("cannot restrict permissions on {}: {}", path.display(), e))
 }
 
 #[cfg(not(unix))]
-fn restrict_dir_permissions(_path: &Path) -> Result<(), String> {
-    Ok(())
+fn restrict_dir_permissions(path: &Path) -> Result<(), String> {
+    crate::secure_fs::restrict_dir_no_follow(path, 0o700)
+        .map_err(|e| format!("cannot restrict permissions on {}: {}", path.display(), e))
 }
+
 
 // ---------------------------------------------------------------------------------------------
 // Minimal TOML subset parser

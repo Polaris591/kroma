@@ -14,8 +14,6 @@ pub struct RpcDispatcher {
 }
 
 /// Alias matching the task specification (`KromaRuntimeServer` / `RpcDispatcher`).
-
-/// Alias matching the task specification (`KromaRuntimeServer` / `RpcDispatcher`).
 pub type KromaRuntimeServer = RpcDispatcher;
 
 impl RpcDispatcher {

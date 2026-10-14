@@ -334,12 +334,12 @@ impl EventLogger {
         fs::create_dir_all(state_dir)?;
         let mut opts = OpenOptions::new();
         opts.create(true).append(true);
+        crate::secure_fs::apply_no_follow(&mut opts);
         #[cfg(unix)]
         {
-            // Open with `O_NOFOLLOW` and `fchmod` the descriptor: a path-based `chmod` would follow
-            // a symlink swapped onto the log path and restrict an arbitrary target instead.
-            opts.mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            // `fchmod` the descriptor we actually opened: a path-based `chmod` would follow a
+            // symlink swapped onto the log path and restrict an arbitrary target instead.
+            opts.mode(0o600);
             let f = opts.open(log_path)?;
             f.set_permissions(fs::Permissions::from_mode(0o600))?;
             Ok(f)
@@ -347,11 +347,8 @@ impl EventLogger {
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            };
-            opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+            use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+            opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
             opts.open(log_path)
         }
     }

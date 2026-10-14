@@ -274,7 +274,7 @@ impl WorkspaceCap {
                     libc::openat(
                         self.root_dir_fd.as_raw_fd(),
                         c_dot.as_ptr(),
-                        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                        crate::secure_fs::OPEN_FILE_NO_FOLLOW,
                     )
                 };
                 if fd < 0 {
@@ -302,7 +302,7 @@ impl WorkspaceCap {
                             libc::openat(
                                 cur_fd,
                                 c_part.as_ptr(),
-                                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                                crate::secure_fs::OPEN_FILE_NO_FOLLOW | libc::O_NONBLOCK,
                             )
                         };
                         if next_fd < 0 {
@@ -430,7 +430,7 @@ impl WorkspaceCap {
                 }
             })?;
             let how = OpenHow {
-                flags: (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                flags: (crate::secure_fs::OPEN_DIR_NO_FOLLOW)
                     as u64,
                 mode: 0,
                 resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
@@ -506,7 +506,7 @@ impl WorkspaceCap {
                         libc::openat(
                             cur_fd,
                             c_part.as_ptr(),
-                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                            crate::secure_fs::OPEN_DIR_NO_FOLLOW,
                         )
                     };
                     if next_fd < 0 {
@@ -553,7 +553,7 @@ impl WorkspaceCap {
                         libc::openat(
                             self.root_dir_fd.as_raw_fd(),
                             c_dot.as_ptr(),
-                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                            crate::secure_fs::OPEN_DIR_NO_FOLLOW,
                         )
                     };
                     if fd < 0 {
@@ -781,7 +781,7 @@ impl WorkspaceCap {
                 libc::openat(
                     self.root_dir_fd.as_raw_fd(),
                     c_dot.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    crate::secure_fs::OPEN_DIR_NO_FOLLOW,
                 )
             };
             if root_dup < 0 {
@@ -809,7 +809,7 @@ impl WorkspaceCap {
                             libc::openat(
                                 cur_dir.as_raw_fd(),
                                 c_part.as_ptr(),
-                                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                                crate::secure_fs::OPEN_DIR_NO_FOLLOW,
                             )
                         };
                         if next_fd < 0 {
@@ -833,10 +833,7 @@ impl WorkspaceCap {
                                     libc::openat(
                                         cur_dir.as_raw_fd(),
                                         c_part.as_ptr(),
-                                        libc::O_RDONLY
-                                            | libc::O_DIRECTORY
-                                            | libc::O_NOFOLLOW
-                                            | libc::O_CLOEXEC,
+                                        crate::secure_fs::OPEN_DIR_NO_FOLLOW,
                                     )
                                 };
                             }

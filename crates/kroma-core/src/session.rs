@@ -207,13 +207,10 @@ impl SessionJournal {
         let path = session_dir.as_ref().join(format!("{}.wal.jsonl", session_id));
         #[cfg(unix)]
         let file = {
-            let f = OpenOptions::new()
-                .create_new(true)
-                .append(true)
-                .read(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(&path)?;
+            let mut opts = OpenOptions::new();
+            opts.create_new(true).append(true).read(true).mode(0o600);
+            crate::secure_fs::apply_no_follow(&mut opts);
+            let f = opts.open(&path)?;
             acquire_wal_lock(&f)?;
             f.set_permissions(fs::Permissions::from_mode(0o600))?;
             f
@@ -221,16 +218,14 @@ impl SessionJournal {
         #[cfg(windows)]
         let file = {
             use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            };
-            let f = OpenOptions::new()
-                .create_new(true)
+            use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+            let mut opts = OpenOptions::new();
+            opts.create_new(true)
                 .append(true)
                 .read(true)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-                .open(&path)?;
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+            crate::secure_fs::apply_no_follow(&mut opts);
+            let f = opts.open(&path)?;
             acquire_wal_lock(&f)?;
             f
         };
@@ -280,25 +275,23 @@ impl SessionJournal {
 
         // `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT` closes the symlink-swap window between `symlink_metadata` and `open`.
         #[cfg(unix)]
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .append(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)?;
+        let mut file = {
+            let mut opts = OpenOptions::new();
+            opts.read(true).write(true).append(true);
+            crate::secure_fs::apply_no_follow(&mut opts);
+            opts.open(&path)?
+        };
         #[cfg(windows)]
         let mut file = {
             use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            };
-            OpenOptions::new()
-                .read(true)
+            use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+            let mut opts = OpenOptions::new();
+            opts.read(true)
                 .write(true)
                 .append(true)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-                .open(&path)?
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+            crate::secure_fs::apply_no_follow(&mut opts);
+            opts.open(&path)?
         };
         acquire_wal_lock(&file)?;
 
@@ -586,10 +579,10 @@ impl SessionJournal {
         }
         #[cfg(unix)]
         let file = {
-            let f = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(path)?;
+            let mut opts = OpenOptions::new();
+            opts.read(true);
+            crate::secure_fs::apply_no_follow(&mut opts);
+            let f = opts.open(path)?;
             let opened_meta = f.metadata()?;
             if !opened_meta.file_type().is_file()
                 || (sym_meta.dev(), sym_meta.ino()) != (opened_meta.dev(), opened_meta.ino())
@@ -604,13 +597,13 @@ impl SessionJournal {
         let file = {
             use std::os::windows::fs::OpenOptionsExt;
             use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
             };
-            let f = OpenOptions::new()
-                .read(true)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-                .open(path)?;
+            let mut opts = OpenOptions::new();
+            opts.read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            crate::secure_fs::apply_no_follow(&mut opts);
+            let f = opts.open(path)?;
             let opened_meta = f.metadata()?;
             if !opened_meta.file_type().is_file()
                 || crate::workspace::is_symlink_or_reparse(&opened_meta)
