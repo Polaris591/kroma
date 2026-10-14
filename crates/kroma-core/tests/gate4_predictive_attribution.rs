@@ -17,7 +17,8 @@
 use kroma_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
 use kroma_core::attribution::{
     added_identifiers, language_name, parse_diagnostic_anchors, removed_identifiers,
-    top_level_symbol_names, AttributionEngine, MutationLedger, MutatedFileSpan,
+    top_level_symbol_names, AttributionCandidate, AttributionEngine, MutationLedger,
+    MutatedFileSpan,
     PredictiveValidator, CANDIDATE_ATTRIBUTION_FRAMING,
 };
 use kroma_core::budget::BudgetConfig;
@@ -1273,6 +1274,216 @@ fn test_multi_span_attribution_windows_paths_and_revert_reapply_verification() {
         fs::read_to_string(ws_dir.join("lib.rs"))
             .unwrap()
             .contains("compute_v2")
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+
+/// `verify_candidate_in_isolated_worktree` had no test at all before this one: production never
+/// calls it (only `attribute_failure` is wired into the loop) and no test referenced it, so it was
+/// only ever checked by the compiler. It is public API that materializes a worktree and reverts
+/// revisions, so pin its two load-bearing properties here: the probe runs against a *copy*, and the
+/// parent workspace is left byte-identical no matter how the probe answers.
+#[test]
+fn test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_parent_untouched() {
+    let root = temp_root("verify-isolated");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    let ws = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+
+    fs::write(ws_dir.join("lib.rs"), "pub fn compute() -> u32 { 1 }\n").unwrap();
+    let rev_before = store.capture_revision(&ws, None, None, 0).unwrap().revision_id;
+    fs::write(ws_dir.join("lib.rs"), "pub fn compute_v2() -> u32 { 1 }\n").unwrap();
+    let rev_after = store
+        .capture_revision(&ws, Some(&rev_before), None, 1)
+        .unwrap()
+        .revision_id;
+
+    let mut ledger = MutationLedger::new();
+    ledger.record_mutation(
+        1,
+        "edit",
+        "call_rename",
+        Some("ev-0001-call_rename".to_string()),
+        Some(rev_before.clone()),
+        vec![MutatedFileSpan {
+            relative_path: "lib.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            added_symbols: vec!["compute_v2".to_string()],
+            removed_symbols: vec!["compute".to_string()],
+            summary: "edit lib.rs lines 1-1".to_string(),
+        }],
+    );
+    ledger.backfill_revision_after(1, Some(rev_after.clone()));
+
+    let mut report = AttributionEngine::attribute_failure(
+        &ledger,
+        "error[E0425]: cannot find function `compute` in this scope\n  --> caller.rs:4:5\n",
+        "completion_gate",
+        3,
+    );
+    let pre_conf = report.candidates[0].confidence;
+    let parent_root = ws.root().to_path_buf();
+    let worktree_root = root.join("wt-attribution");
+
+    let probed_root = std::cell::RefCell::new(PathBuf::new());
+    let probed_text = std::cell::RefCell::new(String::new());
+    let existed_during_probe = std::cell::Cell::new(false);
+    // The worktree is materialized at `rev_after`, so the revert to `rev_before` is a real change
+    // rather than a no-op: what the probe reads is proof the revert actually happened.
+    let verification = AttributionEngine::verify_candidate_in_isolated_worktree(
+        &store,
+        &ws,
+        Some(&rev_after),
+        &mut report.candidates[0],
+        &rev_after,
+        worktree_root.clone(),
+        |probe_ws| {
+            *probed_root.borrow_mut() = probe_ws.root().to_path_buf();
+            *probed_text.borrow_mut() =
+                fs::read_to_string(probe_ws.root().join("lib.rs")).unwrap();
+            existed_during_probe.set(worktree_root.exists());
+            true
+        },
+    )
+    .expect("isolated verification succeeds");
+
+    assert_ne!(
+        *probed_root.borrow(),
+        parent_root,
+        "the probe must run against a copy, not the parent workspace"
+    );
+    assert!(
+        probed_text.borrow().contains("pub fn compute()"),
+        "the probe must observe the reverted revision, saw: {:?}",
+        probed_text.borrow()
+    );
+    assert!(verification.failure_resolved_on_revert);
+    assert!(report.candidates[0].confidence > pre_conf);
+    assert!(report
+        .candidates[0]
+        .rationale
+        .contains("verified in isolated worktree"));
+    assert_eq!(
+        fs::read_to_string(ws_dir.join("lib.rs")).unwrap(),
+        "pub fn compute_v2() -> u32 { 1 }\n"
+    );
+    // Non-vacuous: the worktree really existed while the probe ran, so the assertion below
+    // records a created-then-removed transition rather than a directory that was never made.
+    assert!(
+        existed_during_probe.get(),
+        "the probe ran without a materialized worktree"
+    );
+    assert!(!worktree_root.exists(), "the worktree must be cleaned up");
+
+    // The other branch: a probe that does not resolve the failure must leave confidence alone,
+    // say so in the rationale, and still leave the parent untouched.
+    let mut negative = report.candidates[0].clone();
+    let conf_before_negative = negative.confidence;
+    let negative_result = AttributionEngine::verify_candidate_in_isolated_worktree(
+        &store,
+        &ws,
+        Some(&rev_after),
+        &mut negative,
+        &rev_after,
+        worktree_root.clone(),
+        |_ws| false,
+    )
+    .expect("a probe that does not resolve the failure is still a successful verification");
+    assert!(!negative_result.failure_resolved_on_revert);
+    assert_eq!(negative.confidence, conf_before_negative);
+    assert!(negative.rationale.contains("did not resolve the failure"));
+    assert_eq!(
+        fs::read_to_string(ws_dir.join("lib.rs")).unwrap(),
+        "pub fn compute_v2() -> u32 { 1 }\n"
+    );
+    assert!(!worktree_root.exists(), "the worktree must be cleaned up");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Both verification strategies share `candidate_revision_before` and must reject the same two
+/// unusable inputs before touching anything: a candidate with no `revision_before`, and one whose
+/// `revision_before` already *is* `current_revision` (a no-op revert proves nothing).
+#[test]
+fn test_verify_candidate_verification_rejects_an_unusable_revision_before() {
+    let root = temp_root("verify-guard");
+    let ws_dir = root.join("ws");
+    fs::create_dir_all(&ws_dir).unwrap();
+    let ws = WorkspaceCap::new(&ws_dir).unwrap();
+    let store = SnapshotStore::new(root.join("snapshots"));
+    fs::write(ws_dir.join("lib.rs"), "pub fn compute() -> u32 { 1 }\n").unwrap();
+    let rev = store.capture_revision(&ws, None, None, 0).unwrap().revision_id;
+
+    let mut candidate = AttributionCandidate {
+        mutation_id: "m-guard".to_string(),
+        turn: 1,
+        tool_name: "edit".to_string(),
+        relative_path: Some("lib.rs".to_string()),
+        line_range: Some((1, 1)),
+        source_entry_id: None,
+        revision_before: None,
+        revision_after: None,
+        confidence: 0.5,
+        rationale: "seed".to_string(),
+    };
+    let guard_root = root.join("wt-guard");
+
+    let err = AttributionEngine::verify_candidate_with_snapshot(
+        &store,
+        &ws,
+        &mut candidate,
+        &rev,
+        |_| true,
+    )
+    .expect_err("a candidate with no revision_before cannot be verified");
+    assert!(err.contains("has no revision_before"), "{err}");
+    let err = AttributionEngine::verify_candidate_in_isolated_worktree(
+        &store,
+        &ws,
+        Some(&rev),
+        &mut candidate,
+        &rev,
+        guard_root.clone(),
+        |_| true,
+    )
+    .expect_err("a candidate with no revision_before cannot be verified");
+    assert!(err.contains("has no revision_before"), "{err}");
+
+    candidate.revision_before = Some(rev.clone());
+    let err = AttributionEngine::verify_candidate_with_snapshot(
+        &store,
+        &ws,
+        &mut candidate,
+        &rev,
+        |_| true,
+    )
+    .expect_err("revision_before == current_revision is not verifiable");
+    assert!(err.contains("equals current_revision"), "{err}");
+    let err = AttributionEngine::verify_candidate_in_isolated_worktree(
+        &store,
+        &ws,
+        Some(&rev),
+        &mut candidate,
+        &rev,
+        guard_root.clone(),
+        |_| true,
+    )
+    .expect_err("revision_before == current_revision is not verifiable");
+    assert!(err.contains("equals current_revision"), "{err}");
+
+    // Rejection is pure argument validation: nothing was probed, nothing was written, and the
+    // worktree is never even materialized.
+    assert_eq!(
+        fs::read_to_string(ws_dir.join("lib.rs")).unwrap(),
+        "pub fn compute() -> u32 { 1 }\n"
+    );
+    assert!(
+        !guard_root.exists(),
+        "a rejected verification must not materialize a worktree"
     );
 
     let _ = fs::remove_dir_all(&root);
