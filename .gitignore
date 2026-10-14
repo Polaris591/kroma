@@ -2,3 +2,4 @@
 
 /npm/dist/
 /npm/cli-*/bin/kroma*
+__pycache__/
