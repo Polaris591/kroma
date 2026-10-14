@@ -1794,6 +1794,80 @@ impl AttributionReport {
 /// The failure-attribution engine. Stateless; every input is explicit so results are reproducible.
 pub struct AttributionEngine;
 
+/// The revision a candidate must be reverted to before probing.
+///
+/// Shared by both verification strategies: "no revision_before" and "revision_before equals
+/// current_revision" are argument errors rather than probe failures, and must be rejected
+/// identically by both.
+fn candidate_revision_before(
+    candidate: &AttributionCandidate,
+    current_revision: &RevisionId,
+) -> Result<RevisionId, String> {
+    let Some(rev_before) = candidate.revision_before.clone() else {
+        return Err(format!(
+            "candidate {} has no revision_before to revert to",
+            candidate.mutation_id
+        ));
+    };
+    if &rev_before == current_revision {
+        return Err(format!(
+            "candidate {} revision_before {} equals current_revision",
+            candidate.mutation_id, rev_before
+        ));
+    }
+    Ok(rev_before)
+}
+
+/// Why [`revert_probe_and_restore`] could not complete. The caller formats the message because the
+/// two verification strategies word the same failure differently.
+enum RevertProbeFailure {
+    /// The store call itself failed.
+    Store(String),
+    /// The revert to `revision_before` did not apply cleanly.
+    RevertNotApplied(crate::revision::RestoreResult),
+    /// The re-apply of `current_revision` after the probe failed.
+    ReapplyFailed(crate::revision::RestoreResult),
+}
+
+/// Revert `target` to `rev_before`, run `probe` there, then **unconditionally** re-apply
+/// `current_revision` so `target` is left exactly as it was found.
+///
+/// This is the invariant-bearing half of both verification strategies: the isolated-worktree
+/// variant points it at a throwaway worktree and the snapshot variant at the live workspace, but
+/// the sequence and the `restore_revision` flags must not drift between them -- a probe that leaves
+/// the user's workspace on the wrong revision is the failure this guards against.
+fn revert_probe_and_restore<F>(
+    store: &crate::revision::SnapshotStore,
+    target: &WorkspaceCap,
+    rev_before: &RevisionId,
+    current_revision: &RevisionId,
+    mut probe: F,
+) -> Result<bool, RevertProbeFailure>
+where
+    F: FnMut(&WorkspaceCap) -> bool,
+{
+    match store
+        .restore_revision(target, rev_before, Some(current_revision), false)
+        .map_err(|e| RevertProbeFailure::Store(e.to_string()))?
+    {
+        crate::revision::RestoreResult::Applied { .. } => {}
+        other => return Err(RevertProbeFailure::RevertNotApplied(other)),
+    }
+
+    let passed_on_revert = probe(target);
+
+    match store
+        .restore_revision(target, current_revision, Some(rev_before), true)
+        .map_err(|e| RevertProbeFailure::Store(e.to_string()))?
+    {
+        crate::revision::RestoreResult::Applied { .. } => {}
+        other => return Err(RevertProbeFailure::ReapplyFailed(other)),
+    }
+
+    Ok(passed_on_revert)
+}
+
+
 impl AttributionEngine {
     /// Score `ledger`'s mutations against the diagnostics parsed out of `failure_output`.
     pub fn attribute_failure(
@@ -1887,6 +1961,8 @@ impl AttributionEngine {
     /// `revision_before` is restored inside it, `probe` runs there, and the worktree is then
     /// removed.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+
     pub fn verify_candidate_in_isolated_worktree<F>(
         store: &crate::revision::SnapshotStore,
         parent_workspace: &WorkspaceCap,
@@ -1894,23 +1970,12 @@ impl AttributionEngine {
         candidate: &mut AttributionCandidate,
         current_revision: &RevisionId,
         worktree_root: std::path::PathBuf,
-        mut probe: F,
+        probe: F,
     ) -> Result<CandidateVerificationResult, String>
     where
         F: FnMut(&WorkspaceCap) -> bool,
     {
-        let Some(rev_before) = candidate.revision_before.clone() else {
-            return Err(format!(
-                "candidate {} has no revision_before to revert to",
-                candidate.mutation_id
-            ));
-        };
-        if &rev_before == current_revision {
-            return Err(format!(
-                "candidate {} revision_before {} equals current_revision",
-                candidate.mutation_id, rev_before
-            ));
-        }
+        let rev_before = candidate_revision_before(candidate, current_revision)?;
 
         // Materialize an isolated copy of the parent workspace; the live parent is never touched.
         let mut worktree = crate::subagents::IsolatedWorktree::materialize(
@@ -1924,33 +1989,19 @@ impl AttributionEngine {
         let isolated = worktree.workspace().clone();
 
         let outcome = (|| -> Result<CandidateVerificationResult, String> {
-            match store
-                .restore_revision(&isolated, &rev_before, Some(current_revision), false)
-                .map_err(|e| e.to_string())?
-            {
-                crate::revision::RestoreResult::Applied { .. } => {}
-                other => {
-                    return Err(format!(
-                        "isolated revert to {} did not apply cleanly: {:?}",
-                        rev_before, other
-                    ));
-                }
-            }
-
-            let passed_on_revert = probe(&isolated);
-
-            match store
-                .restore_revision(&isolated, current_revision, Some(&rev_before), true)
-                .map_err(|e| e.to_string())?
-            {
-                crate::revision::RestoreResult::Applied { .. } => {}
-                other => {
-                    return Err(format!(
-                        "isolated reapply of {} failed: {:?}",
-                        current_revision, other
-                    ));
-                }
-            }
+            let passed_on_revert =
+                revert_probe_and_restore(store, &isolated, &rev_before, current_revision, probe)
+                    .map_err(|failure| match failure {
+                        RevertProbeFailure::Store(msg) => msg,
+                        RevertProbeFailure::RevertNotApplied(other) => format!(
+                            "isolated revert to {} did not apply cleanly: {:?}",
+                            rev_before, other
+                        ),
+                        RevertProbeFailure::ReapplyFailed(other) => format!(
+                            "isolated reapply of {} failed: {:?}",
+                            current_revision, other
+                        ),
+                    })?;
 
             if passed_on_revert {
                 candidate.confidence = round3((candidate.confidence + 0.25).min(0.99));
@@ -1990,51 +2041,26 @@ impl AttributionEngine {
         workspace: &WorkspaceCap,
         candidate: &mut AttributionCandidate,
         current_revision: &RevisionId,
-        mut probe: F,
+        probe: F,
     ) -> Result<CandidateVerificationResult, String>
     where
         F: FnMut(&WorkspaceCap) -> bool,
     {
-        let Some(rev_before) = candidate.revision_before.clone() else {
-            return Err(format!(
-                "candidate {} has no revision_before to revert to",
-                candidate.mutation_id
-            ));
-        };
-        if &rev_before == current_revision {
-            return Err(format!(
-                "candidate {} revision_before {} equals current_revision",
-                candidate.mutation_id, rev_before
-            ));
-        }
+        let rev_before = candidate_revision_before(candidate, current_revision)?;
 
-        match store
-            .restore_revision(workspace, &rev_before, Some(current_revision), false)
-            .map_err(|e| e.to_string())?
-        {
-            crate::revision::RestoreResult::Applied { .. } => {}
-            other => {
-                return Err(format!(
-                    "temporary revert to {} did not apply cleanly: {:?}",
-                    rev_before, other
-                ));
-            }
-        }
-
-        let passed_on_revert = probe(workspace);
-
-        match store
-            .restore_revision(workspace, current_revision, Some(&rev_before), true)
-            .map_err(|e| e.to_string())?
-        {
-            crate::revision::RestoreResult::Applied { .. } => {}
-            other => {
-                return Err(format!(
-                    "reapply of {} after revert verification failed: {:?}",
-                    current_revision, other
-                ));
-            }
-        }
+        let passed_on_revert =
+            revert_probe_and_restore(store, workspace, &rev_before, current_revision, probe)
+                .map_err(|failure| match failure {
+                    RevertProbeFailure::Store(msg) => msg,
+                    RevertProbeFailure::RevertNotApplied(other) => format!(
+                        "temporary revert to {} did not apply cleanly: {:?}",
+                        rev_before, other
+                    ),
+                    RevertProbeFailure::ReapplyFailed(other) => format!(
+                        "reapply of {} after revert verification failed: {:?}",
+                        current_revision, other
+                    ),
+                })?;
 
         let note = if passed_on_revert {
             candidate.confidence = round3((candidate.confidence + 0.25).min(0.99));
