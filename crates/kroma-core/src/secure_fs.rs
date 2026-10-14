@@ -440,3 +440,265 @@ fn verify_is_real_dir(handle: &File, display: &str) -> Result<(), SecureFsError>
     }
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Every test gets its own directory so the process-wide umask and any parallel test cannot
+    /// interfere with the permission assertions.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-securefs-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    // ---------------------------------------------------------------- flag constants
+
+    #[test]
+    fn flag_constants_carry_the_no_follow_policy() {
+        assert_eq!(NO_FOLLOW_CUSTOM_FLAGS & libc::O_NOFOLLOW, libc::O_NOFOLLOW);
+        assert_eq!(NO_FOLLOW_CUSTOM_FLAGS & libc::O_CLOEXEC, libc::O_CLOEXEC);
+        assert_eq!(OPEN_FILE_NO_FOLLOW, libc::O_RDONLY | NO_FOLLOW_CUSTOM_FLAGS);
+        assert_eq!(
+            OPEN_DIR_NO_FOLLOW,
+            libc::O_RDONLY | libc::O_DIRECTORY | NO_FOLLOW_CUSTOM_FLAGS
+        );
+    }
+
+    // ---------------------------------------------------------------- open_existing_no_symlink
+
+    #[test]
+    fn open_existing_no_symlink_reads_a_regular_file() {
+        use std::io::Read;
+        let dir = scratch("open-regular");
+        let file = dir.join("payload");
+        fs::write(&file, b"contents").unwrap();
+
+        let mut opened = open_existing_no_symlink(&file).unwrap();
+        let mut buf = String::new();
+        opened.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, "contents");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_existing_no_symlink_refuses_a_symlinked_leaf() {
+        let dir = scratch("open-symlink");
+        let victim = dir.join("victim");
+        fs::write(&victim, b"secret").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let err = open_existing_no_symlink(&link)
+            .expect_err("a symlinked leaf must not be traversed");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ELOOP),
+            "O_NOFOLLOW must fail with ELOOP, got {:?}",
+            err
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------------------- create_new_no_symlink
+
+    #[test]
+    fn create_new_no_symlink_creates_at_the_requested_mode() {
+        let dir = scratch("create-new");
+        let file = dir.join("fresh");
+        let handle = create_new_no_symlink(&file, 0o600).unwrap();
+        drop(handle);
+        assert_eq!(mode_of(&file), 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_new_no_symlink_refuses_an_existing_path() {
+        let dir = scratch("create-existing");
+        let file = dir.join("already-there");
+        fs::write(&file, b"keep me").unwrap();
+
+        create_new_no_symlink(&file, 0o600).expect_err("create_new must refuse an existing path");
+        assert_eq!(fs::read(&file).unwrap(), b"keep me");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_new_no_symlink_does_not_follow_a_planted_symlink() {
+        let dir = scratch("create-symlink");
+        let victim = dir.join("victim");
+        fs::write(&victim, b"original").unwrap();
+        let link = dir.join("planted");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        create_new_no_symlink(&link, 0o600)
+            .expect_err("a pre-planted symlink must be refused with EEXIST, not followed");
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"original",
+            "the symlink target must be untouched"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------------------- restrict_*_no_follow
+
+    #[test]
+    fn restrict_file_no_follow_sets_the_mode_on_a_regular_file() {
+        let dir = scratch("restrict-file");
+        let file = dir.join("state");
+        fs::write(&file, b"x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+
+        restrict_file_no_follow(&file, 0o600).unwrap();
+        assert_eq!(mode_of(&file), 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restrict_file_no_follow_refuses_a_symlinked_leaf_without_touching_the_target() {
+        let dir = scratch("restrict-file-symlink");
+        let victim = dir.join("victim");
+        fs::write(&victim, b"secret").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.join("state");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        restrict_file_no_follow(&link, 0o600)
+            .expect_err("a symlinked leaf must be refused, not chmod-ed through");
+        assert_eq!(
+            mode_of(&victim),
+            0o644,
+            "a refused chmod must leave the symlink target's own permissions untouched"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restrict_dir_no_follow_sets_0700_and_refuses_a_symlinked_leaf() {
+        let dir = scratch("restrict-dir");
+        let real = dir.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+        restrict_dir_no_follow(&real, 0o700).unwrap();
+        assert_eq!(mode_of(&real), 0o700);
+
+        let victim = dir.join("victim");
+        fs::create_dir(&victim).unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        restrict_dir_no_follow(&link, 0o700).expect_err("a symlinked directory must be refused");
+        assert_eq!(mode_of(&victim), 0o755);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------------------- ensure_private_dir
+
+    #[test]
+    fn ensure_private_dir_creates_nested_paths_and_only_restricts_the_last_component() {
+        let dir = scratch("private-nested");
+        // Pre-existing ancestors keep their own permissions and must never be chmod-ed.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let target = dir.join("a").join("b").join("store");
+
+        ensure_private_dir(&target).unwrap();
+        assert_eq!(mode_of(&target), 0o700);
+        assert_eq!(
+            mode_of(&dir.join("a")),
+            0o700,
+            "intermediate components are created private too"
+        );
+        assert_eq!(
+            mode_of(&dir),
+            0o755,
+            "a pre-existing ancestor must keep its own permissions"
+        );
+        // Idempotent: a second call on the existing store must succeed.
+        ensure_private_dir(&target).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_private_dir_refuses_a_symlinked_final_component() {
+        let dir = scratch("private-symlink");
+        let victim = dir.join("victim");
+        fs::create_dir(&victim).unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.join("store");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        match ensure_private_dir(&link) {
+            Err(SecureFsError::InvalidPath(reason)) => {
+                assert!(
+                    reason.contains("not a real directory"),
+                    "unexpected refusal reason: {reason}"
+                );
+            }
+            other => panic!("a symlinked store must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            mode_of(&victim),
+            0o755,
+            "the symlink target must never be chmod-ed through"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_private_dir_tolerates_an_os_owned_symlinked_ancestor() {
+        // Android's `/data/data` -> `/data/user/0` and macOS `/var` -> `/private/var` are symlinks
+        // that no user code may rewrite. The strict dirfd walk cannot traverse them, so the
+        // documented fallback must still create a private store *below* them.
+        let dir = scratch("private-ancestor");
+        let real = dir.join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.join("os-owned-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let target = link.join("nested").join("store");
+
+        ensure_private_dir(&target).unwrap();
+        assert_eq!(mode_of(&real.join("nested").join("store")), 0o700);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_private_dir_rejects_a_path_without_a_directory_component() {
+        match ensure_private_dir(Path::new("/")) {
+            Err(SecureFsError::InvalidPath(reason)) => {
+                assert!(
+                    reason.contains("no directory component"),
+                    "unexpected refusal reason: {reason}"
+                );
+            }
+            other => panic!("a component-less path must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ensure_private_dir_io_keeps_the_os_error_kind() {
+        let dir = scratch("private-io");
+        let victim = dir.join("victim");
+        fs::create_dir(&victim).unwrap();
+        let link = dir.join("store");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let err = ensure_private_dir_io(&link)
+            .expect_err("the io wrapper must propagate the refusal");
+        // The refusal is an InvalidPath, which has no OS error kind, so it is folded into a
+        // generic io::Error that still carries the message.
+        assert!(err.to_string().contains("not a real directory"), "got {err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
