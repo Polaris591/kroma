@@ -3173,33 +3173,13 @@ mod tests {
     }
 }
 
-#[repr(align(64))]
-struct BionicTlsPad([u8; 64]);
-
-thread_local! {
-    static _BIONIC_TLS_ALIGN_64: BionicTlsPad = const { BionicTlsPad([0; 64]) };
-}
-
-// Reference it in main to prevent dead-code elimination
-#[allow(dead_code)]
-fn _ensure_bionic_tls_aligned() {
-    _BIONIC_TLS_ALIGN_64.with(|pad| {
-        let _ = pad.0[0];
-    });
-}
-
-// Android-only, and it must stay that way: an unguarded `#[link(name = "ssl")]` makes every
-// target link OpenSSL, which breaks the Windows/macOS builds outright (there is no `libssl` for
-// mingw-w64) and silently relies on macOS's deprecated system copy. Bionic is the only loader
-// that needs the >= 64 byte TLS segment alignment this padding enforces.
-#[cfg(target_os = "android")]
-#[link(name = "ssl")]
-extern "C" {
-    static __kroma_bionic_tls_align_pad: u8;
-}
-
-#[cfg(target_os = "android")]
-#[inline(never)]
-fn _touch_bionic_pad() -> u8 {
-    unsafe { std::ptr::read_volatile(&__kroma_bionic_tls_align_pad) }
-}
+// Removed 2026-10-14: a `BionicTlsPad` thread_local and two helpers used to sit here, added by
+// 56fb681 ("enforce TLS segment p_align >= 64 for Android ARM64 Bionic"). They never did
+// anything -- nothing called either helper, so the thread_local and both functions were stripped,
+// and the released android binary has no PT_TLS segment at all whose alignment could be wrong.
+// Their only observable effect was an unguarded `#[link(name = "ssl")]`, which forced every
+// target to link OpenSSL and left the Windows release build broken for three months.
+//
+// If a bionic TLS-alignment problem does show up, confirm it against the built artifact
+// (`readelf -lW kroma | grep TLS`; p_align must be >= 64) instead of adding padding the linker
+// may never emit. CI checks the android artifact for exactly that condition.
