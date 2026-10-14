@@ -3006,11 +3006,17 @@ fn _ensure_bionic_tls_aligned() {
     });
 }
 
+// Android-only, and it must stay that way: an unguarded `#[link(name = "ssl")]` makes every
+// target link OpenSSL, which breaks the Windows/macOS builds outright (there is no `libssl` for
+// mingw-w64) and silently relies on macOS's deprecated system copy. Bionic is the only loader
+// that needs the >= 64 byte TLS segment alignment this padding enforces.
+#[cfg(target_os = "android")]
 #[link(name = "ssl")]
 extern "C" {
     static __kroma_bionic_tls_align_pad: u8;
 }
 
+#[cfg(target_os = "android")]
 #[inline(never)]
 fn _touch_bionic_pad() -> u8 {
     unsafe { std::ptr::read_volatile(&__kroma_bionic_tls_align_pad) }
