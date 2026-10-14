@@ -409,7 +409,7 @@ impl ToolRuntime {
                 };
 
                 // Capture pre-approval SHA256 for TOCTOU protection on edit/write (§2.1, §5.2)
-                let pre_approval_sha = rel_path_opt.as_deref().and_then(&compute_target_sha);
+                let pre_approval_sha = rel_path_opt.as_deref().and_then(compute_target_sha);
 
                 let diff_preview = if matches!(call.name.as_str(), "edit" | "write") {
                     Some(Self::build_approval_diff_preview(

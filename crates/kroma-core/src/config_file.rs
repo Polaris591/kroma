@@ -536,8 +536,8 @@ impl ResolvedConfig {
             max_subagents: overrides
                 .max_subagents
                 .or_else(|| env_string(ENV_MAX_SUBAGENTS).and_then(|v| v.parse::<usize>().ok()))
-                .or_else(|| workspace.max_subagents)
-                .or_else(|| user.max_subagents),
+                .or(workspace.max_subagents)
+                .or(user.max_subagents),
             // B2: a safe, non-security key — the workspace file may set it.
             projection_profile: overrides
                 .projection_profile
@@ -551,8 +551,8 @@ impl ResolvedConfig {
                 .or_else(|| {
                     env_string(ENV_ADAPTIVE_TOURNAMENT).and_then(|v| v.parse::<usize>().ok())
                 })
-                .or_else(|| workspace.adaptive_tournament)
-                .or_else(|| user.adaptive_tournament),
+                .or(workspace.adaptive_tournament)
+                .or(user.adaptive_tournament),
             active_profile,
             rejected_workspace_keys,
             user_config_path,
@@ -966,7 +966,7 @@ fn parse_key(raw: &str, lineno: usize) -> Result<String, String> {
 fn unquote_key(raw: &str, lineno: usize) -> Result<String, String> {
     if raw.starts_with('"') {
         match parse_quoted(raw, lineno)? {
-            (s, rest) if rest.is_empty() => Ok(s),
+            (s, "") => Ok(s),
             _ => Err(format!(
                 "line {}: trailing characters after quoted key",
                 lineno

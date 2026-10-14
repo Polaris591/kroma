@@ -330,13 +330,11 @@ pub fn extract_import_tokens(rel: &str, content: &str) -> BTreeSet<String> {
         for ch in line.chars() {
             if ch.is_alphanumeric() || ch == '_' {
                 current.push(ch);
+            } else if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
+            {
+                tokens.insert(std::mem::take(&mut current));
             } else {
-                if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
-                {
-                    tokens.insert(std::mem::take(&mut current));
-                } else {
-                    current.clear();
-                }
+                current.clear();
             }
         }
         if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit()) {
@@ -1210,14 +1208,12 @@ pub fn extract_reference_tokens(rel: &str, content: &str) -> BTreeSet<String> {
     for ch in stripped.chars() {
         if ch.is_alphanumeric() || ch == '_' {
             current.push(ch);
-        } else {
-            if !current.is_empty() {
-                if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
-                {
-                    tokens.insert(std::mem::take(&mut current));
-                } else {
-                    current.clear();
-                }
+        } else if !current.is_empty() {
+            if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
+            {
+                tokens.insert(std::mem::take(&mut current));
+            } else {
+                current.clear();
             }
         }
     }

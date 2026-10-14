@@ -54,7 +54,9 @@ impl EventSeq {
         Self(seq)
     }
 
-    pub fn next(&mut self) -> Self {
+    /// Advance the counter and return the new value. Not named `next`: this mutates and returns a
+    /// counter directly rather than yielding iterator items.
+    pub fn advance(&mut self) -> Self {
         self.0 += 1;
         *self
     }

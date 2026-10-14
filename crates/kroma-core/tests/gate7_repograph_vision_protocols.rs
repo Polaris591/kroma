@@ -41,7 +41,7 @@ use kroma_core::tools::read::{base64_encode, execute_read, sniff_image};
 use kroma_core::types::{EffectClass, ToolCallId};
 use kroma_core::workspace::WorkspaceCap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -57,7 +57,7 @@ fn temp_root(tag: &str) -> PathBuf {
     path
 }
 
-fn write_file(root: &PathBuf, rel: &str, content: &str) {
+fn write_file(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
@@ -65,7 +65,7 @@ fn write_file(root: &PathBuf, rel: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
-fn write_bytes(root: &PathBuf, rel: &str, content: &[u8]) {
+fn write_bytes(root: &Path, rel: &str, content: &[u8]) {
     let path = root.join(rel);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();

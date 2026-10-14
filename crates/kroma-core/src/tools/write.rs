@@ -157,7 +157,7 @@ pub async fn execute_write(
                     },
                 );
             }
-            Some((stat_buf.st_mode & 0o7777) as u32)
+            Some(stat_buf.st_mode & 0o7777)
         } else {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ENOENT) {

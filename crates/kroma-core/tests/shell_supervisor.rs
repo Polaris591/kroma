@@ -171,9 +171,11 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
     assert!(env_out.content.contains("SAFE_BUILD_FLAG=keep_this_value"));
 
     // 2. OutputFloodCap (set low cap in budget for fast test) kills process group immediately
-    let mut flood_budget = BudgetConfig::default();
-    flood_budget.max_process_output_observed_bytes = 128 * 1024; // 128 KiB flood cap for fast test
-    flood_budget.bash_spill_bytes = 64 * 1024;
+    let flood_budget = BudgetConfig {
+        max_process_output_observed_bytes: 128 * 1024, // 128 KiB flood cap for fast test
+        bash_spill_bytes: 64 * 1024,
+        ..Default::default()
+    };
     let (_tx2, rx2) = watch::channel(false);
     let flood_out = execute_bash(
         &tmp_ws,

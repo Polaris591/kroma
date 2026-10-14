@@ -330,7 +330,7 @@ impl RpcDispatcher {
         // F04 (`v1.4.0`): a WAL failure is an explicit RPC error, never a silent success — when a
         // merge happened the revision must be durably recorded. When nothing merged the in-memory
         // count still enforces the quota, so a WAL failure is tolerated.
-        if let Ok(mut journal) = SessionJournal::open(&self.session_path()) {
+        if let Ok(mut journal) = SessionJournal::open(self.session_path()) {
             if let Some(rev) = outcome.merged_revision.clone() {
                 match store.load_revision(&rev) {
                     Ok(manifest) => {

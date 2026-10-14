@@ -572,7 +572,8 @@ fn match_one_edit(
                 ),
             },
         );
-    } else if tier2_matches.len() > 1 {
+    }
+    if tier2_matches.len() > 1 {
         let line_nums: Vec<usize> = tier2_matches.iter().map(|m| m.2).collect();
         return (None, not_unique_diag(idx, &line_nums));
     }
@@ -589,7 +590,7 @@ fn match_one_edit(
     )
 }
 
-fn parse_raw_lines<'a>(body: &'a str) -> Vec<RawLineSlice<'a>> {
+fn parse_raw_lines(body: &str) -> Vec<RawLineSlice<'_>> {
     if body.is_empty() {
         return Vec::new();
     }
@@ -943,14 +944,14 @@ fn line_similarity(a: &str, b: &str) -> f64 {
     let mut matches = 0usize;
     let (mut i, mut j) = (0, 0);
     while i < a_bigrams.len() && j < b_bigrams.len() {
-        if a_bigrams[i] == b_bigrams[j] {
-            matches += 1;
-            i += 1;
-            j += 1;
-        } else if a_bigrams[i] < b_bigrams[j] {
-            i += 1;
-        } else {
-            j += 1;
+        match a_bigrams[i].cmp(&b_bigrams[j]) {
+            std::cmp::Ordering::Equal => {
+                matches += 1;
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
         }
     }
     (2.0 * matches as f64) / ((a_bigrams.len() + b_bigrams.len()) as f64)
@@ -967,9 +968,9 @@ fn format_line_range(
     let s = start_line - 1;
     let e = end_line.min(file_lines.len());
     let mut out = String::new();
-    for idx in s..e {
+    for (idx, line) in file_lines.iter().enumerate().take(e).skip(s) {
         use std::fmt::Write;
-        let line_str = file_lines[idx].content_no_eol;
+        let line_str = line.content_no_eol;
         if line_str.len() > 2048 {
             let mut cut = 2048;
             while cut > 0 && !line_str.is_char_boundary(cut) {

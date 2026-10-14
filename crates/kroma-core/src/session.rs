@@ -1071,6 +1071,7 @@ impl SessionJournal {
     /// Checkpoint variant that also binds the workspace revision captured before this turn (Gate 1),
     /// the ancestor directories whose JIT guidance is already in context (Gate 3), and the branch's
     /// mutation ledger (Gate 4).
+    #[allow(clippy::too_many_arguments)]
     pub fn checkpoint_with_revision(
         &mut self,
         turn: usize,

@@ -1332,8 +1332,8 @@ impl InodeMutationLock {
             return Err(std::io::Error::last_os_error());
         }
         Ok(InodeLockKey {
-            parent_dev: st.st_dev as u64,
-            parent_ino: st.st_ino as u64,
+            parent_dev: st.st_dev,
+            parent_ino: st.st_ino,
             file_name: leaf_name.map(|s| s.to_os_string()).unwrap_or_default(),
         })
     }

@@ -123,7 +123,7 @@ fn test_predictive_validator_catches_syntax_and_delimiter_errors_with_zero_false
         .issues
         .is_empty());
     let toml_report = validator.validate_content("Cargo.toml", "[package\nname = \"x\n");
-    assert!(toml_report.issues.len() >= 1);
+    assert!(!toml_report.issues.is_empty());
     assert!(toml_report
         .issues
         .iter()

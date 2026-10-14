@@ -398,7 +398,7 @@ pub fn parse_command_argv(raw: &str) -> Result<Vec<String>, String> {
 fn canonicalize_diagnostic_line(line: &str) -> String {
     let mut normalized_tokens = Vec::new();
     for raw_tok in line.split_whitespace() {
-        let trimmed = raw_tok.trim_end_matches(|c: char| matches!(c, ',' | ';' | ')'));
+        let trimmed = raw_tok.trim_end_matches([',', ';', ')']);
         // Strip duration tokens like `0.42s`, `12ms`, `(0.01s)`
         let inner = trimmed.trim_start_matches('(');
         if let Some(num_part) = inner.strip_suffix("ms").or_else(|| inner.strip_suffix('s')) {

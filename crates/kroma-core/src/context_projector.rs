@@ -43,7 +43,7 @@ pub fn extract_source_entry_id(content: &str) -> Option<String> {
     let start = content.find("source_entry_id=")? + "source_entry_id=".len();
     let rest = &content[start..];
     let end = rest
-        .find(|c: char| c == ' ' || c == '|' || c == ']' || c == ')' || c == ',')
+        .find([' ', '|', ']', ')', ','])
         .unwrap_or(rest.len());
     let id = rest[..end].trim();
     if id.is_empty() {
@@ -468,6 +468,9 @@ impl ContextProjector {
     }
 
     /// Project the canonical transcript for the next Provider request while preserving prefix stability.
+    // The `>` arm appends to `self.projected_items`, which is the collection the `<` arm compares
+    // against, so the two arms are deliberately exclusive rather than a `match` on `cmp`.
+    #[allow(clippy::comparison_chain)]
     pub fn project(
         &mut self,
         canonical: &mut [TranscriptItem],
@@ -1416,11 +1419,13 @@ mod tests {
     /// Outline Stub while `recent.rs` (edited in turn 10) keeps its Working-Set Pinning exemption.
     #[test]
     fn resumed_compaction_releases_stale_hot_file_and_keeps_recent_file_pinned() {
-        let mut budget = BudgetConfig::default();
-        budget.context_high_watermark_bytes = 64 * 1024;
-        budget.context_low_watermark_bytes = 32 * 1024;
-        budget.context_tail_window_bytes = 2 * 1024;
-        budget.context_min_tail_turns = 1;
+        let budget = BudgetConfig {
+            context_high_watermark_bytes: 64 * 1024,
+            context_low_watermark_bytes: 32 * 1024,
+            context_tail_window_bytes: 2 * 1024,
+            context_min_tail_turns: 1,
+            ..Default::default()
+        };
 
         let old_body = large_source(
             "[File: src/old.rs | Lines: 1-200 of 200 | SHA256: 00000000000000aa]\n",

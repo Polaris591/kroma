@@ -473,6 +473,7 @@ impl ThemeRenderer {
     }
 
     /// The full startup banner (header line, session facts, and a one-line hint).
+    #[allow(clippy::too_many_arguments)]
     pub fn banner(
         &self,
         model: &str,

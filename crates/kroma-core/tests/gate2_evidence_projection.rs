@@ -141,12 +141,13 @@ fn compaction_transcript() -> Vec<TranscriptItem> {
 }
 
 fn compaction_budget() -> BudgetConfig {
-    let mut budget = BudgetConfig::default();
-    budget.context_high_watermark_bytes = 8 * 1024;
-    budget.context_low_watermark_bytes = 4 * 1024;
-    budget.context_tail_window_bytes = 512;
-    budget.context_min_tail_turns = 1;
-    budget
+    BudgetConfig {
+        context_high_watermark_bytes: 8 * 1024,
+        context_low_watermark_bytes: 4 * 1024,
+        context_tail_window_bytes: 512,
+        context_min_tail_turns: 1,
+        ..Default::default()
+    }
 }
 
 fn stub_for<'a>(items: &'a [TranscriptItem], tool: &str) -> &'a str {
@@ -402,15 +403,17 @@ async fn test_agent_loop_recalls_evidence_from_an_outline_stub() {
     // Drive compaction deterministically off the raw tool-output watermark: it trips as soon as a
     // second tool result exists, but the Working-Set/Tail window only lets the big read be archived
     // once it is two assistant turns old (the 4th request).
-    let filler_len = format!("     1\tpub fn filler_0() -> usize {{ 0 }}\n").len();
-    let mut budget = BudgetConfig::default();
-    budget.max_model_turns = 16;
-    budget.max_tool_calls = 32;
-    budget.max_total_tool_output_bytes = big_rust_source().len() + filler_len;
-    budget.context_tail_window_bytes = 512;
-    budget.context_min_tail_turns = 1;
-    budget.context_low_watermark_bytes = 12 * 1024;
-    budget.context_high_watermark_bytes = 96 * 1024;
+    let filler_len = "     1\tpub fn filler_0() -> usize { 0 }\n".to_string().len();
+    let budget = BudgetConfig {
+        max_model_turns: 16,
+        max_tool_calls: 32,
+        max_total_tool_output_bytes: big_rust_source().len() + filler_len,
+        context_tail_window_bytes: 512,
+        context_min_tail_turns: 1,
+        context_low_watermark_bytes: 12 * 1024,
+        context_high_watermark_bytes: 96 * 1024,
+        ..Default::default()
+    };
 
     let mut turns = vec![AssistantTurn {
         content: None,
@@ -540,15 +543,17 @@ async fn test_recall_evidence_survives_resume() {
         .unwrap();
     }
 
-    let filler_len = format!("     1\tpub fn filler_0() -> usize {{ 0 }}\n").len();
-    let mut budget = BudgetConfig::default();
-    budget.max_model_turns = 16;
-    budget.max_tool_calls = 32;
-    budget.max_total_tool_output_bytes = big_rust_source().len() + filler_len;
-    budget.context_tail_window_bytes = 512;
-    budget.context_min_tail_turns = 1;
-    budget.context_low_watermark_bytes = 12 * 1024;
-    budget.context_high_watermark_bytes = 96 * 1024;
+    let filler_len = "     1\tpub fn filler_0() -> usize { 0 }\n".to_string().len();
+    let budget = BudgetConfig {
+        max_model_turns: 16,
+        max_tool_calls: 32,
+        max_total_tool_output_bytes: big_rust_source().len() + filler_len,
+        context_tail_window_bytes: 512,
+        context_min_tail_turns: 1,
+        context_low_watermark_bytes: 12 * 1024,
+        context_high_watermark_bytes: 96 * 1024,
+        ..Default::default()
+    };
 
     // Run 1: read the large file, then enough filler turns to archive it into an Outline Stub.
     let mut turns = vec![AssistantTurn {
@@ -1972,12 +1977,13 @@ fn test_recall_evidence_utf8_patterns_and_byte_cap_line_clipping() {
 // ---------------------------------------------------------------------------------------------
 
 fn eval_budget() -> BudgetConfig {
-    let mut budget = BudgetConfig::default();
-    budget.context_high_watermark_bytes = 16 * 1024;
-    budget.context_low_watermark_bytes = 12 * 1024;
-    budget.context_tail_window_bytes = 512;
-    budget.context_min_tail_turns = 1;
-    budget
+    BudgetConfig {
+        context_high_watermark_bytes: 16 * 1024,
+        context_low_watermark_bytes: 12 * 1024,
+        context_tail_window_bytes: 512,
+        context_min_tail_turns: 1,
+        ..Default::default()
+    }
 }
 
 /// A ~1.6 KiB read body, just above `MIN_COMPACTABLE_TOOL_BYTES`, so compaction granularity is fine
@@ -2189,7 +2195,8 @@ fn test_projection_profiles_ab_metrics_and_tool_pairing_invariant() {
         ProjectionProfile::P2,
         ProjectionProfile::P3,
     ];
-    let archetypes: [(&str, fn() -> Vec<TranscriptItem>); 5] = [
+    type Archetype = (&'static str, fn() -> Vec<TranscriptItem>);
+    let archetypes: [Archetype; 5] = [
         ("long_file_nav", archetype_long_file_nav),
         ("cross_file_bug_fix", archetype_cross_file_bug_fix),
         ("repeated_error_recovery", archetype_repeated_error_recovery),

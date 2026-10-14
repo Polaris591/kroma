@@ -194,8 +194,10 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
     // Scenario 4: Mid-batch tool budget exhaustion synthesizes NOT_EXECUTED_BUDGET_EXHAUSTED for remaining call_ids
     {
         let (ws, state) = setup_sample_repo();
-        let mut budget = BudgetConfig::default();
-        budget.max_tool_calls = 2;
+        let budget = BudgetConfig {
+            max_tool_calls: 2,
+            ..Default::default()
+        };
         let summary = run_scenario(
             &ws,
             &state,
@@ -300,8 +302,10 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
     // Scenario 6: MaxTurns budget exhaustion terminates cleanly at turn boundary
     {
         let (ws, state) = setup_sample_repo();
-        let mut budget = BudgetConfig::default();
-        budget.max_model_turns = 1;
+        let budget = BudgetConfig {
+            max_model_turns: 1,
+            ..Default::default()
+        };
         let summary = run_scenario(
             &ws,
             &state,

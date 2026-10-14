@@ -1305,7 +1305,7 @@ impl SnapshotStore {
             self.store_blob(&sha256, &bytes)?;
             *total_bytes += size;
             #[cfg(unix)]
-            let mode = (meta.mode() & 0o7777) as u32;
+            let mode = meta.mode() & 0o7777;
             #[cfg(windows)]
             let mode = if meta.permissions().readonly() {
                 0o444
@@ -1583,7 +1583,7 @@ pub(crate) fn stat_live_entry(
 fn stat_kind(stat: &libc::stat) -> LiveEntryStat {
     match stat.st_mode & libc::S_IFMT {
         libc::S_IFREG => LiveEntryStat::Regular {
-            mode: (stat.st_mode & 0o7777) as u32,
+            mode: (stat.st_mode & 0o7777),
             size: stat.st_size.max(0) as u64,
         },
         libc::S_IFDIR => LiveEntryStat::Directory,

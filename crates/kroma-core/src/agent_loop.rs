@@ -2003,6 +2003,10 @@ impl AgentRunner {
         );
     }
 
+    // A deliberate orchestrator: the tool-batch scheduler needs the transcript, budget, loop
+    // guard, projector, modified-file set and logger together, and bundling them would only move
+    // the same list into a struct the one caller has to build.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool_batch(
         &mut self,
         tool_calls: &[ToolCall],

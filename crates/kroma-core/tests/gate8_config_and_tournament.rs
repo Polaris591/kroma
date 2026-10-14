@@ -727,9 +727,11 @@ async fn test_best_of_n_worktree_tournament_selects_passing_minimal_candidate_an
     let root = temp_root("tournament-win");
     let (ws_dir, workspace, store) = baseline_workspace(&root);
 
-    let bloated: String = (0..50)
-        .map(|i| format!("// padding line {}\n", i))
-        .collect();
+    let mut bloated = String::new();
+    for i in 0..50 {
+        use std::fmt::Write as _;
+        let _ = writeln!(bloated, "// padding line {}", i);
+    }
     let minimal = "// minimal fix\npub fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }\n";
 
     // c1 fails verification, c2 passes with a bloated 50-line diff, c3 passes with a 3-line fix.

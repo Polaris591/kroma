@@ -613,7 +613,7 @@ impl EventLogger {
             }
         }
 
-        let seq = self.seq.next();
+        let seq = self.seq.advance();
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

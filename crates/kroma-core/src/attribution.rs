@@ -338,7 +338,7 @@ fn toml_issues(content: &str) -> Vec<PredictiveIssue> {
             let body = trimmed.split('#').next().unwrap_or(trimmed).trim();
             if !body.starts_with(open)
                 || !body.ends_with(close)
-                || body.len() <= open.len() + close.len() - 1
+                || body.len() < open.len() + close.len()
             {
                 issues.push(PredictiveIssue {
                     line: line_no,
@@ -584,12 +584,15 @@ fn has_closing_regex_slash_on_line(chars: &[char], start: usize) -> bool {
     false
 }
 
+/// One entry of the structural checker's delimiter stack:
+/// `(delimiter, open_line, open_col, resume_template_open_pos)`.
+type DelimStackFrame = (char, usize, usize, Option<(usize, usize)>);
+
 fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
     let chars: Vec<char> = content.chars().collect();
     let n = chars.len();
     let mut issues: Vec<PredictiveIssue> = Vec::new();
-    // `(delim, open_line, open_col, resume_template_open_pos)`
-    let mut stack: Vec<(char, usize, usize, Option<(usize, usize)>)> = Vec::new();
+    let mut stack: Vec<DelimStackFrame> = Vec::new();
     let mut state = ScanState::Normal;
     let mut prev_sig_char: Option<char> = None;
     let mut prev_word = String::new();
@@ -1500,6 +1503,7 @@ pub fn parse_diagnostic_anchors(output: &str) -> Vec<DiagnosticAnchor> {
     anchors
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_anchor(
     anchors: &mut Vec<DiagnosticAnchor>,
     seen: &mut BTreeSet<(String, Option<usize>, Option<usize>)>,
