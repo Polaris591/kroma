@@ -667,535 +667,17 @@ impl InteractiveRepl {
             let cmd = parts.next().unwrap_or("");
             let rest: Vec<&str> = parts.collect();
             return match cmd {
-                "/help" | "/?" => Ok(ReplStepOutcome {
-                    output: concat!(
-                        "Available commands:\n",
-                        "  /help                       Show this command reference\n",
-                        "  /status                     Show active session, model, thinking, revision and token status\n",
-                        "  /model [<id>] [--save]      Show or hot-swap the active model (--save persists it)\n",
-                        "  /thinking [<lvl>] [--save]  Show or hot-swap reasoning effort (off|low|medium|high|xhigh)\n",
-                        "  /protocol [<name>]          Show or hot-swap the wire protocol (auto|chat-completions|\n",
-                        "                              anthropic-messages|openai-responses)\n",
-                        "  /config [show|set <k> <v>|profile <name>]  Inspect or persist layered configuration\n",
-                        "  /theme [zen|classic]        Show or switch the terminal theme (zen = Design D, default)\n",
-                        "  /sessions                   List recent sessions in the state directory\n",
-                        "  /resume [<latest|id>]       Attach an existing session WAL as the active session\n",
-                        "  /new | /clear               Start a fresh session in this workspace\n",
-                        "  /revisions                  List captured workspace revisions for this session\n",
-                        "  /undo [--force]             Restore workspace & session leaf to previous revision\n",
-                        "  /restore <rev> [--force]    Restore workspace to a specific revision ID\n",
-                        "  /diff                       Show files changed in the latest revision\n",
-                        "  /skills [<name>]            List workspace skills or activate <name>\n",
-                        "  /graph [<query>]            Rank files with Personalized PageRank over the symbol graph\n",
-                        "  /race <N> <task>            Best-of-N worktree tournament: race N workers, merge the best\n",
-                        "  /fork <turn>                Rewind/branch active session at <turn>\n",
-                        "  /inspect <id>               Recall raw tool evidence by source_entry_id\n",
-                        "  /quit | /exit               Shut down the interactive session\n"
-                    )
-                    .to_string(),
-                    should_exit: false,
-                }),
-                "/quit" | "/exit" => {
-                    let _ = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(1, "shutdown", json!({})))
-                        .await;
-                    Ok(ReplStepOutcome {
-                        output: "Session closed.\n".to_string(),
-                        should_exit: true,
-                    })
-                }
-                "/status" => {
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(1, "session.status", json!({})))
-                        .await;
-                    let val = resp.result.ok_or_else(|| {
-                        resp.error
-                            .map(|e| e.message)
-                            .unwrap_or_else(|| "status failed".to_string())
-                    })?;
-                    let sid = val.get("session_id").and_then(Value::as_str).unwrap_or("-");
-                    let policy = val.get("policy_mode").and_then(Value::as_str).unwrap_or("-");
-                    let turns = val.get("turn_count").and_then(Value::as_u64).unwrap_or(0);
-                    let rev = val
-                        .get("latest_revision_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("<none>");
-                    let mut_count = val
-                        .get("mutations")
-                        .and_then(Value::as_array)
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    let sub_count = val
-                        .get("subagents_spawned")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    // `v1.5.0`: prefix the live view with a Design D status-dot line. The body keeps
-                    // its stable `key: value` lines so scripts and parity tests are unaffected.
-                    let renderer = self.dispatcher.theme_renderer();
-                    let mut out = String::new();
-                    if renderer.theme() == Theme::Zen {
-                        out.push_str(&renderer.status_line(
-                            StatusDot::Tool,
-                            "status",
-                            &format!(
-                                "session={} policy={} turns={} rev={}",
-                                sanitize_terminal_text(sid),
-                                sanitize_terminal_text(policy),
-                                turns,
-                                crate::theme::rev_label(rev),
-                            ),
-                        ));
-                        out.push('\n');
-                    }
-                    out.push_str(&format!(
-                        "session_id: {}\npolicy: {}\nturn_count: {}\nlatest_revision: {}\nmutations: {}\nsubagents_spawned: {}\n",
-                        sanitize_terminal_text(sid),
-                        sanitize_terminal_text(policy),
-                        turns,
-                        sanitize_terminal_text(rev),
-                        mut_count,
-                        sub_count,
-                    ));
-                    Ok(ReplStepOutcome {
-                        output: out,
-                        should_exit: false,
-                    })
-                }
-                "/theme" | "/ui" => {
-                    // `v1.5.0`: show or switch the Design D / classic terminal theme.
-                    let renderer = self.dispatcher.theme_renderer();
-                    let Some(&requested) = rest.first() else {
-                        return Ok(ReplStepOutcome {
-                            output: format!(
-                                "theme: {} (available: zen, classic)\n",
-                                renderer.theme().as_str()
-                            ),
-                            should_exit: false,
-                        });
-                    };
-                    if Theme::parse(requested).is_err() {
-                        return Ok(ReplStepOutcome {
-                            output: format!(
-                                "error: unknown theme '{}'; expected 'zen' or 'classic'\n",
-                                sanitize_terminal_text(requested)
-                            ),
-                            should_exit: false,
-                        });
-                    }
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(
-                            1,
-                            "config.set",
-                            json!({ "ui_theme": requested }),
-                        ))
-                        .await;
-                    match resp.result {
-                        Some(val) => {
-                            let theme = val
-                                .get("ui_theme")
-                                .and_then(Value::as_str)
-                                .unwrap_or(requested);
-                            let renderer = self.dispatcher.theme_renderer();
-                            let mut out = String::new();
-                            if renderer.theme() == Theme::Zen {
-                                out.push_str(&renderer.status_line(
-                                    StatusDot::Success,
-                                    "theme",
-                                    &format!("switched to {}", theme),
-                                ));
-                                out.push('\n');
-                            }
-                            out.push_str(&format!(
-                                "theme -> {}{}\n",
-                                sanitize_terminal_text(theme),
-                                if theme == "zen" {
-                                    " (Design D: borderless, ultra-minimal)"
-                                } else {
-                                    ""
-                                }
-                            ));
-                            Ok(ReplStepOutcome {
-                                output: out,
-                                should_exit: false,
-                            })
-                        }
-                        None => Ok(ReplStepOutcome {
-                            output: format!(
-                                "error: {}\n",
-                                sanitize_terminal_text(
-                                    &resp
-                                        .error
-                                        .map(|e| e.message)
-                                        .unwrap_or_else(|| "config.set failed".to_string())
-                                )
-                            ),
-                            should_exit: false,
-                        }),
-                    }
-                }
-                "/revisions" | "/diff" => {
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(1, "revision.list", json!({})))
-                        .await;
-                    let val = resp.result.ok_or_else(|| {
-                        resp.error
-                            .map(|e| e.message)
-                            .unwrap_or_else(|| "revision.list failed".to_string())
-                    })?;
-                    let revs = val
-                        .get("revisions")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    if revs.is_empty() {
-                        return Ok(ReplStepOutcome {
-                            output: "no workspace revisions captured yet.\n".to_string(),
-                            should_exit: false,
-                        });
-                    }
-                    let mut out = String::new();
-                    if cmd == "/diff" {
-                        // `v1.5.0`: Design D header for the live diff view. The stable
-                        // `revisions (N captured):` body below is preserved for scripts.
-                        let renderer = self.dispatcher.theme_renderer();
-                        if renderer.theme() == Theme::Zen {
-                            out.push_str(&renderer.status_line(
-                                StatusDot::Tool,
-                                "diff",
-                                &format!("{} workspace revision(s) captured", revs.len()),
-                            ));
-                            out.push('\n');
-                            out.push_str(&renderer.hairline(terminal_hairline_width()));
-                            out.push('\n');
-                        }
-                    }
-                    out.push_str(&format!("revisions ({} captured):\n", revs.len()));
-                    for r in &revs {
-                        let turn = r.get("turn").and_then(Value::as_u64).unwrap_or(0);
-                        let rid = r.get("revision_id").and_then(Value::as_str).unwrap_or("-");
-                        let files = r
-                            .get("tracked_file_count")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let is_cur = r.get("is_current").and_then(Value::as_bool).unwrap_or(false);
-                        let changed: Vec<String> = r
-                            .get("changed_paths")
-                            .and_then(Value::as_array)
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(Value::as_str)
-                                    .map(sanitize_terminal_text)
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let marker = if is_cur { " <- current" } else { "" };
-                        out.push_str(&format!(
-                            "  turn {}  {}  files={} changed=[{}]{}\n",
-                            turn,
-                            sanitize_terminal_text(rid),
-                            files,
-                            changed.join(", "),
-                            marker
-                        ));
-                    }
-                    Ok(ReplStepOutcome {
-                        output: out,
-                        should_exit: false,
-                    })
-                }
-                "/undo" => {
-                    let force = rest.iter().any(|&arg| arg == "--force" || arg == "-f");
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(
-                            1,
-                            "revision.undo",
-                            json!({ "force": force }),
-                        ))
-                        .await;
-                    match (resp.result, resp.error) {
-                        (Some(val), _) => {
-                            let rev = val
-                                .get("restored_revision")
-                                .and_then(Value::as_str)
-                                .unwrap_or("-");
-                            let turn = val.get("rewound_turn").and_then(Value::as_u64).unwrap_or(0);
-                            Ok(ReplStepOutcome {
-                                output: format!(
-                                    "restored workspace to {} (rewound to turn {})\n",
-                                    sanitize_terminal_text(rev),
-                                    turn
-                                ),
-                                should_exit: false,
-                            })
-                        }
-                        (_, Some(err)) => Ok(ReplStepOutcome {
-                            output: format!("undo error: {}\n", sanitize_terminal_text(&err.message)),
-                            should_exit: false,
-                        }),
-                        _ => Err("unexpected empty response from revision.undo".to_string()),
-                    }
-                }
-                "/restore" => {
-                    let Some(&rev_id) = rest.first() else {
-                        return Ok(ReplStepOutcome {
-                            output: "usage: /restore <revision_id> [--force]\n".to_string(),
-                            should_exit: false,
-                        });
-                    };
-                    let force = rest.iter().skip(1).any(|&arg| arg == "--force" || arg == "-f");
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(
-                            1,
-                            "revision.restore",
-                            json!({ "revision_id": rev_id, "force": force }),
-                        ))
-                        .await;
-                    match (resp.result, resp.error) {
-                        (Some(val), _) => {
-                            let rev = val
-                                .get("restored_revision")
-                                .and_then(Value::as_str)
-                                .unwrap_or("-");
-                            Ok(ReplStepOutcome {
-                                output: format!(
-                                    "restored workspace to {}\n",
-                                    sanitize_terminal_text(rev)
-                                ),
-                                should_exit: false,
-                            })
-                        }
-                        (_, Some(err)) => Ok(ReplStepOutcome {
-                            output: format!(
-                                "restore error: {}\n",
-                                sanitize_terminal_text(&err.message)
-                            ),
-                            should_exit: false,
-                        }),
-                        _ => Err("unexpected empty response from revision.restore".to_string()),
-                    }
-                }
-                "/skills" => {
-                    if let Some(&skill_name) = rest.first() {
-                        let resp = self
-                            .dispatcher
-                            .handle_request(JsonRpcRequest::new(
-                                1,
-                                "skills.activate",
-                                json!({ "name": skill_name }),
-                            ))
-                            .await;
-                        return match (resp.result, resp.error) {
-                            (Some(val), _) => {
-                                let content = val
-                                    .get("content")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("");
-                                Ok(ReplStepOutcome {
-                                    output: format!(
-                                        "activated skill '{}':\n{}\n",
-                                        sanitize_terminal_text(skill_name),
-                                        sanitize_terminal_text(content)
-                                    ),
-                                    should_exit: false,
-                                })
-                            }
-                            (_, Some(err)) => Ok(ReplStepOutcome {
-                                output: format!(
-                                    "skill error: {}\n",
-                                    sanitize_terminal_text(&err.message)
-                                ),
-                                should_exit: false,
-                            }),
-                            _ => Err("empty response from skills.activate".to_string()),
-                        };
-                    }
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(1, "skills.list", json!({})))
-                        .await;
-                    let val = resp.result.unwrap_or_else(|| json!({}));
-                    let skills = val
-                        .get("skills")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    if skills.is_empty() {
-                        return Ok(ReplStepOutcome {
-                            output: "no skills discovered in .agents/skills/.\n".to_string(),
-                            should_exit: false,
-                        });
-                    }
-                    let mut out = format!("skills ({} discovered):\n", skills.len());
-                    for s in &skills {
-                        let name = s.get("name").and_then(Value::as_str).unwrap_or("-");
-                        let desc = s.get("description").and_then(Value::as_str).unwrap_or("");
-                        let act = s.get("activated").and_then(Value::as_bool).unwrap_or(false);
-                        let tag = if act { " [active]" } else { "" };
-                        out.push_str(&format!(
-                            "  {}{}: {}\n",
-                            sanitize_terminal_text(name),
-                            tag,
-                            sanitize_terminal_text(desc)
-                        ));
-                    }
-                    Ok(ReplStepOutcome {
-                        output: out,
-                        should_exit: false,
-                    })
-                }
-                "/graph" => {
-                    let query = rest.join(" ");
-                    let params = if query.trim().is_empty() {
-                        json!({})
-                    } else {
-                        json!({ "query": query })
-                    };
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(1, "workspace.graph", params))
-                        .await;
-                    let val = resp.result.ok_or_else(|| {
-                        resp.error
-                            .map(|e| e.message)
-                            .unwrap_or_else(|| "workspace.graph failed".to_string())
-                    })?;
-                    let total_files = val
-                        .get("total_files")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    let total_symbols = val
-                        .get("total_symbols")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    let total_edges = val
-                        .get("total_edges")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    let ranked = val
-                        .get("ranked")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    if ranked.is_empty() {
-                        return Ok(ReplStepOutcome {
-                            output: format!(
-                                "repo graph: {} files, {} symbols, {} edges; no ranked files.\n",
-                                total_files, total_symbols, total_edges
-                            ),
-                            should_exit: false,
-                        });
-                    }
-                    let mut out = format!(
-                        "repo graph: {} files, {} symbols, {} edges\n",
-                        total_files, total_symbols, total_edges
-                    );
-                    for (i, node) in ranked.iter().enumerate() {
-                        let path = node.get("path").and_then(Value::as_str).unwrap_or("-");
-                        let score = node.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-                        out.push_str(&format!(
-                            "  {} {} (score={:.4})\n",
-                            i + 1,
-                            sanitize_terminal_text(path),
-                            score
-                        ));
-                        if let Some(syms) = node.get("symbols").and_then(Value::as_array) {
-                            for s in syms {
-                                let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
-                                let sig = s.get("signature").and_then(Value::as_str).unwrap_or("");
-                                out.push_str(&format!(
-                                    "      {} {}\n",
-                                    kind,
-                                    sanitize_terminal_text(sig)
-                                ));
-                            }
-                        }
-                    }
-                    Ok(ReplStepOutcome {
-                        output: out,
-                        should_exit: false,
-                    })
-                }
-                "/fork" => {
-                    let Some(turn_str) = rest.first() else {
-                        return Ok(ReplStepOutcome {
-                            output: "usage: /fork <turn>\n".to_string(),
-                            should_exit: false,
-                        });
-                    };
-                    let Ok(turn) = turn_str.parse::<usize>() else {
-                        return Ok(ReplStepOutcome {
-                            output: "error: /fork expects a non-negative integer turn\n"
-                                .to_string(),
-                            should_exit: false,
-                        });
-                    };
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(
-                            1,
-                            "session.fork",
-                            json!({ "turn": turn }),
-                        ))
-                        .await;
-                    match (resp.result, resp.error) {
-                        (Some(val), _) => {
-                            let leaf = val.get("leaf_id").and_then(Value::as_str).unwrap_or("-");
-                            Ok(ReplStepOutcome {
-                                output: format!(
-                                    "forked session at turn {} (leaf {})\n",
-                                    turn,
-                                    sanitize_terminal_text(leaf)
-                                ),
-                                should_exit: false,
-                            })
-                        }
-                        (_, Some(err)) => Ok(ReplStepOutcome {
-                            output: format!(
-                                "fork error: {}\n",
-                                sanitize_terminal_text(&err.message)
-                            ),
-                            should_exit: false,
-                        }),
-                        _ => Err("empty response from session.fork".to_string()),
-                    }
-                }
-                "/inspect" | "/evidence" => {
-                    let sid = rest.first().copied().unwrap_or("latest");
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(
-                            1,
-                            "evidence.recall",
-                            json!({ "source_entry_id": sid }),
-                        ))
-                        .await;
-                    match (resp.result, resp.error) {
-                        (Some(val), _) => {
-                            let content = val
-                                .get("content")
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
-                            Ok(ReplStepOutcome {
-                                output: format!("{}\n", sanitize_terminal_text(content)),
-                                should_exit: false,
-                            })
-                        }
-                        (_, Some(err)) => Ok(ReplStepOutcome {
-                            output: format!(
-                                "evidence error: {}\n",
-                                sanitize_terminal_text(&err.message)
-                            ),
-                            should_exit: false,
-                        }),
-                        _ => Err("empty response from evidence.recall".to_string()),
-                    }
-                }
+                "/help" | "/?" => self.repl_help_command().await,
+                "/quit" | "/exit" => self.repl_quit_command().await,
+                "/status" => self.repl_status_command().await,
+                "/theme" | "/ui" => self.repl_theme_command(&rest).await,
+                "/revisions" | "/diff" => self.repl_revisions_command(cmd).await,
+                "/undo" => self.repl_undo_command(&rest).await,
+                "/restore" => self.repl_restore_command(&rest).await,
+                "/skills" => self.repl_skills_command(&rest).await,
+                "/graph" => self.repl_graph_command(&rest).await,
+                "/fork" => self.repl_fork_command(&rest).await,
+                "/inspect" | "/evidence" => self.repl_inspect_command(&rest).await,
                 "/model" => self.repl_config_command("model", &rest).await,
                 "/thinking" => self.repl_config_command("thinking", &rest).await,
                 "/protocol" => self.repl_config_command("protocol", &rest).await,
@@ -1204,23 +686,7 @@ impl InteractiveRepl {
                 "/resume" => self.repl_resume_command(&rest).await,
                 "/new" => self.repl_new_session_command().await,
                 "/race" => self.repl_race_command(&rest).await,
-                "/clear" => {
-                    let resp = self
-                        .dispatcher
-                        .handle_request(JsonRpcRequest::new(1, "session.new", json!({})))
-                        .await;
-                    let sid = resp
-                        .result
-                        .and_then(|v| v.get("session_id").and_then(Value::as_str).map(String::from))
-                        .unwrap_or_default();
-                    Ok(ReplStepOutcome {
-                        output: format!(
-                            "started new session {}\n",
-                            sanitize_terminal_text(&sid)
-                        ),
-                        should_exit: false,
-                    })
-                }
+                "/clear" => self.repl_clear_command().await,
                 other => Ok(ReplStepOutcome {
                     output: format!(
                         "unknown command '{}'; type /help for available commands.\n",
@@ -1349,6 +815,567 @@ impl InteractiveRepl {
             _ => Err("empty response from session.prompt".to_string()),
         }
     }
+
+    async fn repl_help_command(&self) -> Result<ReplStepOutcome, String> {
+        Ok(ReplStepOutcome {
+            output: concat!(
+                "Available commands:\n",
+                "  /help                       Show this command reference\n",
+                "  /status                     Show active session, model, thinking, revision and token status\n",
+                "  /model [<id>] [--save]      Show or hot-swap the active model (--save persists it)\n",
+                "  /thinking [<lvl>] [--save]  Show or hot-swap reasoning effort (off|low|medium|high|xhigh)\n",
+                "  /protocol [<name>]          Show or hot-swap the wire protocol (auto|chat-completions|\n",
+                "                              anthropic-messages|openai-responses)\n",
+                "  /config [show|set <k> <v>|profile <name>]  Inspect or persist layered configuration\n",
+                "  /theme [zen|classic]        Show or switch the terminal theme (zen = Design D, default)\n",
+                "  /sessions                   List recent sessions in the state directory\n",
+                "  /resume [<latest|id>]       Attach an existing session WAL as the active session\n",
+                "  /new | /clear               Start a fresh session in this workspace\n",
+                "  /revisions                  List captured workspace revisions for this session\n",
+                "  /undo [--force]             Restore workspace & session leaf to previous revision\n",
+                "  /restore <rev> [--force]    Restore workspace to a specific revision ID\n",
+                "  /diff                       Show files changed in the latest revision\n",
+                "  /skills [<name>]            List workspace skills or activate <name>\n",
+                "  /graph [<query>]            Rank files with Personalized PageRank over the symbol graph\n",
+                "  /race <N> <task>            Best-of-N worktree tournament: race N workers, merge the best\n",
+                "  /fork <turn>                Rewind/branch active session at <turn>\n",
+                "  /inspect <id>               Recall raw tool evidence by source_entry_id\n",
+                "  /quit | /exit               Shut down the interactive session\n"
+            )
+            .to_string(),
+            should_exit: false,
+        })
+    }
+
+    async fn repl_quit_command(&self) -> Result<ReplStepOutcome, String> {
+        let _ = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "shutdown", json!({})))
+            .await;
+        Ok(ReplStepOutcome {
+            output: "Session closed.\n".to_string(),
+            should_exit: true,
+        })
+    }
+
+    async fn repl_status_command(&self) -> Result<ReplStepOutcome, String> {
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "session.status", json!({})))
+            .await;
+        let val = resp.result.ok_or_else(|| {
+            resp.error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "status failed".to_string())
+        })?;
+        let sid = val.get("session_id").and_then(Value::as_str).unwrap_or("-");
+        let policy = val.get("policy_mode").and_then(Value::as_str).unwrap_or("-");
+        let turns = val.get("turn_count").and_then(Value::as_u64).unwrap_or(0);
+        let rev = val
+            .get("latest_revision_id")
+            .and_then(Value::as_str)
+            .unwrap_or("<none>");
+        let mut_count = val
+            .get("mutations")
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let sub_count = val
+            .get("subagents_spawned")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        // `v1.5.0`: prefix the live view with a Design D status-dot line. The body keeps
+        // its stable `key: value` lines so scripts and parity tests are unaffected.
+        let renderer = self.dispatcher.theme_renderer();
+        let mut out = String::new();
+        if renderer.theme() == Theme::Zen {
+            out.push_str(&renderer.status_line(
+                StatusDot::Tool,
+                "status",
+                &format!(
+                    "session={} policy={} turns={} rev={}",
+                    sanitize_terminal_text(sid),
+                    sanitize_terminal_text(policy),
+                    turns,
+                    crate::theme::rev_label(rev),
+                ),
+            ));
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "session_id: {}\npolicy: {}\nturn_count: {}\nlatest_revision: {}\nmutations: {}\nsubagents_spawned: {}\n",
+            sanitize_terminal_text(sid),
+            sanitize_terminal_text(policy),
+            turns,
+            sanitize_terminal_text(rev),
+            mut_count,
+            sub_count,
+        ));
+        Ok(ReplStepOutcome {
+            output: out,
+            should_exit: false,
+        })
+    }
+
+    async fn repl_theme_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        // `v1.5.0`: show or switch the Design D / classic terminal theme.
+        let renderer = self.dispatcher.theme_renderer();
+        let Some(&requested) = rest.first() else {
+            return Ok(ReplStepOutcome {
+                output: format!(
+                    "theme: {} (available: zen, classic)\n",
+                    renderer.theme().as_str()
+                ),
+                should_exit: false,
+            });
+        };
+        if Theme::parse(requested).is_err() {
+            return Ok(ReplStepOutcome {
+                output: format!(
+                    "error: unknown theme '{}'; expected 'zen' or 'classic'\n",
+                    sanitize_terminal_text(requested)
+                ),
+                should_exit: false,
+            });
+        }
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "config.set",
+                json!({ "ui_theme": requested }),
+            ))
+            .await;
+        match resp.result {
+            Some(val) => {
+                let theme = val
+                    .get("ui_theme")
+                    .and_then(Value::as_str)
+                    .unwrap_or(requested);
+                let renderer = self.dispatcher.theme_renderer();
+                let mut out = String::new();
+                if renderer.theme() == Theme::Zen {
+                    out.push_str(&renderer.status_line(
+                        StatusDot::Success,
+                        "theme",
+                        &format!("switched to {}", theme),
+                    ));
+                    out.push('\n');
+                }
+                out.push_str(&format!(
+                    "theme -> {}{}\n",
+                    sanitize_terminal_text(theme),
+                    if theme == "zen" {
+                        " (Design D: borderless, ultra-minimal)"
+                    } else {
+                        ""
+                    }
+                ));
+                Ok(ReplStepOutcome {
+                    output: out,
+                    should_exit: false,
+                })
+            }
+            None => Ok(ReplStepOutcome {
+                output: format!(
+                    "error: {}\n",
+                    sanitize_terminal_text(
+                        &resp
+                            .error
+                            .map(|e| e.message)
+                            .unwrap_or_else(|| "config.set failed".to_string())
+                    )
+                ),
+                should_exit: false,
+            }),
+        }
+    }
+
+    async fn repl_revisions_command(&self, cmd: &str) -> Result<ReplStepOutcome, String> {
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "revision.list", json!({})))
+            .await;
+        let val = resp.result.ok_or_else(|| {
+            resp.error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "revision.list failed".to_string())
+        })?;
+        let revs = val
+            .get("revisions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if revs.is_empty() {
+            return Ok(ReplStepOutcome {
+                output: "no workspace revisions captured yet.\n".to_string(),
+                should_exit: false,
+            });
+        }
+        let mut out = String::new();
+        if cmd == "/diff" {
+            // `v1.5.0`: Design D header for the live diff view. The stable
+            // `revisions (N captured):` body below is preserved for scripts.
+            let renderer = self.dispatcher.theme_renderer();
+            if renderer.theme() == Theme::Zen {
+                out.push_str(&renderer.status_line(
+                    StatusDot::Tool,
+                    "diff",
+                    &format!("{} workspace revision(s) captured", revs.len()),
+                ));
+                out.push('\n');
+                out.push_str(&renderer.hairline(terminal_hairline_width()));
+                out.push('\n');
+            }
+        }
+        out.push_str(&format!("revisions ({} captured):\n", revs.len()));
+        for r in &revs {
+            let turn = r.get("turn").and_then(Value::as_u64).unwrap_or(0);
+            let rid = r.get("revision_id").and_then(Value::as_str).unwrap_or("-");
+            let files = r
+                .get("tracked_file_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let is_cur = r.get("is_current").and_then(Value::as_bool).unwrap_or(false);
+            let changed: Vec<String> = r
+                .get("changed_paths")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(sanitize_terminal_text)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let marker = if is_cur { " <- current" } else { "" };
+            out.push_str(&format!(
+                "  turn {}  {}  files={} changed=[{}]{}\n",
+                turn,
+                sanitize_terminal_text(rid),
+                files,
+                changed.join(", "),
+                marker
+            ));
+        }
+        Ok(ReplStepOutcome {
+            output: out,
+            should_exit: false,
+        })
+    }
+
+    async fn repl_undo_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let force = rest.iter().any(|&arg| arg == "--force" || arg == "-f");
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "revision.undo",
+                json!({ "force": force }),
+            ))
+            .await;
+        match (resp.result, resp.error) {
+            (Some(val), _) => {
+                let rev = val
+                    .get("restored_revision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                let turn = val.get("rewound_turn").and_then(Value::as_u64).unwrap_or(0);
+                Ok(ReplStepOutcome {
+                    output: format!(
+                        "restored workspace to {} (rewound to turn {})\n",
+                        sanitize_terminal_text(rev),
+                        turn
+                    ),
+                    should_exit: false,
+                })
+            }
+            (_, Some(err)) => Ok(ReplStepOutcome {
+                output: format!("undo error: {}\n", sanitize_terminal_text(&err.message)),
+                should_exit: false,
+            }),
+            _ => Err("unexpected empty response from revision.undo".to_string()),
+        }
+    }
+
+    async fn repl_restore_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let Some(&rev_id) = rest.first() else {
+            return Ok(ReplStepOutcome {
+                output: "usage: /restore <revision_id> [--force]\n".to_string(),
+                should_exit: false,
+            });
+        };
+        let force = rest.iter().skip(1).any(|&arg| arg == "--force" || arg == "-f");
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "revision.restore",
+                json!({ "revision_id": rev_id, "force": force }),
+            ))
+            .await;
+        match (resp.result, resp.error) {
+            (Some(val), _) => {
+                let rev = val
+                    .get("restored_revision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                Ok(ReplStepOutcome {
+                    output: format!(
+                        "restored workspace to {}\n",
+                        sanitize_terminal_text(rev)
+                    ),
+                    should_exit: false,
+                })
+            }
+            (_, Some(err)) => Ok(ReplStepOutcome {
+                output: format!(
+                    "restore error: {}\n",
+                    sanitize_terminal_text(&err.message)
+                ),
+                should_exit: false,
+            }),
+            _ => Err("unexpected empty response from revision.restore".to_string()),
+        }
+    }
+
+    async fn repl_skills_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        if let Some(&skill_name) = rest.first() {
+            let resp = self
+                .dispatcher
+                .handle_request(JsonRpcRequest::new(
+                    1,
+                    "skills.activate",
+                    json!({ "name": skill_name }),
+                ))
+                .await;
+            return match (resp.result, resp.error) {
+                (Some(val), _) => {
+                    let content = val
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    Ok(ReplStepOutcome {
+                        output: format!(
+                            "activated skill '{}':\n{}\n",
+                            sanitize_terminal_text(skill_name),
+                            sanitize_terminal_text(content)
+                        ),
+                        should_exit: false,
+                    })
+                }
+                (_, Some(err)) => Ok(ReplStepOutcome {
+                    output: format!(
+                        "skill error: {}\n",
+                        sanitize_terminal_text(&err.message)
+                    ),
+                    should_exit: false,
+                }),
+                _ => Err("empty response from skills.activate".to_string()),
+            };
+        }
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "skills.list", json!({})))
+            .await;
+        let val = resp.result.unwrap_or_else(|| json!({}));
+        let skills = val
+            .get("skills")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if skills.is_empty() {
+            return Ok(ReplStepOutcome {
+                output: "no skills discovered in .agents/skills/.\n".to_string(),
+                should_exit: false,
+            });
+        }
+        let mut out = format!("skills ({} discovered):\n", skills.len());
+        for s in &skills {
+            let name = s.get("name").and_then(Value::as_str).unwrap_or("-");
+            let desc = s.get("description").and_then(Value::as_str).unwrap_or("");
+            let act = s.get("activated").and_then(Value::as_bool).unwrap_or(false);
+            let tag = if act { " [active]" } else { "" };
+            out.push_str(&format!(
+                "  {}{}: {}\n",
+                sanitize_terminal_text(name),
+                tag,
+                sanitize_terminal_text(desc)
+            ));
+        }
+        Ok(ReplStepOutcome {
+            output: out,
+            should_exit: false,
+        })
+    }
+
+    async fn repl_graph_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let query = rest.join(" ");
+        let params = if query.trim().is_empty() {
+            json!({})
+        } else {
+            json!({ "query": query })
+        };
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "workspace.graph", params))
+            .await;
+        let val = resp.result.ok_or_else(|| {
+            resp.error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "workspace.graph failed".to_string())
+        })?;
+        let total_files = val
+            .get("total_files")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let total_symbols = val
+            .get("total_symbols")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let total_edges = val
+            .get("total_edges")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let ranked = val
+            .get("ranked")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if ranked.is_empty() {
+            return Ok(ReplStepOutcome {
+                output: format!(
+                    "repo graph: {} files, {} symbols, {} edges; no ranked files.\n",
+                    total_files, total_symbols, total_edges
+                ),
+                should_exit: false,
+            });
+        }
+        let mut out = format!(
+            "repo graph: {} files, {} symbols, {} edges\n",
+            total_files, total_symbols, total_edges
+        );
+        for (i, node) in ranked.iter().enumerate() {
+            let path = node.get("path").and_then(Value::as_str).unwrap_or("-");
+            let score = node.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+            out.push_str(&format!(
+                "  {} {} (score={:.4})\n",
+                i + 1,
+                sanitize_terminal_text(path),
+                score
+            ));
+            if let Some(syms) = node.get("symbols").and_then(Value::as_array) {
+                for s in syms {
+                    let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
+                    let sig = s.get("signature").and_then(Value::as_str).unwrap_or("");
+                    out.push_str(&format!(
+                        "      {} {}\n",
+                        kind,
+                        sanitize_terminal_text(sig)
+                    ));
+                }
+            }
+        }
+        Ok(ReplStepOutcome {
+            output: out,
+            should_exit: false,
+        })
+    }
+
+    async fn repl_fork_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let Some(turn_str) = rest.first() else {
+            return Ok(ReplStepOutcome {
+                output: "usage: /fork <turn>\n".to_string(),
+                should_exit: false,
+            });
+        };
+        let Ok(turn) = turn_str.parse::<usize>() else {
+            return Ok(ReplStepOutcome {
+                output: "error: /fork expects a non-negative integer turn\n"
+                    .to_string(),
+                should_exit: false,
+            });
+        };
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "session.fork",
+                json!({ "turn": turn }),
+            ))
+            .await;
+        match (resp.result, resp.error) {
+            (Some(val), _) => {
+                let leaf = val.get("leaf_id").and_then(Value::as_str).unwrap_or("-");
+                Ok(ReplStepOutcome {
+                    output: format!(
+                        "forked session at turn {} (leaf {})\n",
+                        turn,
+                        sanitize_terminal_text(leaf)
+                    ),
+                    should_exit: false,
+                })
+            }
+            (_, Some(err)) => Ok(ReplStepOutcome {
+                output: format!(
+                    "fork error: {}\n",
+                    sanitize_terminal_text(&err.message)
+                ),
+                should_exit: false,
+            }),
+            _ => Err("empty response from session.fork".to_string()),
+        }
+    }
+
+    async fn repl_inspect_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let sid = rest.first().copied().unwrap_or("latest");
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "evidence.recall",
+                json!({ "source_entry_id": sid }),
+            ))
+            .await;
+        match (resp.result, resp.error) {
+            (Some(val), _) => {
+                let content = val
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                Ok(ReplStepOutcome {
+                    output: format!("{}\n", sanitize_terminal_text(content)),
+                    should_exit: false,
+                })
+            }
+            (_, Some(err)) => Ok(ReplStepOutcome {
+                output: format!(
+                    "evidence error: {}\n",
+                    sanitize_terminal_text(&err.message)
+                ),
+                should_exit: false,
+            }),
+            _ => Err("empty response from evidence.recall".to_string()),
+        }
+    }
+
+    async fn repl_clear_command(&self) -> Result<ReplStepOutcome, String> {
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "session.new", json!({})))
+            .await;
+        let sid = resp
+            .result
+            .and_then(|v| v.get("session_id").and_then(Value::as_str).map(String::from))
+            .unwrap_or_default();
+        Ok(ReplStepOutcome {
+            output: format!(
+                "started new session {}\n",
+                sanitize_terminal_text(&sid)
+            ),
+            should_exit: false,
+        })
+    }
+
 
     /// `v1.5.0`: map a live `kroma/event` notification to a Design D status line.
     ///
