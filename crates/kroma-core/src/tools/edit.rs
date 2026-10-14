@@ -336,87 +336,13 @@ pub async fn execute_edit(
     for (idx, item) in args.edits.iter().enumerate() {
         let old_norm = normalize_crlf(&item.old_text);
         let new_norm = normalize_crlf(&item.new_text);
-
-        let tier2_matches = find_tier2_trailing_ws_matches(&file_lines, &old_norm);
-        // Tier 1: Exact match after CRLF/CR -> LF normalization (only accept as unique if Tier 2
-        // does not reveal additional trailing-whitespace-equivalent duplicates elsewhere in the file).
-        let tier1_matches = find_tier1_exact_matches(body_raw, &file_lines, &old_norm);
-        if tier1_matches.len() == 1 && tier2_matches.len() <= 1 {
-            let (byte_start, byte_end, start_line, end_line) = tier1_matches[0];
-            let replacement_str = apply_eol_style(&new_norm, dominant_eol);
-            validated_spans.push(ValidatedSpan {
-                edit_index: idx,
-                byte_start,
-                byte_end,
-                start_line,
-                end_line,
-                replacement_bytes: replacement_str.into_bytes(),
-                tier: EditMatchTier::Tier1Exact,
-            });
-            diagnostics.push(EditItemDiag {
-                error_code: None,
-                diag_kind: None,
-                detail: format!("edits[{}]: OK (lines {}-{})", idx, start_line, end_line),
-            });
-            continue;
-        } else if tier1_matches.len() > 1 {
-            any_failed = true;
-            let line_nums: Vec<usize> = tier1_matches.iter().map(|m| m.2).collect();
-            diagnostics.push(EditItemDiag {
-                error_code: Some(ErrorCode::MatchNotUnique),
-                diag_kind: Some(EditDiagKind::MatchNotUnique),
-                detail: format!(
-                    "edits[{}]: MATCH_NOT_UNIQUE (Matched at lines {:?}. Include 2-3 surrounding unique lines in old_text to disambiguate.)",
-                    idx, line_nums
-                ),
-            });
-            continue;
+        let (span, diag) =
+            match_one_edit(idx, &old_norm, &new_norm, body_raw, &file_lines, dominant_eol);
+        match span {
+            Some(span) => validated_spans.push(span),
+            None => any_failed = true,
         }
-
-        // Tier 2: Trailing horizontal whitespace tolerant match (preserving unchanged lines, indentation, BOM & CRLF)
-        if tier2_matches.len() == 1 {
-            let (byte_start, byte_end, start_line, end_line) = tier2_matches[0];
-            let replacement_str = apply_eol_style(&new_norm, dominant_eol);
-            validated_spans.push(ValidatedSpan {
-                edit_index: idx,
-                byte_start,
-                byte_end,
-                start_line,
-                end_line,
-                replacement_bytes: replacement_str.into_bytes(),
-                tier: EditMatchTier::Tier2TrailingWhitespace,
-            });
-            diagnostics.push(EditItemDiag {
-                error_code: None,
-                diag_kind: None,
-                detail: format!(
-                    "edits[{}]: OK via Tier 2 trailing-whitespace match (lines {}-{})",
-                    idx, start_line, end_line
-                ),
-            });
-            continue;
-        } else if tier2_matches.len() > 1 {
-            any_failed = true;
-            let line_nums: Vec<usize> = tier2_matches.iter().map(|m| m.2).collect();
-            diagnostics.push(EditItemDiag {
-                error_code: Some(ErrorCode::MatchNotUnique),
-                diag_kind: Some(EditDiagKind::MatchNotUnique),
-                detail: format!(
-                    "edits[{}]: MATCH_NOT_UNIQUE (Matched at lines {:?}. Include 2-3 surrounding unique lines in old_text to disambiguate.)",
-                    idx, line_nums
-                ),
-            });
-            continue;
-        }
-
-        // Neither Tier 1 nor Tier 2 matched: run actionable mismatch diagnostics (§5.2)
-        any_failed = true;
-        let (diag_kind, diag_hint) = diagnose_mismatch(body_raw, &file_lines, &old_norm);
-        diagnostics.push(EditItemDiag {
-            error_code: Some(ErrorCode::MatchNotFound),
-            diag_kind: Some(diag_kind),
-            detail: format!("edits[{}]: MATCH_NOT_FOUND\n{}", idx, diag_hint),
-        });
+        diagnostics.push(diag);
     }
 
     if any_failed {
@@ -545,6 +471,118 @@ pub async fn execute_edit(
         },
     )
 }
+
+/// `MATCH_NOT_UNIQUE` diagnostic for an `old_text` that matched more than once.
+///
+/// Both tiers produce exactly this message, so it lives here rather than being spelled out twice.
+fn not_unique_diag(idx: usize, line_nums: &[usize]) -> EditItemDiag {
+    EditItemDiag {
+        error_code: Some(ErrorCode::MatchNotUnique),
+        diag_kind: Some(EditDiagKind::MatchNotUnique),
+        detail: format!(
+            "edits[{}]: MATCH_NOT_UNIQUE (Matched at lines {:?}. Include 2-3 surrounding unique lines in old_text to disambiguate.)",
+            idx, line_nums
+        ),
+    }
+}
+
+/// Match one `edits[]` item against the raw snapshot and describe the outcome.
+///
+/// Pure: it only reads the parsed snapshot plus the normalized old/new text, so the whole Tier 1 /
+/// Tier 2 / mismatch-diagnostic policy is unit-testable without a workspace, a mutation lock or an
+/// open file handle. `Some(span)` means the item matched and is ready to apply; the diagnostic is
+/// always returned because the caller reports it on both paths.
+fn match_one_edit(
+    idx: usize,
+    old_norm: &str,
+    new_norm: &str,
+    body_raw: &str,
+    file_lines: &[RawLineSlice<'_>],
+    dominant_eol: &str,
+) -> (Option<ValidatedSpan>, EditItemDiag) {
+    // `execute_edit` rejects an empty `old_text` earlier (InvalidArguments), so this is currently
+    // unreachable in production -- but this is the pure matching boundary and an empty needle walks
+    // the substring search past the end of the buffer (a panic, not an error). Guard it here so the
+    // precondition is enforced where it is relied on, and so a future caller cannot reintroduce it.
+    if old_norm.is_empty() {
+        return (
+            None,
+            EditItemDiag {
+                error_code: Some(ErrorCode::InvalidArguments),
+                diag_kind: None,
+                detail: format!("edits[{}]: old_text must not be empty", idx),
+            },
+        );
+    }
+
+    let tier2_matches = find_tier2_trailing_ws_matches(file_lines, old_norm);
+    // Tier 1: Exact match after CRLF/CR -> LF normalization (only accept as unique if Tier 2
+    // does not reveal additional trailing-whitespace-equivalent duplicates elsewhere in the file).
+    let tier1_matches = find_tier1_exact_matches(body_raw, file_lines, old_norm);
+    if tier1_matches.len() == 1 && tier2_matches.len() <= 1 {
+        let (byte_start, byte_end, start_line, end_line) = tier1_matches[0];
+        let replacement_str = apply_eol_style(new_norm, dominant_eol);
+        return (
+            Some(ValidatedSpan {
+                edit_index: idx,
+                byte_start,
+                byte_end,
+                start_line,
+                end_line,
+                replacement_bytes: replacement_str.into_bytes(),
+                tier: EditMatchTier::Tier1Exact,
+            }),
+            EditItemDiag {
+                error_code: None,
+                diag_kind: None,
+                detail: format!("edits[{}]: OK (lines {}-{})", idx, start_line, end_line),
+            },
+        );
+    } else if tier1_matches.len() > 1 {
+        let line_nums: Vec<usize> = tier1_matches.iter().map(|m| m.2).collect();
+        return (None, not_unique_diag(idx, &line_nums));
+    }
+
+    // Tier 2: Trailing horizontal whitespace tolerant match (preserving unchanged lines, indentation, BOM & CRLF)
+    if tier2_matches.len() == 1 {
+        let (byte_start, byte_end, start_line, end_line) = tier2_matches[0];
+        let replacement_str = apply_eol_style(new_norm, dominant_eol);
+        return (
+            Some(ValidatedSpan {
+                edit_index: idx,
+                byte_start,
+                byte_end,
+                start_line,
+                end_line,
+                replacement_bytes: replacement_str.into_bytes(),
+                tier: EditMatchTier::Tier2TrailingWhitespace,
+            }),
+            EditItemDiag {
+                error_code: None,
+                diag_kind: None,
+                detail: format!(
+                    "edits[{}]: OK via Tier 2 trailing-whitespace match (lines {}-{})",
+                    idx, start_line, end_line
+                ),
+            },
+        );
+    } else if tier2_matches.len() > 1 {
+        let line_nums: Vec<usize> = tier2_matches.iter().map(|m| m.2).collect();
+        return (None, not_unique_diag(idx, &line_nums));
+    }
+
+    // Neither Tier 1 nor Tier 2 matched: run actionable mismatch diagnostics (§5.2)
+    let (diag_kind, diag_hint) = diagnose_mismatch(body_raw, file_lines, old_norm);
+    (
+        None,
+        EditItemDiag {
+            error_code: Some(ErrorCode::MatchNotFound),
+            diag_kind: Some(diag_kind),
+            detail: format!("edits[{}]: MATCH_NOT_FOUND\n{}", idx, diag_hint),
+        },
+    )
+}
+
 
 fn parse_raw_lines<'a>(body: &'a str) -> Vec<RawLineSlice<'a>> {
     if body.is_empty() {
@@ -998,4 +1036,132 @@ fn build_unified_diff(
         diff.push('\n');
     }
     diff
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::*;
+
+    /// Run the pure matcher over a raw body, the way `execute_edit` does after reading the file.
+    fn run<'a>(
+        body: &'a str,
+        old: &str,
+        new: &str,
+        dominant_eol: &str,
+    ) -> (Option<ValidatedSpan>, EditItemDiag, Vec<RawLineSlice<'a>>) {
+        let file_lines = parse_raw_lines(body);
+        let (span, diag) = match_one_edit(
+            0,
+            &normalize_crlf(old),
+            &normalize_crlf(new),
+            body,
+            &file_lines,
+            dominant_eol,
+        );
+        (span, diag, file_lines)
+    }
+
+    #[test]
+    fn tier1_exact_match_covers_exactly_the_old_text() {
+        let body = "a\nb\nc\n";
+        let (span, diag, _) = run(body, "b\n", "B\n", "\n");
+        let span = span.expect("a unique exact match must be applied");
+        assert_eq!(span.tier, EditMatchTier::Tier1Exact);
+        assert_eq!((span.start_line, span.end_line), (2, 2));
+        assert_eq!(
+            &body[span.byte_start..span.byte_end],
+            "b\n",
+            "the span must cover exactly the matched old text"
+        );
+        assert!(diag.error_code.is_none() && diag.diag_kind.is_none());
+        assert!(diag.detail.contains("OK"), "got {}", diag.detail);
+    }
+
+    #[test]
+    fn tier1_wins_when_the_exact_match_is_unique() {
+        let (span, _, _) = run("let x = 1;\n", "let x = 1;\n", "let x = 2;\n", "\n");
+        assert_eq!(
+            span.expect("exact match").tier,
+            EditMatchTier::Tier1Exact,
+            "an exact hit must be reported as Tier 1, not Tier 2"
+        );
+    }
+
+    #[test]
+    fn a_crlf_body_matches_an_lf_old_text_and_the_span_keeps_the_crlf() {
+        let body = "a\r\nb\r\n";
+        let (span, _, _) = run(body, "b\n", "B\n", "\r\n");
+        let span = span.expect("CRLF/CR -> LF normalization must let this match");
+        assert_eq!(span.tier, EditMatchTier::Tier1Exact);
+        assert_eq!(
+            &body[span.byte_start..span.byte_end],
+            "b\r\n",
+            "the span must cover the raw CRLF bytes, not the normalized ones"
+        );
+    }
+
+    #[test]
+    fn replacement_is_written_back_in_the_dominant_eol_style() {
+        let (span, _, _) = run("a\r\nb\r\n", "b\n", "B\n", "\r\n");
+        assert_eq!(
+            span.expect("match").replacement_bytes,
+            b"B\r\n",
+            "a CRLF file must not be rewritten with a bare LF"
+        );
+        let (span, _, _) = run("a\nb\n", "b\n", "B\n", "\n");
+        assert_eq!(span.expect("match").replacement_bytes, b"B\n");
+    }
+
+    #[test]
+    fn tier2_tolerates_trailing_whitespace_on_the_file_line() {
+        let body = "let x = 1;   \n";
+        let (span, diag, _) = run(body, "let x = 1;\n", "let x = 2;\n", "\n");
+        let span = span.expect("trailing whitespace must be tolerated at Tier 2");
+        assert_eq!(span.tier, EditMatchTier::Tier2TrailingWhitespace);
+        assert!(diag.detail.contains("Tier 2"), "got {}", diag.detail);
+    }
+
+    #[test]
+    fn an_ambiguous_old_text_is_refused_as_not_unique() {
+        let (span, diag, _) = run("x\nx\n", "x\n", "y\n", "\n");
+        assert!(span.is_none(), "an ambiguous edit must not be applied");
+        assert_eq!(diag.error_code, Some(ErrorCode::MatchNotUnique));
+        assert_eq!(diag.diag_kind, Some(EditDiagKind::MatchNotUnique));
+        assert!(diag.detail.contains("MATCH_NOT_UNIQUE"), "got {}", diag.detail);
+    }
+
+    #[test]
+    fn a_tier1_unique_hit_is_still_refused_when_tier2_reveals_duplicates() {
+        // `x\n` appears exactly once byte-for-byte, but a second line differs only by trailing
+        // whitespace. Accepting the Tier 1 hit would silently edit the wrong one of two
+        // equivalent lines, so the documented rule refuses it.
+        let (span, diag, _) = run("x   \nx\n", "x\n", "y\n", "\n");
+        assert!(
+            span.is_none(),
+            "a Tier 1 hit with a Tier 2 duplicate elsewhere must not be applied"
+        );
+        assert_eq!(diag.error_code, Some(ErrorCode::MatchNotUnique));
+    }
+
+    #[test]
+    fn a_missing_old_text_reports_match_not_found_with_a_diagnostic_kind() {
+        let (span, diag, _) = run("a\n", "zzz\n", "y\n", "\n");
+        assert!(span.is_none());
+        assert_eq!(diag.error_code, Some(ErrorCode::MatchNotFound));
+        assert!(
+            diag.diag_kind.is_some(),
+            "the mismatch must carry an actionable diagnostic kind"
+        );
+        assert!(diag.detail.contains("MATCH_NOT_FOUND"), "got {}", diag.detail);
+    }
+
+    #[test]
+    fn an_empty_old_text_is_refused_instead_of_panicking() {
+        // The substring search would run off the end of the buffer for an empty needle, so the pure
+        // boundary must reject it rather than panic. `execute_edit` also pre-rejects it.
+        let (span, diag, _) = run("a\n", "", "y\n", "\n");
+        assert!(span.is_none(), "an empty old_text must not match");
+        assert_eq!(diag.error_code, Some(ErrorCode::InvalidArguments));
+        assert!(diag.detail.contains("must not be empty"), "got {}", diag.detail);
+    }
 }
