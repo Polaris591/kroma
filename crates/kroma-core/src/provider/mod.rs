@@ -371,8 +371,8 @@ pub fn build_provider(
                 },
             )?)
         }
-        ProviderProtocol::AnthropicMessages => Arc::new(
-            anthropic_messages::AnthropicMessagesClient::new(
+        ProviderProtocol::AnthropicMessages => {
+            Arc::new(anthropic_messages::AnthropicMessagesClient::new(
                 anthropic_messages::AnthropicMessagesConfig {
                     base_url: settings.base_url.clone(),
                     api_key: settings.api_key.clone(),
@@ -380,17 +380,19 @@ pub fn build_provider(
                     max_retries: settings.max_retries,
                     max_tokens: settings.max_tokens,
                 },
-            )?,
-        ),
-        ProviderProtocol::OpenAiResponses => Arc::new(openai_responses::OpenAiResponsesClient::new(
-            openai_responses::OpenAiResponsesConfig {
-                base_url: settings.base_url.clone(),
-                api_key: settings.api_key.clone(),
-                model: settings.model.clone(),
-                max_retries: settings.max_retries,
-                reasoning_effort: settings.reasoning_effort.clone(),
-            },
-        )?),
+            )?)
+        }
+        ProviderProtocol::OpenAiResponses => {
+            Arc::new(openai_responses::OpenAiResponsesClient::new(
+                openai_responses::OpenAiResponsesConfig {
+                    base_url: settings.base_url.clone(),
+                    api_key: settings.api_key.clone(),
+                    model: settings.model.clone(),
+                    max_retries: settings.max_retries,
+                    reasoning_effort: settings.reasoning_effort.clone(),
+                },
+            )?)
+        }
     };
     Ok((resolved, provider))
 }

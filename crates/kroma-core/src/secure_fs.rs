@@ -237,7 +237,11 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), SecureFsError> {
                 dir.display()
             )));
         }
-        let anchor = if absolute { Path::new("/") } else { Path::new(".") };
+        let anchor = if absolute {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        };
         let mut collapsed = PathBuf::from(anchor);
         for name in &components {
             collapsed.push(name);
@@ -260,7 +264,11 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), SecureFsError> {
         builder.create(&collapsed).map_err(|e| {
             SecureFsError::Io(std::io::Error::new(
                 e.kind(),
-                format!("failed to create snapshot store '{}': {}", collapsed.display(), e),
+                format!(
+                    "failed to create snapshot store '{}': {}",
+                    collapsed.display(),
+                    e
+                ),
             ))
         })?;
         // F02: never `chmod` by path. The create above deliberately follows OS-owned symlinked
@@ -280,12 +288,18 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), SecureFsError> {
             }
             _ => e,
         })?;
-        handle.set_permissions(fs::Permissions::from_mode(0o700)).map_err(|e| {
-            SecureFsError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to restrict snapshot store '{}': {}", collapsed.display(), e),
-            ))
-        })?;
+        handle
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(|e| {
+                SecureFsError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "failed to restrict snapshot store '{}': {}",
+                        collapsed.display(),
+                        e
+                    ),
+                ))
+            })?;
         Ok(())
     }
     #[cfg(windows)]
@@ -352,8 +366,9 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), SecureFsError> {
             }
             Err(e) => return Err(e.into()),
         }
-        let _ = crate::workspace::open_windows_handle_no_reparse(&collapsed, &collapsed, Some(true))
-            .map_err(|e| SecureFsError::InvalidPath(e.to_string()))?;
+        let _ =
+            crate::workspace::open_windows_handle_no_reparse(&collapsed, &collapsed, Some(true))
+                .map_err(|e| SecureFsError::InvalidPath(e.to_string()))?;
         Ok(())
     }
 }
@@ -413,13 +428,7 @@ fn open_real_dir(path: &Path) -> Result<File, SecureFsError> {
 /// `openat` a child directory of an already-verified directory descriptor, refusing symlinks.
 #[cfg(unix)]
 fn open_dir_at(parent_fd: RawFd, name: &CString) -> Result<File, SecureFsError> {
-    let fd = unsafe {
-        libc::openat(
-            parent_fd,
-            name.as_ptr(),
-            OPEN_DIR_NO_FOLLOW,
-        )
-    };
+    let fd = unsafe { libc::openat(parent_fd, name.as_ptr(), OPEN_DIR_NO_FOLLOW) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -449,11 +458,8 @@ mod tests {
     /// Every test gets its own directory so the process-wide umask and any parallel test cannot
     /// interfere with the permission assertions.
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "kroma-securefs-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kroma-securefs-{}-{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -500,8 +506,8 @@ mod tests {
         let link = dir.join("link");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
 
-        let err = open_existing_no_symlink(&link)
-            .expect_err("a symlinked leaf must not be traversed");
+        let err =
+            open_existing_no_symlink(&link).expect_err("a symlinked leaf must not be traversed");
         assert_eq!(
             err.raw_os_error(),
             Some(libc::ELOOP),
@@ -694,11 +700,14 @@ mod tests {
         let link = dir.join("store");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
 
-        let err = ensure_private_dir_io(&link)
-            .expect_err("the io wrapper must propagate the refusal");
+        let err =
+            ensure_private_dir_io(&link).expect_err("the io wrapper must propagate the refusal");
         // The refusal is an InvalidPath, which has no OS error kind, so it is folded into a
         // generic io::Error that still carries the message.
-        assert!(err.to_string().contains("not a real directory"), "got {err}");
+        assert!(
+            err.to_string().contains("not a real directory"),
+            "got {err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -70,8 +70,12 @@ pub struct CompletionGateContext {
 pub enum GateOutcome {
     Approved,
     /// Verification was intentionally skipped because no supported command was discoverable.
-    Skipped { reason: String },
-    Rejected { feedback: String },
+    Skipped {
+        reason: String,
+    },
+    Rejected {
+        feedback: String,
+    },
 }
 
 /// Pre-terminal completion gate executed when model stops after modifying files (§3.2 V6-07).

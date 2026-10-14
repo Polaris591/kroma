@@ -10,9 +10,7 @@ use kroma_core::env::LocalHostEnv;
 use kroma_core::events::EventLogger;
 use kroma_core::messages::{AssistantTurn, FinishReason, ToolCall, TranscriptItem, UserMessage};
 use kroma_core::provider::FakeProvider;
-use kroma_core::revision::{
-    ConflictKind, RestoreFault, RestoreResult, RevisionId, SnapshotStore,
-};
+use kroma_core::revision::{ConflictKind, RestoreFault, RestoreResult, RevisionId, SnapshotStore};
 use kroma_core::session::SessionJournal;
 use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
 use kroma_core::types::{RunStatus, ToolCallId};
@@ -160,7 +158,11 @@ fn test_capture_then_restore_applies_modified_deleted_and_created_files() {
     assert_eq!(baseline.tracked_files.len(), 3);
     assert_eq!(
         baseline.changed_paths,
-        vec!["keep.txt".to_string(), "src/a.rs".to_string(), "src/b.rs".to_string()]
+        vec![
+            "keep.txt".to_string(),
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string()
+        ]
     );
     assert_eq!(baseline.tracked_files["src/a.rs"].mode & 0o777, 0o600);
 
@@ -170,7 +172,12 @@ fn test_capture_then_restore_applies_modified_deleted_and_created_files() {
     fs::write(ws_dir.join("src/new.rs"), "fn new() {}\n").unwrap();
 
     let mutated = store
-        .capture_revision(&workspace, Some(&baseline.revision_id), Some("wal-entry-1"), 1)
+        .capture_revision(
+            &workspace,
+            Some(&baseline.revision_id),
+            Some("wal-entry-1"),
+            1,
+        )
         .unwrap();
     assert_eq!(
         mutated.parent_revision_id.as_ref().map(|r| r.as_str()),
@@ -179,7 +186,11 @@ fn test_capture_then_restore_applies_modified_deleted_and_created_files() {
     assert_eq!(mutated.wal_entry_id.as_deref(), Some("wal-entry-1"));
     assert_eq!(
         mutated.changed_paths,
-        vec!["src/a.rs".to_string(), "src/b.rs".to_string(), "src/new.rs".to_string()]
+        vec![
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+            "src/new.rs".to_string()
+        ]
     );
     assert_eq!(mutated.tracked_files.len(), 3);
 
@@ -200,7 +211,11 @@ fn test_capture_then_restore_applies_modified_deleted_and_created_files() {
             assert_eq!(restored_revision, baseline.revision_id);
             assert_eq!(
                 restored_files,
-                vec!["keep.txt".to_string(), "src/a.rs".to_string(), "src/b.rs".to_string()]
+                vec![
+                    "keep.txt".to_string(),
+                    "src/a.rs".to_string(),
+                    "src/b.rs".to_string()
+                ]
             );
             assert_eq!(removed_files, vec!["src/new.rs".to_string()]);
         }
@@ -216,7 +231,10 @@ fn test_capture_then_restore_applies_modified_deleted_and_created_files() {
         0o600,
         "the tracked file mode must be restored, not reset to the process default"
     );
-    assert!(!store.intent_path().exists(), "a clean restore clears its intent journal");
+    assert!(
+        !store.intent_path().exists(),
+        "a clean restore clears its intent journal"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -281,7 +299,10 @@ fn test_external_modifications_conflict_and_force_restore_overwrites() {
     assert_eq!(read(ws_dir.join("src/a.rs")), "user edit\n");
     assert_eq!(read(ws_dir.join("src/b.rs")), "user new\n");
     assert!(!ws_dir.join("src/c.rs").exists());
-    assert!(!store.intent_path().exists(), "a refused restore must not journal anything");
+    assert!(
+        !store.intent_path().exists(),
+        "a refused restore must not journal anything"
+    );
 
     let forced = store
         .restore_revision(
@@ -338,15 +359,26 @@ fn test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_stat
         )
         .unwrap();
     match early {
-        RestoreResult::RecoveryRequired { journal_path, reason, .. } => {
-            assert!(journal_path.exists(), "the intent journal must survive the crash");
+        RestoreResult::RecoveryRequired {
+            journal_path,
+            reason,
+            ..
+        } => {
+            assert!(
+                journal_path.exists(),
+                "the intent journal must survive the crash"
+            );
             assert!(reason.contains("fault injection"), "reason was: {}", reason);
         }
         other => panic!("expected RestoreResult::RecoveryRequired, got {:?}", other),
     }
     assert!(store.pending_restore().unwrap().is_some());
     for name in ["a.rs", "b.rs", "c.rs"] {
-        assert_eq!(read(ws_dir.join("src").join(name)), "v2\n", "no file may change before the journal is cleared");
+        assert_eq!(
+            read(ws_dir.join("src").join(name)),
+            "v2\n",
+            "no file may change before the journal is cleared"
+        );
     }
 
     // A second restore is refused while the journal is outstanding.
@@ -366,7 +398,11 @@ fn test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_stat
 
     let recovered = store.recover_pending_restore(&workspace).unwrap();
     match recovered {
-        RestoreResult::Applied { restored_revision, restored_files, .. } => {
+        RestoreResult::Applied {
+            restored_revision,
+            restored_files,
+            ..
+        } => {
             assert_eq!(restored_revision, baseline.revision_id);
             assert_eq!(restored_files.len(), 3);
         }
@@ -375,7 +411,10 @@ fn test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_stat
     for name in ["a.rs", "b.rs", "c.rs"] {
         assert_eq!(read(ws_dir.join("src").join(name)), "v1\n");
     }
-    assert!(!store.intent_path().exists(), "recovery clears the intent journal");
+    assert!(
+        !store.intent_path().exists(),
+        "recovery clears the intent journal"
+    );
     assert!(store.pending_restore().unwrap().is_none());
 
     // Now crash midway through the file mutations.
@@ -389,7 +428,11 @@ fn test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_stat
         )
         .unwrap();
     match midway {
-        RestoreResult::RecoveryRequired { journal_path, reason, .. } => {
+        RestoreResult::RecoveryRequired {
+            journal_path,
+            reason,
+            ..
+        } => {
             assert!(journal_path.exists());
             assert!(reason.contains("1 of 3"), "reason was: {}", reason);
         }
@@ -398,7 +441,9 @@ fn test_interrupted_restore_requires_recovery_then_recovers_to_a_consistent_stat
 
     let recovered = store.recover_pending_restore(&workspace).unwrap();
     match recovered {
-        RestoreResult::Applied { restored_revision, .. } => {
+        RestoreResult::Applied {
+            restored_revision, ..
+        } => {
             assert_eq!(restored_revision, mutated.revision_id);
         }
         other => panic!("expected Applied after recovery, got {:?}", other),
@@ -436,7 +481,8 @@ async fn test_agent_loop_persists_revision_ids_and_undo_rewinds_wal_and_workspac
             tool_calls: vec![ToolCall {
                 call_id: ToolCallId::new("call_write"),
                 name: "write".into(),
-                raw_arguments: r#"{"path":"src/app.rs","content":"fn main() { println!(\"hi\"); }\n"}"#.into(),
+                raw_arguments:
+                    r#"{"path":"src/app.rs","content":"fn main() { println!(\"hi\"); }\n"}"#.into(),
             }],
             finish_reason: FinishReason::ToolCalls,
             usage: None,
@@ -450,7 +496,10 @@ async fn test_agent_loop_persists_revision_ids_and_undo_rewinds_wal_and_workspac
         },
     ]));
     let env = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
-    let policy = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let budget = BudgetConfig::default();
     let runtime = build_default_runtime(env, policy, budget.clone(), None);
     let cfg = AgentRunConfig::new("update the greeting", budget);
@@ -462,12 +511,25 @@ async fn test_agent_loop_persists_revision_ids_and_undo_rewinds_wal_and_workspac
         .run(logger)
         .await;
 
-    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
-    assert_eq!(read(ws_dir.join("src/app.rs")), "fn main() { println!(\"hi\"); }\n");
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
+    assert_eq!(
+        read(ws_dir.join("src/app.rs")),
+        "fn main() { println!(\"hi\"); }\n"
+    );
 
     let mut journal = SessionJournal::open(&wal_path).unwrap();
     let records = journal.revision_records();
-    assert_eq!(records.len(), 2, "expected a baseline and one mutation revision: {:?}", records);
+    assert_eq!(
+        records.len(),
+        2,
+        "expected a baseline and one mutation revision: {:?}",
+        records
+    );
     assert_ne!(records[0].revision_id, records[1].revision_id);
     assert_eq!(records[0].turn, 0);
     assert_eq!(records[1].turn, 1);
@@ -507,8 +569,14 @@ async fn test_agent_loop_persists_revision_ids_and_undo_rewinds_wal_and_workspac
 
     let reopened = SessionJournal::open(&wal_path).unwrap();
     let transcript = reopened.active_transcript();
-    assert_eq!(transcript.len(), 1, "the rewound transcript keeps only the original task");
-    assert!(matches!(&transcript[0], TranscriptItem::User(u) if u.content == "update the greeting"));
+    assert_eq!(
+        transcript.len(),
+        1,
+        "the rewound transcript keeps only the original task"
+    );
+    assert!(
+        matches!(&transcript[0], TranscriptItem::User(u) if u.content == "update the greeting")
+    );
     assert_eq!(
         reopened.revision_records().len(),
         1,
@@ -540,7 +608,12 @@ fn test_symlinks_and_sensitive_files_are_never_captured_or_overwritten() {
     let baseline = store.capture_revision(&workspace, None, None, 0).unwrap();
 
     assert!(baseline.tracked_files.contains_key("real.txt"));
-    for excluded in [".env", "escape.txt", "node_modules/dep.js", "target/build.bin"] {
+    for excluded in [
+        ".env",
+        "escape.txt",
+        "node_modules/dep.js",
+        "target/build.bin",
+    ] {
         assert!(
             !baseline.tracked_files.contains_key(excluded),
             "{} must never be tracked: {:?}",
@@ -557,9 +630,14 @@ fn test_symlinks_and_sensitive_files_are_never_captured_or_overwritten() {
         );
     }
     let blobs = blob_contents(&store);
-    assert!(!blobs.is_empty(), "the tracked file must have produced a blob");
     assert!(
-        blobs.iter().all(|body| !body.contains("SUPER_SECRET_VALUE")),
+        !blobs.is_empty(),
+        "the tracked file must have produced a blob"
+    );
+    assert!(
+        blobs
+            .iter()
+            .all(|body| !body.contains("SUPER_SECRET_VALUE")),
         "a sensitive file's contents must never reach the snapshot store"
     );
 
@@ -568,10 +646,17 @@ fn test_symlinks_and_sensitive_files_are_never_captured_or_overwritten() {
     create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("real.txt"));
 
     let refused = store
-        .restore_revision(&workspace, &baseline.revision_id, Some(&baseline.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &baseline.revision_id,
+            Some(&baseline.revision_id),
+            false,
+        )
         .unwrap();
     match refused {
-        RestoreResult::Conflict { conflicting_paths, .. } => {
+        RestoreResult::Conflict {
+            conflicting_paths, ..
+        } => {
             assert_eq!(conflicting_paths.len(), 1, "got {:?}", conflicting_paths);
             assert_eq!(conflicting_paths[0].path, "real.txt");
             // A symlink parked on a tracked path is a modification of that path (it is neither the
@@ -605,7 +690,12 @@ fn test_sequential_undo_across_three_mutating_turns_rewinds_to_the_baseline() {
     let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
 
     journal
-        .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+        .append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "task".into(),
+            }),
+        )
         .unwrap();
     let r0 = capture_and_record(&store, &mut journal, &workspace, None, 0);
 
@@ -613,7 +703,12 @@ fn test_sequential_undo_across_three_mutating_turns_rewinds_to_the_baseline() {
     for turn in 1..=3usize {
         fs::write(ws_dir.join("f.txt"), format!("v{}\n", turn)).unwrap();
         journal
-            .append_item(turn, TranscriptItem::User(UserMessage { content: format!("turn {}", turn) }))
+            .append_item(
+                turn,
+                TranscriptItem::User(UserMessage {
+                    content: format!("turn {}", turn),
+                }),
+            )
             .unwrap();
         parent = capture_and_record(&store, &mut journal, &workspace, Some(&parent), turn);
     }
@@ -634,7 +729,10 @@ fn test_sequential_undo_across_three_mutating_turns_rewinds_to_the_baseline() {
         );
         assert_eq!(
             journal.latest_revision_id().as_deref(),
-            journal.revision_records().last().map(|r| r.revision_id.as_str()),
+            journal
+                .revision_records()
+                .last()
+                .map(|r| r.revision_id.as_str()),
             "latest_revision_id must track the active branch"
         );
     }
@@ -657,17 +755,32 @@ fn test_fork_then_new_mutation_and_cross_branch_restore() {
     let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
 
     journal
-        .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+        .append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "task".into(),
+            }),
+        )
         .unwrap();
     let r0 = capture_and_record(&store, &mut journal, &workspace, None, 0);
     fs::write(ws_dir.join("f.txt"), "v1\n").unwrap();
     journal
-        .append_item(1, TranscriptItem::User(UserMessage { content: "turn 1".into() }))
+        .append_item(
+            1,
+            TranscriptItem::User(UserMessage {
+                content: "turn 1".into(),
+            }),
+        )
         .unwrap();
     let r1 = capture_and_record(&store, &mut journal, &workspace, Some(&r0), 1);
     fs::write(ws_dir.join("f.txt"), "v2\n").unwrap();
     journal
-        .append_item(2, TranscriptItem::User(UserMessage { content: "turn 2".into() }))
+        .append_item(
+            2,
+            TranscriptItem::User(UserMessage {
+                content: "turn 2".into(),
+            }),
+        )
         .unwrap();
     let r2 = capture_and_record(&store, &mut journal, &workspace, Some(&r1), 2);
     assert_eq!(journal.revision_records().len(), 3);
@@ -676,11 +789,20 @@ fn test_fork_then_new_mutation_and_cross_branch_restore() {
     journal.fork_at_turn(1).unwrap();
     fs::write(ws_dir.join("f.txt"), "v2-branch\n").unwrap();
     journal
-        .append_item(2, TranscriptItem::User(UserMessage { content: "turn 2 branch".into() }))
+        .append_item(
+            2,
+            TranscriptItem::User(UserMessage {
+                content: "turn 2 branch".into(),
+            }),
+        )
         .unwrap();
     let r2b = capture_and_record(&store, &mut journal, &workspace, Some(&r1), 2);
     let records = journal.revision_records();
-    assert_eq!(records.len(), 3, "the abandoned branch's revision must be filtered out");
+    assert_eq!(
+        records.len(),
+        3,
+        "the abandoned branch's revision must be filtered out"
+    );
     assert!(!records.iter().any(|r| r.revision_id == r2.as_str()));
     assert_eq!(journal.latest_revision_id().as_deref(), Some(r2b.as_str()));
 
@@ -717,7 +839,12 @@ fn test_nested_new_directory_tree_is_pruned_on_undo() {
         .unwrap();
 
     let restored = store
-        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &baseline.revision_id,
+            Some(&mutated.revision_id),
+            false,
+        )
         .unwrap();
     match restored {
         RestoreResult::Applied { removed_files, .. } => {
@@ -760,27 +887,43 @@ fn test_file_and_directory_kind_swap_restores_in_both_directions() {
 
     // Undo back to the file revision.
     let back_to_file = store
-        .restore_revision(&workspace, &file_rev.revision_id, Some(&dir_rev.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &file_rev.revision_id,
+            Some(&dir_rev.revision_id),
+            false,
+        )
         .unwrap();
     assert!(
         matches!(back_to_file, RestoreResult::Applied { .. }),
         "directory -> file must not wedge: {:?}",
         back_to_file
     );
-    assert!(fs::symlink_metadata(ws_dir.join("foo")).unwrap().file_type().is_file());
+    assert!(fs::symlink_metadata(ws_dir.join("foo"))
+        .unwrap()
+        .file_type()
+        .is_file());
     assert_eq!(read(ws_dir.join("foo")), "foo v1\n");
     assert!(!ws_dir.join("foo/bar.txt").exists());
 
     // And forward again to the directory revision.
     let back_to_dir = store
-        .restore_revision(&workspace, &dir_rev.revision_id, Some(&file_rev.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &dir_rev.revision_id,
+            Some(&file_rev.revision_id),
+            false,
+        )
         .unwrap();
     assert!(
         matches!(back_to_dir, RestoreResult::Applied { .. }),
         "file -> directory must not wedge: {:?}",
         back_to_dir
     );
-    assert!(fs::symlink_metadata(ws_dir.join("foo")).unwrap().file_type().is_dir());
+    assert!(fs::symlink_metadata(ws_dir.join("foo"))
+        .unwrap()
+        .file_type()
+        .is_dir());
     assert_eq!(read(ws_dir.join("foo/bar.txt")), "bar\n");
     let _ = fs::remove_dir_all(root);
 }
@@ -812,10 +955,17 @@ fn test_external_symlink_and_mode_change_are_conflicts() {
     // External chmod: same bytes, different mode -> ModifiedExternally.
     set_file_mode(ws_dir.join("x.rs"), 0o600);
     let mode_conflict = store
-        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &baseline.revision_id,
+            Some(&mutated.revision_id),
+            false,
+        )
         .unwrap();
     match mode_conflict {
-        RestoreResult::Conflict { conflicting_paths, .. } => {
+        RestoreResult::Conflict {
+            conflicting_paths, ..
+        } => {
             assert_eq!(conflicting_paths.len(), 1, "got {:?}", conflicting_paths);
             assert_eq!(conflicting_paths[0].path, "x.rs");
             assert_eq!(conflicting_paths[0].kind, ConflictKind::ModifiedExternally);
@@ -827,10 +977,17 @@ fn test_external_symlink_and_mode_change_are_conflicts() {
     // External symlink at a path the baseline wants to restore (only in target).
     create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("g.rs"));
     let link_conflict = store
-        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &baseline.revision_id,
+            Some(&mutated.revision_id),
+            false,
+        )
         .unwrap();
     match link_conflict {
-        RestoreResult::Conflict { conflicting_paths, .. } => {
+        RestoreResult::Conflict {
+            conflicting_paths, ..
+        } => {
             assert_eq!(conflicting_paths.len(), 1, "got {:?}", conflicting_paths);
             assert_eq!(conflicting_paths[0].path, "g.rs");
             assert_eq!(conflicting_paths[0].kind, ConflictKind::CreatedExternally);
@@ -838,7 +995,10 @@ fn test_external_symlink_and_mode_change_are_conflicts() {
         other => panic!("expected Conflict for a created symlink, got {:?}", other),
     }
     assert!(
-        fs::symlink_metadata(ws_dir.join("g.rs")).unwrap().file_type().is_symlink(),
+        fs::symlink_metadata(ws_dir.join("g.rs"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "a refused restore must not touch the user's symlink"
     );
     assert_eq!(read(outside_dir.join("secret.txt")), "OUTSIDE_SECRET\n");
@@ -847,10 +1007,17 @@ fn test_external_symlink_and_mode_change_are_conflicts() {
     fs::remove_file(ws_dir.join("x.rs")).unwrap();
     create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("x.rs"));
     let swap_conflict = store
-        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &baseline.revision_id,
+            Some(&mutated.revision_id),
+            false,
+        )
         .unwrap();
     match swap_conflict {
-        RestoreResult::Conflict { conflicting_paths, .. } => {
+        RestoreResult::Conflict {
+            conflicting_paths, ..
+        } => {
             let by_path: BTreeMap<&str, ConflictKind> = conflicting_paths
                 .iter()
                 .map(|c| (c.path.as_str(), c.kind))
@@ -893,7 +1060,12 @@ fn test_skipped_large_file_is_preserved_on_restore() {
 
     // Restoring to the grown revision must not delete the file it could not track.
     let restored = store
-        .restore_revision(&workspace, &grown.revision_id, Some(&baseline.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &grown.revision_id,
+            Some(&baseline.revision_id),
+            false,
+        )
         .unwrap();
     match restored {
         RestoreResult::Applied { removed_files, .. } => {
@@ -936,7 +1108,12 @@ fn test_force_restore_clears_obstructing_symlink_and_directory() {
     fs::write(ws_dir.join("foo/nested/inner.txt"), "user data\n").unwrap();
 
     let refused = store
-        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), false)
+        .restore_revision(
+            &workspace,
+            &baseline.revision_id,
+            Some(&mutated.revision_id),
+            false,
+        )
         .unwrap();
     assert!(
         matches!(refused, RestoreResult::Conflict { .. }),
@@ -946,14 +1123,22 @@ fn test_force_restore_clears_obstructing_symlink_and_directory() {
     assert!(ws_dir.join("foo/nested/inner.txt").exists());
 
     let forced = store
-        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), true)
+        .restore_revision(
+            &workspace,
+            &baseline.revision_id,
+            Some(&mutated.revision_id),
+            true,
+        )
         .unwrap();
     assert!(
         matches!(forced, RestoreResult::Applied { .. }),
         "force must clear the obstructing directory instead of wedging: {:?}",
         forced
     );
-    assert!(fs::symlink_metadata(ws_dir.join("foo")).unwrap().file_type().is_file());
+    assert!(fs::symlink_metadata(ws_dir.join("foo"))
+        .unwrap()
+        .file_type()
+        .is_file());
     assert_eq!(read(ws_dir.join("foo")), "foo v1\n");
     assert!(!ws_dir.join("foo/nested").exists());
 
@@ -961,14 +1146,22 @@ fn test_force_restore_clears_obstructing_symlink_and_directory() {
     fs::remove_file(ws_dir.join("foo")).unwrap();
     create_symlink_file(outside_dir.join("secret.txt"), ws_dir.join("foo"));
     let forced_link = store
-        .restore_revision(&workspace, &baseline.revision_id, Some(&mutated.revision_id), true)
+        .restore_revision(
+            &workspace,
+            &baseline.revision_id,
+            Some(&mutated.revision_id),
+            true,
+        )
         .unwrap();
     assert!(
         matches!(forced_link, RestoreResult::Applied { .. }),
         "force must replace the symlink itself: {:?}",
         forced_link
     );
-    assert!(fs::symlink_metadata(ws_dir.join("foo")).unwrap().file_type().is_file());
+    assert!(fs::symlink_metadata(ws_dir.join("foo"))
+        .unwrap()
+        .file_type()
+        .is_file());
     assert_eq!(read(ws_dir.join("foo")), "foo v1\n");
     assert_eq!(read(outside_dir.join("secret.txt")), "OUTSIDE_SECRET\n");
     let _ = fs::remove_dir_all(root);
@@ -1016,7 +1209,10 @@ async fn test_resumed_run_baseline_survives_undo_rewind() {
 
     // Run 1 (fresh session): write "hi".
     let env = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
-    let policy = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let runtime = build_default_runtime(env, policy, budget.clone(), None);
     let cfg = AgentRunConfig::new("write hi", budget.clone());
     let logger = EventLogger::new(cfg.run_id, Some(state_dir.clone()), false).unwrap();
@@ -1031,24 +1227,42 @@ async fn test_resumed_run_baseline_survives_undo_rewind() {
     .with_snapshot_store(store.clone())
     .run(logger)
     .await;
-    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
-    assert_eq!(read(ws_dir.join("src/app.rs")), "fn main() { println!(\"hi\"); }\n");
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
+    assert_eq!(
+        read(ws_dir.join("src/app.rs")),
+        "fn main() { println!(\"hi\"); }\n"
+    );
 
     let resumed = SessionJournal::open(&wal_path).unwrap();
     let pre_run_leaf = resumed.leaf_id().map(|s| s.to_string());
-    assert!(pre_run_leaf.is_some(), "run 1 must have left an active leaf");
+    assert!(
+        pre_run_leaf.is_some(),
+        "run 1 must have left an active leaf"
+    );
     let pre_run_turn = resumed.max_active_turn();
 
     // Run 2 (resume): write "bye" on the same session.
     let env = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
-    let policy = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let runtime = build_default_runtime(env, policy, budget.clone(), None);
     let cfg = AgentRunConfig::new("write bye", budget.clone());
     let logger = EventLogger::new(cfg.run_id, Some(state_dir.clone()), false).unwrap();
     let (_tx, rx) = watch::channel(false);
     let (summary, _logger) = AgentRunner::new(
         cfg,
-        scripted_write_provider("call_bye", "src/app.rs", "fn main() { println!(\"bye\"); }\n"),
+        scripted_write_provider(
+            "call_bye",
+            "src/app.rs",
+            "fn main() { println!(\"bye\"); }\n",
+        ),
         runtime,
         rx,
     )
@@ -1056,8 +1270,16 @@ async fn test_resumed_run_baseline_survives_undo_rewind() {
     .with_snapshot_store(store.clone())
     .run(logger)
     .await;
-    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
-    assert_eq!(read(ws_dir.join("src/app.rs")), "fn main() { println!(\"bye\"); }\n");
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
+    assert_eq!(
+        read(ws_dir.join("src/app.rs")),
+        "fn main() { println!(\"bye\"); }\n"
+    );
 
     let mut journal = SessionJournal::open(&wal_path).unwrap();
     let baseline_records: Vec<_> = journal
@@ -1066,7 +1288,9 @@ async fn test_resumed_run_baseline_survives_undo_rewind() {
         .filter(|r| r.turn == pre_run_turn)
         .collect();
     assert!(
-        baseline_records.iter().any(|r| r.leaf_id.as_deref() == pre_run_leaf.as_deref()),
+        baseline_records
+            .iter()
+            .any(|r| r.leaf_id.as_deref() == pre_run_leaf.as_deref()),
         "the resumed baseline must be bound to the pre-run leaf: {:?}",
         baseline_records
     );
@@ -1107,11 +1331,17 @@ fn test_blob_path_rejects_non_hex_content_hash_without_panicking() {
     ] {
         match store.blob_path(bad) {
             Err(kroma_core::revision::RevisionError::InvalidStore(_)) => {}
-            other => panic!("expected InvalidStore from blob_path({:?}), got {:?}", bad, other),
+            other => panic!(
+                "expected InvalidStore from blob_path({:?}), got {:?}",
+                bad, other
+            ),
         }
         match store.read_blob(bad) {
             Err(kroma_core::revision::RevisionError::InvalidStore(_)) => {}
-            other => panic!("expected InvalidStore from read_blob({:?}), got {:?}", bad, other),
+            other => panic!(
+                "expected InvalidStore from read_blob({:?}), got {:?}",
+                bad, other
+            ),
         }
     }
     // A valid 64-hex hash still resolves beneath `blobs/`.
@@ -1152,13 +1382,20 @@ fn test_startup_recovery_rolls_back_an_interrupted_merge() {
     let outcome = store.recover_pending_merge(&workspace).unwrap();
     match outcome {
         kroma_core::revision::MergeRecoveryOutcome::RolledBack {
-            pre_merge_revision,
-            ..
+            pre_merge_revision, ..
         } => assert_eq!(pre_merge_revision, pre.revision_id),
         other => panic!("expected RolledBack, got {:?}", other),
     }
-    assert_eq!(read(ws_dir.join("edit.rs")), "v1\n", "an overwritten file must be restored");
-    assert_eq!(read(ws_dir.join("keep.rs")), "v1\n", "a removed file must be restored");
+    assert_eq!(
+        read(ws_dir.join("edit.rs")),
+        "v1\n",
+        "an overwritten file must be restored"
+    );
+    assert_eq!(
+        read(ws_dir.join("keep.rs")),
+        "v1\n",
+        "a removed file must be restored"
+    );
     assert!(
         !ws_dir.join("new.rs").exists(),
         "a file the merge newly created must be removed"
@@ -1601,7 +1838,10 @@ fn test_startup_merge_recovery_allows_a_plain_file_ancestor_that_is_scheduled_fo
         "expected a clean rollback, got {:?}",
         outcome
     );
-    assert!(ws_dir.join("d").is_dir(), "d must be restored as a directory");
+    assert!(
+        ws_dir.join("d").is_dir(),
+        "d must be restored as a directory"
+    );
     assert_eq!(read(ws_dir.join("d").join("a")), "v1\n");
     assert!(store.pending_merge_intent().unwrap().is_none());
     assert!(store.pending_restore().unwrap().is_none());
@@ -1783,9 +2023,9 @@ fn test_startup_merge_recovery_refuses_to_delete_an_untracked_user_file_inside_a
     fs::write(ws_dir.join("d").join("b"), "merged\n").unwrap();
     fs::write(ws_dir.join("d").join("user.txt"), "mine\n").unwrap();
 
-    let err = store
-        .recover_pending_merge(&workspace)
-        .expect_err("an untracked file inside the restored directory must be an actionable failure");
+    let err = store.recover_pending_merge(&workspace).expect_err(
+        "an untracked file inside the restored directory must be an actionable failure",
+    );
     match err {
         kroma_core::revision::RevisionError::RecoveryRequired { reason, .. } => {
             assert!(

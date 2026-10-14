@@ -453,4 +453,3 @@ pub fn apply_shell_args_tokio(
     let _ = (shell_bin, raw_command);
     cmd.args(shell_args);
 }
-

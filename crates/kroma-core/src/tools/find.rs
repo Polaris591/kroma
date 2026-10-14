@@ -32,7 +32,10 @@ pub fn execute_find(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
     };
 
     let rel_input = args.path.as_deref().unwrap_or(".");
-    let limit = args.limit.unwrap_or(DEFAULT_NAV_LIMIT).min(DEFAULT_NAV_LIMIT);
+    let limit = args
+        .limit
+        .unwrap_or(DEFAULT_NAV_LIMIT)
+        .min(DEFAULT_NAV_LIMIT);
     if limit == 0 || args.pattern.trim().is_empty() {
         return ToolExecutionOutput::error(
             ErrorCode::InvalidArguments,
@@ -312,7 +315,9 @@ fn load_dir_ignore_rules(workspace: &WorkspaceCap, dir_rel: &Path, rules: &mut V
                 (false, rest)
             };
             let anchored = without_trailing.contains('/');
-            let clean_pat = without_trailing.strip_prefix('/').unwrap_or(without_trailing);
+            let clean_pat = without_trailing
+                .strip_prefix('/')
+                .unwrap_or(without_trailing);
             if clean_pat.is_empty() {
                 continue;
             }

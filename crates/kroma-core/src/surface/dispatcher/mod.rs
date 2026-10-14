@@ -73,8 +73,7 @@ impl RpcDispatcher {
         match snapshot_store.recover_pending_merge(env.workspace()) {
             Ok(MergeRecoveryOutcome::NothingPending) => {}
             Ok(MergeRecoveryOutcome::RolledBack {
-                pre_merge_revision,
-                ..
+                pre_merge_revision, ..
             }) => {
                 eprintln!(
                     "[kroma] recovered an interrupted subagent merge; rolled the workspace back to {}",
@@ -102,8 +101,8 @@ impl RpcDispatcher {
             Arc::clone(&approval_broker) as Arc<dyn ApprovalHandler>,
         );
 
-        let mut registry =
-            ToolRegistry::new(config.tool_filter.clone()).with_workspace_skills(workspace_skills.clone());
+        let mut registry = ToolRegistry::new(config.tool_filter.clone())
+            .with_workspace_skills(workspace_skills.clone());
         if config.max_subagents == 0 {
             registry = registry.without_subagents();
         }
@@ -230,7 +229,9 @@ impl RpcDispatcher {
         let records = journal.revision_records();
         let reverted_active_revisions = (|| -> Option<BTreeSet<String>> {
             let last = records.last()?;
-            let first_idx = records.iter().position(|r| r.revision_id == last.revision_id)?;
+            let first_idx = records
+                .iter()
+                .position(|r| r.revision_id == last.revision_id)?;
             if first_idx + 1 < records.len() {
                 Some(
                     records[..=first_idx]
@@ -321,7 +322,10 @@ impl RpcDispatcher {
                 id,
                 JsonRpcError::new(
                     JSONRPC_INVALID_REQUEST,
-                    format!("unsupported jsonrpc version '{}'; expected '2.0'", req.jsonrpc),
+                    format!(
+                        "unsupported jsonrpc version '{}'; expected '2.0'",
+                        req.jsonrpc
+                    ),
                 ),
             );
         }
@@ -335,17 +339,13 @@ impl RpcDispatcher {
                 self.rpc_session_prompt(&req.params).await
             }
             "approval.pending" | "approval/pending" => self.rpc_approval_pending().await,
-            "approval.respond" | "approval/respond" => {
-                self.rpc_approval_respond(&req.params).await
-            }
+            "approval.respond" | "approval/respond" => self.rpc_approval_respond(&req.params).await,
             "session.cancel" | "session/cancel" | "acp.cancel" => self.rpc_session_cancel().await,
             "session.status" | "session/status" => self.rpc_session_status().await,
             "session.fork" | "session/fork" => self.rpc_session_fork(&req.params).await,
             "revision.list" | "revision/list" => self.rpc_revision_list().await,
             "revision.undo" | "revision/undo" => self.rpc_revision_undo(&req.params).await,
-            "revision.restore" | "revision/restore" => {
-                self.rpc_revision_restore(&req.params).await
-            }
+            "revision.restore" | "revision/restore" => self.rpc_revision_restore(&req.params).await,
             "evidence.recall" | "evidence/recall" => self.rpc_evidence_recall(&req.params).await,
             // Gate 7 (v1.2.0): symbol dependency graph + Personalized PageRank navigation.
             "workspace.graph" | "workspace/graph" => self.rpc_workspace_graph(&req.params).await,
@@ -355,9 +355,7 @@ impl RpcDispatcher {
                 self.rpc_config_set(&req.params).await
             }
             // v1.3.0: in-REPL session listing and switching.
-            "sessions.list" | "sessions/list" | "session.list" => {
-                self.rpc_sessions_list().await
-            }
+            "sessions.list" | "sessions/list" | "session.list" => self.rpc_sessions_list().await,
             "session.resume" | "session/resume" => self.rpc_session_resume(&req.params).await,
             // v1.3.0: Best-of-N worktree tournament.
             "session.tournament" | "session/tournament" => {
@@ -452,7 +450,11 @@ impl RpcDispatcher {
     }
     /// `v1.5.0`: current terminal theme (Design D `Zen` by default).
     pub fn active_theme(&self) -> Theme {
-        *self.inner.active_theme.lock().unwrap_or_else(|e| e.into_inner())
+        *self
+            .inner
+            .active_theme
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
     /// `v1.5.0`: build a [`ThemeRenderer`] for the active theme, auto-detecting colour support.
     pub fn theme_renderer(&self) -> ThemeRenderer {
@@ -514,7 +516,10 @@ impl RpcDispatcher {
             1 => Ok(matches.into_iter().next().unwrap()),
             n => Err(JsonRpcError::new(
                 JSONRPC_INVALID_PARAMS,
-                format!("session prefix '{}' is ambiguous ({} matches)", requested, n),
+                format!(
+                    "session prefix '{}' is ambiguous ({} matches)",
+                    requested, n
+                ),
             )),
         }
     }
@@ -557,10 +562,7 @@ impl RpcDispatcher {
             if sub_id_slot.is_none() {
                 self.inner.approval_broker.reopen();
                 let out_tx_notes = out_tx.clone();
-                let id = self
-                    .inner
-                    .next_subscriber_id
-                    .fetch_add(1, Ordering::SeqCst);
+                let id = self.inner.next_subscriber_id.fetch_add(1, Ordering::SeqCst);
                 self.inner.subscribers.lock().unwrap().push((
                     id,
                     Arc::new(move |note| {

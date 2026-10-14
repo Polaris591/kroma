@@ -4,15 +4,7 @@ use super::*;
 
 pub(crate) fn looks_like_http_request(trimmed: &str) -> bool {
     const HTTP_PREFIXES: &[&str] = &[
-        "GET ",
-        "POST ",
-        "PUT ",
-        "DELETE ",
-        "OPTIONS ",
-        "HEAD ",
-        "CONNECT ",
-        "Host:",
-        "Origin:",
+        "GET ", "POST ", "PUT ", "DELETE ", "OPTIONS ", "HEAD ", "CONNECT ", "Host:", "Origin:",
     ];
     HTTP_PREFIXES.iter().any(|p| trimmed.starts_with(p))
 }
@@ -44,8 +36,7 @@ pub(crate) async fn read_bounded_jsonrpc_line<R: AsyncBufRead + Unpin>(
             if buf.is_empty() {
                 return Ok(None);
             }
-            let s = String::from_utf8(buf)
-                .map_err(|_| "frame is not valid UTF-8".to_string())?;
+            let s = String::from_utf8(buf).map_err(|_| "frame is not valid UTF-8".to_string())?;
             return Ok(Some(s));
         }
         if let Some(newline_pos) = available.iter().position(|&b| b == b'\n') {
@@ -59,8 +50,7 @@ pub(crate) async fn read_bounded_jsonrpc_line<R: AsyncBufRead + Unpin>(
             }
             buf.extend_from_slice(&available[..newline_pos]);
             reader.consume(take_len);
-            let s = String::from_utf8(buf)
-                .map_err(|_| "frame is not valid UTF-8".to_string())?;
+            let s = String::from_utf8(buf).map_err(|_| "frame is not valid UTF-8".to_string())?;
             return Ok(Some(s));
         } else {
             let chunk_len = available.len();

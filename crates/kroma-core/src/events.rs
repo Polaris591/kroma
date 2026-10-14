@@ -173,10 +173,7 @@ pub enum EventPayload {
     },
     /// Gate 6: a runtime surface (`headless`, `repl`, `acp`, `serve`) started on `transport`
     /// (`stdio`, `tty`, `tcp`, `unix`, `inproc`).
-    SurfaceStarted {
-        surface: String,
-        transport: String,
-    },
+    SurfaceStarted { surface: String, transport: String },
     /// Gate 6: a tool call paused awaiting operator approval on `surface`.
     ApprovalRequested {
         request_id: String,
@@ -232,7 +229,9 @@ pub fn resolve_default_state_dir() -> PathBuf {
         }
     }
     if cfg!(windows) {
-        if let Ok(local_appdata) = std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA")) {
+        if let Ok(local_appdata) =
+            std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA"))
+        {
             if !local_appdata.trim().is_empty() {
                 return PathBuf::from(local_appdata).join("kroma").join("runs");
             }

@@ -2,7 +2,9 @@ use kroma_core::budget::{BudgetConfig, ConfigError};
 use kroma_core::events::{EventLogger, EventPayload};
 use kroma_core::tool::policy::PolicyMode;
 use kroma_core::tool::registry::ToolRegistry;
-use kroma_core::types::{EditDiagKind, EditMatchTier, RunId, RunStatus, TerminalReason, ToolCallId};
+use kroma_core::types::{
+    EditDiagKind, EditMatchTier, RunId, RunStatus, TerminalReason, ToolCallId,
+};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -101,10 +103,18 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
             "spawn_subagent"
         ]
     );
-    assert!(reg.lookup_for_dispatch("edit", PolicyMode::ReadOnly).is_err());
-    assert!(reg.lookup_for_dispatch("write", PolicyMode::ReadOnly).is_err());
-    assert!(reg.lookup_for_dispatch("bash", PolicyMode::ReadOnly).is_err());
-    assert!(reg.lookup_for_dispatch("read", PolicyMode::ReadOnly).is_ok());
+    assert!(reg
+        .lookup_for_dispatch("edit", PolicyMode::ReadOnly)
+        .is_err());
+    assert!(reg
+        .lookup_for_dispatch("write", PolicyMode::ReadOnly)
+        .is_err());
+    assert!(reg
+        .lookup_for_dispatch("bash", PolicyMode::ReadOnly)
+        .is_err());
+    assert!(reg
+        .lookup_for_dispatch("read", PolicyMode::ReadOnly)
+        .is_ok());
 
     // --tool-filter ablation switch
     let filtered = ToolRegistry::new(Some(vec![
@@ -116,7 +126,9 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
     let f_defs = filtered.visible_definitions(PolicyMode::Ask);
     let f_names: Vec<&str> = f_defs.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(f_names, vec!["bash", "edit", "read", "write"]);
-    assert!(filtered.lookup_for_dispatch("grep", PolicyMode::Ask).is_err());
+    assert!(filtered
+        .lookup_for_dispatch("grep", PolicyMode::Ask)
+        .is_err());
 
     // Non-interactive PolicyEngine hides tools that would be automatically denied:
     // - Non-interactive Ask: hides bash, edit, write -> activate_skill, code_graph, find, grep, ls, read, recall_evidence, spawn_subagent
@@ -299,7 +311,8 @@ fn test_event_logger_0600_permissions_and_resilient_degradation() {
 #[cfg(unix)]
 #[test]
 fn test_event_logger_refuses_a_symlinked_log_path_instead_of_chmod_ing_its_target() {
-    let tmp_dir = std::env::temp_dir().join(format!("kroma-test-events-symlink-{}", Uuid::new_v4()));
+    let tmp_dir =
+        std::env::temp_dir().join(format!("kroma-test-events-symlink-{}", Uuid::new_v4()));
     fs::create_dir_all(&tmp_dir).unwrap();
     let victim = tmp_dir.join("victim.txt");
     fs::write(&victim, b"keep").unwrap();

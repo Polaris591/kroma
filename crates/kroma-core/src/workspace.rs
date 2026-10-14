@@ -98,9 +98,10 @@ impl WorkspaceCap {
     pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self, WorkspaceError> {
         #[cfg(unix)]
         {
-            let root = fs::canonicalize(workspace_root.as_ref()).map_err(|e| WorkspaceError::Io {
-                reason: format!("failed to canonicalize workspace root: {}", e),
-            })?;
+            let root =
+                fs::canonicalize(workspace_root.as_ref()).map_err(|e| WorkspaceError::Io {
+                    reason: format!("failed to canonicalize workspace root: {}", e),
+                })?;
             let c_root = CString::new(root.as_os_str().as_bytes()).map_err(|_| {
                 WorkspaceError::InvalidPath {
                     reason: "workspace root path contains NUL byte".to_string(),
@@ -136,9 +137,10 @@ impl WorkspaceCap {
         }
         #[cfg(windows)]
         {
-            let root = fs::canonicalize(workspace_root.as_ref()).map_err(|e| WorkspaceError::Io {
-                reason: format!("failed to canonicalize workspace root: {}", e),
-            })?;
+            let root =
+                fs::canonicalize(workspace_root.as_ref()).map_err(|e| WorkspaceError::Io {
+                    reason: format!("failed to canonicalize workspace root: {}", e),
+                })?;
             let dir_fd = open_windows_handle_no_reparse(&root, &root, Some(true))?;
             Ok(Self {
                 root,
@@ -183,7 +185,10 @@ impl WorkspaceCap {
         let norm_rel = Self::validate_relative_components(rel)?;
         if norm_rel != Path::new(".") && self.sensitive_path_blocked(&norm_rel) {
             return Err(WorkspaceError::SensitivePath {
-                reason: format!("access to sensitive path '{}' is blocked", norm_rel.display()),
+                reason: format!(
+                    "access to sensitive path '{}' is blocked",
+                    norm_rel.display()
+                ),
             });
         }
 
@@ -234,18 +239,12 @@ impl WorkspaceCap {
                 }
                 Some(libc::ELOOP) => {
                     return Err(WorkspaceError::SymlinkBlocked {
-                        reason: format!(
-                            "symlink component blocked at '{}'",
-                            norm_rel.display()
-                        ),
+                        reason: format!("symlink component blocked at '{}'", norm_rel.display()),
                     });
                 }
                 Some(libc::EXDEV) => {
                     return Err(WorkspaceError::PathEscape {
-                        reason: format!(
-                            "path escape blocked at '{}'",
-                            norm_rel.display()
-                        ),
+                        reason: format!("path escape blocked at '{}'", norm_rel.display()),
                     });
                 }
                 _ => {
@@ -318,7 +317,11 @@ impl WorkspaceCap {
                                     ),
                                 },
                                 _ => WorkspaceError::Io {
-                                    reason: format!("failed to open '{}': {}", norm_rel.display(), err),
+                                    reason: format!(
+                                        "failed to open '{}': {}",
+                                        norm_rel.display(),
+                                        err
+                                    ),
                                 },
                             });
                         }
@@ -409,7 +412,10 @@ impl WorkspaceCap {
         let norm_rel = Self::validate_relative_components(rel)?;
         if norm_rel != Path::new(".") && self.sensitive_path_blocked(&norm_rel) {
             return Err(WorkspaceError::SensitivePath {
-                reason: format!("access to sensitive path '{}' is blocked", norm_rel.display()),
+                reason: format!(
+                    "access to sensitive path '{}' is blocked",
+                    norm_rel.display()
+                ),
             });
         }
 
@@ -430,8 +436,7 @@ impl WorkspaceCap {
                 }
             })?;
             let how = OpenHow {
-                flags: (crate::secure_fs::OPEN_DIR_NO_FOLLOW)
-                    as u64,
+                flags: (crate::secure_fs::OPEN_DIR_NO_FOLLOW) as u64,
                 mode: 0,
                 resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
             };
@@ -493,11 +498,10 @@ impl WorkspaceCap {
             let mut cur_file: Option<File> = None;
             for comp in norm_rel.components() {
                 if let Component::Normal(part) = comp {
-                    let c_part = CString::new(part.as_bytes()).map_err(|_| {
-                        WorkspaceError::InvalidPath {
+                    let c_part =
+                        CString::new(part.as_bytes()).map_err(|_| WorkspaceError::InvalidPath {
                             reason: "path component contains NUL byte".to_string(),
-                        }
-                    })?;
+                        })?;
                     let cur_fd = cur_file
                         .as_ref()
                         .map(|f| f.as_raw_fd())
@@ -641,7 +645,8 @@ impl WorkspaceCap {
                 if ent.is_null() {
                     break;
                 }
-                let name_bytes = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
+                let name_bytes =
+                    unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
                 if name_bytes == b"." || name_bytes == b".." {
                     continue;
                 }
@@ -815,8 +820,9 @@ impl WorkspaceCap {
                         if next_fd < 0 {
                             let err = std::io::Error::last_os_error();
                             if create_missing && err.raw_os_error() == Some(libc::ENOENT) {
-                                let mk_res =
-                                    unsafe { libc::mkdirat(cur_dir.as_raw_fd(), c_part.as_ptr(), 0o755) };
+                                let mk_res = unsafe {
+                                    libc::mkdirat(cur_dir.as_raw_fd(), c_part.as_ptr(), 0o755)
+                                };
                                 if mk_res < 0 {
                                     let mk_err = std::io::Error::last_os_error();
                                     if mk_err.raw_os_error() != Some(libc::EEXIST) {
@@ -1025,7 +1031,10 @@ impl WorkspaceCap {
         }
         if self.sensitive_path_blocked(&norm_rel) {
             return Err(WorkspaceError::SensitivePath {
-                reason: format!("access to sensitive path '{}' is blocked", norm_rel.display()),
+                reason: format!(
+                    "access to sensitive path '{}' is blocked",
+                    norm_rel.display()
+                ),
             });
         }
 
@@ -1056,15 +1065,15 @@ impl WorkspaceCap {
                             ),
                         });
                     }
-                    let canonical_target = fs::canonicalize(&cur).map_err(|_| {
-                        WorkspaceError::PathEscape {
+                    let canonical_target =
+                        fs::canonicalize(&cur).map_err(|_| WorkspaceError::PathEscape {
                             reason: format!(
                                 "dangling or external symlink '{}' blocked",
                                 norm_rel.display()
                             ),
-                        }
-                    })?;
-                    let Some(rel_target) = path_starts_with_and_strip(&canonical_target, &self.root)
+                        })?;
+                    let Some(rel_target) =
+                        path_starts_with_and_strip(&canonical_target, &self.root)
                     else {
                         return Err(WorkspaceError::PathEscape {
                             reason: format!(
@@ -1118,7 +1127,10 @@ impl WorkspaceCap {
         }
         if self.sensitive_path_blocked(&norm_rel) {
             return Err(WorkspaceError::SensitivePath {
-                reason: format!("writing to sensitive path '{}' is blocked", norm_rel.display()),
+                reason: format!(
+                    "writing to sensitive path '{}' is blocked",
+                    norm_rel.display()
+                ),
             });
         }
 
@@ -1139,14 +1151,13 @@ impl WorkspaceCap {
                                     ),
                                 });
                             }
-                            let canonical_target = fs::canonicalize(&cur).map_err(|_| {
-                                WorkspaceError::PathEscape {
+                            let canonical_target =
+                                fs::canonicalize(&cur).map_err(|_| WorkspaceError::PathEscape {
                                     reason: format!(
                                         "dangling or external directory symlink '{}' blocked",
                                         norm_rel.display()
                                     ),
-                                }
-                            })?;
+                                })?;
                             let Some(rel_target) =
                                 path_starts_with_and_strip(&canonical_target, &self.root)
                             else {
@@ -1248,11 +1259,9 @@ impl InodeMutationLock {
         let parent = target_abs_path.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent dir")
         })?;
-        let file_name = target_abs_path
-            .file_name()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing file name")
-            })?;
+        let file_name = target_abs_path.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing file name")
+        })?;
         #[cfg(unix)]
         {
             // F-07: computing a lock key must never create directories or canonicalize as a side
@@ -1300,8 +1309,7 @@ impl InodeMutationLock {
                 return Err(std::io::Error::last_os_error());
             }
             let parent_dev = info.dwVolumeSerialNumber as u64;
-            let parent_ino =
-                ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+            let parent_ino = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
             let norm_leaf = leaf_name
                 .map(|s| OsString::from(s.to_string_lossy().to_ascii_lowercase()))
                 .unwrap_or_default();
@@ -1636,10 +1644,12 @@ pub(crate) fn open_windows_handle_no_reparse(
         }
         if !want_dir && is_dir {
             return Err(WorkspaceError::InvalidPath {
-                reason: format!("'{}' is a directory, not a regular file", display_rel.display()),
+                reason: format!(
+                    "'{}' is a directory, not a regular file",
+                    display_rel.display()
+                ),
             });
         }
     }
     Ok(file)
 }
-

@@ -119,7 +119,9 @@ enum WalPayload {
         workspace_root: PathBuf,
         created_at_ms: u64,
     },
-    Append { entry: SessionEntry },
+    Append {
+        entry: SessionEntry,
+    },
     /// Append-only projection overlay for compaction changes to an existing event. `evidence_links`
     /// binds each Outline Stub to the raw evidence it replaced (Gate 2); `serde(default)` keeps
     /// WALs written before Gate 2 readable.
@@ -130,9 +132,14 @@ enum WalPayload {
         #[serde(default)]
         evidence_links: Vec<EvidenceLink>,
     },
-    SetLeaf { leaf_id: String },
+    SetLeaf {
+        leaf_id: String,
+    },
     /// Records the final gate result; subsequent file mutations become dirty again.
-    CompletionResolved { leaf_id: String, resolution: CompletionResolution },
+    CompletionResolved {
+        leaf_id: String,
+        resolution: CompletionResolution,
+    },
     Checkpoint {
         leaf_id: Option<String>,
         turn: usize,
@@ -204,7 +211,9 @@ impl SessionJournal {
             fs::create_dir_all(session_dir.as_ref())?;
         }
         let session_id = Uuid::new_v4().to_string();
-        let path = session_dir.as_ref().join(format!("{}.wal.jsonl", session_id));
+        let path = session_dir
+            .as_ref()
+            .join(format!("{}.wal.jsonl", session_id));
         #[cfg(unix)]
         let file = {
             let mut opts = OpenOptions::new();
@@ -297,7 +306,9 @@ impl SessionJournal {
 
         // Re-check the opened handle itself (fstat) so a raced replacement cannot slip through.
         let opened_meta = file.metadata()?;
-        if !opened_meta.file_type().is_file() || crate::workspace::is_symlink_or_reparse(&opened_meta) {
+        if !opened_meta.file_type().is_file()
+            || crate::workspace::is_symlink_or_reparse(&opened_meta)
+        {
             return Err(SessionError::Invalid(
                 "session WAL is not a regular file".into(),
             ));
@@ -355,7 +366,11 @@ impl SessionJournal {
         let mut completion_resolution_leaf_ids: Vec<String> = Vec::new();
         let mut projection_updates: Vec<ProjectionOverlay> = Vec::new();
 
-        for (line_idx, raw) in complete.split(|b| *b == b'\n').filter(|line| !line.is_empty()).enumerate() {
+        for (line_idx, raw) in complete
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .enumerate()
+        {
             if raw.len() > MAX_WAL_LINE_BYTES {
                 return Err(SessionError::Invalid(format!(
                     "line {} exceeds the maximum WAL line size of {} bytes",
@@ -369,20 +384,35 @@ impl SessionJournal {
             if line.seq != expected_seq {
                 return Err(SessionError::Invalid(format!(
                     "sequence mismatch at line {}: expected {}, got {}",
-                    line_idx + 1, expected_seq, line.seq
+                    line_idx + 1,
+                    expected_seq,
+                    line.seq
                 )));
             }
             if line.prev_hash != prev_hash {
-                return Err(SessionError::Invalid(format!("hash-chain predecessor mismatch at line {}", line_idx + 1)));
+                return Err(SessionError::Invalid(format!(
+                    "hash-chain predecessor mismatch at line {}",
+                    line_idx + 1
+                )));
             }
             let computed = calculate_hash(line.seq, &line.prev_hash, &line.payload)?;
             if line.hash != computed {
-                return Err(SessionError::Invalid(format!("hash mismatch at line {}", line_idx + 1)));
+                return Err(SessionError::Invalid(format!(
+                    "hash mismatch at line {}",
+                    line_idx + 1
+                )));
             }
             match line.payload {
-                WalPayload::Header { version, session_id: sid, workspace_root: root, .. } => {
+                WalPayload::Header {
+                    version,
+                    session_id: sid,
+                    workspace_root: root,
+                    ..
+                } => {
                     if expected_seq != 0 || version != WAL_VERSION {
-                        return Err(SessionError::Invalid("invalid or duplicate WAL header".into()));
+                        return Err(SessionError::Invalid(
+                            "invalid or duplicate WAL header".into(),
+                        ));
                     }
                     session_id = Some(sid);
                     workspace_root = Some(root);
@@ -396,49 +426,118 @@ impl SessionJournal {
                     }
                     if let Some(ref parent) = entry.parent_id {
                         if !entries.contains_key(parent) {
-                            return Err(SessionError::Invalid(format!("unknown parent entry {}", parent)));
+                            return Err(SessionError::Invalid(format!(
+                                "unknown parent entry {}",
+                                parent
+                            )));
                         }
                     }
                     leaf_id = Some(entry.id.clone());
                     entries.insert(entry.id.clone(), entry);
                 }
-                WalPayload::ProjectionUpdate { projected_at_leaf_id, entry_id, item, evidence_links: links } => {
+                WalPayload::ProjectionUpdate {
+                    projected_at_leaf_id,
+                    entry_id,
+                    item,
+                    evidence_links: links,
+                } => {
                     if !entries.contains_key(&projected_at_leaf_id) {
-                        return Err(SessionError::Invalid(format!("projection update references unknown projection leaf {}", projected_at_leaf_id)));
+                        return Err(SessionError::Invalid(format!(
+                            "projection update references unknown projection leaf {}",
+                            projected_at_leaf_id
+                        )));
                     }
                     if !entries.contains_key(&entry_id) {
-                        return Err(SessionError::Invalid(format!("projection update references unknown entry {}", entry_id)));
+                        return Err(SessionError::Invalid(format!(
+                            "projection update references unknown entry {}",
+                            entry_id
+                        )));
                     }
-                    projection_updates.push(ProjectionOverlay { projected_at_leaf_id, entry_id, item, evidence_links: links });
+                    projection_updates.push(ProjectionOverlay {
+                        projected_at_leaf_id,
+                        entry_id,
+                        item,
+                        evidence_links: links,
+                    });
                 }
                 WalPayload::SetLeaf { leaf_id: selected } => {
                     if !entries.contains_key(&selected) {
-                        return Err(SessionError::Invalid(format!("branch points to unknown entry {}", selected)));
+                        return Err(SessionError::Invalid(format!(
+                            "branch points to unknown entry {}",
+                            selected
+                        )));
                     }
                     leaf_id = Some(selected);
                 }
-                WalPayload::CompletionResolved { leaf_id, resolution: _ } => {
+                WalPayload::CompletionResolved {
+                    leaf_id,
+                    resolution: _,
+                } => {
                     if !entries.contains_key(&leaf_id) {
-                        return Err(SessionError::Invalid(format!("completion resolution references unknown entry {}", leaf_id)));
+                        return Err(SessionError::Invalid(format!(
+                            "completion resolution references unknown entry {}",
+                            leaf_id
+                        )));
                     }
                     completion_resolution_leaf_ids.push(leaf_id);
                 }
-                WalPayload::Checkpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs, mutations, subagents_spawned } => {
-                    checkpoints.push(SessionCheckpoint { leaf_id, turn, pinned_baseline_end, last_touched, reasoning_blocks_sha256, workspace_revision_id, subtree_dirs, mutations, subagents_spawned });
+                WalPayload::Checkpoint {
+                    leaf_id,
+                    turn,
+                    pinned_baseline_end,
+                    last_touched,
+                    reasoning_blocks_sha256,
+                    workspace_revision_id,
+                    subtree_dirs,
+                    mutations,
+                    subagents_spawned,
+                } => {
+                    checkpoints.push(SessionCheckpoint {
+                        leaf_id,
+                        turn,
+                        pinned_baseline_end,
+                        last_touched,
+                        reasoning_blocks_sha256,
+                        workspace_revision_id,
+                        subtree_dirs,
+                        mutations,
+                        subagents_spawned,
+                    });
                 }
-                WalPayload::RevisionCaptured { leaf_id, turn, revision_id, parent_revision_id, changed_paths, tracked_file_count, captured_at_ms } => {
+                WalPayload::RevisionCaptured {
+                    leaf_id,
+                    turn,
+                    revision_id,
+                    parent_revision_id,
+                    changed_paths,
+                    tracked_file_count,
+                    captured_at_ms,
+                } => {
                     if !revision_id.starts_with("r-") {
-                        return Err(SessionError::Invalid(format!("invalid revision id '{}'", revision_id)));
+                        return Err(SessionError::Invalid(format!(
+                            "invalid revision id '{}'",
+                            revision_id
+                        )));
                     }
-                    revision_records.push(RevisionRecord { leaf_id, turn, revision_id, parent_revision_id, changed_paths, tracked_file_count, captured_at_ms });
+                    revision_records.push(RevisionRecord {
+                        leaf_id,
+                        turn,
+                        revision_id,
+                        parent_revision_id,
+                        changed_paths,
+                        tracked_file_count,
+                        captured_at_ms,
+                    });
                 }
             }
             prev_hash = line.hash;
             expected_seq += 1;
         }
 
-        let session_id = session_id.ok_or_else(|| SessionError::Invalid("missing WAL header".into()))?;
-        let workspace_root = workspace_root.ok_or_else(|| SessionError::Invalid("missing workspace root".into()))?;
+        let session_id =
+            session_id.ok_or_else(|| SessionError::Invalid("missing WAL header".into()))?;
+        let workspace_root =
+            workspace_root.ok_or_else(|| SessionError::Invalid("missing workspace root".into()))?;
         // F-01: only now — with every complete line (header + full hash chain) verified — repair a
         // torn trailing fragment. Any invalid file returned above is left byte-for-byte untouched.
         if complete_len != bytes.len() {
@@ -475,8 +574,12 @@ impl SessionJournal {
     pub fn seed_projector_evidence(&self, projector: &mut ContextProjector) {
         let recorded = self.evidence_links();
         for (index, entry) in self.active_entries().iter().enumerate() {
-            let TranscriptItem::ToolResult(active_tr) = &entry.item else { continue; };
-            let Some(sid) = extract_source_entry_id(&active_tr.content) else { continue; };
+            let TranscriptItem::ToolResult(active_tr) = &entry.item else {
+                continue;
+            };
+            let Some(sid) = extract_source_entry_id(&active_tr.content) else {
+                continue;
+            };
             let Some(TranscriptItem::ToolResult(raw_tr)) = self.raw_entry_item(&entry.id) else {
                 continue;
             };
@@ -504,10 +607,18 @@ impl SessionJournal {
         }
     }
 
-    pub fn path(&self) -> &Path { &self.path }
-    pub fn session_id(&self) -> &str { &self.session_id }
-    pub fn workspace_root(&self) -> &Path { &self.workspace_root }
-    pub fn leaf_id(&self) -> Option<&str> { self.leaf_id.as_deref() }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+    pub fn leaf_id(&self) -> Option<&str> {
+        self.leaf_id.as_deref()
+    }
 
     /// Evidence links recorded for the active branch, ordered by canonical index (Gate 2).
     ///
@@ -520,7 +631,9 @@ impl SessionJournal {
         let active_len = self.active_entries().len();
         let mut winner: HashMap<&str, (usize, usize)> = HashMap::new();
         for (wal_index, update) in self.projection_updates.iter().enumerate() {
-            let Some(&depth) = depth_map.get(&update.projected_at_leaf_id) else { continue; };
+            let Some(&depth) = depth_map.get(&update.projected_at_leaf_id) else {
+                continue;
+            };
             let slot = winner.entry(update.entry_id.as_str()).or_insert((0, 0));
             if (depth, wal_index) >= *slot {
                 *slot = (depth, wal_index);
@@ -528,7 +641,9 @@ impl SessionJournal {
         }
         let mut links: Vec<EvidenceLink> = Vec::new();
         for (wal_index, update) in self.projection_updates.iter().enumerate() {
-            let Some(&depth) = depth_map.get(&update.projected_at_leaf_id) else { continue; };
+            let Some(&depth) = depth_map.get(&update.projected_at_leaf_id) else {
+                continue;
+            };
             if winner.get(update.entry_id.as_str()) != Some(&(depth, wal_index)) {
                 continue;
             }
@@ -537,7 +652,10 @@ impl SessionJournal {
                 if link.canonical_index >= active_len {
                     continue;
                 }
-                if !links.iter().any(|existing| existing.source_entry_id == link.source_entry_id) {
+                if !links
+                    .iter()
+                    .any(|existing| existing.source_entry_id == link.source_entry_id)
+                {
                     links.push(link.clone());
                 }
             }
@@ -635,7 +753,9 @@ impl SessionJournal {
                 workspace_root,
                 ..
             } if version == WAL_VERSION => Ok(workspace_root),
-            _ => Err(SessionError::Invalid("first WAL entry is not a valid header".into())),
+            _ => Err(SessionError::Invalid(
+                "first WAL entry is not a valid header".into(),
+            )),
         }
     }
 
@@ -683,23 +803,33 @@ impl SessionJournal {
     /// preserve the anti-oscillation retry budget across an explicit process restart.
     pub fn completion_feedback_since_last_resolution(&self) -> Vec<String> {
         let active = self.active_entries();
-        let start = self.latest_active_completion_resolution()
+        let start = self
+            .latest_active_completion_resolution()
             .and_then(|resolution_id| active.iter().position(|entry| entry.id == resolution_id))
             .map(|index| index + 1)
             .unwrap_or(0);
-        active.iter().skip(start).filter_map(|entry| match &entry.item {
-            TranscriptItem::User(user) if user.content.starts_with("[CompletionGate Rejected, attempt ") => {
-                Some(user.content.clone())
-            }
-            _ => None,
-        }).collect()
+        active
+            .iter()
+            .skip(start)
+            .filter_map(|entry| match &entry.item {
+                TranscriptItem::User(user)
+                    if user
+                        .content
+                        .starts_with("[CompletionGate Rejected, attempt ") =>
+                {
+                    Some(user.content.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Modified files after the last resolved completion. This keeps interrupted work dirty while
     /// allowing later no-change tasks to short-circuit verification.
     pub fn modified_files_since_last_resolution(&self) -> Vec<String> {
         let active = self.active_entries();
-        let start = self.latest_active_completion_resolution()
+        let start = self
+            .latest_active_completion_resolution()
             .and_then(|resolution_id| active.iter().position(|entry| entry.id == resolution_id))
             .map(|index| index + 1)
             .unwrap_or(0);
@@ -722,20 +852,34 @@ impl SessionJournal {
     }
 
     /// Record an intentional validation skip without representing it as a successful test run.
-    pub fn mark_completion_skipped(&mut self, reason: impl Into<String>) -> Result<(), SessionError> {
+    pub fn mark_completion_skipped(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Result<(), SessionError> {
         self.mark_completion_resolved(CompletionResolution::Skipped(reason.into()))
     }
 
-    fn mark_completion_resolved(&mut self, resolution: CompletionResolution) -> Result<(), SessionError> {
-        let leaf_id = self.leaf_id.clone()
-            .ok_or_else(|| SessionError::Invalid("cannot resolve completion with no active transcript leaf".into()))?;
-        self.append_payload(WalPayload::CompletionResolved { leaf_id: leaf_id.clone(), resolution })?;
+    fn mark_completion_resolved(
+        &mut self,
+        resolution: CompletionResolution,
+    ) -> Result<(), SessionError> {
+        let leaf_id = self.leaf_id.clone().ok_or_else(|| {
+            SessionError::Invalid("cannot resolve completion with no active transcript leaf".into())
+        })?;
+        self.append_payload(WalPayload::CompletionResolved {
+            leaf_id: leaf_id.clone(),
+            resolution,
+        })?;
         self.completion_resolution_leaf_ids.push(leaf_id);
         Ok(())
     }
 
     /// Add a single transcript event. Each item is flushed to disk before returning.
-    pub fn append_item(&mut self, turn: usize, item: TranscriptItem) -> Result<String, SessionError> {
+    pub fn append_item(
+        &mut self,
+        turn: usize,
+        item: TranscriptItem,
+    ) -> Result<String, SessionError> {
         let id = Uuid::new_v4().to_string();
         let entry = SessionEntry {
             id: id.clone(),
@@ -743,7 +887,9 @@ impl SessionJournal {
             turn,
             item,
         };
-        self.append_payload(WalPayload::Append { entry: entry.clone() })?;
+        self.append_payload(WalPayload::Append {
+            entry: entry.clone(),
+        })?;
         self.leaf_id = Some(id.clone());
         self.entries.insert(id.clone(), entry);
         Ok(id)
@@ -752,25 +898,38 @@ impl SessionJournal {
     /// Move the active leaf to any existing entry, preserving all abandoned branches in the WAL.
     pub fn fork_at(&mut self, entry_id: &str) -> Result<(), SessionError> {
         if !self.entries.contains_key(entry_id) {
-            return Err(SessionError::Invalid(format!("no session entry named {}", entry_id)));
+            return Err(SessionError::Invalid(format!(
+                "no session entry named {}",
+                entry_id
+            )));
         }
-        self.append_payload(WalPayload::SetLeaf { leaf_id: entry_id.to_string() })?;
+        self.append_payload(WalPayload::SetLeaf {
+            leaf_id: entry_id.to_string(),
+        })?;
         self.leaf_id = Some(entry_id.to_string());
         Ok(())
     }
 
     /// Select the last event at or before a turn on the active path, then continue as a branch.
     pub fn fork_at_turn(&mut self, turn: usize) -> Result<String, SessionError> {
-        let selected = self.active_entries().into_iter().rev()
+        let selected = self
+            .active_entries()
+            .into_iter()
+            .rev()
             .find(|entry| entry.turn <= turn)
             .map(|entry| entry.id.clone())
-            .ok_or_else(|| SessionError::Invalid(format!("no active entry at or before turn {}", turn)))?;
+            .ok_or_else(|| {
+                SessionError::Invalid(format!("no active entry at or before turn {}", turn))
+            })?;
         self.fork_at(&selected)?;
         Ok(selected)
     }
 
     pub fn active_transcript(&self) -> Vec<TranscriptItem> {
-        self.active_entries().into_iter().map(|entry| entry.item.clone()).collect()
+        self.active_entries()
+            .into_iter()
+            .map(|entry| entry.item.clone())
+            .collect()
     }
 
     /// Persist compaction-induced changes to the in-memory canonical transcript without rewriting
@@ -786,14 +945,23 @@ impl SessionJournal {
         if active_entries.len() != transcript.len() {
             return Err(SessionError::Invalid(format!(
                 "projection/transcript length mismatch: WAL has {}, in-memory transcript has {}",
-                active_entries.len(), transcript.len()
+                active_entries.len(),
+                transcript.len()
             )));
         }
         let Some(projected_at_leaf_id) = self.leaf_id.clone() else {
-            if transcript.is_empty() { return Ok(()); }
-            return Err(SessionError::Invalid("cannot persist projection without an active leaf".into()));
+            if transcript.is_empty() {
+                return Ok(());
+            }
+            return Err(SessionError::Invalid(
+                "cannot persist projection without an active leaf".into(),
+            ));
         };
-        for (index, (entry, item)) in active_entries.into_iter().zip(transcript.iter()).enumerate() {
+        for (index, (entry, item)) in active_entries
+            .into_iter()
+            .zip(transcript.iter())
+            .enumerate()
+        {
             if &entry.item != item {
                 let links: Vec<EvidenceLink> = evidence_links
                     .iter()
@@ -826,7 +994,9 @@ impl SessionJournal {
         // so an ancestor overlay cannot overwrite a descendant's after forking and re-selecting.
         let mut projected_items: HashMap<String, (&TranscriptItem, usize)> = HashMap::new();
         for update in &self.projection_updates {
-            let Some(&leaf_depth) = depth_map.get(&update.projected_at_leaf_id) else { continue; };
+            let Some(&leaf_depth) = depth_map.get(&update.projected_at_leaf_id) else {
+                continue;
+            };
             if !depth_map.contains_key(&update.entry_id) {
                 continue;
             }
@@ -851,7 +1021,9 @@ impl SessionJournal {
         let mut path = Vec::new();
         let mut next = self.leaf_id.as_deref();
         while let Some(id) = next {
-            let Some(entry) = self.entries.get(id) else { break; };
+            let Some(entry) = self.entries.get(id) else {
+                break;
+            };
             path.push(entry.clone());
             next = entry.parent_id.as_deref();
         }
@@ -864,12 +1036,17 @@ impl SessionJournal {
         let mut path = Vec::new();
         let mut next = self.leaf_id.as_deref();
         while let Some(id) = next {
-            let Some(entry) = self.entries.get(id) else { break; };
+            let Some(entry) = self.entries.get(id) else {
+                break;
+            };
             path.push(id.to_string());
             next = entry.parent_id.as_deref();
         }
         path.reverse();
-        path.into_iter().enumerate().map(|(index, id)| (id, index)).collect()
+        path.into_iter()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect()
     }
 
     /// Persist replay-relevant projector metadata alongside the append-only transcript.
@@ -1015,7 +1192,9 @@ impl SessionJournal {
 
     /// Revision the workspace is expected to be in right now, per the active branch.
     pub fn latest_revision_id(&self) -> Option<String> {
-        self.revision_records().last().map(|r| r.revision_id.clone())
+        self.revision_records()
+            .last()
+            .map(|r| r.revision_id.clone())
     }
 
     fn append_payload(&mut self, payload: WalPayload) -> Result<(), SessionError> {
@@ -1064,7 +1243,13 @@ impl Drop for SessionJournal {
             let mut overlapped: OVERLAPPED = std::mem::zeroed();
             overlapped.Anonymous.Anonymous.Offset = u32::MAX - 1;
             overlapped.Anonymous.Anonymous.OffsetHigh = u32::MAX;
-            let _ = UnlockFileEx(self.file.as_raw_handle() as HANDLE, 0, 1, 0, &mut overlapped);
+            let _ = UnlockFileEx(
+                self.file.as_raw_handle() as HANDLE,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            );
         }
     }
 }
@@ -1123,7 +1308,10 @@ fn calculate_hash(seq: u64, prev_hash: &str, payload: &WalPayload) -> Result<Str
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1141,12 +1329,29 @@ mod tests {
     fn wal_round_trips_signed_reasoning_and_branching() {
         let dir = tempdir();
         let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
-        let first = wal.append_item(0, TranscriptItem::User(UserMessage { content: "start".into() })).unwrap();
-        wal.append_item(1, TranscriptItem::Assistant(AssistantTurn {
-            content: Some("one".into()),
-            reasoning_blocks: vec![ReasoningBlock { text: None, signature: Some("opaque-signature".into()), opaque_payload: Some("provider-payload".into()) }],
-            tool_calls: vec![], finish_reason: FinishReason::Stop, usage: None,
-        })).unwrap();
+        let first = wal
+            .append_item(
+                0,
+                TranscriptItem::User(UserMessage {
+                    content: "start".into(),
+                }),
+            )
+            .unwrap();
+        wal.append_item(
+            1,
+            TranscriptItem::Assistant(AssistantTurn {
+                content: Some("one".into()),
+                reasoning_blocks: vec![ReasoningBlock {
+                    text: None,
+                    signature: Some("opaque-signature".into()),
+                    opaque_payload: Some("provider-payload".into()),
+                }],
+                tool_calls: vec![],
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            }),
+        )
+        .unwrap();
         let path = wal.path().to_path_buf();
         drop(wal);
 
@@ -1155,9 +1360,21 @@ mod tests {
         assert!(matches!(&round_trip[1], TranscriptItem::Assistant(a)
             if a.reasoning_blocks[0].signature.as_deref() == Some("opaque-signature")
             && a.reasoning_blocks[0].opaque_payload.as_deref() == Some("provider-payload")));
-        wal.append_item(2, TranscriptItem::User(UserMessage { content: "second branch".into() })).unwrap();
+        wal.append_item(
+            2,
+            TranscriptItem::User(UserMessage {
+                content: "second branch".into(),
+            }),
+        )
+        .unwrap();
         wal.fork_at(&first).unwrap();
-        wal.append_item(1, TranscriptItem::User(UserMessage { content: "alternate".into() })).unwrap();
+        wal.append_item(
+            1,
+            TranscriptItem::User(UserMessage {
+                content: "alternate".into(),
+            }),
+        )
+        .unwrap();
         drop(wal);
 
         let reopened = SessionJournal::open(path).unwrap();
@@ -1173,18 +1390,36 @@ mod tests {
         use std::sync::Arc;
         let dir = tempdir();
         let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
-        wal.append_item(0, TranscriptItem::User(UserMessage { content: "start".into() })).unwrap();
-        let result_id = wal.append_item(1, TranscriptItem::ToolResult(ToolResultMessage {
-            call_id: crate::types::ToolCallId::new("call_1"),
-            tool_name: "read".into(),
-            outcome: ToolOutcome::Success,
-            content: Arc::from("x".repeat(4096)),
-            meta: ToolResultMeta::default(),
-        })).unwrap();
-        wal.append_item(2, TranscriptItem::Assistant(AssistantTurn {
-            content: Some("follow-up".into()), reasoning_blocks: vec![], tool_calls: vec![],
-            finish_reason: FinishReason::Stop, usage: None,
-        })).unwrap();
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "start".into(),
+            }),
+        )
+        .unwrap();
+        let result_id = wal
+            .append_item(
+                1,
+                TranscriptItem::ToolResult(ToolResultMessage {
+                    call_id: crate::types::ToolCallId::new("call_1"),
+                    tool_name: "read".into(),
+                    outcome: ToolOutcome::Success,
+                    content: Arc::from("x".repeat(4096)),
+                    meta: ToolResultMeta::default(),
+                }),
+            )
+            .unwrap();
+        wal.append_item(
+            2,
+            TranscriptItem::Assistant(AssistantTurn {
+                content: Some("follow-up".into()),
+                reasoning_blocks: vec![],
+                tool_calls: vec![],
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            }),
+        )
+        .unwrap();
         let mut projected = wal.active_transcript();
         if let TranscriptItem::ToolResult(tr) = &mut projected[1] {
             tr.content = Arc::from("<outline stub>");
@@ -1193,9 +1428,13 @@ mod tests {
         let path = wal.path().to_path_buf();
         drop(wal);
         let mut reopened = SessionJournal::open(path).unwrap();
-        assert!(matches!(&reopened.active_transcript()[1], TranscriptItem::ToolResult(tr) if &*tr.content == "<outline stub>"));
+        assert!(
+            matches!(&reopened.active_transcript()[1], TranscriptItem::ToolResult(tr) if &*tr.content == "<outline stub>")
+        );
         reopened.fork_at(&result_id).unwrap();
-        assert!(matches!(&reopened.active_transcript()[1], TranscriptItem::ToolResult(tr) if tr.content.len() == 4096));
+        assert!(
+            matches!(&reopened.active_transcript()[1], TranscriptItem::ToolResult(tr) if tr.content.len() == 4096)
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1205,34 +1444,78 @@ mod tests {
         use std::sync::Arc;
         let dir = tempdir();
         let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
-        wal.append_item(0, TranscriptItem::User(UserMessage { content: "implement".into() })).unwrap();
-        wal.append_item(1, TranscriptItem::ToolResult(ToolResultMessage {
-            call_id: crate::types::ToolCallId::new("call_edit"),
-            tool_name: "edit".into(),
-            outcome: ToolOutcome::Success,
-            content: Arc::from("changed"),
-            meta: ToolResultMeta { relative_path: Some("src/lib.rs".into()), modified_file: true, ..Default::default() },
-        })).unwrap();
-        wal.append_item(2, TranscriptItem::Assistant(AssistantTurn {
-            content: Some("done".into()), reasoning_blocks: vec![], tool_calls: vec![],
-            finish_reason: FinishReason::Stop, usage: None,
-        })).unwrap();
-        assert_eq!(wal.modified_files_since_last_resolution(), vec!["src/lib.rs"]);
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "implement".into(),
+            }),
+        )
+        .unwrap();
+        wal.append_item(
+            1,
+            TranscriptItem::ToolResult(ToolResultMessage {
+                call_id: crate::types::ToolCallId::new("call_edit"),
+                tool_name: "edit".into(),
+                outcome: ToolOutcome::Success,
+                content: Arc::from("changed"),
+                meta: ToolResultMeta {
+                    relative_path: Some("src/lib.rs".into()),
+                    modified_file: true,
+                    ..Default::default()
+                },
+            }),
+        )
+        .unwrap();
+        wal.append_item(
+            2,
+            TranscriptItem::Assistant(AssistantTurn {
+                content: Some("done".into()),
+                reasoning_blocks: vec![],
+                tool_calls: vec![],
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            wal.modified_files_since_last_resolution(),
+            vec!["src/lib.rs"]
+        );
         wal.mark_completion_approved().unwrap();
-        wal.append_item(3, TranscriptItem::User(UserMessage { content: "explain this code".into() })).unwrap();
+        wal.append_item(
+            3,
+            TranscriptItem::User(UserMessage {
+                content: "explain this code".into(),
+            }),
+        )
+        .unwrap();
         assert!(wal.modified_files_since_last_resolution().is_empty());
-        wal.append_item(4, TranscriptItem::ToolResult(ToolResultMessage {
-            call_id: crate::types::ToolCallId::new("call_edit_again"),
-            tool_name: "edit".into(),
-            outcome: ToolOutcome::Success,
-            content: Arc::from("changed again"),
-            meta: ToolResultMeta { relative_path: Some("src/other.rs".into()), modified_file: true, ..Default::default() },
-        })).unwrap();
-        assert_eq!(wal.modified_files_since_last_resolution(), vec!["src/other.rs"]);
+        wal.append_item(
+            4,
+            TranscriptItem::ToolResult(ToolResultMessage {
+                call_id: crate::types::ToolCallId::new("call_edit_again"),
+                tool_name: "edit".into(),
+                outcome: ToolOutcome::Success,
+                content: Arc::from("changed again"),
+                meta: ToolResultMeta {
+                    relative_path: Some("src/other.rs".into()),
+                    modified_file: true,
+                    ..Default::default()
+                },
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            wal.modified_files_since_last_resolution(),
+            vec!["src/other.rs"]
+        );
         let path = wal.path().to_path_buf();
         drop(wal);
         let reopened = SessionJournal::open(path).unwrap();
-        assert_eq!(reopened.modified_files_since_last_resolution(), vec!["src/other.rs"]);
+        assert_eq!(
+            reopened.modified_files_since_last_resolution(),
+            vec!["src/other.rs"]
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1240,29 +1523,63 @@ mod tests {
     fn gate_rejections_survive_resume_and_clear_after_resolution() {
         let dir = tempdir();
         let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
-        wal.append_item(0, TranscriptItem::User(UserMessage { content: "implement".into() })).unwrap();
-        wal.append_item(1, TranscriptItem::Assistant(AssistantTurn {
-            content: Some("done".into()), reasoning_blocks: vec![], tool_calls: vec![],
-            finish_reason: FinishReason::Stop, usage: None,
-        })).unwrap();
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "implement".into(),
+            }),
+        )
+        .unwrap();
+        wal.append_item(
+            1,
+            TranscriptItem::Assistant(AssistantTurn {
+                content: Some("done".into()),
+                reasoning_blocks: vec![],
+                tool_calls: vec![],
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            }),
+        )
+        .unwrap();
         let rejection = "[CompletionGate Rejected, attempt 1/3]: error: assertion failed\nFix the reported issue before finishing.";
-        wal.append_item(2, TranscriptItem::User(UserMessage { content: rejection.into() })).unwrap();
+        wal.append_item(
+            2,
+            TranscriptItem::User(UserMessage {
+                content: rejection.into(),
+            }),
+        )
+        .unwrap();
         assert_eq!(wal.completion_feedback_since_last_resolution().len(), 1);
         let path = wal.path().to_path_buf();
         drop(wal);
 
         let mut reopened = SessionJournal::open(&path).unwrap();
-        assert_eq!(reopened.completion_feedback_since_last_resolution().len(), 1);
-        reopened.append_item(3, TranscriptItem::Assistant(AssistantTurn {
-            content: Some("fixed".into()), reasoning_blocks: vec![], tool_calls: vec![],
-            finish_reason: FinishReason::Stop, usage: None,
-        })).unwrap();
+        assert_eq!(
+            reopened.completion_feedback_since_last_resolution().len(),
+            1
+        );
+        reopened
+            .append_item(
+                3,
+                TranscriptItem::Assistant(AssistantTurn {
+                    content: Some("fixed".into()),
+                    reasoning_blocks: vec![],
+                    tool_calls: vec![],
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                }),
+            )
+            .unwrap();
         reopened.mark_completion_approved().unwrap();
-        assert!(reopened.completion_feedback_since_last_resolution().is_empty());
+        assert!(reopened
+            .completion_feedback_since_last_resolution()
+            .is_empty());
         drop(reopened);
 
         let reopened = SessionJournal::open(&path).unwrap();
-        assert!(reopened.completion_feedback_since_last_resolution().is_empty());
+        assert!(reopened
+            .completion_feedback_since_last_resolution()
+            .is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1272,7 +1589,12 @@ mod tests {
         let wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
         let path = wal.path().to_path_buf();
         drop(wal);
-        OpenOptions::new().append(true).open(&path).unwrap().write_all(b"{\"torn\":").unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"torn\":")
+            .unwrap();
         let opened = SessionJournal::open(&path).unwrap();
         assert_eq!(opened.max_active_turn(), 0);
         let _ = fs::remove_dir_all(dir);
@@ -1292,7 +1614,10 @@ mod tests {
         );
 
         let after = fs::read(&target).unwrap();
-        assert_eq!(after, original, "rejected WAL open must not modify the file");
+        assert_eq!(
+            after, original,
+            "rejected WAL open must not modify the file"
+        );
         assert_eq!(after.len(), original.len());
         assert_eq!(crate::prompt::sha256_hex64(&after), before);
         let _ = fs::remove_dir_all(dir);

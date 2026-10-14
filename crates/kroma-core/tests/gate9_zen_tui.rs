@@ -115,14 +115,23 @@ async fn zen_theme_is_default_and_the_banner_is_borderless() {
 
     // Design D chrome: brand diamond header, no ASCII boxes.
     assert!(banner.contains("◆ kroma 1.5.0"), "banner: {banner}");
-    assert!(!banner.contains("==="), "banner must be borderless: {banner}");
+    assert!(
+        !banner.contains("==="),
+        "banner must be borderless: {banner}"
+    );
     // Stable facts for scripts and parity tests remain present.
     assert!(banner.contains("model:"), "banner: {banner}");
     assert!(banner.contains("thinking:"), "banner: {banner}");
     assert!(banner.contains("protocol:"), "banner: {banner}");
-    assert!(banner.contains("policy: allow-write+allow-shell"), "banner: {banner}");
     assert!(
-        banner.contains(&format!("Kroma v{} Interactive REPL", kroma_core::version())),
+        banner.contains("policy: allow-write+allow-shell"),
+        "banner: {banner}"
+    );
+    assert!(
+        banner.contains(&format!(
+            "Kroma v{} Interactive REPL",
+            kroma_core::version()
+        )),
         "banner: {banner}"
     );
     // Under `cargo test` stdout is not a TTY, so colour must be disabled and no ESC may leak.
@@ -140,7 +149,11 @@ async fn theme_command_switches_between_zen_and_classic() {
     assert!(show.output.contains("theme: zen"), "got: {}", show.output);
 
     let classic = repl.handle_line("/theme classic").await.unwrap();
-    assert!(classic.output.contains("theme -> classic"), "got: {}", classic.output);
+    assert!(
+        classic.output.contains("theme -> classic"),
+        "got: {}",
+        classic.output
+    );
     assert_eq!(repl.dispatcher().active_theme(), Theme::Classic);
     let banner = repl.render_status_banner().await;
     assert!(
@@ -154,7 +167,10 @@ async fn theme_command_switches_between_zen_and_classic() {
     assert_eq!(repl.dispatcher().active_theme(), Theme::Zen);
     let banner = repl.render_status_banner().await;
     assert!(banner.contains("◆ kroma 1.5.0"), "zen banner: {banner}");
-    assert!(!banner.contains("==="), "zen banner must be borderless: {banner}");
+    assert!(
+        !banner.contains("==="),
+        "zen banner must be borderless: {banner}"
+    );
 
     // `/help` advertises the new command.
     let help = repl.handle_line("/help").await.unwrap();
@@ -189,17 +205,26 @@ async fn config_get_and_set_report_and_swap_ui_theme() {
 
     let set = repl
         .dispatcher()
-        .handle_request(
-            JsonRpcRequest::new(2, "config.set", json!({ "ui_theme": "classic" })),
-        )
+        .handle_request(JsonRpcRequest::new(
+            2,
+            "config.set",
+            json!({ "ui_theme": "classic" }),
+        ))
         .await;
     let val = set.result.unwrap();
-    assert_eq!(val.get("ui_theme").and_then(|v| v.as_str()), Some("classic"));
+    assert_eq!(
+        val.get("ui_theme").and_then(|v| v.as_str()),
+        Some("classic")
+    );
     assert_eq!(repl.dispatcher().active_theme(), Theme::Classic);
 
     let bad = repl
         .dispatcher()
-        .handle_request(JsonRpcRequest::new(3, "config.set", json!({ "ui_theme": "neon" })))
+        .handle_request(JsonRpcRequest::new(
+            3,
+            "config.set",
+            json!({ "ui_theme": "neon" }),
+        ))
         .await;
     assert!(bad.error.is_some(), "invalid ui_theme must be rejected");
 
@@ -246,7 +271,11 @@ async fn zen_prompt_turn_emits_telemetry_footer() {
     let out = repl.handle_line("Say done").await.unwrap();
     assert!(out.output.contains("Done."), "got: {}", out.output);
     // Stable machine line preserved.
-    assert!(out.output.contains("[status=completed"), "got: {}", out.output);
+    assert!(
+        out.output.contains("[status=completed"),
+        "got: {}",
+        out.output
+    );
     // Design D telemetry footer: self/child token spend, cache hit and revision.
     assert!(out.output.contains("self "), "got: {}", out.output);
     // P2 (`v1.5.0`): `self` is input + output tokens, not just input.
@@ -274,7 +303,10 @@ async fn repl_prompt_uses_borderless_prefix() {
     let rendered = String::from_utf8(out_buf).unwrap();
     assert!(rendered.contains("› "), "rendered: {rendered:?}");
     assert!(!rendered.contains("kroma> "), "rendered: {rendered:?}");
-    assert!(rendered.contains("Session closed."), "rendered: {rendered:?}");
+    assert!(
+        rendered.contains("Session closed."),
+        "rendered: {rendered:?}"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -316,7 +348,10 @@ async fn config_set_accepts_stringified_adaptive_tournament() {
     let val = set
         .result
         .expect("a stringified adaptive_tournament must be accepted");
-    assert_eq!(val.get("adaptive_tournament").and_then(|v| v.as_u64()), Some(3));
+    assert_eq!(
+        val.get("adaptive_tournament").and_then(|v| v.as_u64()),
+        Some(3)
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -331,7 +366,10 @@ fn short_rev_and_header_reject_control_characters() {
     let footer = plain.telemetry_footer(1, 0, 1.0, hostile, 0);
     assert!(!header.contains('\u{1b}'), "header leaked ESC: {header:?}");
     assert!(!footer.contains('\u{1b}'), "footer leaked ESC: {footer:?}");
-    assert!(!header.contains('\u{202e}'), "header leaked bidi override: {header:?}");
+    assert!(
+        !header.contains('\u{202e}'),
+        "header leaked bidi override: {header:?}"
+    );
 }
 
 #[test]
@@ -450,9 +488,19 @@ async fn streaming_turn_emits_live_status_lines_before_summary() {
     let mut out = Vec::new();
     let step = repl.run_turn_streaming("Say done", &mut out).await.unwrap();
     let rendered = String::from_utf8(out).unwrap();
-    assert!(rendered.contains("●"), "expected live status lines: {rendered:?}");
-    assert!(rendered.contains("thinking") || rendered.contains("gate"), "{rendered:?}");
-    assert!(step.output.contains("Done streaming."), "got: {}", step.output);
+    assert!(
+        rendered.contains("●"),
+        "expected live status lines: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("thinking") || rendered.contains("gate"),
+        "{rendered:?}"
+    );
+    assert!(
+        step.output.contains("Done streaming."),
+        "got: {}",
+        step.output
+    );
     assert!(step.output.contains("self "), "got: {}", step.output);
 
     let _ = fs::remove_dir_all(&root);
@@ -467,27 +515,56 @@ fn theme_renderer_public_api_degrades_without_color() {
     assert!(!color_enabled_with(None, None, false));
 
     let plain = ThemeRenderer::plain(Theme::Zen);
-    let header = plain.header("deepseek", "high", "responses", 99.6, "0b92f1ab", "/opt/kroma");
+    let header = plain.header(
+        "deepseek",
+        "high",
+        "responses",
+        99.6,
+        "0b92f1ab",
+        "/opt/kroma",
+    );
     assert!(header.starts_with("◆ kroma 1.5.0"), "header: {header}");
     assert!(!header.contains('\x1b'));
     assert_eq!(plain.prompt_prefix(), "› ");
     assert!(plain.hairline(6).chars().all(|c| c == '-'));
 
     let colored = ThemeRenderer::new(Theme::Zen, true);
-    assert!(colored.header("m", "high", "responses", 1.0, "r", "/ws").contains("\x1b[38;2;"));
+    assert!(colored
+        .header("m", "high", "responses", 1.0, "r", "/ws")
+        .contains("\x1b[38;2;"));
     assert_eq!(colored.hairline(4).matches('━').count(), 4);
 
     // Status dots map to the four-colour spectrum.
-    assert!(colored.status_line(StatusDot::Thinking, "thinking", "x").contains("\x1b[38;2;168;85;247m"));
-    assert!(colored.status_line(StatusDot::Tool, "read", "x").contains("\x1b[38;2;56;189;248m"));
-    assert!(colored.status_line(StatusDot::Success, "edit", "x").contains("\x1b[38;2;52;211;153m"));
-    assert!(colored.status_line(StatusDot::Alert, "policy", "x").contains("\x1b[38;2;251;191;36m"));
+    assert!(colored
+        .status_line(StatusDot::Thinking, "thinking", "x")
+        .contains("\x1b[38;2;168;85;247m"));
+    assert!(colored
+        .status_line(StatusDot::Tool, "read", "x")
+        .contains("\x1b[38;2;56;189;248m"));
+    assert!(colored
+        .status_line(StatusDot::Success, "edit", "x")
+        .contains("\x1b[38;2;52;211;153m"));
+    assert!(colored
+        .status_line(StatusDot::Alert, "policy", "x")
+        .contains("\x1b[38;2;251;191;36m"));
 
     // Borderless inline diff preview.
     let lines = vec![
-        DiffLine { kind: DiffKind::Context, line_number: Some(1), text: "keep();".into() },
-        DiffLine { kind: DiffKind::Removed, line_number: Some(2), text: "old();".into() },
-        DiffLine { kind: DiffKind::Added, line_number: Some(2), text: "new();".into() },
+        DiffLine {
+            kind: DiffKind::Context,
+            line_number: Some(1),
+            text: "keep();".into(),
+        },
+        DiffLine {
+            kind: DiffKind::Removed,
+            line_number: Some(2),
+            text: "old();".into(),
+        },
+        DiffLine {
+            kind: DiffKind::Added,
+            line_number: Some(2),
+            text: "new();".into(),
+        },
     ];
     let preview = colored.diff_preview(&lines);
     assert!(preview.contains("+    2 new();"), "preview: {preview:?}");
@@ -495,7 +572,8 @@ fn theme_renderer_public_api_degrades_without_color() {
     assert!(!preview.contains('╭') && !preview.contains('│'));
 
     // Unified-diff parsing.
-    let parsed = ThemeRenderer::plain(Theme::Zen).preview_from_unified_diff("@@ -1 +1 @@\n-old();\n+new();\n");
+    let parsed = ThemeRenderer::plain(Theme::Zen)
+        .preview_from_unified_diff("@@ -1 +1 @@\n-old();\n+new();\n");
     assert!(parsed.contains("-      old();"), "parsed: {parsed:?}");
     assert!(parsed.contains("+      new();"), "parsed: {parsed:?}");
 

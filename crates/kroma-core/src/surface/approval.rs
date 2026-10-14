@@ -191,9 +191,7 @@ impl RpcApprovalBroker {
             let mut guard = self.inner.lock().unwrap();
             let target_id = match request_id.map(str::trim).filter(|s| !s.is_empty()) {
                 Some(id) => id.to_string(),
-                None if guard.pending.len() == 1 => {
-                    guard.pending.keys().next().cloned().unwrap()
-                }
+                None if guard.pending.len() == 1 => guard.pending.keys().next().cloned().unwrap(),
                 None if guard.pending.is_empty() => {
                     return Err("no pending approval requests".to_string());
                 }
@@ -238,7 +236,12 @@ impl RpcApprovalBroker {
         } else if let Some(ref path) = req.target_path {
             path.display().to_string()
         } else if let Some(ref diff) = req.diff_preview {
-            diff.lines().next().unwrap_or("").chars().take(200).collect()
+            diff.lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect()
         } else {
             req.tool_name.clone()
         };

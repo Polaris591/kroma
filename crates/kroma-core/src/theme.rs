@@ -194,7 +194,9 @@ pub fn rev_label(rev: &str) -> String {
 /// and non-empty, when `TERM=dumb`, or when the output stream is not a terminal.
 pub fn color_enabled_with(no_color: Option<&str>, term: Option<&str>, is_tty: bool) -> bool {
     let disabled = no_color.map(|v| !v.is_empty()).unwrap_or(false)
-        || term.map(|t| t.eq_ignore_ascii_case("dumb")).unwrap_or(false);
+        || term
+            .map(|t| t.eq_ignore_ascii_case("dumb"))
+            .unwrap_or(false);
     !disabled && is_tty
 }
 
@@ -205,7 +207,11 @@ pub fn color_enabled() -> bool {
         std::env::var(KROMA_NO_COLOR_ENV).ok(),
     );
     let term = std::env::var("TERM").ok();
-    color_enabled_with(no_color.as_deref(), term.as_deref(), std::io::stdout().is_terminal())
+    color_enabled_with(
+        no_color.as_deref(),
+        term.as_deref(),
+        std::io::stdout().is_terminal(),
+    )
 }
 
 /// Resolve the effective `NO_COLOR` value from the standard `NO_COLOR` variable and Kroma's
@@ -303,7 +309,11 @@ impl ThemeRenderer {
         };
         let version = self.paint(sgr::DIM, crate::version());
         let model_seg = if self.color {
-            format!("{}:{}", self.paint(sgr::INK, &model), self.paint(sgr::PURPLE, &thinking))
+            format!(
+                "{}:{}",
+                self.paint(sgr::INK, &model),
+                self.paint(sgr::PURPLE, &thinking)
+            )
         } else {
             format!("{}:{}", model, thinking)
         };
@@ -556,7 +566,11 @@ mod tests {
         let footer = r.telemetry_footer(3100, 0, 99.6, "0b92f1ab", 0);
         let hair = r.hairline(8);
         for text in [&header, &line, &footer, &hair] {
-            assert!(!text.contains('\x1b'), "plain output leaked ESC: {:?}", text);
+            assert!(
+                !text.contains('\x1b'),
+                "plain output leaked ESC: {:?}",
+                text
+            );
         }
         assert!(hair.chars().all(|c| c == '-'));
         assert!(header.starts_with("◆ kroma "));
@@ -565,9 +579,22 @@ mod tests {
     #[test]
     fn coloured_renderer_emits_truecolor_sequences() {
         let r = ThemeRenderer::new(Theme::Zen, true);
-        let header = r.header("deepseek", "high", "responses", 99.6, "0b92f1ab", "/opt/kroma");
-        assert!(header.contains("\x1b[38;2;56;189;248m"), "header: {header:?}");
-        assert!(header.contains('◆') && header.contains("kroma"), "header: {header:?}");
+        let header = r.header(
+            "deepseek",
+            "high",
+            "responses",
+            99.6,
+            "0b92f1ab",
+            "/opt/kroma",
+        );
+        assert!(
+            header.contains("\x1b[38;2;56;189;248m"),
+            "header: {header:?}"
+        );
+        assert!(
+            header.contains('◆') && header.contains("kroma"),
+            "header: {header:?}"
+        );
         let hair = r.hairline(5);
         assert!(hair.contains("\x1b[38;2;"), "hairline: {hair:?}");
         assert_eq!(hair.matches('━').count(), 5);
@@ -598,9 +625,21 @@ mod tests {
     fn diff_preview_marks_added_removed_and_is_borderless() {
         let r = ThemeRenderer::new(Theme::Zen, true);
         let lines = vec![
-            DiffLine { kind: DiffKind::Context, line_number: Some(92), text: "let x = 1;".into() },
-            DiffLine { kind: DiffKind::Removed, line_number: Some(93), text: "old();".into() },
-            DiffLine { kind: DiffKind::Added, line_number: Some(93), text: "new();".into() },
+            DiffLine {
+                kind: DiffKind::Context,
+                line_number: Some(92),
+                text: "let x = 1;".into(),
+            },
+            DiffLine {
+                kind: DiffKind::Removed,
+                line_number: Some(93),
+                text: "old();".into(),
+            },
+            DiffLine {
+                kind: DiffKind::Added,
+                line_number: Some(93),
+                text: "new();".into(),
+            },
         ];
         let out = r.diff_preview(&lines);
         assert!(out.contains("+   93 new();"), "out: {out:?}");
@@ -617,7 +656,8 @@ mod tests {
     #[test]
     fn unified_diff_preview_classifies_lines() {
         let r = ThemeRenderer::plain(Theme::Zen);
-        let diff = "@@ -1,2 +1,2 @@\n--- a/f.rs\n+++ b/f.rs\n let x = 1;\n-let y = 2;\n+let y = 3;\n";
+        let diff =
+            "@@ -1,2 +1,2 @@\n--- a/f.rs\n+++ b/f.rs\n let x = 1;\n-let y = 2;\n+let y = 3;\n";
         let out = r.preview_from_unified_diff(diff);
         assert!(out.contains("let y = 3;"), "out: {out:?}");
         assert!(out.contains("let y = 2;"), "out: {out:?}");
@@ -646,8 +686,12 @@ mod tests {
     #[test]
     fn gate_line_reports_pass_and_fail() {
         let r = ThemeRenderer::plain(Theme::Zen);
-        assert!(r.gate_line("cargo test", true, 0.84).contains("PASSED (0.84s)"));
-        assert!(r.gate_line("cargo test", false, 1.5).contains("FAILED (1.50s)"));
+        assert!(r
+            .gate_line("cargo test", true, 0.84)
+            .contains("PASSED (0.84s)"));
+        assert!(r
+            .gate_line("cargo test", false, 1.5)
+            .contains("FAILED (1.50s)"));
     }
 
     #[test]

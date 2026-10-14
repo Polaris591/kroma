@@ -181,7 +181,10 @@ pub async fn execute_write(
             if crate::workspace::is_windows_reparse_point(&meta) {
                 return ToolExecutionOutput::error(
                     ErrorCode::SymlinkBlocked,
-                    format!("refusing to overwrite reparse point / symlink '{}'", rel_str),
+                    format!(
+                        "refusing to overwrite reparse point / symlink '{}'",
+                        rel_str
+                    ),
                     ToolResultMeta {
                         relative_path: Some(rel_str),
                         ..Default::default()
@@ -419,7 +422,10 @@ pub fn atomic_write_at(
             libc::openat(
                 parent_fd,
                 c_tmp.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | crate::secure_fs::NO_FOLLOW_CUSTOM_FLAGS,
+                libc::O_WRONLY
+                    | libc::O_CREAT
+                    | libc::O_EXCL
+                    | crate::secure_fs::NO_FOLLOW_CUSTOM_FLAGS,
                 (mode & 0o7777) as libc::c_uint,
             )
         };
@@ -454,15 +460,8 @@ pub fn atomic_write_at(
         }
 
         if no_clobber {
-            let link_rc = unsafe {
-                libc::linkat(
-                    parent_fd,
-                    c_tmp.as_ptr(),
-                    parent_fd,
-                    c_target.as_ptr(),
-                    0,
-                )
-            };
+            let link_rc =
+                unsafe { libc::linkat(parent_fd, c_tmp.as_ptr(), parent_fd, c_target.as_ptr(), 0) };
             if link_rc == 0 {
                 unsafe {
                     let _ = libc::unlinkat(parent_fd, c_tmp.as_ptr(), 0);
@@ -516,14 +515,8 @@ pub fn atomic_write_at(
             }
         }
 
-        let rename_rc = unsafe {
-            libc::renameat(
-                parent_fd,
-                c_tmp.as_ptr(),
-                parent_fd,
-                c_target.as_ptr(),
-            )
-        };
+        let rename_rc =
+            unsafe { libc::renameat(parent_fd, c_tmp.as_ptr(), parent_fd, c_target.as_ptr()) };
         if rename_rc < 0 {
             return Err((
                 ErrorCode::IoError,
@@ -654,7 +647,10 @@ pub fn atomic_write_at(
         let meta = std::fs::metadata(&target_path).map_err(|e| {
             (
                 ErrorCode::IoError,
-                format!("metadata failed after write for '{}': {}", file_name_lossy, e),
+                format!(
+                    "metadata failed after write for '{}': {}",
+                    file_name_lossy, e
+                ),
             )
         })?;
         if meta.permissions().readonly() != want_readonly {
@@ -701,12 +697,8 @@ pub fn atomic_write_file(
                 "parent path contains NUL byte".to_string(),
             )
         })?;
-        let parent_fd = unsafe {
-            libc::open(
-                c_parent.as_ptr(),
-                crate::secure_fs::OPEN_DIR_NO_FOLLOW,
-            )
-        };
+        let parent_fd =
+            unsafe { libc::open(c_parent.as_ptr(), crate::secure_fs::OPEN_DIR_NO_FOLLOW) };
         if parent_fd < 0 {
             return Err((
                 ErrorCode::IoError,
@@ -722,8 +714,9 @@ pub fn atomic_write_file(
     }
     #[cfg(windows)]
     {
-        let parent_dir = crate::workspace::open_windows_handle_no_reparse(parent, parent, Some(true))
-            .map_err(|e| (e.error_code(), e.to_string()))?;
+        let parent_dir =
+            crate::workspace::open_windows_handle_no_reparse(parent, parent, Some(true))
+                .map_err(|e| (e.error_code(), e.to_string()))?;
         atomic_write_at(&parent_dir, file_name, bytes, mode, no_clobber)
     }
 }

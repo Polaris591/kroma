@@ -60,7 +60,10 @@ fn test_base_url_rejects_control_characters_and_whitespace() {
     ];
     for hostile in hostile_urls {
         assert!(
-            matches!(validate_base_url(hostile), Err(ProviderError::InsecureUrl(_))),
+            matches!(
+                validate_base_url(hostile),
+                Err(ProviderError::InsecureUrl(_))
+            ),
             "hostile URL must be rejected: {:?}",
             hostile
         );
@@ -101,14 +104,8 @@ async fn test_chunked_sse_streaming_and_pre_chunk_disconnect_retry_and_oom_guard
     assert!(serialized.contains("\"thinking\""));
     assert!(!serialized.contains("\"reasoning_effort\""));
 
-    let serialized_effort = serialize_openai_request_body_with_effort(
-        "deepseek",
-        "sys",
-        &[],
-        &[],
-        true,
-        Some("high"),
-    );
+    let serialized_effort =
+        serialize_openai_request_body_with_effort("deepseek", "sys", &[], &[], true, Some("high"));
     assert!(serialized_effort.contains("\"reasoning_effort\":\"high\""));
 
     let wb_usage = serde_json::json!({
@@ -176,7 +173,7 @@ async fn test_chunked_sse_streaming_and_pre_chunk_disconnect_retry_and_oom_guard
                 messages: Vec::new(),
                 stream: true,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx,
@@ -214,7 +211,7 @@ async fn test_chunked_sse_streaming_and_pre_chunk_disconnect_retry_and_oom_guard
                 messages: Vec::new(),
                 stream: true,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx2,
@@ -265,13 +262,16 @@ async fn test_mock_http_server_429_retry_after_and_redirect_block() {
     .unwrap();
 
     // Ensure Debug output masks API key
-    let dbg_str = format!("{:?}", ChatCompletionsConfig {
-        base_url: "https://api.openai.com".into(),
-        api_key: "sk-live-super-secret".into(),
-        model: "gpt".into(),
-        max_retries: 2,
-        reasoning_effort: Some("high".into()),
-    });
+    let dbg_str = format!(
+        "{:?}",
+        ChatCompletionsConfig {
+            base_url: "https://api.openai.com".into(),
+            api_key: "sk-live-super-secret".into(),
+            model: "gpt".into(),
+            max_retries: 2,
+            reasoning_effort: Some("high".into()),
+        }
+    );
     assert!(!dbg_str.contains("sk-live-super-secret"));
     assert!(dbg_str.contains("Bearer ***"));
 
@@ -284,7 +284,7 @@ async fn test_mock_http_server_429_retry_after_and_redirect_block() {
                 messages: Vec::new(),
                 stream: false,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx,
@@ -298,10 +298,7 @@ async fn test_mock_http_server_429_retry_after_and_redirect_block() {
         completion.turn.content.as_deref(),
         Some("Recovered after 429")
     );
-    assert_eq!(
-        completion.turn.usage.unwrap().cached_input_tokens,
-        Some(64)
-    );
+    assert_eq!(completion.turn.usage.unwrap().cached_input_tokens, Some(64));
 
     // Verify 302 redirect is strictly blocked
     let redir_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -332,7 +329,7 @@ async fn test_mock_http_server_429_retry_after_and_redirect_block() {
                 messages: Vec::new(),
                 stream: false,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx2,
@@ -389,7 +386,9 @@ data: [DONE]\n\n";
     let logger = EventLogger::new(cfg.run_id, Some(tmp_state.clone()), false).unwrap();
     let (_tx, rx) = watch::channel(false);
 
-    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx).run(logger).await;
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .run(logger)
+        .await;
     assert_eq!(summary.status, RunStatus::Failed);
     assert!(matches!(
         summary.terminal_reason,
@@ -436,7 +435,7 @@ async fn test_http_smuggling_dual_te_cl_rejected_and_chunked_error_body_decoded(
                 messages: Vec::new(),
                 stream: false,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx,
@@ -446,7 +445,10 @@ async fn test_http_smuggling_dual_te_cl_rejected_and_chunked_error_body_decoded(
         Err(ProviderError::Transport(msg)) => {
             assert!(msg.contains("Transfer-Encoding") && msg.contains("Content-Length"));
         }
-        other => panic!("expected Transport error for TE+CL smuggling response, got {:?}", other),
+        other => panic!(
+            "expected Transport error for TE+CL smuggling response, got {:?}",
+            other
+        ),
     }
 
     // 2. Non-2xx error response with Transfer-Encoding: chunked decodes the chunked error body
@@ -483,7 +485,7 @@ async fn test_http_smuggling_dual_te_cl_rejected_and_chunked_error_body_decoded(
                 messages: Vec::new(),
                 stream: true,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx2,
@@ -530,7 +532,7 @@ async fn test_duplicate_conflicting_content_length_is_rejected() {
                 messages: Vec::new(),
                 stream: false,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx,
@@ -544,7 +546,10 @@ async fn test_duplicate_conflicting_content_length_is_rejected() {
                 msg
             );
         }
-        other => panic!("conflicting Content-Length must be rejected, got {:?}", other.map(|_| ())),
+        other => panic!(
+            "conflicting Content-Length must be rejected, got {:?}",
+            other.map(|_| ())
+        ),
     }
 }
 
@@ -582,7 +587,7 @@ async fn test_premature_eof_short_body_is_rejected() {
                 messages: Vec::new(),
                 stream: false,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx,
@@ -596,7 +601,10 @@ async fn test_premature_eof_short_body_is_rejected() {
                 msg
             );
         }
-        other => panic!("premature EOF must be rejected, got {:?}", other.map(|_| ())),
+        other => panic!(
+            "premature EOF must be rejected, got {:?}",
+            other.map(|_| ())
+        ),
     }
 }
 
@@ -735,7 +743,7 @@ async fn test_bogus_transfer_encoding_is_rejected() {
                 messages: Vec::new(),
                 stream: false,
                 cache_breakpoints: Vec::new(),
-                            max_output_tokens: None,
+                max_output_tokens: None,
             },
             &BudgetConfig::default(),
             rx,
@@ -749,6 +757,9 @@ async fn test_bogus_transfer_encoding_is_rejected() {
                 msg
             );
         }
-        other => panic!("bogus Transfer-Encoding must be rejected, got {:?}", other.map(|_| ())),
+        other => panic!(
+            "bogus Transfer-Encoding must be rejected, got {:?}",
+            other.map(|_| ())
+        ),
     }
 }

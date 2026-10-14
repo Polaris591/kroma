@@ -219,7 +219,10 @@ impl RpcDispatcher {
                     journal.fork_at_turn(turn).map_err(|e| {
                         JsonRpcError::new(
                             JSONRPC_INTERNAL_ERROR,
-                            format!("workspace restored but session leaf could not be rewound: {}", e),
+                            format!(
+                                "workspace restored but session leaf could not be rewound: {}",
+                                e
+                            ),
                         )
                     })?;
                     if journal.latest_revision_id().as_deref() != Some(restored_revision.as_str()) {
@@ -362,9 +365,7 @@ impl RpcDispatcher {
                     Vec::new(),
                 ),
             };
-        let revision = merged_revision
-            .map(|r| r.as_str().to_string())
-            .or(prev_rev);
+        let revision = merged_revision.map(|r| r.as_str().to_string()).or(prev_rev);
         let turn = journal.max_active_turn().max(prev_turn);
         journal
             .checkpoint_with_subagents(
@@ -465,7 +466,10 @@ impl RpcDispatcher {
             .map(|s| s.to_string());
 
         let mut call_args = serde_json::Map::new();
-        call_args.insert("source_entry_id".to_string(), Value::String(resolved_id.clone()));
+        call_args.insert(
+            "source_entry_id".to_string(),
+            Value::String(resolved_id.clone()),
+        );
         if let Some(s) = start_line {
             call_args.insert("start_line".to_string(), json!(s));
         }

@@ -43,14 +43,24 @@ impl WorkspaceCompletionGate {
         Self::with_auto_detection(command, timeout, true)
     }
 
-    pub fn with_auto_detection(command: Option<Vec<String>>, timeout: Duration, allow_auto_detected: bool) -> Self {
+    pub fn with_auto_detection(
+        command: Option<Vec<String>>,
+        timeout: Duration,
+        allow_auto_detected: bool,
+    ) -> Self {
         let command = command.filter(|argv| !argv.is_empty() && !argv[0].trim().is_empty());
-        Self { command, timeout, allow_auto_detected }
+        Self {
+            command,
+            timeout,
+            allow_auto_detected,
+        }
     }
 
     pub fn from_environment() -> Self {
         let configured = std::env::var("KROMA_VERIFY_COMMAND").ok().and_then(|raw| {
-            parse_command_argv(&raw).ok().filter(|argv| !argv.is_empty())
+            parse_command_argv(&raw)
+                .ok()
+                .filter(|argv| !argv.is_empty())
         });
         Self::new(configured, configured_timeout())
     }
@@ -60,11 +70,21 @@ impl WorkspaceCompletionGate {
             return Some(argv.clone());
         }
         if root.join("Cargo.toml").is_file() {
-            Some(vec!["cargo".into(), "test".into(), "--workspace".into(), "--no-fail-fast".into()])
+            Some(vec![
+                "cargo".into(),
+                "test".into(),
+                "--workspace".into(),
+                "--no-fail-fast".into(),
+            ])
         } else if root.join("go.mod").is_file() {
             Some(vec!["go".into(), "test".into(), "./...".into()])
         } else if root.join("pyproject.toml").is_file() || root.join("pytest.ini").is_file() {
-            Some(vec!["python".into(), "-m".into(), "pytest".into(), "-q".into()])
+            Some(vec![
+                "python".into(),
+                "-m".into(),
+                "pytest".into(),
+                "-q".into(),
+            ])
         } else if root.join("package.json").is_file() {
             Some(vec!["npm".into(), "test".into()])
         } else {
@@ -74,7 +94,9 @@ impl WorkspaceCompletionGate {
 }
 
 impl Default for WorkspaceCompletionGate {
-    fn default() -> Self { Self::from_environment() }
+    fn default() -> Self {
+        Self::from_environment()
+    }
 }
 
 impl CompletionGate for WorkspaceCompletionGate {
@@ -102,7 +124,8 @@ impl CompletionGate for WorkspaceCompletionGate {
             };
 
             let mut command = Command::new(&argv[0]);
-            command.args(&argv[1..])
+            command
+                .args(&argv[1..])
                 .current_dir(&ctx.workspace_root)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -118,9 +141,15 @@ impl CompletionGate for WorkspaceCompletionGate {
 
             let mut child = match command.spawn() {
                 Ok(child) => child,
-                Err(err) => return Ok(GateOutcome::Rejected {
-                    feedback: format!("verification command could not execute ({}): {}", display_argv(&argv), err),
-                }),
+                Err(err) => {
+                    return Ok(GateOutcome::Rejected {
+                        feedback: format!(
+                            "verification command could not execute ({}): {}",
+                            display_argv(&argv),
+                            err
+                        ),
+                    })
+                }
             };
             let proc_group = ChildProcessGroup::from_tokio_child(&child);
             let stdout = child.stdout.take();
@@ -142,7 +171,11 @@ impl CompletionGate for WorkspaceCompletionGate {
                     let _ = stderr_task.await;
                     proc_group.cleanup_after_exit().await;
                     return Ok(GateOutcome::Rejected {
-                        feedback: format!("verification command failed ({}): {}", display_argv(&argv), err),
+                        feedback: format!(
+                            "verification command failed ({}): {}",
+                            display_argv(&argv),
+                            err
+                        ),
                     });
                 }
                 Err(_) => {
@@ -154,7 +187,11 @@ impl CompletionGate for WorkspaceCompletionGate {
                     let _ = stderr_task.await;
                     proc_group.cleanup_after_exit().await;
                     return Ok(GateOutcome::Rejected {
-                        feedback: format!("verification timed out after {} seconds: {}", self.timeout.as_secs(), display_argv(&argv)),
+                        feedback: format!(
+                            "verification timed out after {} seconds: {}",
+                            self.timeout.as_secs(),
+                            display_argv(&argv)
+                        ),
                     });
                 }
             };
@@ -215,11 +252,15 @@ where
 {
     // Reuse the shared 16 KiB head + 48 KiB rolling tail implementation. No spill path is
     // configured here, so even pathological test output stays memory-bounded for the gate.
-    let buffer = Arc::new(Mutex::new(HeadTailBuffer::new(HEAD_BYTES, TAIL_BYTES, 100_000, 0, None)));
+    let buffer = Arc::new(Mutex::new(HeadTailBuffer::new(
+        HEAD_BYTES, TAIL_BYTES, 100_000, 0, None,
+    )));
     let handle = {
         let buffer = Arc::clone(&buffer);
         tokio::spawn(async move {
-            let Some(mut reader) = reader else { return; };
+            let Some(mut reader) = reader else {
+                return;
+            };
             let mut collector = StreamLineCollector::new(2048);
             let mut bytes = [0u8; 8192];
             let mut drain_deadline: Option<tokio::time::Instant> = None;
@@ -255,7 +296,9 @@ where
                 };
                 match read_result {
                     Ok(0) => break,
-                    Ok(n) => collector.push_chunk(&bytes[..n], |segment| buffer.lock().unwrap().push_str(segment)),
+                    Ok(n) => collector.push_chunk(&bytes[..n], |segment| {
+                        buffer.lock().unwrap().push_str(segment)
+                    }),
                     Err(_) => break,
                 }
             }
@@ -267,15 +310,21 @@ where
 
 fn finalize_stream(buffer: Arc<Mutex<HeadTailBuffer>>) -> String {
     let mut guard = buffer.lock().unwrap();
-    std::mem::replace(&mut *guard, HeadTailBuffer::new(0, 0, 1, 0, None)).finalize().0
+    std::mem::replace(&mut *guard, HeadTailBuffer::new(0, 0, 1, 0, None))
+        .finalize()
+        .0
 }
 
-fn display_argv(argv: &[String]) -> String { argv.join(" ") }
+fn display_argv(argv: &[String]) -> String {
+    argv.join(" ")
+}
 
 /// Completion-check timeout from `KROMA_VERIFY_TIMEOUT_SECS`, falling back to the 180s default.
 pub fn configured_timeout() -> Duration {
     let timeout_secs = std::env::var("KROMA_VERIFY_TIMEOUT_SECS")
-        .ok().and_then(|s| s.parse::<u64>().ok()).filter(|s| *s > 0)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
     Duration::from_secs(timeout_secs)
 }
@@ -353,13 +402,19 @@ fn canonicalize_diagnostic_line(line: &str) -> String {
         // Strip duration tokens like `0.42s`, `12ms`, `(0.01s)`
         let inner = trimmed.trim_start_matches('(');
         if let Some(num_part) = inner.strip_suffix("ms").or_else(|| inner.strip_suffix('s')) {
-            if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit() || c == '.') && num_part.chars().any(|c| c.is_ascii_digit()) {
+            if !num_part.is_empty()
+                && num_part.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && num_part.chars().any(|c| c.is_ascii_digit())
+            {
                 normalized_tokens.push("<duration>".to_string());
                 continue;
             }
         }
         // Strip hex addresses like `0x7fff1234abcd`
-        if let Some(hex) = inner.strip_prefix("0x").or_else(|| inner.strip_prefix("0X")) {
+        if let Some(hex) = inner
+            .strip_prefix("0x")
+            .or_else(|| inner.strip_prefix("0X"))
+        {
             if !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()) {
                 normalized_tokens.push("<hex>".to_string());
                 continue;
@@ -371,7 +426,9 @@ fn canonicalize_diagnostic_line(line: &str) -> String {
             let coords = rest.trim_start_matches(':').trim_end_matches(':');
             if !prefix.is_empty()
                 && !coords.is_empty()
-                && coords.split(':').all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
+                && coords
+                    .split(':')
+                    .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
             {
                 normalized_tokens.push(format!("{}:<loc>", prefix));
                 continue;
@@ -392,8 +449,18 @@ pub fn failure_fingerprint(feedback: &str) -> String {
         .filter(|line| {
             let line = line.to_ascii_lowercase();
             [
-                "error", "failed", "failure", "panicked", "assertion", "traceback",
-                "test result", "not ok", "expected", "actual", "--- fail:", "fail\t",
+                "error",
+                "failed",
+                "failure",
+                "panicked",
+                "assertion",
+                "traceback",
+                "test result",
+                "not ok",
+                "expected",
+                "actual",
+                "--- fail:",
+                "fail\t",
             ]
             .iter()
             .any(|needle| line.contains(needle))
@@ -430,8 +497,16 @@ pub fn localize_failure(output: &str) -> String {
     for line in tail.lines() {
         let l = line.to_ascii_lowercase();
         let is_diag = [
-            "error", "failed", "failure", "panicked", "assertion", "traceback",
-            "test result", "not ok", "--- fail:", "fail\t",
+            "error",
+            "failed",
+            "failure",
+            "panicked",
+            "assertion",
+            "traceback",
+            "test result",
+            "not ok",
+            "--- fail:",
+            "fail\t",
         ]
         .iter()
         .any(|needle| l.contains(needle));
@@ -443,23 +518,39 @@ pub fn localize_failure(output: &str) -> String {
                 context_after = context_after.saturating_sub(1);
             }
             let remaining = MAX_HIGHLIGHT_BYTES.saturating_sub(highlight_bytes);
-            if remaining == 0 { break; }
+            if remaining == 0 {
+                break;
+            }
             let end = floor_char_boundary(line, line.len().min(remaining));
-            if end == 0 { continue; }
+            if end == 0 {
+                continue;
+            }
             let excerpt = line[..end].to_string();
-            if highlights.last().map(|last: &String| last != &excerpt).unwrap_or(true) {
+            if highlights
+                .last()
+                .map(|last: &String| last != &excerpt)
+                .unwrap_or(true)
+            {
                 highlights.push(excerpt);
                 highlight_bytes = highlight_bytes.saturating_add(end + 1);
             }
         }
-        if highlight_bytes >= MAX_HIGHLIGHT_BYTES { break; }
+        if highlight_bytes >= MAX_HIGHLIGHT_BYTES {
+            break;
+        }
     }
     let mut result = String::new();
     result.push_str(head);
-    result.push_str(&format!("\n\n[CompletionGate omitted {} bytes; retained 16 KiB head + 48 KiB tail]\n\n", total.saturating_sub(head_end + (total - tail_start))));
+    result.push_str(&format!(
+        "\n\n[CompletionGate omitted {} bytes; retained 16 KiB head + 48 KiB tail]\n\n",
+        total.saturating_sub(head_end + (total - tail_start))
+    ));
     if !highlights.is_empty() {
         result.push_str("Failure-focused lines from the retained tail:\n");
-        for line in highlights { result.push_str(&line); result.push('\n'); }
+        for line in highlights {
+            result.push_str(&line);
+            result.push('\n');
+        }
         result.push_str("\nFull retained tail:\n");
     }
     result.push_str(tail);
@@ -467,11 +558,15 @@ pub fn localize_failure(output: &str) -> String {
 }
 
 fn floor_char_boundary(s: &str, mut i: usize) -> usize {
-    while i > 0 && !s.is_char_boundary(i) { i -= 1; }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
     i
 }
 fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
-    while i < s.len() && !s.is_char_boundary(i) { i += 1; }
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
     i
 }
 
@@ -494,8 +589,14 @@ mod tests {
 
     #[test]
     fn failure_fingerprint_ignores_whitespace_only_differences() {
-        assert_eq!(failure_fingerprint("error: foo\n"), failure_fingerprint("error:   foo"));
-        assert_ne!(failure_fingerprint("error foo"), failure_fingerprint("error bar"));
+        assert_eq!(
+            failure_fingerprint("error: foo\n"),
+            failure_fingerprint("error:   foo")
+        );
+        assert_ne!(
+            failure_fingerprint("error foo"),
+            failure_fingerprint("error bar")
+        );
     }
 
     #[test]
@@ -520,9 +621,15 @@ mod tests {
         let (mut writer, reader) = duplex(4096);
         let writer_task = tokio::spawn(async move {
             for i in 0..5000 {
-                writer.write_all(format!("line-{i:05} padding 01234567890123456789\n").as_bytes()).await.unwrap();
+                writer
+                    .write_all(format!("line-{i:05} padding 01234567890123456789\n").as_bytes())
+                    .await
+                    .unwrap();
             }
-            writer.write_all(b"error: final assertion failed\n").await.unwrap();
+            writer
+                .write_all(b"error: final assertion failed\n")
+                .await
+                .unwrap();
         });
         let (_exited_tx, exited_rx) = watch::channel(false);
         let (collector, buffer) = spawn_stream_collector(Some(reader), exited_rx);
@@ -559,13 +666,24 @@ mod tests {
         ];
         let gate = WorkspaceCompletionGate::new(Some(cmd_vec), Duration::from_secs(5));
         let ctx = CompletionGateContext {
-            run_id: RunId::new(), workspace_root: root.clone(), modified_files: vec!["src/lib.rs".into()], turns_used: 1,
+            run_id: RunId::new(),
+            workspace_root: root.clone(),
+            modified_files: vec!["src/lib.rs".into()],
+            turns_used: 1,
         };
         let started = Instant::now();
         let outcome = gate.check(&ctx).await.unwrap();
         let elapsed = started.elapsed();
-        assert_eq!(outcome, GateOutcome::Approved, "gate should approve the fast exit");
-        assert!(elapsed < Duration::from_secs(1), "gate took {:?}; the 200ms pipe drain did not bound the grandchild hang", elapsed);
+        assert_eq!(
+            outcome,
+            GateOutcome::Approved,
+            "gate should approve the fast exit"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "gate took {:?}; the 200ms pipe drain did not bound the grandchild hang",
+            elapsed
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -578,9 +696,13 @@ mod tests {
         std::fs::write(root.join("package.json"), "{\"name\":\"untrusted\"}\n").unwrap();
         // No explicit command and auto-detection not authorized: the gate must not silently run
         // the repository's own `npm test`; it reports a skip instead.
-        let gate = WorkspaceCompletionGate::with_auto_detection(None, Duration::from_secs(3), false);
+        let gate =
+            WorkspaceCompletionGate::with_auto_detection(None, Duration::from_secs(3), false);
         let ctx = CompletionGateContext {
-            run_id: RunId::new(), workspace_root: root.clone(), modified_files: vec!["src/index.js".into()], turns_used: 1,
+            run_id: RunId::new(),
+            workspace_root: root.clone(),
+            modified_files: vec!["src/index.js".into()],
+            turns_used: 1,
         };
         match gate.check(&ctx).await.unwrap() {
             GateOutcome::Skipped { reason } => assert!(reason.contains("--allow-shell")),
@@ -593,15 +715,27 @@ mod tests {
     fn parse_command_argv_preserves_quoted_segments_and_escapes() {
         assert_eq!(
             parse_command_argv("sh -c \"cargo test --workspace\"").unwrap(),
-            vec!["sh".to_string(), "-c".to_string(), "cargo test --workspace".to_string()]
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cargo test --workspace".to_string()
+            ]
         );
         assert_eq!(
             parse_command_argv("cargo test --workspace").unwrap(),
-            vec!["cargo".to_string(), "test".to_string(), "--workspace".to_string()]
+            vec![
+                "cargo".to_string(),
+                "test".to_string(),
+                "--workspace".to_string()
+            ]
         );
         assert_eq!(
             parse_command_argv("echo 'single quoted arg' plain").unwrap(),
-            vec!["echo".to_string(), "single quoted arg".to_string(), "plain".to_string()]
+            vec![
+                "echo".to_string(),
+                "single quoted arg".to_string(),
+                "plain".to_string()
+            ]
         );
         assert_eq!(
             parse_command_argv("printf a\\ b").unwrap(),
@@ -631,10 +765,15 @@ mod tests {
         ];
         let gate = WorkspaceCompletionGate::new(Some(fail_cmd), Duration::from_secs(3));
         let ctx = CompletionGateContext {
-            run_id: RunId::new(), workspace_root: root.clone(), modified_files: vec!["src/lib.rs".into()], turns_used: 2,
+            run_id: RunId::new(),
+            workspace_root: root.clone(),
+            modified_files: vec!["src/lib.rs".into()],
+            turns_used: 2,
         };
         match gate.check(&ctx).await.unwrap() {
-            GateOutcome::Rejected { feedback } => assert!(feedback.contains("error: assertion failed")),
+            GateOutcome::Rejected { feedback } => {
+                assert!(feedback.contains("error: assertion failed"))
+            }
             other => panic!("expected rejected gate outcome, got {:?}", other),
         }
         let _ = std::fs::remove_dir_all(root);
@@ -644,9 +783,15 @@ mod tests {
     async fn dirty_file_short_circuit_does_not_spawn_an_invalid_command() {
         use crate::env::{CompletionGateContext, GateOutcome};
         use crate::types::RunId;
-        let gate = WorkspaceCompletionGate::new(Some(vec!["/definitely/not/a/real/command".into()]), Duration::from_secs(1));
+        let gate = WorkspaceCompletionGate::new(
+            Some(vec!["/definitely/not/a/real/command".into()]),
+            Duration::from_secs(1),
+        );
         let ctx = CompletionGateContext {
-            run_id: RunId::new(), workspace_root: std::env::temp_dir(), modified_files: vec![], turns_used: 1,
+            run_id: RunId::new(),
+            workspace_root: std::env::temp_dir(),
+            modified_files: vec![],
+            turns_used: 1,
         };
         assert_eq!(gate.check(&ctx).await.unwrap(), GateOutcome::Approved);
     }
@@ -657,7 +802,15 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
         let gate = WorkspaceCompletionGate::new(None, Duration::from_secs(1));
-        assert_eq!(gate.select_command(&root).unwrap(), vec!["cargo".to_string(), "test".to_string(), "--workspace".to_string(), "--no-fail-fast".to_string()]);
+        assert_eq!(
+            gate.select_command(&root).unwrap(),
+            vec![
+                "cargo".to_string(),
+                "test".to_string(),
+                "--workspace".to_string(),
+                "--no-fail-fast".to_string()
+            ]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

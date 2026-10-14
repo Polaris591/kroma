@@ -15,7 +15,11 @@ pub enum PolicyMode {
 }
 
 impl PolicyMode {
-    pub fn from_flags(base: Option<&str>, allow_write: bool, allow_shell: bool) -> Result<Self, String> {
+    pub fn from_flags(
+        base: Option<&str>,
+        allow_write: bool,
+        allow_shell: bool,
+    ) -> Result<Self, String> {
         if !matches!(
             base,
             None | Some("ask" | "read-only" | "allow-write" | "allow-shell")
@@ -24,7 +28,10 @@ impl PolicyMode {
         }
         if let Some("read-only") = base {
             if allow_write || allow_shell {
-                return Err("cannot combine --policy read-only with --allow-write or --allow-shell".to_string());
+                return Err(
+                    "cannot combine --policy read-only with --allow-write or --allow-shell"
+                        .to_string(),
+                );
             }
             return Ok(PolicyMode::ReadOnly);
         }
@@ -147,7 +154,8 @@ impl PolicyEngine {
     }
 
     pub fn is_effect_enabled(&self, effect_class: EffectClass) -> bool {
-        self.mode.is_effect_enabled(effect_class, self.is_interactive())
+        self.mode
+            .is_effect_enabled(effect_class, self.is_interactive())
     }
 
     pub fn evaluate(
@@ -158,9 +166,7 @@ impl PolicyEngine {
     ) -> PolicyCheckResult {
         if self.mode == PolicyMode::ReadOnly {
             if effect_class != EffectClass::ReadOnly {
-                return PolicyCheckResult::Deny(
-                    "tool is forbidden under --policy read-only",
-                );
+                return PolicyCheckResult::Deny("tool is forbidden under --policy read-only");
             }
             if is_sensitive_path {
                 return PolicyCheckResult::Deny(

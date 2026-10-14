@@ -147,16 +147,24 @@ pub enum ExtensionError {
     DuplicateTool { extension: String, tool: String },
     #[error("skill name '{0}' is already registered")]
     DuplicateSkill(String),
-    #[error("extension '{extension}' targets unsupported API version '{found}' (expected {expected})")]
+    #[error(
+        "extension '{extension}' targets unsupported API version '{found}' (expected {expected})"
+    )]
     UnsupportedApiVersion {
         extension: String,
         found: String,
         expected: String,
     },
     #[error("extension '{extension}' contributes '{capability}' without declaring it in manifest.capabilities")]
-    UndeclaredCapability { extension: String, capability: String },
+    UndeclaredCapability {
+        extension: String,
+        capability: String,
+    },
     #[error("extension '{extension}' is project-untrusted and may not register '{capability}'")]
-    UntrustedCapability { extension: String, capability: String },
+    UntrustedCapability {
+        extension: String,
+        capability: String,
+    },
     #[error(
         "extension '{extension}' source checksum changed (trusted {expected}, found {found}); re-trust it explicitly before mounting"
     )]
@@ -741,7 +749,8 @@ impl ExtensionState {
         self.tools.retain(|_, tool| &tool.extension_id != id);
         self.policy_hooks.retain(|(owner, _)| owner != id);
         self.observer_hooks.retain(|(owner, _)| owner != id);
-        self.skills.retain(|_, skill| skill.extension_id.as_ref() != Some(id));
+        self.skills
+            .retain(|_, skill| skill.extension_id.as_ref() != Some(id));
         self.manifests.remove(id);
 
         Ok(UnmountReport {
@@ -867,7 +876,11 @@ pub enum HookError {
 pub trait PolicyHook: Send + Sync {
     fn id(&self) -> &str;
     fn events(&self) -> &'static [HookEvent];
-    fn evaluate(&self, event: HookEvent, ctx: &HookContext) -> Result<PolicyHookDecision, HookError>;
+    fn evaluate(
+        &self,
+        event: HookEvent,
+        ctx: &HookContext,
+    ) -> Result<PolicyHookDecision, HookError>;
 }
 
 /// Fail-open hook. Telemetry only: any failure is recorded and the action proceeds.
@@ -891,7 +904,14 @@ pub struct HookEvaluation {
 }
 
 impl HookEvaluation {
-    fn new(hook_id: &str, hook_kind: &str, event: HookEvent, outcome: &str, duration_ms: u64, message: Option<String>) -> Self {
+    fn new(
+        hook_id: &str,
+        hook_kind: &str,
+        event: HookEvent,
+        outcome: &str,
+        duration_ms: u64,
+        message: Option<String>,
+    ) -> Self {
         Self {
             hook_id: hook_id.to_string(),
             hook_kind: hook_kind.to_string(),
@@ -906,7 +926,9 @@ impl HookEvaluation {
 /// Outcome of evaluating every `PolicyHook` registered for an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyHookOutcome {
-    Allow { evaluations: Vec<HookEvaluation> },
+    Allow {
+        evaluations: Vec<HookEvaluation>,
+    },
     Deny {
         reason: String,
         evaluations: Vec<HookEvaluation>,
@@ -920,9 +942,8 @@ impl PolicyHookOutcome {
 
     pub fn evaluations(&self) -> &[HookEvaluation] {
         match self {
-            PolicyHookOutcome::Allow { evaluations } | PolicyHookOutcome::Deny { evaluations, .. } => {
-                evaluations
-            }
+            PolicyHookOutcome::Allow { evaluations }
+            | PolicyHookOutcome::Deny { evaluations, .. } => evaluations,
         }
     }
 
@@ -978,10 +999,18 @@ impl CommandHookRunner {
     ///
     /// Synchronous on purpose: it keeps hook semantics identical under the async engine (which
     /// calls this through `spawn_blocking`) and under direct unit tests, with no runtime required.
-    pub fn run(&self, event: HookEvent, ctx: &HookContext) -> Result<CommandHookOutcome, HookError> {
+    pub fn run(
+        &self,
+        event: HookEvent,
+        ctx: &HookContext,
+    ) -> Result<CommandHookOutcome, HookError> {
         use std::process::{Command, Stdio};
 
-        let hook_name = self.argv.first().cloned().unwrap_or_else(|| "<empty>".to_string());
+        let hook_name = self
+            .argv
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<empty>".to_string());
         if self.argv.is_empty() {
             return Err(HookError::Failed(
                 hook_name,
@@ -1034,11 +1063,8 @@ impl CommandHookRunner {
         match child.stdout.take() {
             Some(out) => {
                 std::thread::spawn(move || {
-                    let buf = read_pipe_bounded(
-                        out,
-                        (HOOK_OUTPUT_LIMIT_BYTES + 1) as u64,
-                        pipe_deadline,
-                    );
+                    let buf =
+                        read_pipe_bounded(out, (HOOK_OUTPUT_LIMIT_BYTES + 1) as u64, pipe_deadline);
                     let _ = out_tx.send(buf);
                 });
             }
@@ -1049,11 +1075,8 @@ impl CommandHookRunner {
         match child.stderr.take() {
             Some(err) => {
                 std::thread::spawn(move || {
-                    let buf = read_pipe_bounded(
-                        err,
-                        (HOOK_OUTPUT_LIMIT_BYTES + 1) as u64,
-                        pipe_deadline,
-                    );
+                    let buf =
+                        read_pipe_bounded(err, (HOOK_OUTPUT_LIMIT_BYTES + 1) as u64, pipe_deadline);
                     let _ = err_tx.send(buf);
                 });
             }
@@ -1104,10 +1127,14 @@ impl CommandHookRunner {
         // gave up before a reader that is only released at `pipe_deadline` (a hook whose escaped
         // grandchild still holds the pipe) could send. `run` still can never block forever.
         let stdout_bytes = out_rx
-            .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()) + HOOK_DRAIN_DEADLINE)
+            .recv_timeout(
+                pipe_deadline.saturating_duration_since(Instant::now()) + HOOK_DRAIN_DEADLINE,
+            )
             .unwrap_or_default();
         let stderr_bytes = err_rx
-            .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()) + HOOK_DRAIN_DEADLINE)
+            .recv_timeout(
+                pipe_deadline.saturating_duration_since(Instant::now()) + HOOK_DRAIN_DEADLINE,
+            )
             .unwrap_or_default();
         let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
         let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
@@ -1299,7 +1326,11 @@ impl PolicyHook for CommandPolicyHook {
         self.events
     }
 
-    fn evaluate(&self, event: HookEvent, ctx: &HookContext) -> Result<PolicyHookDecision, HookError> {
+    fn evaluate(
+        &self,
+        event: HookEvent,
+        ctx: &HookContext,
+    ) -> Result<PolicyHookDecision, HookError> {
         let outcome = self.runner.run(event, ctx)?;
         if outcome.success {
             Ok(PolicyHookDecision::Allow)
@@ -1387,8 +1418,18 @@ pub struct HookEngine {
 impl fmt::Debug for HookEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HookEngine")
-            .field("policy_hooks", &self.policy_hooks.iter().map(|h| h.id()).collect::<Vec<_>>())
-            .field("observer_hooks", &self.observer_hooks.iter().map(|h| h.id()).collect::<Vec<_>>())
+            .field(
+                "policy_hooks",
+                &self.policy_hooks.iter().map(|h| h.id()).collect::<Vec<_>>(),
+            )
+            .field(
+                "observer_hooks",
+                &self
+                    .observer_hooks
+                    .iter()
+                    .map(|h| h.id())
+                    .collect::<Vec<_>>(),
+            )
             .field("timeout_ms", &self.timeout.as_millis())
             .finish()
     }
@@ -1422,11 +1463,17 @@ impl HookEngine {
     }
 
     pub fn policy_hook_ids(&self) -> Vec<String> {
-        self.policy_hooks.iter().map(|h| h.id().to_string()).collect()
+        self.policy_hooks
+            .iter()
+            .map(|h| h.id().to_string())
+            .collect()
     }
 
     pub fn observer_hook_ids(&self) -> Vec<String> {
-        self.observer_hooks.iter().map(|h| h.id().to_string()).collect()
+        self.observer_hooks
+            .iter()
+            .map(|h| h.id().to_string())
+            .collect()
     }
 
     /// Evaluate every `PolicyHook` registered for `event`. Any denial, error, panic or timeout
@@ -1446,7 +1493,12 @@ impl HookEngine {
             match result {
                 Ok(PolicyHookDecision::Allow) => {
                     evaluations.push(HookEvaluation::new(
-                        &hook_id, "policy", event, "allow", duration_ms, None,
+                        &hook_id,
+                        "policy",
+                        event,
+                        "allow",
+                        duration_ms,
+                        None,
                     ));
                 }
                 Ok(PolicyHookDecision::Deny { reason }) => {
@@ -1454,7 +1506,12 @@ impl HookEngine {
                         denial = Some(reason.clone());
                     }
                     evaluations.push(HookEvaluation::new(
-                        &hook_id, "policy", event, "deny", duration_ms, Some(reason),
+                        &hook_id,
+                        "policy",
+                        event,
+                        "deny",
+                        duration_ms,
+                        Some(reason),
                     ));
                 }
                 Err(HookError::Timeout(id, ms)) => {
@@ -1463,7 +1520,12 @@ impl HookEngine {
                         denial = Some(reason.clone());
                     }
                     evaluations.push(HookEvaluation::new(
-                        &hook_id, "policy", event, "timeout", duration_ms, Some(reason),
+                        &hook_id,
+                        "policy",
+                        event,
+                        "timeout",
+                        duration_ms,
+                        Some(reason),
                     ));
                 }
                 Err(HookError::Panicked(id)) => {
@@ -1472,7 +1534,12 @@ impl HookEngine {
                         denial = Some(reason.clone());
                     }
                     evaluations.push(HookEvaluation::new(
-                        &hook_id, "policy", event, "panicked", duration_ms, Some(reason),
+                        &hook_id,
+                        "policy",
+                        event,
+                        "panicked",
+                        duration_ms,
+                        Some(reason),
                     ));
                 }
                 Err(HookError::Failed(id, msg)) => {
@@ -1481,7 +1548,12 @@ impl HookEngine {
                         denial = Some(reason.clone());
                     }
                     evaluations.push(HookEvaluation::new(
-                        &hook_id, "policy", event, "deny", duration_ms, Some(reason),
+                        &hook_id,
+                        "policy",
+                        event,
+                        "deny",
+                        duration_ms,
+                        Some(reason),
                     ));
                 }
             }
@@ -1510,7 +1582,12 @@ impl HookEngine {
             let duration_ms = started.elapsed().as_millis() as u64;
             match result {
                 Ok(()) => evaluations.push(HookEvaluation::new(
-                    &hook_id, "observer", event, "ok", duration_ms, None,
+                    &hook_id,
+                    "observer",
+                    event,
+                    "ok",
+                    duration_ms,
+                    None,
                 )),
                 Err(HookError::Timeout(id, ms)) => evaluations.push(HookEvaluation::new(
                     &hook_id,
@@ -1876,7 +1953,10 @@ fn parse_skill(dir_name: &str, path: &str, raw: &str) -> SkillEntry {
     let mut description = String::new();
     let mut body = raw.to_string();
 
-    if let Some(rest) = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n")) {
+    if let Some(rest) = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"))
+    {
         if let Some(end) = rest.find("\n---") {
             let frontmatter = &rest[..end];
             body = rest[end + 4..].trim_start_matches(['\r', '\n']).to_string();
@@ -1884,7 +1964,11 @@ fn parse_skill(dir_name: &str, path: &str, raw: &str) -> SkillEntry {
                 let Some((key, value)) = line.split_once(':') else {
                     continue;
                 };
-                let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
                 match key.trim() {
                     // A hostile frontmatter `name:` cannot inject a fence attribute: anything
                     // outside the conservative charset falls back to the directory name.
@@ -1943,7 +2027,10 @@ pub fn execute_activate_skill(catalog: &[SkillEntry], raw_args: &str) -> ToolExe
 
     let listing = |catalog: &[SkillEntry]| -> String {
         if catalog.is_empty() {
-            format!("No skills found. Add a definition at {}/<name>/SKILL.md.", SKILL_DIR)
+            format!(
+                "No skills found. Add a definition at {}/<name>/SKILL.md.",
+                SKILL_DIR
+            )
         } else {
             let mut out = format!("Available skills ({}):\n", catalog.len());
             for skill in catalog {
@@ -2023,7 +2110,10 @@ pub fn activate_skill_registration() -> RegisteredTool {
 
 /// Workspace-relative directories that trigger JIT context loading for a tool call.
 pub fn is_subtree_context_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "read" | "write" | "edit" | "grep" | "find" | "ls")
+    matches!(
+        tool_name,
+        "read" | "write" | "edit" | "grep" | "find" | "ls"
+    )
 }
 
 /// Error code used when a path is not valid for subtree traversal.

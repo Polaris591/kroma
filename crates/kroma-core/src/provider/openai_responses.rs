@@ -177,18 +177,12 @@ pub fn serialize_responses_request_body_with_limit(
         root.insert("tools".to_string(), Value::Array(tools_json));
     }
     if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
-        root.insert(
-            "reasoning".to_string(),
-            json!({ "effort": effort }),
-        );
+        root.insert("reasoning".to_string(), json!({ "effort": effort }));
     }
     root.insert("stream".to_string(), Value::Bool(stream));
     root.insert("store".to_string(), Value::Bool(false));
     if let Some(limit) = max_output_tokens {
-        root.insert(
-            "max_output_tokens".to_string(),
-            Value::Number(limit.into()),
-        );
+        root.insert("max_output_tokens".to_string(), Value::Number(limit.into()));
     }
 
     serde_json::to_string(&Value::Object(root)).unwrap_or_else(|_| "{}".to_string())

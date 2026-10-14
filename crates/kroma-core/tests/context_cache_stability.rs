@@ -106,9 +106,12 @@ async fn test_15_turns_append_only_prefix_byte_stability() {
             let m_t = serde_json::to_string(&requests[t].messages[m_idx]).unwrap();
             let m_next = serde_json::to_string(&requests[t + 1].messages[m_idx]).unwrap();
             assert_eq!(
-                m_t, m_next,
+                m_t,
+                m_next,
                 "Prefix message {} mutated between turn {} and {}",
-                m_idx, t, t + 1
+                m_idx,
+                t,
+                t + 1
             );
         }
     }
@@ -121,8 +124,8 @@ async fn test_15_turns_append_only_prefix_byte_stability() {
 fn test_watermark_step_down_compaction_working_set_pinning_and_outline_stub() {
     let mut budget = BudgetConfig::default();
     budget.context_high_watermark_bytes = 24 * 1024; // 24 KiB high watermark for test
-    budget.context_low_watermark_bytes = 12 * 1024;  // 12 KiB low watermark
-    budget.context_tail_window_bytes = 2 * 1024;     // 2 KiB tail window
+    budget.context_low_watermark_bytes = 12 * 1024; // 12 KiB low watermark
+    budget.context_tail_window_bytes = 2 * 1024; // 2 KiB tail window
     budget.context_min_tail_turns = 1;
 
     let mut projector = ContextProjector::new();
@@ -131,7 +134,8 @@ fn test_watermark_step_down_compaction_working_set_pinning_and_outline_stub() {
     })];
 
     // Turn 1: Read cold file `src/cold.rs` (8 KiB with top-level symbols)
-    let mut cold_src = String::from("[File: src/cold.rs | Lines: 1-200 of 200 | SHA256: a1b2c3d4e5f60718]\n");
+    let mut cold_src =
+        String::from("[File: src/cold.rs | Lines: 1-200 of 200 | SHA256: a1b2c3d4e5f60718]\n");
     cold_src.push_str("    1\tpub struct ColdParser {\n   12\tpub fn parse_cold_expr() {\n   45\tenum ColdToken {\n");
     cold_src.push_str(&"   50\t// padding line for cold file\n".repeat(260));
     canonical.push(TranscriptItem::Assistant(AssistantTurn {
@@ -159,7 +163,8 @@ fn test_watermark_step_down_compaction_working_set_pinning_and_outline_stub() {
     }));
 
     // Turn 2: Read & Edit hot file `src/hot.rs` (8 KiB) -> Working-Set Pinning must exempt its latest read!
-    let mut hot_src = String::from("[File: src/hot.rs | Lines: 1-200 of 200 | SHA256: 1122334455667788]\n");
+    let mut hot_src =
+        String::from("[File: src/hot.rs | Lines: 1-200 of 200 | SHA256: 1122334455667788]\n");
     hot_src.push_str("    1\tpub fn hot_active_function() {}\n");
     hot_src.push_str(&"   10\t// hot file active content\n".repeat(260));
     canonical.push(TranscriptItem::Assistant(AssistantTurn {
@@ -206,7 +211,8 @@ fn test_watermark_step_down_compaction_working_set_pinning_and_outline_stub() {
     }));
 
     // Turn 3: Read another cold file `src/ cold2.rs` (10 KiB) + Turn 4 tail
-    let mut cold2_src = String::from("[File: src/cold2.rs | Lines: 1-250 of 250 | SHA256: deadbeefcafebabe]\n");
+    let mut cold2_src =
+        String::from("[File: src/cold2.rs | Lines: 1-250 of 250 | SHA256: deadbeefcafebabe]\n");
     cold2_src.push_str("    5\tpub struct LexerState {\n");
     cold2_src.push_str(&"   20\t// padding line for cold2\n".repeat(320));
     canonical.push(TranscriptItem::Assistant(AssistantTurn {
@@ -330,7 +336,8 @@ fn test_watermark_step_down_compaction_working_set_pinning_and_outline_stub() {
     let baseline_len_after_comp1 = proj.breakpoints[2].message_index;
     assert_eq!(baseline_len_after_comp1, 4);
     for t in 0..10 {
-        let mut big = String::from("[File: src/extra.rs | Lines: 1-100 of 100 | SHA256: 0000111122223333]\n");
+        let mut big =
+            String::from("[File: src/extra.rs | Lines: 1-100 of 100 | SHA256: 0000111122223333]\n");
         big.push_str(&format!("   10\t// turn {} extra data\n", t).repeat(120));
         canonical.push(TranscriptItem::Assistant(AssistantTurn {
             content: None,
@@ -374,7 +381,9 @@ fn test_watermark_step_down_compaction_working_set_pinning_and_outline_stub() {
         panic!("expected ToolResult at index 4");
     };
     assert!(
-        hot_after_comp2.content.starts_with("[Compacted: read(src/hot.rs"),
+        hot_after_comp2
+            .content
+            .starts_with("[Compacted: read(src/hot.rs"),
         "src/hot.rs read must be reclaimed once its pin window expires, got: {}",
         &hot_after_comp2.content[..hot_after_comp2.content.len().min(80)]
     );
@@ -386,14 +395,26 @@ fn test_loop_guard_repeated_ping_pong_and_edit_streak() {
 
     // 1. Consecutive 3 identical calls (canonical JSON key-order insensitive AND `./` path normalized)
     assert!(matches!(
-        guard.check_and_record("read", r#"{"path":"./src/a.rs","offset":1}"#, Some("./src/a.rs")),
+        guard.check_and_record(
+            "read",
+            r#"{"path":"./src/a.rs","offset":1}"#,
+            Some("./src/a.rs")
+        ),
         LoopGuardVerdict::Allow { .. }
     ));
     assert!(matches!(
-        guard.check_and_record("read", r#"{"offset": 1, "path": "src/a.rs"}"#, Some("src/a.rs")),
+        guard.check_and_record(
+            "read",
+            r#"{"offset": 1, "path": "src/a.rs"}"#,
+            Some("src/a.rs")
+        ),
         LoopGuardVerdict::Allow { .. }
     ));
-    let third = guard.check_and_record("read", r#"{"path":"src//./a.rs","offset":1}"#, Some("src/a.rs"));
+    let third = guard.check_and_record(
+        "read",
+        r#"{"path":"src//./a.rs","offset":1}"#,
+        Some("src/a.rs"),
+    );
     assert!(matches!(
         third,
         LoopGuardVerdict::Block {
@@ -407,7 +428,10 @@ fn test_loop_guard_repeated_ping_pong_and_edit_streak() {
     // 6th call (B completing 3rd full cycle [A,B,A,B,A]+B) is blocked!
     let mut pp_guard = LoopGuard::new();
     let call_a = ("read", r#"{"path":"x.rs"}"#);
-    let call_b = ("edit", r#"{"path":"x.rs","edits":[{"old_text":"a","new_text":"b"}]}"#);
+    let call_b = (
+        "edit",
+        r#"{"path":"x.rs","edits":[{"old_text":"a","new_text":"b"}]}"#,
+    );
     // Cycle 1
     assert!(matches!(
         pp_guard.check_and_record(call_a.0, call_a.1, Some("x.rs")),
@@ -443,11 +467,26 @@ fn test_loop_guard_repeated_ping_pong_and_edit_streak() {
 
     // 3. Per-file consecutive 3 edit failures circuit breaker (interleaved `read` before 3 does not reset streak)
     let mut streak_guard = LoopGuard::new();
-    assert_eq!(streak_guard.record_file_tool_outcome("edit", "./foo.rs", false), 1);
-    assert_eq!(streak_guard.record_file_tool_outcome("read", "foo.rs", true), 1);
-    assert_eq!(streak_guard.record_file_tool_outcome("edit", "foo.rs", false), 2);
-    assert_eq!(streak_guard.record_file_tool_outcome("read", "./foo.rs", true), 2);
-    assert_eq!(streak_guard.record_file_tool_outcome("edit", "foo.rs", false), 3);
+    assert_eq!(
+        streak_guard.record_file_tool_outcome("edit", "./foo.rs", false),
+        1
+    );
+    assert_eq!(
+        streak_guard.record_file_tool_outcome("read", "foo.rs", true),
+        1
+    );
+    assert_eq!(
+        streak_guard.record_file_tool_outcome("edit", "foo.rs", false),
+        2
+    );
+    assert_eq!(
+        streak_guard.record_file_tool_outcome("read", "./foo.rs", true),
+        2
+    );
+    assert_eq!(
+        streak_guard.record_file_tool_outcome("edit", "foo.rs", false),
+        3
+    );
 
     // 4th edit without an intervening `read` after reaching 3 is blocked by EditFailureStreakBlocked
     let blocked_edit = streak_guard.check_and_record(
@@ -464,7 +503,10 @@ fn test_loop_guard_repeated_ping_pong_and_edit_streak() {
     ));
 
     // Calling `read` on `foo.rs` AFTER streak >= 3 unlocks the circuit breaker
-    assert_eq!(streak_guard.record_file_tool_outcome("read", "foo.rs", true), 0);
+    assert_eq!(
+        streak_guard.record_file_tool_outcome("read", "foo.rs", true),
+        0
+    );
     assert!(matches!(
         streak_guard.check_and_record(
             "edit",
@@ -504,7 +546,11 @@ async fn test_readonly_parallel_batch_ordering_steering_and_completion_gate() {
     fs::create_dir_all(&tmp_ws).unwrap();
 
     for i in 0..10 {
-        fs::write(tmp_ws.join(format!("f_{}.txt", i)), format!("file_content_{}\n", i)).unwrap();
+        fs::write(
+            tmp_ws.join(format!("f_{}.txt", i)),
+            format!("file_content_{}\n", i),
+        )
+        .unwrap();
     }
 
     // Turn 1: 10 concurrent read-only calls in a single batch + 1 write call

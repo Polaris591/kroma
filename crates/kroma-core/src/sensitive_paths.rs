@@ -80,11 +80,20 @@ impl SensitivePathGuard {
         // Credential & state files
         if matches!(
             file_name.as_str(),
-            ".git-credentials" | ".npmrc" | ".pypirc" | ".netrc" | "_netrc" | ".pgpass" | "credentials" | "credentials.toml"
+            ".git-credentials"
+                | ".npmrc"
+                | ".pypirc"
+                | ".netrc"
+                | "_netrc"
+                | ".pgpass"
+                | "credentials"
+                | "credentials.toml"
         ) {
             return true;
         }
-        if file_name.contains("credentials") && (file_name.ends_with(".json") || file_name.ends_with(".toml")) {
+        if file_name.contains("credentials")
+            && (file_name.ends_with(".json") || file_name.ends_with(".toml"))
+        {
             return true;
         }
         if file_name.starts_with("terraform.tfstate") || file_name.ends_with(".tfvars") {

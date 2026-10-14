@@ -45,7 +45,10 @@ impl InteractiveRepl {
             .get("policy_mode")
             .and_then(Value::as_str)
             .unwrap_or("ask");
-        let turns = result.get("turn_count").and_then(Value::as_u64).unwrap_or(0);
+        let turns = result
+            .get("turn_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let rev = result
             .get("latest_revision_id")
             .and_then(Value::as_str)
@@ -125,7 +128,10 @@ impl InteractiveRepl {
                     "/theme /status /diff /model /thinking /race /undo"
                 )
             ));
-            banner.push_str(&format!("{}\n", renderer.hairline(terminal_hairline_width())));
+            banner.push_str(&format!(
+                "{}\n",
+                renderer.hairline(terminal_hairline_width())
+            ));
             return banner;
         }
 
@@ -178,10 +184,7 @@ impl InteractiveRepl {
                         .get("active_model")
                         .and_then(Value::as_str)
                         .unwrap_or("<unset>");
-                    return out(format!(
-                        "model: {}\n",
-                        sanitize_terminal_text(active)
-                    ));
+                    return out(format!("model: {}\n", sanitize_terminal_text(active)));
                 }
                 let requested = args[0];
                 // Mix-up guard: `/model high` is almost certainly a `/thinking` invocation.
@@ -242,10 +245,7 @@ impl InteractiveRepl {
                             })
                         })
                         .unwrap_or_else(|| "<unset>".to_string());
-                    return out(format!(
-                        "thinking: {}\n",
-                        sanitize_terminal_text(&level)
-                    ));
+                    return out(format!("thinking: {}\n", sanitize_terminal_text(&level)));
                 }
                 let requested = args[0];
                 if !looks_like_thinking_level(requested) {
@@ -300,10 +300,7 @@ impl InteractiveRepl {
                         .get("active_protocol")
                         .and_then(Value::as_str)
                         .unwrap_or("<unset>");
-                    return out(format!(
-                        "protocol: {}\n",
-                        sanitize_terminal_text(active)
-                    ));
+                    return out(format!("protocol: {}\n", sanitize_terminal_text(active)));
                 }
                 let resp = self
                     .dispatcher
@@ -483,10 +480,16 @@ impl InteractiveRepl {
         }
         let mut text = format!("sessions ({}):\n", sessions.len());
         for entry in sessions {
-            let id = entry.get("session_id").and_then(Value::as_str).unwrap_or("-");
+            let id = entry
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
             let entries = entry.get("entries").and_then(Value::as_u64).unwrap_or(0);
             let turns = entry.get("turns").and_then(Value::as_u64).unwrap_or(0);
-            let active = entry.get("active").and_then(Value::as_bool).unwrap_or(false);
+            let active = entry
+                .get("active")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             text.push_str(&format!(
                 "  {}{}  entries={} turns={}\n",
                 if active { "* " } else { "  " },
@@ -549,7 +552,11 @@ impl InteractiveRepl {
             .await;
         let sid = resp
             .result
-            .and_then(|v| v.get("session_id").and_then(Value::as_str).map(String::from))
+            .and_then(|v| {
+                v.get("session_id")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
             .unwrap_or_default();
         Ok(ReplStepOutcome {
             output: format!("started new session {}\n", sanitize_terminal_text(&sid)),
@@ -707,11 +714,11 @@ impl InteractiveRepl {
             .await;
         match (resp.result, resp.error) {
             (Some(val), _) => {
-                let status = val.get("status").and_then(Value::as_str).unwrap_or("unknown");
-                let text = val
-                    .get("final_text")
+                let status = val
+                    .get("status")
                     .and_then(Value::as_str)
-                    .unwrap_or("");
+                    .unwrap_or("unknown");
+                let text = val.get("final_text").and_then(Value::as_str).unwrap_or("");
                 let turns = val.get("turns_used").and_then(Value::as_u64).unwrap_or(0);
                 let tools = val
                     .get("tool_calls_used")
@@ -790,7 +797,11 @@ impl InteractiveRepl {
                         out.push_str(&renderer.status_line(
                             StatusDot::Success,
                             "edit",
-                            &format!("{} file(s) changed: {}", modified.len(), modified.join(", ")),
+                            &format!(
+                                "{} file(s) changed: {}",
+                                modified.len(),
+                                modified.join(", ")
+                            ),
                         ));
                         out.push('\n');
                     }
@@ -869,7 +880,10 @@ impl InteractiveRepl {
                 .unwrap_or_else(|| "status failed".to_string())
         })?;
         let sid = val.get("session_id").and_then(Value::as_str).unwrap_or("-");
-        let policy = val.get("policy_mode").and_then(Value::as_str).unwrap_or("-");
+        let policy = val
+            .get("policy_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
         let turns = val.get("turn_count").and_then(Value::as_u64).unwrap_or(0);
         let rev = val
             .get("latest_revision_id")
@@ -1036,7 +1050,10 @@ impl InteractiveRepl {
                 .get("tracked_file_count")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let is_cur = r.get("is_current").and_then(Value::as_bool).unwrap_or(false);
+            let is_cur = r
+                .get("is_current")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let changed: Vec<String> = r
                 .get("changed_paths")
                 .and_then(Value::as_array)
@@ -1104,7 +1121,10 @@ impl InteractiveRepl {
                 should_exit: false,
             });
         };
-        let force = rest.iter().skip(1).any(|&arg| arg == "--force" || arg == "-f");
+        let force = rest
+            .iter()
+            .skip(1)
+            .any(|&arg| arg == "--force" || arg == "-f");
         let resp = self
             .dispatcher
             .handle_request(JsonRpcRequest::new(
@@ -1120,18 +1140,12 @@ impl InteractiveRepl {
                     .and_then(Value::as_str)
                     .unwrap_or("-");
                 Ok(ReplStepOutcome {
-                    output: format!(
-                        "restored workspace to {}\n",
-                        sanitize_terminal_text(rev)
-                    ),
+                    output: format!("restored workspace to {}\n", sanitize_terminal_text(rev)),
                     should_exit: false,
                 })
             }
             (_, Some(err)) => Ok(ReplStepOutcome {
-                output: format!(
-                    "restore error: {}\n",
-                    sanitize_terminal_text(&err.message)
-                ),
+                output: format!("restore error: {}\n", sanitize_terminal_text(&err.message)),
                 should_exit: false,
             }),
             _ => Err("unexpected empty response from revision.restore".to_string()),
@@ -1150,10 +1164,7 @@ impl InteractiveRepl {
                 .await;
             return match (resp.result, resp.error) {
                 (Some(val), _) => {
-                    let content = val
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
+                    let content = val.get("content").and_then(Value::as_str).unwrap_or("");
                     Ok(ReplStepOutcome {
                         output: format!(
                             "activated skill '{}':\n{}\n",
@@ -1164,10 +1175,7 @@ impl InteractiveRepl {
                     })
                 }
                 (_, Some(err)) => Ok(ReplStepOutcome {
-                    output: format!(
-                        "skill error: {}\n",
-                        sanitize_terminal_text(&err.message)
-                    ),
+                    output: format!("skill error: {}\n", sanitize_terminal_text(&err.message)),
                     should_exit: false,
                 }),
                 _ => Err("empty response from skills.activate".to_string()),
@@ -1224,18 +1232,12 @@ impl InteractiveRepl {
                 .map(|e| e.message)
                 .unwrap_or_else(|| "workspace.graph failed".to_string())
         })?;
-        let total_files = val
-            .get("total_files")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let total_files = val.get("total_files").and_then(Value::as_u64).unwrap_or(0);
         let total_symbols = val
             .get("total_symbols")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let total_edges = val
-            .get("total_edges")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let total_edges = val.get("total_edges").and_then(Value::as_u64).unwrap_or(0);
         let ranked = val
             .get("ranked")
             .and_then(Value::as_array)
@@ -1267,11 +1269,7 @@ impl InteractiveRepl {
                 for s in syms {
                     let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
                     let sig = s.get("signature").and_then(Value::as_str).unwrap_or("");
-                    out.push_str(&format!(
-                        "      {} {}\n",
-                        kind,
-                        sanitize_terminal_text(sig)
-                    ));
+                    out.push_str(&format!("      {} {}\n", kind, sanitize_terminal_text(sig)));
                 }
             }
         }
@@ -1290,8 +1288,7 @@ impl InteractiveRepl {
         };
         let Ok(turn) = turn_str.parse::<usize>() else {
             return Ok(ReplStepOutcome {
-                output: "error: /fork expects a non-negative integer turn\n"
-                    .to_string(),
+                output: "error: /fork expects a non-negative integer turn\n".to_string(),
                 should_exit: false,
             });
         };
@@ -1316,10 +1313,7 @@ impl InteractiveRepl {
                 })
             }
             (_, Some(err)) => Ok(ReplStepOutcome {
-                output: format!(
-                    "fork error: {}\n",
-                    sanitize_terminal_text(&err.message)
-                ),
+                output: format!("fork error: {}\n", sanitize_terminal_text(&err.message)),
                 should_exit: false,
             }),
             _ => Err("empty response from session.fork".to_string()),
@@ -1338,20 +1332,14 @@ impl InteractiveRepl {
             .await;
         match (resp.result, resp.error) {
             (Some(val), _) => {
-                let content = val
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let content = val.get("content").and_then(Value::as_str).unwrap_or("");
                 Ok(ReplStepOutcome {
                     output: format!("{}\n", sanitize_terminal_text(content)),
                     should_exit: false,
                 })
             }
             (_, Some(err)) => Ok(ReplStepOutcome {
-                output: format!(
-                    "evidence error: {}\n",
-                    sanitize_terminal_text(&err.message)
-                ),
+                output: format!("evidence error: {}\n", sanitize_terminal_text(&err.message)),
                 should_exit: false,
             }),
             _ => Err("empty response from evidence.recall".to_string()),
@@ -1365,17 +1353,17 @@ impl InteractiveRepl {
             .await;
         let sid = resp
             .result
-            .and_then(|v| v.get("session_id").and_then(Value::as_str).map(String::from))
+            .and_then(|v| {
+                v.get("session_id")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
             .unwrap_or_default();
         Ok(ReplStepOutcome {
-            output: format!(
-                "started new session {}\n",
-                sanitize_terminal_text(&sid)
-            ),
+            output: format!("started new session {}\n", sanitize_terminal_text(&sid)),
             should_exit: false,
         })
     }
-
 
     /// `v1.5.0`: map a live `kroma/event` notification to a Design D status line.
     ///
@@ -1426,7 +1414,11 @@ impl InteractiveRepl {
                 let tool = str_of("tool_name");
                 let outcome = str_of("outcome");
                 let ok = outcome == "success";
-                let dot = if ok { StatusDot::Success } else { StatusDot::Error };
+                let dot = if ok {
+                    StatusDot::Success
+                } else {
+                    StatusDot::Error
+                };
                 let path = str_of("relative_path");
                 let tier = payload
                     .get("edit_match_tier")
@@ -1544,7 +1536,11 @@ impl InteractiveRepl {
             "approvalrequested" => renderer.status_line(
                 StatusDot::Alert,
                 "approval",
-                &format!("{} awaiting decision on {}", str_of("tool_name"), str_of("surface")),
+                &format!(
+                    "{} awaiting decision on {}",
+                    str_of("tool_name"),
+                    str_of("surface")
+                ),
             ),
             "loopguardtriggered" => renderer.status_line(
                 StatusDot::Alert,
@@ -1611,7 +1607,10 @@ impl InteractiveRepl {
         // Flush any events that were queued just before termination.
         while let Ok(note) = rx.try_recv() {
             if let Some(line) = self.render_live_event(&note) {
-                writer.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+                writer
+                    .write_all(line.as_bytes())
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
         }
         writer.flush().await.map_err(|e| e.to_string())?;

@@ -25,11 +25,7 @@ fn setup_sample_repo() -> (std::path::PathBuf, std::path::PathBuf) {
         "pub fn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n\npub fn mul(a: i32, b: i32) -> i32 {\n    a * b\n}\n",
     )
     .unwrap();
-    fs::write(
-        ws.join("src/lib.rs"),
-        "pub mod math;\n",
-    )
-    .unwrap();
+    fs::write(ws.join("src/lib.rs"), "pub mod math;\n").unwrap();
     fs::write(ws.join(".env"), "DB_PASSWORD=secret\n").unwrap();
     (ws, state)
 }
@@ -48,7 +44,9 @@ async fn run_scenario(
     let cfg = AgentRunConfig::new("golden task", budget);
     let logger = EventLogger::new(cfg.run_id, Some(state.to_path_buf()), false).unwrap();
     let (_tx, rx) = watch::channel(false);
-    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx).run(logger).await;
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .run(logger)
+        .await;
     assert!(verify_tool_call_pairing(&summary.transcript));
     summary
 }
@@ -272,7 +270,7 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
             Arc::new(NonInteractiveApprovalHandler),
         );
         let runtime = build_default_runtime(env, policy, budget.clone(), None)
-            .with_bash_grace_period( std::time::Duration::from_millis(50) );
+            .with_bash_grace_period(std::time::Duration::from_millis(50));
         let cfg = AgentRunConfig::new("cancel mid batch", budget);
         let logger = EventLogger::new(cfg.run_id, Some(state), false).unwrap();
         let (tx, rx) = watch::channel(false);
@@ -280,7 +278,9 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let _ = tx.send(true);
         });
-        let (summary, _) = AgentRunner::new(cfg, provider, runtime, rx).run(logger).await;
+        let (summary, _) = AgentRunner::new(cfg, provider, runtime, rx)
+            .run(logger)
+            .await;
         assert_eq!(summary.status, RunStatus::Cancelled);
         assert_eq!(summary.terminal_reason, TerminalReason::UserCancelled);
         assert!(verify_tool_call_pairing(&summary.transcript));
@@ -501,7 +501,9 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
             err_tr.meta.diag_kind,
             Some(kroma_core::types::EditDiagKind::LineNumberPrefix)
         );
-        assert!(fs::read_to_string(ws.join("src/math.rs")).unwrap().contains("a + b"));
+        assert!(fs::read_to_string(ws.join("src/math.rs"))
+            .unwrap()
+            .contains("a + b"));
         let _ = fs::remove_dir_all(ws.parent().unwrap());
     }
 
@@ -646,19 +648,34 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
             finish_reason: FinishReason::Stop,
             usage: None,
         });
-        let summary = run_scenario(&ws, &state, PolicyMode::ReadOnly, BudgetConfig::default(), turns).await;
+        let summary = run_scenario(
+            &ws,
+            &state,
+            PolicyMode::ReadOnly,
+            BudgetConfig::default(),
+            turns,
+        )
+        .await;
         assert_eq!(summary.status, RunStatus::Completed);
         // 5th call (pp_r_3) must be Success; 6th call (pp_g_3) must be PingPongCycleBlocked!
-        let fifth = summary.transcript.iter().find_map(|i| match i {
-            TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "pp_r_3" => Some(tr),
-            _ => None,
-        }).unwrap();
+        let fifth = summary
+            .transcript
+            .iter()
+            .find_map(|i| match i {
+                TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "pp_r_3" => Some(tr),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(fifth.outcome, ToolOutcome::Success);
 
-        let sixth = summary.transcript.iter().find_map(|i| match i {
-            TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "pp_g_3" => Some(tr),
-            _ => None,
-        }).unwrap();
+        let sixth = summary
+            .transcript
+            .iter()
+            .find_map(|i| match i {
+                TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "pp_g_3" => Some(tr),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             sixth.outcome,
             ToolOutcome::Error {
@@ -741,20 +758,28 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
         )
         .await;
         assert_eq!(summary.status, RunStatus::Completed);
-        let ef4 = summary.transcript.iter().find_map(|i| match i {
-            TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "ef4_blocked" => Some(tr),
-            _ => None,
-        }).unwrap();
+        let ef4 = summary
+            .transcript
+            .iter()
+            .find_map(|i| match i {
+                TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "ef4_blocked" => Some(tr),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             ef4.outcome,
             ToolOutcome::Error {
                 code: ErrorCode::EditFailureStreakBlocked
             }
         );
-        let ef5 = summary.transcript.iter().find_map(|i| match i {
-            TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "ef5_ok" => Some(tr),
-            _ => None,
-        }).unwrap();
+        let ef5 = summary
+            .transcript
+            .iter()
+            .find_map(|i| match i {
+                TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "ef5_ok" => Some(tr),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(ef5.outcome, ToolOutcome::Success);
         let _ = fs::remove_dir_all(ws.parent().unwrap());
     }
@@ -802,21 +827,32 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
         )
         .await;
         assert_eq!(summary.status, RunStatus::Completed);
-        assert_eq!(fs::read_to_string(ws.join("src/lib.rs")).unwrap(), "pub mod math;\n");
-        let w_clash = summary.transcript.iter().find_map(|i| match i {
-            TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "w_clash" => Some(tr),
-            _ => None,
-        }).unwrap();
+        assert_eq!(
+            fs::read_to_string(ws.join("src/lib.rs")).unwrap(),
+            "pub mod math;\n"
+        );
+        let w_clash = summary
+            .transcript
+            .iter()
+            .find_map(|i| match i {
+                TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "w_clash" => Some(tr),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             w_clash.outcome,
             ToolOutcome::Error {
                 code: ErrorCode::FileAlreadyExists
             }
         );
-        let b_verify = summary.transcript.iter().find_map(|i| match i {
-            TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "b_verify" => Some(tr),
-            _ => None,
-        }).unwrap();
+        let b_verify = summary
+            .transcript
+            .iter()
+            .find_map(|i| match i {
+                TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "b_verify" => Some(tr),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(b_verify.outcome, ToolOutcome::Success);
         assert!(b_verify.content.contains("MAGIC"));
         let _ = fs::remove_dir_all(ws.parent().unwrap());
@@ -860,10 +896,14 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
         )
         .await;
         assert_eq!(summary.status, RunStatus::Completed);
-        let esc_tr = summary.transcript.iter().find_map(|i| match i {
-            TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "esc_w" => Some(tr),
-            _ => None,
-        }).unwrap();
+        let esc_tr = summary
+            .transcript
+            .iter()
+            .find_map(|i| match i {
+                TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "esc_w" => Some(tr),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             esc_tr.outcome,
             ToolOutcome::Error {
@@ -890,7 +930,11 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
             fn request_approval(&self, req: &ApprovalRequest) -> ApprovalDecision {
                 *self.captured_diff.lock().unwrap() = req.diff_preview.clone();
                 // Simulate external process creating the target file while user is reviewing approval prompt!
-                fs::write(self.ws.join("src/new_race.rs"), "external concurrent content\n").unwrap();
+                fs::write(
+                    self.ws.join("src/new_race.rs"),
+                    "external concurrent content\n",
+                )
+                .unwrap();
                 ApprovalDecision::AllowOnce
             }
         }
@@ -911,7 +955,8 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
                 tool_calls: vec![ToolCall {
                     call_id: ToolCallId::new("race_write"),
                     name: "write".into(),
-                    raw_arguments: r#"{"path":"src/new_race.rs","content":"pub fn mine() {}\n"}"#.into(),
+                    raw_arguments: r#"{"path":"src/new_race.rs","content":"pub fn mine() {}\n"}"#
+                        .into(),
                 }],
                 finish_reason: FinishReason::ToolCalls,
                 usage: None,
@@ -927,16 +972,24 @@ async fn test_golden_smoke_16_end_to_end_scenarios() {
         let cfg = AgentRunConfig::new("race test", budget);
         let logger = EventLogger::new(cfg.run_id, Some(state), false).unwrap();
         let (_tx, rx) = watch::channel(false);
-        let (summary, _) = AgentRunner::new(cfg, provider, runtime, rx).run(logger).await;
+        let (summary, _) = AgentRunner::new(cfg, provider, runtime, rx)
+            .run(logger)
+            .await;
 
         assert_eq!(summary.status, RunStatus::Completed);
         let diff_str = handler.captured_diff.lock().unwrap().clone().unwrap();
-        assert!(diff_str.contains("--- a/src/new_race.rs") && diff_str.contains("+pub fn mine() {}"));
+        assert!(
+            diff_str.contains("--- a/src/new_race.rs") && diff_str.contains("+pub fn mine() {}")
+        );
 
-        let race_tr = summary.transcript.iter().find_map(|i| match i {
-            TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "race_write" => Some(tr),
-            _ => None,
-        }).unwrap();
+        let race_tr = summary
+            .transcript
+            .iter()
+            .find_map(|i| match i {
+                TranscriptItem::ToolResult(tr) if tr.call_id.as_str() == "race_write" => Some(tr),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             race_tr.outcome,
             ToolOutcome::Error {

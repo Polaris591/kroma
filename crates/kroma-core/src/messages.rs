@@ -139,7 +139,9 @@ impl ImageAttachment {
     /// One-line summary safe to render in any surface.
     pub fn describe(&self) -> String {
         match (self.width, self.height) {
-            (Some(w), Some(h)) => format!("{}, {}x{}, {} bytes", self.mime_type, w, h, self.byte_len),
+            (Some(w), Some(h)) => {
+                format!("{}, {}x{}, {} bytes", self.mime_type, w, h, self.byte_len)
+            }
             _ => format!("{}, {} bytes", self.mime_type, self.byte_len),
         }
     }

@@ -68,7 +68,13 @@ pub struct PredictiveReport {
 }
 
 impl PredictiveReport {
-    fn new(path: &str, language: &str, status: &str, issues: Vec<PredictiveIssue>, duration_ms: u64) -> Self {
+    fn new(
+        path: &str,
+        language: &str,
+        status: &str,
+        issues: Vec<PredictiveIssue>,
+        duration_ms: u64,
+    ) -> Self {
         Self {
             path: path.to_string(),
             language: language.to_string(),
@@ -330,7 +336,10 @@ fn toml_issues(content: &str) -> Vec<PredictiveIssue> {
                 ("[", "]")
             };
             let body = trimmed.split('#').next().unwrap_or(trimmed).trim();
-            if !body.starts_with(open) || !body.ends_with(close) || body.len() <= open.len() + close.len() - 1 {
+            if !body.starts_with(open)
+                || !body.ends_with(close)
+                || body.len() <= open.len() + close.len() - 1
+            {
                 issues.push(PredictiveIssue {
                     line: line_no,
                     column: 1,
@@ -482,7 +491,11 @@ impl CodeLang {
 enum ScanState {
     Normal,
     LineComment,
-    BlockComment { depth: usize, open_line: usize, open_col: usize },
+    BlockComment {
+        depth: usize,
+        open_line: usize,
+        open_col: usize,
+    },
     /// `raw_hashes = Some(h)` means the terminator is `"` followed by `h` `#` characters.
     Str {
         quote: char,
@@ -524,8 +537,25 @@ fn is_js_regex_start(prev_sig_char: Option<char>, prev_word: &str) -> bool {
         None => true,
         Some(ch) => matches!(
             ch,
-            '(' | ',' | '=' | ':' | '[' | '!' | '&' | '|' | '?' | '{' | '}' | ';' | '~' | '^'
-                | '+' | '-' | '*' | '%' | '<' | '>'
+            '(' | ','
+                | '='
+                | ':'
+                | '['
+                | '!'
+                | '&'
+                | '|'
+                | '?'
+                | '{'
+                | '}'
+                | ';'
+                | '~'
+                | '^'
+                | '+'
+                | '-'
+                | '*'
+                | '%'
+                | '<'
+                | '>'
         ),
     }
 }
@@ -593,9 +623,17 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                 }
                 advance!(1);
             }
-            ScanState::BlockComment { depth, open_line, open_col } => {
+            ScanState::BlockComment {
+                depth,
+                open_line,
+                open_col,
+            } => {
                 if lang.nests_block_comment() && c == '/' && chars.get(i + 1) == Some(&'*') {
-                    state = ScanState::BlockComment { depth: depth + 1, open_line, open_col };
+                    state = ScanState::BlockComment {
+                        depth: depth + 1,
+                        open_line,
+                        open_col,
+                    };
                     advance!(2);
                     continue;
                 }
@@ -603,14 +641,22 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                     if depth <= 1 {
                         state = ScanState::Normal;
                     } else {
-                        state = ScanState::BlockComment { depth: depth - 1, open_line, open_col };
+                        state = ScanState::BlockComment {
+                            depth: depth - 1,
+                            open_line,
+                            open_col,
+                        };
                     }
                     advance!(2);
                     continue;
                 }
                 advance!(1);
             }
-            ScanState::Regex { in_class, open_line, open_col } => {
+            ScanState::Regex {
+                in_class,
+                open_line,
+                open_col,
+            } => {
                 if c == '\\' {
                     advance!(2);
                     continue;
@@ -627,12 +673,20 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                     continue;
                 }
                 if c == '[' && !in_class {
-                    state = ScanState::Regex { in_class: true, open_line, open_col };
+                    state = ScanState::Regex {
+                        in_class: true,
+                        open_line,
+                        open_col,
+                    };
                     advance!(1);
                     continue;
                 }
                 if c == ']' && in_class {
-                    state = ScanState::Regex { in_class: false, open_line, open_col };
+                    state = ScanState::Regex {
+                        in_class: false,
+                        open_line,
+                        open_col,
+                    };
                     advance!(1);
                     continue;
                 }
@@ -645,7 +699,15 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                 }
                 advance!(1);
             }
-            ScanState::Str { quote, triple, raw_hashes, escape, open_line, open_col, multiline } => {
+            ScanState::Str {
+                quote,
+                triple,
+                raw_hashes,
+                escape,
+                open_line,
+                open_col,
+                multiline,
+            } => {
                 if escape && c == '\\' {
                     advance!(2);
                     continue;
@@ -665,15 +727,20 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                     continue;
                 }
                 let closes = if triple {
-                    c == quote && chars.get(i + 1) == Some(&quote) && chars.get(i + 2) == Some(&quote)
-                } else if let Some(h) = raw_hashes {
                     c == quote
-                        && (0..h).all(|k| chars.get(i + 1 + k) == Some(&'#'))
+                        && chars.get(i + 1) == Some(&quote)
+                        && chars.get(i + 2) == Some(&quote)
+                } else if let Some(h) = raw_hashes {
+                    c == quote && (0..h).all(|k| chars.get(i + 1 + k) == Some(&'#'))
                 } else {
                     c == quote
                 };
                 if closes {
-                    let consumed = if triple { 3 } else { 1 + raw_hashes.unwrap_or(0) };
+                    let consumed = if triple {
+                        3
+                    } else {
+                        1 + raw_hashes.unwrap_or(0)
+                    };
                     state = ScanState::Normal;
                     prev_sig_char = Some(quote);
                     prev_word.clear();
@@ -698,12 +765,17 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
             ScanState::Normal => {
                 // Conflict markers are only meaningful at column 1 outside strings/comments.
                 if col == 1 {
-                    if let Some(marker) = line_conflict_marker(&chars[i..].iter().take(8).collect::<String>()) {
+                    if let Some(marker) =
+                        line_conflict_marker(&chars[i..].iter().take(8).collect::<String>())
+                    {
                         issues.push(PredictiveIssue {
                             line,
                             column: 1,
                             kind: "conflict_marker".to_string(),
-                            message: format!("unresolved version-control conflict marker '{}'", marker),
+                            message: format!(
+                                "unresolved version-control conflict marker '{}'",
+                                marker
+                            ),
                         });
                         while i < n && chars[i] != '\n' {
                             advance!(1);
@@ -724,7 +796,11 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                 }
                 // Block comments.
                 if lang.has_block_comment() && c == '/' && chars.get(i + 1) == Some(&'*') {
-                    state = ScanState::BlockComment { depth: 1, open_line: line, open_col: col };
+                    state = ScanState::BlockComment {
+                        depth: 1,
+                        open_line: line,
+                        open_col: col,
+                    };
                     advance!(2);
                     continue;
                 }
@@ -734,7 +810,11 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                     && is_js_regex_start(prev_sig_char, &prev_word)
                     && has_closing_regex_slash_on_line(&chars, i)
                 {
-                    state = ScanState::Regex { in_class: false, open_line: line, open_col: col };
+                    state = ScanState::Regex {
+                        in_class: false,
+                        open_line: line,
+                        open_col: col,
+                    };
                     advance!(1);
                     continue;
                 }
@@ -774,7 +854,9 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                                     multiline: true,
                                 };
                             }
-                        } else if let Some(pos) = stack.iter().rposition(|(d, _, _, _)| *d == expected) {
+                        } else if let Some(pos) =
+                            stack.iter().rposition(|(d, _, _, _)| *d == expected)
+                        {
                             let mut resume_tpl_after = None;
                             for (unclosed, ul, uc, resume_tpl) in stack.drain(pos..).rev() {
                                 if unclosed != expected {
@@ -830,7 +912,11 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
 
     if issues.len() < MAX_ISSUES_PER_FILE {
         match state {
-            ScanState::BlockComment { open_line, open_col, .. } => {
+            ScanState::BlockComment {
+                open_line,
+                open_col,
+                ..
+            } => {
                 issues.push(PredictiveIssue {
                     line: open_line,
                     column: open_col,
@@ -838,7 +924,12 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                     message: "unterminated block comment /*".to_string(),
                 });
             }
-            ScanState::Str { quote, open_line, open_col, .. } => {
+            ScanState::Str {
+                quote,
+                open_line,
+                open_col,
+                ..
+            } => {
                 issues.push(PredictiveIssue {
                     line: open_line,
                     column: open_col,
@@ -846,7 +937,11 @@ fn scan_code(lang: CodeLang, content: &str) -> Vec<PredictiveIssue> {
                     message: format!("unterminated string literal starting with {}", quote),
                 });
             }
-            ScanState::Regex { open_line, open_col, .. } => {
+            ScanState::Regex {
+                open_line,
+                open_col,
+                ..
+            } => {
                 issues.push(PredictiveIssue {
                     line: open_line,
                     column: open_col,
@@ -884,8 +979,21 @@ fn open_string(
 ) -> Option<usize> {
     let c = chars[i];
     let next = chars.get(i + 1).copied();
-    let mut set = |quote: char, triple: bool, raw_hashes: Option<usize>, escape: bool, multiline: bool, consumed: usize| {
-        *state = ScanState::Str { quote, triple, raw_hashes, escape, open_line: line, open_col: col, multiline };
+    let mut set = |quote: char,
+                   triple: bool,
+                   raw_hashes: Option<usize>,
+                   escape: bool,
+                   multiline: bool,
+                   consumed: usize| {
+        *state = ScanState::Str {
+            quote,
+            triple,
+            raw_hashes,
+            escape,
+            open_line: line,
+            open_col: col,
+            multiline,
+        };
         consumed
     };
 
@@ -960,7 +1068,9 @@ fn open_string(
             if c.is_ascii_alphabetic() {
                 let mut prefix_len = 0usize;
                 while let Some(pc) = chars.get(i + prefix_len) {
-                    if pc.is_ascii_alphabetic() && matches!(pc.to_ascii_lowercase(), 'r' | 'b' | 'f' | 'u') {
+                    if pc.is_ascii_alphabetic()
+                        && matches!(pc.to_ascii_lowercase(), 'r' | 'b' | 'f' | 'u')
+                    {
                         prefix_len += 1;
                     } else {
                         break;
@@ -1235,7 +1345,8 @@ impl MutationLedger {
 
         if snapshot_store_active && changed_paths.is_empty() {
             // Reclaim sequence numbers of dropped no-op pathless records if they are at the tail.
-            self.records.retain(|record| !(record.turn == turn && record.touched_ranges.is_empty()));
+            self.records
+                .retain(|record| !(record.turn == turn && record.touched_ranges.is_empty()));
             self.next_seq_floor = self.records.iter().map(|r| r.seq()).max().unwrap_or(0);
         }
 
@@ -1328,7 +1439,16 @@ pub fn parse_diagnostic_anchors(output: &str) -> Vec<DiagnosticAnchor> {
             let target = trimmed[pos + 3..].trim();
             if let Some((path, ln, col)) = parse_path_line_col(target) {
                 let (error_code, symbol, excerpt) = rust_error_context(&lines, idx);
-                push_anchor(&mut anchors, &mut seen, path, Some(ln), col, symbol, error_code, excerpt);
+                push_anchor(
+                    &mut anchors,
+                    &mut seen,
+                    path,
+                    Some(ln),
+                    col,
+                    symbol,
+                    error_code,
+                    excerpt,
+                );
                 continue;
             }
         }
@@ -1510,10 +1630,7 @@ fn path_before(text: &str, colon_char_index: usize) -> Option<String> {
         }
         // Allow `:` inside a directory component (e.g. `/tmp/run:1/src/lib.rs`) when the token
         // before `:` is part of the same path and not a URL scheme (`http://`).
-        if i >= 2
-            && chars[i - 1] == ':'
-            && !matches!(chars.get(i..i + 2), Some(['/', '/']))
-        {
+        if i >= 2 && chars[i - 1] == ':' && !matches!(chars.get(i..i + 2), Some(['/', '/'])) {
             let mut k = i - 1;
             while k > 0
                 && (chars[k - 1].is_alphanumeric()
@@ -1553,7 +1670,10 @@ fn path_before(text: &str, colon_char_index: usize) -> Option<String> {
 }
 
 /// Nearest `error[EXXXX]` / `error:` / `warning[...]` header above an arrow line, plus its symbol.
-fn rust_error_context(lines: &[&str], arrow_idx: usize) -> (Option<String>, Option<String>, String) {
+fn rust_error_context(
+    lines: &[&str],
+    arrow_idx: usize,
+) -> (Option<String>, Option<String>, String) {
     let mut error_code = None;
     let mut symbol = None;
     let start = arrow_idx.saturating_sub(4);
@@ -1628,13 +1748,19 @@ fn is_plausible_symbol(candidate: &str) -> bool {
         return false;
     }
     let mut chars = candidate.chars();
-    let Some(first) = chars.next() else { return false };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if !(first.is_ascii_alphabetic() || first == '_' || first == '.') {
         return false;
     }
-    candidate
-        .chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '_' | ':' | '<' | '>' | '.' | '#' | '(' | ')' | '[' | ']' | '!' | '&' | '\''))
+    candidate.chars().all(|c| {
+        c.is_alphanumeric()
+            || matches!(
+                c,
+                '_' | ':' | '<' | '>' | '.' | '#' | '(' | ')' | '[' | ']' | '!' | '&' | '\''
+            )
+    })
 }
 
 /// `"path"` → (`path`, remainder-after-quote)
@@ -1719,10 +1845,15 @@ impl AttributionReport {
              root cause: reproduce the failure before reverting anything.\n",
         );
         for (rank, candidate) in self.candidates.iter().enumerate() {
-            let raw_path = candidate.relative_path.as_deref().unwrap_or("<unattributed>");
+            let raw_path = candidate
+                .relative_path
+                .as_deref()
+                .unwrap_or("<unattributed>");
             let path = crate::prompt::escape_control_chars(raw_path);
             let lines = match candidate.line_range {
-                Some((start, end)) if end >= start && start > 0 => format!("{}:{}-{}", path, start, end),
+                Some((start, end)) if end >= start && start > 0 => {
+                    format!("{}:{}-{}", path, start, end)
+                }
                 _ => path,
             };
             body.push_str(&format!(
@@ -1784,7 +1915,11 @@ impl AttributionReport {
         }
         Some(crate::prompt::fence_untrusted(
             "candidate_failure_attribution",
-            &format!(" framing=\"{}\" source=\"{}\"", CANDIDATE_ATTRIBUTION_FRAMING, escape_fence_attribute(&self.source)),
+            &format!(
+                " framing=\"{}\" source=\"{}\"",
+                CANDIDATE_ATTRIBUTION_FRAMING,
+                escape_fence_attribute(&self.source)
+            ),
             &body,
             ATTRIBUTION_BLOCK_MAX_BYTES,
         ))
@@ -1866,7 +2001,6 @@ where
 
     Ok(passed_on_revert)
 }
-
 
 impl AttributionEngine {
     /// Score `ledger`'s mutations against the diagnostics parsed out of `failure_output`.
@@ -2168,7 +2302,8 @@ fn score_record_against_anchor<'a>(
                 };
                 if distance <= ATTRIBUTION_ADJACENT_LINES {
                     consider(
-                        0.85 + 0.13 * (1.0 - distance as f64 / (ATTRIBUTION_ADJACENT_LINES as f64 + 1.0)),
+                        0.85 + 0.13
+                            * (1.0 - distance as f64 / (ATTRIBUTION_ADJACENT_LINES as f64 + 1.0)),
                         format!(
                             "diagnostic anchor {}:{} is {} line(s) from the edited span {}-{}",
                             span.relative_path, line, distance, span.start_line, span.end_line
@@ -2205,9 +2340,16 @@ fn score_record_against_anchor<'a>(
     if !path_matched {
         let paths = record.touched_paths();
         let detail = if paths.is_empty() {
-            format!("`{}` ran in turn {} (individual files not attributed)", record.tool_name, record.turn)
+            format!(
+                "`{}` ran in turn {} (individual files not attributed)",
+                record.tool_name, record.turn
+            )
         } else {
-            format!("turn {} modified {} with no matching diagnostic path", record.turn, paths.join(", "))
+            format!(
+                "turn {} modified {} with no matching diagnostic path",
+                record.turn,
+                paths.join(", ")
+            )
         };
         consider(0.20 + 0.25 * recency, detail, None);
     }
@@ -2245,12 +2387,73 @@ fn symbol_matches_span(symbol: &str, span: &MutatedFileSpan) -> bool {
 // ---------------------------------------------------------------------------------------------
 
 const SYMBOL_KEYWORDS: &[&str] = &[
-    "fn", "let", "mut", "pub", "use", "mod", "impl", "struct", "enum", "trait", "const", "static",
-    "type", "where", "self", "Self", "return", "match", "if", "else", "for", "while", "loop",
-    "break", "continue", "true", "false", "None", "Some", "Ok", "Err", "as", "in", "ref", "move",
-    "async", "await", "dyn", "unsafe", "extern", "crate", "super", "function", "var", "class",
-    "def", "import", "from", "new", "this", "void", "int", "char", "float", "double", "package",
-    "func", "interface", "and", "or", "not", "is", "None", "print", "len", "String", "Vec",
+    "fn",
+    "let",
+    "mut",
+    "pub",
+    "use",
+    "mod",
+    "impl",
+    "struct",
+    "enum",
+    "trait",
+    "const",
+    "static",
+    "type",
+    "where",
+    "self",
+    "Self",
+    "return",
+    "match",
+    "if",
+    "else",
+    "for",
+    "while",
+    "loop",
+    "break",
+    "continue",
+    "true",
+    "false",
+    "None",
+    "Some",
+    "Ok",
+    "Err",
+    "as",
+    "in",
+    "ref",
+    "move",
+    "async",
+    "await",
+    "dyn",
+    "unsafe",
+    "extern",
+    "crate",
+    "super",
+    "function",
+    "var",
+    "class",
+    "def",
+    "import",
+    "from",
+    "new",
+    "this",
+    "void",
+    "int",
+    "char",
+    "float",
+    "double",
+    "package",
+    "func",
+    "interface",
+    "and",
+    "or",
+    "not",
+    "is",
+    "None",
+    "print",
+    "len",
+    "String",
+    "Vec",
 ];
 
 /// Identifiers that appear in `new_text` but not in `old_text`, i.e. the names an `edit` introduced.
@@ -2308,7 +2511,10 @@ fn identifiers(text: &str) -> Vec<String> {
 fn flush_identifier(current: &mut String, out: &mut Vec<String>) {
     if current.len() >= 3
         && !SYMBOL_KEYWORDS.contains(&current.as_str())
-        && current.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && current
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
     {
         out.push(current.clone());
     }
@@ -2318,8 +2524,25 @@ fn flush_identifier(current: &mut String, out: &mut Vec<String>) {
 /// Names declared by a whole-file `write`: `fn foo`, `struct Bar`, `class Baz`, `def qux`, …
 pub fn top_level_symbol_names(content: &str, max: usize) -> Vec<String> {
     const KINDS: &[&str] = &[
-        "fn", "struct", "enum", "trait", "impl", "const", "static", "type", "mod", "class",
-        "interface", "function", "def", "func", "let", "var", "public", "private", "protected",
+        "fn",
+        "struct",
+        "enum",
+        "trait",
+        "impl",
+        "const",
+        "static",
+        "type",
+        "mod",
+        "class",
+        "interface",
+        "function",
+        "def",
+        "func",
+        "let",
+        "var",
+        "public",
+        "private",
+        "protected",
     ];
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
@@ -2353,16 +2576,28 @@ pub fn top_level_symbol_names(content: &str, max: usize) -> Vec<String> {
 }
 
 /// Build the summary line stored alongside a mutation span.
-pub fn mutation_summary(tool_name: &str, relative_path: &str, start_line: usize, end_line: usize) -> String {
+pub fn mutation_summary(
+    tool_name: &str,
+    relative_path: &str,
+    start_line: usize,
+    end_line: usize,
+) -> String {
     if start_line > 0 && end_line >= start_line {
-        format!("{} {} lines {}-{}", tool_name, relative_path, start_line, end_line)
+        format!(
+            "{} {} lines {}-{}",
+            tool_name, relative_path, start_line, end_line
+        )
     } else {
         format!("{} {}", tool_name, relative_path)
     }
 }
 
 /// Convenience: build the `added_symbols` hint for one mutating tool call from its raw arguments.
-pub fn added_symbols_for_call(tool_name: &str, raw_arguments: &str, new_content: Option<&str>) -> Vec<String> {
+pub fn added_symbols_for_call(
+    tool_name: &str,
+    raw_arguments: &str,
+    new_content: Option<&str>,
+) -> Vec<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_arguments) else {
         return Vec::new();
     };
@@ -2439,7 +2674,11 @@ fn main() {
     fn scanner_accepts_rust_lifetimes_and_raw_strings() {
         let source = "struct S<'a> { r: &'a str }\nfn f<'a>(x: &'a str) -> &'a str { x }\n";
         let issues = scan_code(CodeLang::Rust, source);
-        assert!(issues.is_empty(), "lifetimes are not char literals: {:?}", issues);
+        assert!(
+            issues.is_empty(),
+            "lifetimes are not char literals: {:?}",
+            issues
+        );
     }
 
     #[test]
@@ -2491,7 +2730,8 @@ fn main() {
         assert_eq!(anchors[0].error_code.as_deref(), Some("E0425"));
         assert_eq!(anchors[0].symbol.as_deref(), Some("foo"));
 
-        let py = "Traceback (most recent call last):\n  File \"/tmp/ws/app.py\", line 7, in <module>\n";
+        let py =
+            "Traceback (most recent call last):\n  File \"/tmp/ws/app.py\", line 7, in <module>\n";
         let anchors = parse_diagnostic_anchors(py);
         assert_eq!(anchors[0].file_path, "/tmp/ws/app.py");
         assert_eq!(anchors[0].line, Some(7));

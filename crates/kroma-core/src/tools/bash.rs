@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{watch, Notify};
 
 pub const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -130,7 +130,7 @@ where
                 flood_notify.notify_one();
             }
         });
-})
+    })
 }
 
 pub async fn execute_bash(
@@ -172,8 +172,7 @@ pub async fn execute_bash(
     }
     let timeout_duration = Duration::from_secs(timeout_sec).min(budget.max_run_duration);
 
-    let (shell_bin, shell_args) =
-        crate::process_group::resolve_shell_invocation(&args.command);
+    let (shell_bin, shell_args) = crate::process_group::resolve_shell_invocation(&args.command);
 
     let mut cmd = Command::new(&shell_bin);
     crate::process_group::apply_shell_args_tokio(&mut cmd, &shell_bin, &shell_args, &args.command);
@@ -284,7 +283,9 @@ pub async fn execute_bash(
                 }
                 .to_string(),
             );
-            proc_group.terminate_gracefully(&mut child, grace_period).await;
+            proc_group
+                .terminate_gracefully(&mut child, grace_period)
+                .await;
         }
     }
 
@@ -301,17 +302,16 @@ pub async fn execute_bash(
 
     let buf_inner = {
         let mut guard = shared_buf.lock().unwrap();
-        std::mem::replace(
-            &mut *guard,
-            HeadTailBuffer::new(0, 0, 1, 0, None),
-        )
+        std::mem::replace(&mut *guard, HeadTailBuffer::new(0, 0, 1, 0, None))
     };
 
     if buf_inner.total_observed_bytes() > flood_cap && trigger != StopTrigger::OutputFloodCap {
         trigger = StopTrigger::OutputFloodCap;
         exit_code = None;
         terminated_by = Some("OutputFloodCap".to_string());
-        proc_group.terminate_gracefully(&mut child, grace_period).await;
+        proc_group
+            .terminate_gracefully(&mut child, grace_period)
+            .await;
     }
 
     let (body_output, truncated) = buf_inner.finalize();
@@ -369,4 +369,3 @@ pub async fn execute_bash(
         }
     }
 }
-

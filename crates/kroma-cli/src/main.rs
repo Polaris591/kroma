@@ -1,28 +1,29 @@
 pub mod approval_ui;
 
 use approval_ui::TtyApprovalUi;
-use kroma_core::agent_loop::{ build_runtime_with_registry, AgentRunConfig, AgentRunner };
+use kroma_core::agent_loop::{build_runtime_with_registry, AgentRunConfig, AgentRunner};
 use kroma_core::budget::BudgetConfig;
-use kroma_core::completion_gate::{configured_timeout, parse_command_argv, WorkspaceCompletionGate};
+use kroma_core::completion_gate::{
+    configured_timeout, parse_command_argv, WorkspaceCompletionGate,
+};
 use kroma_core::config_file::{ConfigOverrides, ResolvedConfig};
 use kroma_core::env::{AllowAllGate, ExecutionEnv, LocalHostEnv, SharedCompletionGate};
-use kroma_core::events::{ resolve_default_state_dir, EventLogger, EventPayload };
-use kroma_core::prompt::PromptBuilder;
-use kroma_core::revision::{MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore};
-use kroma_core::session::SessionJournal;
-use kroma_core::workspace::WorkspaceCap;
-use kroma_core::provider::{build_provider, ProviderProtocol, ProviderSettings};
+use kroma_core::events::{resolve_default_state_dir, EventLogger, EventPayload};
 use kroma_core::extensions::{
     discover_skills, CommandObserverHook, CommandPolicyHook, ExtensionManifest, ScopedExtension,
     SubtreeContextTracker,
 };
+use kroma_core::prompt::PromptBuilder;
+use kroma_core::provider::{build_provider, ProviderProtocol, ProviderSettings};
+use kroma_core::revision::{MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore};
+use kroma_core::session::SessionJournal;
 use kroma_core::surface::{
-    validate_daemon_listen_addr, KromaDaemon, KromaRuntimeConfig, InteractiveRepl,
-    RpcDispatcher,
+    validate_daemon_listen_addr, InteractiveRepl, KromaDaemon, KromaRuntimeConfig, RpcDispatcher,
 };
-use kroma_core::tool::policy::{ PolicyEngine, PolicyMode };
+use kroma_core::tool::policy::{PolicyEngine, PolicyMode};
 use kroma_core::tool::registry::ToolRegistry;
 use kroma_core::types::RunStatus;
+use kroma_core::workspace::WorkspaceCap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -35,7 +36,9 @@ pub enum CliSurface {
     Headless,
     Repl,
     Acp,
-    Serve { listen_addr: String },
+    Serve {
+        listen_addr: String,
+    },
     /// Item #3 (`v1.4.0`): paired, budget-locked A/B benchmark runner.
     Bench {
         suite: Option<PathBuf>,
@@ -368,8 +371,7 @@ where
                     .next()
                     .ok_or_else(|| "missing value for --protocol".to_string())?;
                 // Validate here so a typo fails fast, before any credentials are read.
-                let parsed = ProviderProtocol::parse(&val)
-                    .map_err(|e| e.to_string())?;
+                let parsed = ProviderProtocol::parse(&val).map_err(|e| e.to_string())?;
                 protocol = parsed.as_str().to_string();
                 protocol_explicit = true;
             }
@@ -386,15 +388,24 @@ where
                 quiet = true;
             }
             "--resume" => {
-                let val = iter.next().ok_or_else(|| "missing value for --resume".to_string())?;
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --resume".to_string())?;
                 resume = Some(PathBuf::from(val));
             }
             "--fork" => {
-                let val = iter.next().ok_or_else(|| "missing value for --fork <TURN>".to_string())?;
-                fork_turn = Some(val.parse::<usize>().map_err(|_| "--fork expects a numeric turn index".to_string())?);
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --fork <TURN>".to_string())?;
+                fork_turn = Some(
+                    val.parse::<usize>()
+                        .map_err(|_| "--fork expects a numeric turn index".to_string())?,
+                );
             }
             "--verify-cmd" => {
-                let val = iter.next().ok_or_else(|| "missing value for --verify-cmd <CMD>".to_string())?;
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --verify-cmd <CMD>".to_string())?;
                 if val.trim().is_empty() {
                     return Err("empty value for --verify-cmd".to_string());
                 }
@@ -502,7 +513,11 @@ where
                 return Err(format!("kroma {}", kroma_core::version()));
             }
             other => {
-                return Err(format!("unrecognized argument '{}'\n\n{}", other, usage_text()));
+                return Err(format!(
+                    "unrecognized argument '{}'\n\n{}",
+                    other,
+                    usage_text()
+                ));
             }
         }
     }
@@ -726,10 +741,12 @@ fn resolve_resume_path(
     }
 
     // A bare session id / filename resolves against the session store (reject any path traversal).
-    if !raw
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir))
-    {
+    if !raw.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
+    }) {
         let direct = sessions_dir.join(raw);
         if direct.exists() {
             validate_resume_path_candidate(&direct)?;
@@ -819,15 +836,18 @@ fn choose_completion_gate(
         }
         return Ok(CompletionGateChoice::Explicit(argv));
     }
-    Ok(CompletionGateChoice::AutoDetect { allow_auto: cli.policy_mode.allows_shell_auto() })
+    Ok(CompletionGateChoice::AutoDetect {
+        allow_auto: cli.policy_mode.allows_shell_auto(),
+    })
 }
 
 fn build_completion_gate(choice: CompletionGateChoice) -> SharedCompletionGate {
     match choice {
         CompletionGateChoice::Disabled => Arc::new(AllowAllGate),
-        CompletionGateChoice::Explicit(argv) => {
-            Arc::new(WorkspaceCompletionGate::new(Some(argv), configured_timeout()))
-        }
+        CompletionGateChoice::Explicit(argv) => Arc::new(WorkspaceCompletionGate::new(
+            Some(argv),
+            configured_timeout(),
+        )),
         CompletionGateChoice::AutoDetect { allow_auto } => Arc::new(
             WorkspaceCompletionGate::with_auto_detection(None, configured_timeout(), allow_auto),
         ),
@@ -940,7 +960,9 @@ fn run_bench(
         print!("{}", report.render());
     }
     if !quiet && report.executor == SYNTHETIC_EXECUTOR_LABEL {
-        eprintln!("[kroma] note: built-in smoke suite uses the synthetic executor (plumbing check only)");
+        eprintln!(
+            "[kroma] note: built-in smoke suite uses the synthetic executor (plumbing check only)"
+        );
     }
     ExitCode::SUCCESS
 }
@@ -961,7 +983,11 @@ fn run_list_skills(cli: &CliArgs) -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-    println!("skills for {} ({} discovered):", cli.workspace.display(), skills.len());
+    println!(
+        "skills for {} ({} discovered):",
+        cli.workspace.display(),
+        skills.len()
+    );
     for skill in &skills {
         println!("  {}\n      path: {}", skill.name, skill.path);
         if !skill.description.is_empty() {
@@ -978,7 +1004,8 @@ fn build_cli_extension(cli: &CliArgs) -> Result<Option<ScopedExtension>, String>
     if cli.policy_hook.is_none() && cli.observer_hook.is_none() {
         return Ok(None);
     }
-    let mut manifest = ExtensionManifest::operator_trusted("cli-hooks", "--policy-hook/--observer-hook");
+    let mut manifest =
+        ExtensionManifest::operator_trusted("cli-hooks", "--policy-hook/--observer-hook");
     let mut ext = ScopedExtension::new(manifest.clone());
     if let Some(raw) = cli.policy_hook.as_deref() {
         let argv = parse_command_argv(raw)?;
@@ -995,8 +1022,10 @@ fn build_cli_extension(cli: &CliArgs) -> Result<Option<ScopedExtension>, String>
             return Err("empty --observer-hook command".to_string());
         }
         manifest.capabilities.push("observer_hook".to_string());
-        ext.observer_hooks
-            .push(Arc::new(CommandObserverHook::new("cli-observer-hook", argv)));
+        ext.observer_hooks.push(Arc::new(CommandObserverHook::new(
+            "cli-observer-hook",
+            argv,
+        )));
     }
     ext.manifest = manifest;
     Ok(Some(ext))
@@ -1154,8 +1183,7 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
     match store.recover_pending_merge(&workspace) {
         Ok(MergeRecoveryOutcome::NothingPending) => {}
         Ok(MergeRecoveryOutcome::RolledBack {
-            pre_merge_revision,
-            ..
+            pre_merge_revision, ..
         }) => {
             println!(
                 "recovered an interrupted subagent merge; rolled the workspace back to {}",
@@ -1200,7 +1228,9 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
             );
             return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
         }
-        Ok(None) => store.restore_revision(&workspace, &target, expected.as_ref(), cli.force_restore),
+        Ok(None) => {
+            store.restore_revision(&workspace, &target, expected.as_ref(), cli.force_restore)
+        }
         Err(e) => Err(e),
     };
 
@@ -1239,7 +1269,10 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
             );
             if let Some(turn) = rewind_turn {
                 match journal.fork_at_turn(turn) {
-                    Ok(leaf) => println!("rewound session transcript to turn {} (leaf {})", turn, leaf),
+                    Ok(leaf) => println!(
+                        "rewound session transcript to turn {} (leaf {})",
+                        turn, leaf
+                    ),
                     Err(e) => {
                         eprintln!(
                             "error: workspace restored but the session leaf could not be rewound: {}",
@@ -1255,9 +1288,7 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
                 // revision, making the next `--undo` / `--restore-rev` fail with a false
                 // `ModifiedExternally` conflict. Re-bind the restored revision so the WAL always
                 // describes the workspace that is actually on disk.
-                if journal.latest_revision_id().as_deref()
-                    != Some(restored_revision.as_str())
-                {
+                if journal.latest_revision_id().as_deref() != Some(restored_revision.as_str()) {
                     if let Err(e) = record_restored_revision(
                         &mut journal,
                         &store,
@@ -1443,8 +1474,8 @@ impl kroma_core::surface::ProviderFactory for CliProviderFactory {
             protocol: parsed,
             max_tokens: 0,
         };
-        let (resolved, provider) =
-            build_provider(&settings).map_err(|e| format!("invalid provider configuration: {}", e))?;
+        let (resolved, provider) = build_provider(&settings)
+            .map_err(|e| format!("invalid provider configuration: {}", e))?;
         Ok((
             kroma_core::surface::ProviderSwap {
                 protocol: resolved.as_str().to_string(),
@@ -1479,7 +1510,13 @@ async fn main() -> ExitCode {
         json,
     } = cli.surface
     {
-        return run_bench(suite.as_deref(), budget_tokens, json, &cli.workspace, cli.quiet);
+        return run_bench(
+            suite.as_deref(),
+            budget_tokens,
+            json,
+            &cli.workspace,
+            cli.quiet,
+        );
     }
 
     // Gate 1: revision management actions never contact a provider and never need an API key.
@@ -1598,10 +1635,7 @@ async fn main() -> ExitCode {
         }
     };
     if !cli.quiet && resolved_protocol != ProviderProtocol::ChatCompletions {
-        eprintln!(
-            "[kroma] provider protocol: {}",
-            resolved_protocol.as_str()
-        );
+        eprintln!("[kroma] provider protocol: {}", resolved_protocol.as_str());
     }
 
     let budget = BudgetConfig::default();
@@ -1660,12 +1694,9 @@ async fn main() -> ExitCode {
         rt_cfg.completion_gate_max_retries = max_gate_retries;
         rt_cfg.predictive_check = !cli.no_predictive_check;
         rt_cfg.subtree_context_enabled = !cli.no_subtree_context;
-        rt_cfg.max_subagents = resolved_config
-            .max_subagents
-            .unwrap_or(cli.max_subagents);
+        rt_cfg.max_subagents = resolved_config.max_subagents.unwrap_or(cli.max_subagents);
         // Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
-        rt_cfg.adaptive_tournament_candidates =
-            resolved_config.adaptive_tournament.unwrap_or(0);
+        rt_cfg.adaptive_tournament_candidates = resolved_config.adaptive_tournament.unwrap_or(0);
         rt_cfg.initial_skill = cli.skill.clone();
         if let Some(raw_pred) = cli.predict_cmd.as_deref() {
             if cli.policy_mode != PolicyMode::ReadOnly && !cli.no_predictive_check {
@@ -1732,7 +1763,8 @@ async fn main() -> ExitCode {
                     .await
             }
             CliSurface::Bench { .. } => Err(
-                "kroma bench runs before the agent surfaces; this branch is unreachable".to_string(),
+                "kroma bench runs before the agent surfaces; this branch is unreachable"
+                    .to_string(),
             ),
             CliSurface::Serve { listen_addr } => {
                 match KromaDaemon::bind(listen_addr, dispatcher).await {
@@ -1772,8 +1804,7 @@ async fn main() -> ExitCode {
     match snapshot_store_for(&state_dir).recover_pending_merge(env.workspace()) {
         Ok(MergeRecoveryOutcome::NothingPending) => {}
         Ok(MergeRecoveryOutcome::RolledBack {
-            pre_merge_revision,
-            ..
+            pre_merge_revision, ..
         }) => {
             if !cli.quiet {
                 eprintln!(
@@ -1791,7 +1822,10 @@ async fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("error: failed to recover an interrupted subagent merge: {}", e);
+            eprintln!(
+                "error: failed to recover an interrupted subagent merge: {}",
+                e
+            );
             return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
         }
     }
@@ -1820,7 +1854,11 @@ async fn main() -> ExitCode {
             }
         };
         if journal.workspace_root() != env.workspace().root() {
-            eprintln!("error: session WAL belongs to workspace {}, not {}", journal.workspace_root().display(), env.workspace().root().display());
+            eprintln!(
+                "error: session WAL belongs to workspace {}, not {}",
+                journal.workspace_root().display(),
+                env.workspace().root().display()
+            );
             return ExitCode::from(2);
         }
         // O6: a crash between the snapshot write and the WAL append leaves the store one revision
@@ -1856,7 +1894,8 @@ async fn main() -> ExitCode {
         .as_deref()
         .and_then(|v| kroma_core::context_projector::ProjectionProfile::parse(v).ok());
 
-    let mut logger = match EventLogger::new(run_cfg.run_id, Some(state_dir.clone()), cli.strict_log) {
+    let mut logger = match EventLogger::new(run_cfg.run_id, Some(state_dir.clone()), cli.strict_log)
+    {
         Ok(l) => l,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -1884,7 +1923,8 @@ async fn main() -> ExitCode {
     // BUG-01 (`v1.5.1`): the headless path must honour the same resolved `max_subagents` as the
     // REPL/serve path (`resolved_config` already merges CLI > env > workspace > user file).
     let max_subagents = resolved_config.max_subagents.unwrap_or(cli.max_subagents);
-    let mut registry = ToolRegistry::new(cli.tool_filter.clone()).with_workspace_skills(workspace_skills);
+    let mut registry =
+        ToolRegistry::new(cli.tool_filter.clone()).with_workspace_skills(workspace_skills);
     if max_subagents == 0 {
         registry = registry.without_subagents();
     }
@@ -1940,7 +1980,10 @@ async fn main() -> ExitCode {
 
     let snapshot_store = Arc::new(snapshot_store_for(&state_dir));
     if !cli.quiet {
-        eprintln!("[kroma] workspace revisions: {}", snapshot_store.root().display());
+        eprintln!(
+            "[kroma] workspace revisions: {}",
+            snapshot_store.root().display()
+        );
     }
     let runner = AgentRunner::new(run_cfg, provider, runtime, cancel_rx)
         .with_prompt_builder(prompt_builder)
@@ -1951,9 +1994,7 @@ async fn main() -> ExitCode {
         .with_completion_gate_max_retries(max_gate_retries)
         .with_max_subagents(max_subagents)
         // Item #3 (`v1.4.0`): adaptive tournament escalation on repeated verification failure.
-        .with_adaptive_tournament_candidates(
-            resolved_config.adaptive_tournament.unwrap_or(0),
-        );
+        .with_adaptive_tournament_candidates(resolved_config.adaptive_tournament.unwrap_or(0));
     // Gate 4: `--predict-cmd` is an explicit operator authorization, exactly like `--verify-cmd`,
     // so it runs without needing `--allow-shell`. It is skipped when `--policy read-only` or
     // `--no-predictive-check` is active.
@@ -1964,11 +2005,13 @@ async fn main() -> ExitCode {
                 if !cli.quiet {
                     eprintln!("[kroma] predictive check: {}", argv.join(" "));
                 }
-                runner.with_predictive_command(Arc::new(WorkspaceCompletionGate::with_auto_detection(
-                    Some(argv),
-                    configured_timeout(),
-                    false,
-                )))
+                runner.with_predictive_command(Arc::new(
+                    WorkspaceCompletionGate::with_auto_detection(
+                        Some(argv),
+                        configured_timeout(),
+                        false,
+                    ),
+                ))
             }
             Ok(_) => {
                 eprintln!("error: empty value for --predict-cmd");
@@ -2098,16 +2141,35 @@ mod tests {
         assert!(with_effort_quiet.quiet);
 
         let resumed = parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
-            "--task".into(), "continue".into(), "--resume".into(), "session.wal.jsonl".into(),
-            "--fork".into(), "10".into(),
-        ]).unwrap();
-        assert_eq!(resumed.resume.as_deref(), Some(std::path::Path::new("session.wal.jsonl")));
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "continue".into(),
+            "--resume".into(),
+            "session.wal.jsonl".into(),
+            "--fork".into(),
+            "10".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            resumed.resume.as_deref(),
+            Some(std::path::Path::new("session.wal.jsonl"))
+        );
         assert_eq!(resumed.fork_turn, Some(10));
         assert!(parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
-            "--task".into(), "continue".into(), "--fork".into(), "10".into(),
-        ]).unwrap_err().contains("requires --resume"));
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--task".into(),
+            "continue".into(),
+            "--fork".into(),
+            "10".into(),
+        ])
+        .unwrap_err()
+        .contains("requires --resume"));
 
         // Passing invalid --policy with --allow-write must be rejected
         let bad_policy = parse_cli_args(vec![
@@ -2177,7 +2239,10 @@ mod tests {
             "sh -c \"cargo test --workspace\"".into(),
         ]))
         .unwrap();
-        assert_eq!(explicit.verify_cmd.as_deref(), Some("sh -c \"cargo test --workspace\""));
+        assert_eq!(
+            explicit.verify_cmd.as_deref(),
+            Some("sh -c \"cargo test --workspace\"")
+        );
         assert!(!explicit.no_verify);
 
         let disabled = parse_cli_args(base_cli(vec!["--no-verify".into()])).unwrap();
@@ -2193,8 +2258,13 @@ mod tests {
     fn test_workspace_revision_management_flags_parse() {
         // `--list-revisions` and `--undo` are standalone actions: no --task required.
         let listed = parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
-            "--resume".into(), "session.wal.jsonl".into(), "--list-revisions".into(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--resume".into(),
+            "session.wal.jsonl".into(),
+            "--list-revisions".into(),
         ])
         .unwrap();
         assert!(listed.list_revisions);
@@ -2202,8 +2272,13 @@ mod tests {
         assert!(listed.is_revision_management());
 
         let undo = parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
-            "--resume".into(), "session.wal.jsonl".into(), "--undo".into(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--resume".into(),
+            "session.wal.jsonl".into(),
+            "--undo".into(),
             "--force-restore".into(),
         ])
         .unwrap();
@@ -2211,9 +2286,14 @@ mod tests {
         assert!(undo.force_restore);
 
         let restore = parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
-            "--resume".into(), "session.wal.jsonl".into(),
-            "--restore-rev".into(), "r-0123456789abcdef0123456789abcdef".into(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--resume".into(),
+            "session.wal.jsonl".into(),
+            "--restore-rev".into(),
+            "r-0123456789abcdef0123456789abcdef".into(),
         ])
         .unwrap();
         assert_eq!(
@@ -2223,14 +2303,20 @@ mod tests {
 
         // A normal run still requires --task.
         assert!(parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
         ])
         .unwrap_err()
         .contains("--task"));
 
         // Management actions need a session to act on.
         assert!(parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
             "--undo".into(),
         ])
         .unwrap_err()
@@ -2238,15 +2324,28 @@ mod tests {
 
         // Conflicting or dangling combinations are rejected rather than guessed at.
         assert!(parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
-            "--resume".into(), "session.wal.jsonl".into(), "--undo".into(),
-            "--restore-rev".into(), "r-0123456789abcdef0123456789abcdef".into(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--resume".into(),
+            "session.wal.jsonl".into(),
+            "--undo".into(),
+            "--restore-rev".into(),
+            "r-0123456789abcdef0123456789abcdef".into(),
         ])
         .unwrap_err()
         .contains("mutually exclusive"));
         assert!(parse_cli_args(vec![
-            "kroma".into(), "run".into(), "--workspace".into(), "./repo".into(),
-            "--resume".into(), "session.wal.jsonl".into(), "--undo".into(), "--fork".into(), "2".into(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            "./repo".into(),
+            "--resume".into(),
+            "session.wal.jsonl".into(),
+            "--undo".into(),
+            "--fork".into(),
+            "2".into(),
         ])
         .unwrap_err()
         .contains("drop --fork"));
@@ -2274,7 +2373,11 @@ mod tests {
         let no_cmd = parse_cli_args(base_cli(vec![])).unwrap();
         assert_eq!(
             choose_completion_gate(&no_cmd, Some("cargo test --workspace".into())).unwrap(),
-            CompletionGateChoice::Explicit(vec!["cargo".into(), "test".into(), "--workspace".into()])
+            CompletionGateChoice::Explicit(vec![
+                "cargo".into(),
+                "test".into(),
+                "--workspace".into()
+            ])
         );
 
         // Without an explicit command and without --allow-shell, auto-detection must stay off.
@@ -2291,11 +2394,8 @@ mod tests {
         );
 
         // --no-verify wins over an otherwise-authorized explicit command.
-        let disabled = parse_cli_args(base_cli(vec![
-            "--allow-shell".into(),
-            "--no-verify".into(),
-        ]))
-        .unwrap();
+        let disabled =
+            parse_cli_args(base_cli(vec!["--allow-shell".into(), "--no-verify".into()])).unwrap();
         assert_eq!(
             choose_completion_gate(&disabled, Some("cargo test".into())).unwrap(),
             CompletionGateChoice::Disabled
@@ -2303,7 +2403,10 @@ mod tests {
 
         // Read-only policy never enables verification.
         let ro = parse_cli_args(base_cli(vec!["--policy".into(), "read-only".into()])).unwrap();
-        assert_eq!(choose_completion_gate(&ro, None).unwrap(), CompletionGateChoice::Disabled);
+        assert_eq!(
+            choose_completion_gate(&ro, None).unwrap(),
+            CompletionGateChoice::Disabled
+        );
     }
 
     /// `--restore-rev` must bind the restored revision into the WAL, so a following `--undo`
@@ -2313,10 +2416,8 @@ mod tests {
         use kroma_core::messages::{TranscriptItem, UserMessage};
         use std::fs;
 
-        let root = std::env::temp_dir().join(format!(
-            "kroma-cli-restore-rev-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("kroma-cli-restore-rev-{}", uuid::Uuid::new_v4()));
         let ws_dir = root.join("ws");
         fs::create_dir_all(&ws_dir).unwrap();
         fs::write(ws_dir.join("f.txt"), "v0\n").unwrap();
@@ -2326,22 +2427,44 @@ mod tests {
         let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
 
         journal
-            .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+            .append_item(
+                0,
+                TranscriptItem::User(UserMessage {
+                    content: "task".into(),
+                }),
+            )
             .unwrap();
         let r0 = store.capture_revision(&workspace, None, None, 0).unwrap();
         journal
-            .record_revision_capture(0, r0.revision_id.as_str(), None, r0.changed_paths.clone(), r0.tracked_files.len())
+            .record_revision_capture(
+                0,
+                r0.revision_id.as_str(),
+                None,
+                r0.changed_paths.clone(),
+                r0.tracked_files.len(),
+            )
             .unwrap();
 
         fs::write(ws_dir.join("f.txt"), "v1\n").unwrap();
         journal
-            .append_item(1, TranscriptItem::User(UserMessage { content: "turn 1".into() }))
+            .append_item(
+                1,
+                TranscriptItem::User(UserMessage {
+                    content: "turn 1".into(),
+                }),
+            )
             .unwrap();
         let r1 = store
             .capture_revision(&workspace, Some(&r0.revision_id), None, 1)
             .unwrap();
         journal
-            .record_revision_capture(1, r1.revision_id.as_str(), Some(r0.revision_id.as_str()), r1.changed_paths.clone(), r1.tracked_files.len())
+            .record_revision_capture(
+                1,
+                r1.revision_id.as_str(),
+                Some(r0.revision_id.as_str()),
+                r1.changed_paths.clone(),
+                r1.tracked_files.len(),
+            )
             .unwrap();
 
         // `--restore-rev r0`: the expected revision is the session's latest recorded one.
@@ -2349,9 +2472,11 @@ mod tests {
             .restore_revision(&workspace, &r0.revision_id, Some(&r1.revision_id), false)
             .unwrap();
         let (restored_files, removed_files) = match &restored {
-            RestoreResult::Applied { restored_files, removed_files, .. } => {
-                (restored_files.clone(), removed_files.clone())
-            }
+            RestoreResult::Applied {
+                restored_files,
+                removed_files,
+                ..
+            } => (restored_files.clone(), removed_files.clone()),
             other => panic!("expected Applied, got {:?}", other),
         };
         record_restored_revision(
@@ -2416,22 +2541,44 @@ mod tests {
         let store = SnapshotStore::new(root.join("snapshots"));
         let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
         journal
-            .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+            .append_item(
+                0,
+                TranscriptItem::User(UserMessage {
+                    content: "task".into(),
+                }),
+            )
             .unwrap();
         let r0 = store.capture_revision(&workspace, None, None, 0).unwrap();
         journal
-            .record_revision_capture(0, r0.revision_id.as_str(), None, r0.changed_paths.clone(), r0.tracked_files.len())
+            .record_revision_capture(
+                0,
+                r0.revision_id.as_str(),
+                None,
+                r0.changed_paths.clone(),
+                r0.tracked_files.len(),
+            )
             .unwrap();
 
         fs::write(ws_dir.join("edit.rs"), "v2\n").unwrap();
         journal
-            .append_item(1, TranscriptItem::User(UserMessage { content: "turn 1".into() }))
+            .append_item(
+                1,
+                TranscriptItem::User(UserMessage {
+                    content: "turn 1".into(),
+                }),
+            )
             .unwrap();
         let r1 = store
             .capture_revision(&workspace, Some(&r0.revision_id), None, 1)
             .unwrap();
         journal
-            .record_revision_capture(1, r1.revision_id.as_str(), Some(r0.revision_id.as_str()), r1.changed_paths.clone(), r1.tracked_files.len())
+            .record_revision_capture(
+                1,
+                r1.revision_id.as_str(),
+                Some(r0.revision_id.as_str()),
+                r1.changed_paths.clone(),
+                r1.tracked_files.len(),
+            )
             .unwrap();
 
         // A merge parented on r1 was interrupted halfway: its journal is on disk and `edit.rs` is
@@ -2529,10 +2676,8 @@ mod tests {
         use kroma_core::messages::{TranscriptItem, UserMessage};
         use std::fs;
 
-        let root = std::env::temp_dir().join(format!(
-            "kroma-cli-undo-leaf-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("kroma-cli-undo-leaf-{}", uuid::Uuid::new_v4()));
         let ws_dir = root.join("ws");
         let state_dir = root.join("state");
         fs::create_dir_all(&ws_dir).unwrap();
@@ -2543,22 +2688,44 @@ mod tests {
         let store = SnapshotStore::new(state_dir.join("snapshots"));
         let mut journal = SessionJournal::create(state_dir.join("sessions"), &ws_dir).unwrap();
         journal
-            .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+            .append_item(
+                0,
+                TranscriptItem::User(UserMessage {
+                    content: "task".into(),
+                }),
+            )
             .unwrap();
         let r0 = store.capture_revision(&workspace, None, None, 0).unwrap();
         journal
-            .record_revision_capture(0, r0.revision_id.as_str(), None, r0.changed_paths.clone(), r0.tracked_files.len())
+            .record_revision_capture(
+                0,
+                r0.revision_id.as_str(),
+                None,
+                r0.changed_paths.clone(),
+                r0.tracked_files.len(),
+            )
             .unwrap();
 
         fs::write(ws_dir.join("f.txt"), "v1\n").unwrap();
         journal
-            .append_item(1, TranscriptItem::User(UserMessage { content: "turn 1".into() }))
+            .append_item(
+                1,
+                TranscriptItem::User(UserMessage {
+                    content: "turn 1".into(),
+                }),
+            )
             .unwrap();
         let r1 = store
             .capture_revision(&workspace, Some(&r0.revision_id), None, 1)
             .unwrap();
         journal
-            .record_revision_capture(1, r1.revision_id.as_str(), Some(r0.revision_id.as_str()), r1.changed_paths.clone(), r1.tracked_files.len())
+            .record_revision_capture(
+                1,
+                r1.revision_id.as_str(),
+                Some(r0.revision_id.as_str()),
+                r1.changed_paths.clone(),
+                r1.tracked_files.len(),
+            )
             .unwrap();
 
         // `--restore-rev r0` re-records r0 at the *current* leaf, i.e. the same turn-1 entry that
@@ -2567,9 +2734,11 @@ mod tests {
             .restore_revision(&workspace, &r0.revision_id, Some(&r1.revision_id), false)
             .unwrap();
         let (restored_files, removed_files) = match &restored {
-            RestoreResult::Applied { restored_files, removed_files, .. } => {
-                (restored_files.clone(), removed_files.clone())
-            }
+            RestoreResult::Applied {
+                restored_files,
+                removed_files,
+                ..
+            } => (restored_files.clone(), removed_files.clone()),
             other => panic!("expected Applied, got {:?}", other),
         };
         record_restored_revision(
@@ -2586,9 +2755,12 @@ mod tests {
 
         // `--undo` from here: `current` (r0) and `previous` (r1) share turn 1 and the same leaf.
         let undo_cli = parse_cli_args(vec![
-            "kroma".into(), "run".into(),
-            "--workspace".into(), ws_dir.display().to_string(),
-            "--resume".into(), wal_path.display().to_string(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            ws_dir.display().to_string(),
+            "--resume".into(),
+            wal_path.display().to_string(),
             "--undo".into(),
         ])
         .unwrap();
@@ -2608,10 +2780,14 @@ mod tests {
 
         // With the WAL in sync, a following `--restore-rev r0` must apply without a false conflict.
         let restore_cli = parse_cli_args(vec![
-            "kroma".into(), "run".into(),
-            "--workspace".into(), ws_dir.display().to_string(),
-            "--resume".into(), wal_path.display().to_string(),
-            "--restore-rev".into(), r0.revision_id.as_str().to_string(),
+            "kroma".into(),
+            "run".into(),
+            "--workspace".into(),
+            ws_dir.display().to_string(),
+            "--resume".into(),
+            wal_path.display().to_string(),
+            "--restore-rev".into(),
+            r0.revision_id.as_str().to_string(),
         ])
         .unwrap();
         let _ = run_revision_management(&restore_cli, &state_dir);
@@ -2627,10 +2803,8 @@ mod tests {
         use kroma_core::messages::{TranscriptItem, UserMessage};
         use std::fs;
 
-        let root = std::env::temp_dir().join(format!(
-            "kroma-cli-reconcile-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("kroma-cli-reconcile-{}", uuid::Uuid::new_v4()));
         let ws_dir = root.join("ws");
         let state_dir = root.join("state");
         fs::create_dir_all(&ws_dir).unwrap();
@@ -2641,7 +2815,12 @@ mod tests {
         let store = SnapshotStore::new(root.join("snapshots"));
         let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
         journal
-            .append_item(0, TranscriptItem::User(UserMessage { content: "task".into() }))
+            .append_item(
+                0,
+                TranscriptItem::User(UserMessage {
+                    content: "task".into(),
+                }),
+            )
             .unwrap();
         let baseline = store.capture_revision(&workspace, None, None, 0).unwrap();
         journal
@@ -2693,7 +2872,10 @@ mod tests {
             .filter_map(|entry| entry.ok())
             .map(|entry| fs::read_to_string(entry.path()).unwrap_or_default())
             .any(|body| body.contains("\"RevisionRestored\"") && body.contains("restored_files"));
-        assert!(logged, "a completed restore must be recorded in the run event log");
+        assert!(
+            logged,
+            "a completed restore must be recorded in the run event log"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2756,8 +2938,9 @@ mod tests {
         // BUG-09 (`v1.5.1`): `--no-subagents` is an explicit operator capability disable. A
         // workspace `.kroma.toml` (untrusted repo input) may set `max_subagents`, but it must not
         // silently re-enable subagents behind the operator's back.
-        let workspace_cfg = kroma_core::config_file::KromaConfigFile::parse_str("max_subagents = 5")
-            .expect("workspace config parses");
+        let workspace_cfg =
+            kroma_core::config_file::KromaConfigFile::parse_str("max_subagents = 5")
+                .expect("workspace config parses");
         let user_cfg = kroma_core::config_file::KromaConfigFile::default();
         let env = std::collections::BTreeMap::new();
         let workspace_path = PathBuf::from(".kroma.toml");
@@ -2989,7 +3172,6 @@ mod tests {
         assert_eq!(task_only.task.as_deref(), Some("quick fix"));
     }
 }
-
 
 #[repr(align(64))]
 struct BionicTlsPad([u8; 64]);

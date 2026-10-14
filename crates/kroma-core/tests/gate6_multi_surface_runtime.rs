@@ -14,14 +14,12 @@ use kroma_core::events::{EventLogger, EVENT_SCHEMA_VERSION};
 use kroma_core::extensions::discover_skills;
 use kroma_core::messages::{AssistantTurn, FinishReason, TokenUsage, ToolCall, TranscriptItem};
 use kroma_core::prompt::PromptBuilder;
-use kroma_core::provider::{
-    ModelProvider, ProviderCompletion, ProviderError, ProviderRequest,
-};
+use kroma_core::provider::{ModelProvider, ProviderCompletion, ProviderError, ProviderRequest};
 use kroma_core::revision::SnapshotStore;
 use kroma_core::session::SessionJournal;
 use kroma_core::surface::{
-    validate_daemon_listen_addr, KromaDaemon, KromaRuntimeConfig, InteractiveRepl,
-    JsonRpcRequest, JsonRpcResponse, RpcDispatcher, JSONRPC_INVALID_REQUEST, JSONRPC_PARSE_ERROR,
+    validate_daemon_listen_addr, InteractiveRepl, JsonRpcRequest, JsonRpcResponse, KromaDaemon,
+    KromaRuntimeConfig, RpcDispatcher, JSONRPC_INVALID_REQUEST, JSONRPC_PARSE_ERROR,
     JSONRPC_UNAUTHORIZED, MAX_RPC_FRAME_BYTES,
 };
 use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
@@ -206,7 +204,10 @@ async fn test_acp_stdio_initialize_prompt_event_stream_and_evidence_recall() {
 
     let disp_server = dispatcher.clone();
     let server_task = tokio::spawn(async move {
-        disp_server.serve_stream(server_read, server_write).await.unwrap();
+        disp_server
+            .serve_stream(server_read, server_write)
+            .await
+            .unwrap();
     });
 
     let mut client_lines = BufReader::new(client_read).lines();
@@ -247,7 +248,11 @@ async fn test_acp_stdio_initialize_prompt_event_stream_and_evidence_recall() {
     )
     .await;
     let init_resp = read_until_response(&mut client_lines, 1, &mut notifications).await;
-    assert!(init_resp.is_ok(), "initialize failed: {:?}", init_resp.error);
+    assert!(
+        init_resp.is_ok(),
+        "initialize failed: {:?}",
+        init_resp.error
+    );
     let init_val = init_resp.result.unwrap();
     assert_eq!(init_val["version"], kroma_core::version());
     assert_eq!(init_val["event_schema_version"], "1.0.0");
@@ -269,13 +274,14 @@ async fn test_acp_stdio_initialize_prompt_event_stream_and_evidence_recall() {
     )
     .await;
     let prompt_resp = read_until_response(&mut client_lines, 2, &mut notifications).await;
-    assert!(prompt_resp.is_ok(), "session.prompt failed: {:?}", prompt_resp.error);
+    assert!(
+        prompt_resp.is_ok(),
+        "session.prompt failed: {:?}",
+        prompt_resp.error
+    );
     let prompt_val = prompt_resp.result.unwrap();
     assert_eq!(prompt_val["status"], "completed");
-    assert_eq!(
-        prompt_val["final_text"],
-        "Updated version() to return 2."
-    );
+    assert_eq!(prompt_val["final_text"], "Updated version() to return 2.");
     assert_eq!(
         fs::read_to_string(ws.join("app.rs")).unwrap(),
         "pub fn version() -> u32 {\n    2\n}\n"
@@ -364,7 +370,11 @@ async fn test_acp_stdio_initialize_prompt_event_stream_and_evidence_recall() {
     )
     .await;
     let undo_resp = read_until_response(&mut client_lines, 5, &mut notifications).await;
-    assert!(undo_resp.is_ok(), "revision.undo failed: {:?}", undo_resp.error);
+    assert!(
+        undo_resp.is_ok(),
+        "revision.undo failed: {:?}",
+        undo_resp.error
+    );
     let undo_val = undo_resp.result.unwrap();
     assert_eq!(undo_val["status"], "applied");
     assert_eq!(
@@ -869,10 +879,24 @@ async fn test_serve_tcp_daemon_loopback_security_and_cancel_and_fork() {
         panic!("TCP stream closed before response id={}", id);
     }
 
-    let r1 = tcp_rpc(&mut w, &mut lines, 1, "session.prompt", json!({ "prompt": "First prompt" })).await;
+    let r1 = tcp_rpc(
+        &mut w,
+        &mut lines,
+        1,
+        "session.prompt",
+        json!({ "prompt": "First prompt" }),
+    )
+    .await;
     assert_eq!(r1.result.unwrap()["status"], "completed");
 
-    let r2 = tcp_rpc(&mut w, &mut lines, 2, "session.prompt", json!({ "prompt": "Second prompt" })).await;
+    let r2 = tcp_rpc(
+        &mut w,
+        &mut lines,
+        2,
+        "session.prompt",
+        json!({ "prompt": "Second prompt" }),
+    )
+    .await;
     assert_eq!(r2.result.unwrap()["status"], "completed");
 
     let st_before = tcp_rpc(&mut w, &mut lines, 3, "session.status", json!({})).await;
@@ -881,7 +905,11 @@ async fn test_serve_tcp_daemon_loopback_security_and_cancel_and_fork() {
 
     // Fork back to turn 1 over TCP JSON-RPC.
     let fork_resp = tcp_rpc(&mut w, &mut lines, 4, "session.fork", json!({ "turn": 1 })).await;
-    assert!(fork_resp.is_ok(), "session.fork failed: {:?}", fork_resp.error);
+    assert!(
+        fork_resp.is_ok(),
+        "session.fork failed: {:?}",
+        fork_resp.error
+    );
     assert_eq!(fork_resp.result.unwrap()["turn_count"], 1);
 
     drop(w);
@@ -915,11 +943,9 @@ async fn test_serve_tcp_daemon_loopback_security_and_cancel_and_fork() {
     sw.flush().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(60)).await;
-    sw.write_all(
-        b"{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"session.cancel\",\"params\":{}}\n",
-    )
-    .await
-    .unwrap();
+    sw.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"session.cancel\",\"params\":{}}\n")
+        .await
+        .unwrap();
     sw.flush().await.unwrap();
 
     let mut got_cancel_ack = false;
@@ -1169,7 +1195,8 @@ async fn test_cross_surface_parity_headless_vs_rpc_produce_identical_wal_and_rev
     let env_h = Arc::new(LocalHostEnv::new(&ws_headless, state_headless.clone()).unwrap());
     let prompt_h = PromptBuilder::default().with_workspace_context(env_h.workspace());
     let skills_h = discover_skills(env_h.workspace());
-    let journal_h = SessionJournal::create(state_headless.join("sessions"), env_h.workspace().root()).unwrap();
+    let journal_h =
+        SessionJournal::create(state_headless.join("sessions"), env_h.workspace().root()).unwrap();
     let wal_path_h = journal_h.path().to_path_buf();
     let store_h = Arc::new(SnapshotStore::new(state_headless.join("snapshots")));
     let policy_h = PolicyEngine::new(
@@ -1384,7 +1411,10 @@ async fn test_unauthenticated_probe_isolation_and_disconnect_cancellation_and_pr
             break;
         }
     }
-    assert_eq!(fs::read_to_string(ws.join("protected.txt")).unwrap(), "ok\n");
+    assert_eq!(
+        fs::read_to_string(ws.join("protected.txt")).unwrap(),
+        "ok\n"
+    );
     drop(auth_w);
 
     // Verify HTTP/CSRF request rejection on TCP socket.
@@ -1609,7 +1639,10 @@ async fn test_unix_domain_socket_daemon_0600_permissions_and_worker_subagent_rpc
         }
     }
 
-    assert!(approved, "worker spawn_subagent must request approval under PolicyMode::Ask");
+    assert!(
+        approved,
+        "worker spawn_subagent must request approval under PolicyMode::Ask"
+    );
     assert_eq!(
         fs::read_to_string(ws.join("worker_out.txt")).unwrap(),
         "created by worker\n"
@@ -1642,4 +1675,3 @@ async fn test_unix_domain_socket_daemon_0600_permissions_and_worker_subagent_rpc
     daemon_task.await.unwrap();
     let _ = fs::remove_dir_all(&root);
 }
-

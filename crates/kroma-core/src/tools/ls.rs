@@ -37,7 +37,10 @@ pub fn execute_ls(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOutp
     };
 
     let rel_input = args.path.as_deref().unwrap_or(".");
-    let limit = args.limit.unwrap_or(DEFAULT_NAV_LIMIT).min(DEFAULT_NAV_LIMIT);
+    let limit = args
+        .limit
+        .unwrap_or(DEFAULT_NAV_LIMIT)
+        .min(DEFAULT_NAV_LIMIT);
     if limit == 0 {
         return ToolExecutionOutput::error(
             ErrorCode::InvalidArguments,

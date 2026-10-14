@@ -12,7 +12,9 @@ impl RpcDispatcher {
             .unwrap_or_else(|e| e.into_inner())
     }
     /// B2 (`v1.4.0`): active context projection profile (`None` = default `P2`).
-    pub(crate) fn active_projection_profile(&self) -> Option<crate::context_projector::ProjectionProfile> {
+    pub(crate) fn active_projection_profile(
+        &self,
+    ) -> Option<crate::context_projector::ProjectionProfile> {
         *self
             .inner
             .active_projection_profile
@@ -51,7 +53,11 @@ impl RpcDispatcher {
             let canon_target = raw_path.canonicalize().map_err(|e| {
                 JsonRpcError::new(
                     JSONRPC_INVALID_PARAMS,
-                    format!("failed to resolve session WAL {}: {}", raw_path.display(), e),
+                    format!(
+                        "failed to resolve session WAL {}: {}",
+                        raw_path.display(),
+                        e
+                    ),
                 )
             })?;
             if crate::workspace::path_starts_with_and_strip(&canon_target, &canon_sessions)
@@ -89,12 +95,14 @@ impl RpcDispatcher {
             let _ = self.inner.snapshot_store.reconcile_with_wal(&mut j);
             j
         } else {
-            SessionJournal::create(sessions_dir, self.inner.env.workspace().root()).map_err(|e| {
-                JsonRpcError::new(
-                    JSONRPC_INTERNAL_ERROR,
-                    format!("failed to create session WAL: {}", e),
-                )
-            })?
+            SessionJournal::create(sessions_dir, self.inner.env.workspace().root()).map_err(
+                |e| {
+                    JsonRpcError::new(
+                        JSONRPC_INTERNAL_ERROR,
+                        format!("failed to create session WAL: {}", e),
+                    )
+                },
+            )?
         };
         let next_snap = Self::snapshot_from_journal(&journal);
         drop(journal);
@@ -155,7 +163,11 @@ impl RpcDispatcher {
         let mut journal = SessionJournal::open(&session_path).map_err(|e| {
             JsonRpcError::new(
                 JSONRPC_INTERNAL_ERROR,
-                format!("failed to open session WAL {}: {}", session_path.display(), e),
+                format!(
+                    "failed to open session WAL {}: {}",
+                    session_path.display(),
+                    e
+                ),
             )
         })?;
         let _ = self.inner.snapshot_store.reconcile_with_wal(&mut journal);
@@ -164,8 +176,9 @@ impl RpcDispatcher {
             PromptBuilder::default().with_workspace_context(self.inner.env.workspace());
         let activated_skills = self.inner.status.lock().unwrap().activated_skills.clone();
         for skill_name in &activated_skills {
-            if let Ok(pb) =
-                prompt_builder.clone().with_activated_skill(self.inner.env.workspace(), skill_name)
+            if let Ok(pb) = prompt_builder
+                .clone()
+                .with_activated_skill(self.inner.env.workspace(), skill_name)
             {
                 prompt_builder = pb;
             }
@@ -222,7 +235,13 @@ impl RpcDispatcher {
 
         let mut runner = AgentRunner::new(
             run_cfg,
-            Arc::clone(&self.inner.provider.lock().unwrap_or_else(|e| e.into_inner())),
+            Arc::clone(
+                &self
+                    .inner
+                    .provider
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ),
             runtime,
             cancel_rx,
         )
@@ -375,15 +394,12 @@ impl RpcDispatcher {
         }))
     }
     pub(crate) async fn rpc_session_fork(&self, params: &Value) -> Result<Value, JsonRpcError> {
-        let turn = params
-            .get("turn")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                JsonRpcError::new(
-                    JSONRPC_INVALID_PARAMS,
-                    "missing non-negative integer 'turn' parameter for session.fork",
-                )
-            })? as usize;
+        let turn = params.get("turn").and_then(Value::as_u64).ok_or_else(|| {
+            JsonRpcError::new(
+                JSONRPC_INVALID_PARAMS,
+                "missing non-negative integer 'turn' parameter for session.fork",
+            )
+        })? as usize;
 
         if self.inner.in_flight.load(Ordering::SeqCst) {
             return Err(JsonRpcError::new(
@@ -464,10 +480,7 @@ impl RpcDispatcher {
                 .to_string();
             let id = file_name.trim_end_matches(".wal.jsonl").to_string();
             let (entries, turns) = match SessionJournal::open(&path) {
-                Ok(journal) => (
-                    journal.active_transcript().len(),
-                    journal.max_active_turn(),
-                ),
+                Ok(journal) => (journal.active_transcript().len(), journal.max_active_turn()),
                 Err(_) => (0, 0),
             };
             out.push(json!({

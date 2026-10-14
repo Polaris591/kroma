@@ -19,7 +19,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
 use tokio::net::TcpStream;
 
 pub(crate) const MAX_HTTP_HEADER_LINE_BYTES: usize = 16 * 1024;
@@ -52,9 +54,9 @@ pub(crate) enum BodyFailure {
 // ---------------------------------------------------------------------------------------------
 
 #[cfg(all(unix, not(target_os = "macos")))]
-use std::os::unix::io::AsRawFd;
-#[cfg(all(unix, not(target_os = "macos")))]
 use std::ffi::{c_char, c_int, c_long, c_void};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::os::unix::io::AsRawFd;
 #[cfg(all(unix, not(target_os = "macos")))]
 use tokio::io::unix::AsyncFd;
 
@@ -74,7 +76,11 @@ extern "C" {
     fn SSL_new(ctx: *mut c_void) -> *mut c_void;
     fn SSL_free(ssl: *mut c_void);
     fn SSL_set_fd(ssl: *mut c_void, fd: c_int) -> c_int;
-    fn SSL_set_verify(ssl: *mut c_void, mode: c_int, cb: Option<extern "C" fn(c_int, *mut c_void) -> c_int>);
+    fn SSL_set_verify(
+        ssl: *mut c_void,
+        mode: c_int,
+        cb: Option<extern "C" fn(c_int, *mut c_void) -> c_int>,
+    );
     fn SSL_ctrl(ssl: *mut c_void, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
     fn SSL_set1_host(ssl: *mut c_void, hostname: *const c_char) -> c_int;
     fn SSL_get_verify_result(ssl: *const c_void) -> c_long;
@@ -162,7 +168,9 @@ fn shared_client_ssl_ctx() -> io::Result<*mut c_void> {
             for file_path in KNOWN_CA_FILES {
                 if std::path::Path::new(file_path).is_file() {
                     if let Ok(c_path) = CString::new(*file_path) {
-                        if SSL_CTX_load_verify_locations(ctx, c_path.as_ptr(), std::ptr::null()) == 1 {
+                        if SSL_CTX_load_verify_locations(ctx, c_path.as_ptr(), std::ptr::null())
+                            == 1
+                        {
                             break;
                         }
                     }
@@ -172,7 +180,8 @@ fn shared_client_ssl_ctx() -> io::Result<*mut c_void> {
             for dir_path in KNOWN_CA_DIRS {
                 if std::path::Path::new(dir_path).is_dir() {
                     if let Ok(c_path) = CString::new(*dir_path) {
-                        let _ = SSL_CTX_load_verify_locations(ctx, std::ptr::null(), c_path.as_ptr());
+                        let _ =
+                            SSL_CTX_load_verify_locations(ctx, std::ptr::null(), c_path.as_ptr());
                     }
                 }
             }
@@ -479,12 +488,15 @@ impl NativeTlsStream {
             .build()
             .map_err(|e| io::Error::other(format!("native TLS init failed: {}", e)))?;
         let async_connector = tokio_native_tls::TlsConnector::from(connector);
-        let stream = async_connector.connect(clean_host, tcp).await.map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::ConnectionRefused,
-                format!("TLS handshake failed: {}", e),
-            )
-        })?;
+        let stream = async_connector
+            .connect(clean_host, tcp)
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    format!("TLS handshake failed: {}", e),
+                )
+            })?;
         Ok(Self { inner: stream })
     }
 }
@@ -609,31 +621,28 @@ pub(crate) async fn send_request(
     budget: &BudgetConfig,
     deadline: Instant,
 ) -> Result<HttpResponseHead, TransportFailure> {
-    let connect_to = step_timeout(deadline, budget.connect_timeout)
-        .map_err(TransportFailure::Transient)?;
-    let tcp = match tokio::time::timeout(connect_to, TcpStream::connect(endpoint.connect_addr()))
-        .await
-    {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            return Err(TransportFailure::Transient(ProviderError::Transport(format!(
-                "connect failed: {}",
-                e
-            ))));
-        }
-        Err(_) => return Err(TransportFailure::Transient(ProviderError::Timeout)),
-    };
+    let connect_to =
+        step_timeout(deadline, budget.connect_timeout).map_err(TransportFailure::Transient)?;
+    let tcp =
+        match tokio::time::timeout(connect_to, TcpStream::connect(endpoint.connect_addr())).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                return Err(TransportFailure::Transient(ProviderError::Transport(
+                    format!("connect failed: {}", e),
+                )));
+            }
+            Err(_) => return Err(TransportFailure::Transient(ProviderError::Timeout)),
+        };
 
     let mut transport = if endpoint.scheme == "https" {
-        let tls_to = step_timeout(deadline, budget.connect_timeout)
-            .map_err(TransportFailure::Transient)?;
+        let tls_to =
+            step_timeout(deadline, budget.connect_timeout).map_err(TransportFailure::Transient)?;
         match tokio::time::timeout(tls_to, PlatformTlsStream::connect(tcp, &endpoint.host)).await {
             Ok(Ok(tls)) => MaybeTlsStream::Tls(tls),
             Ok(Err(e)) => {
-                return Err(TransportFailure::Transient(ProviderError::Transport(format!(
-                    "TLS handshake failed: {}",
-                    e
-                ))));
+                return Err(TransportFailure::Transient(ProviderError::Transport(
+                    format!("TLS handshake failed: {}", e),
+                )));
             }
             Err(_) => return Err(TransportFailure::Transient(ProviderError::Timeout)),
         }
@@ -660,24 +669,27 @@ pub(crate) async fn send_request(
     ));
     wire.push_str(spec.body);
 
-    let write_to = step_timeout(deadline, budget.idle_timeout)
-        .map_err(TransportFailure::Transient)?;
+    let write_to =
+        step_timeout(deadline, budget.idle_timeout).map_err(TransportFailure::Transient)?;
     match tokio::time::timeout(write_to, transport.write_all(wire.as_bytes())).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            return Err(TransportFailure::Transient(ProviderError::Transport(format!(
-                "write failed: {}",
-                e
-            ))));
+            return Err(TransportFailure::Transient(ProviderError::Transport(
+                format!("write failed: {}", e),
+            )));
         }
         Err(_) => return Err(TransportFailure::Transient(ProviderError::Timeout)),
     }
 
     let mut reader = BufReader::new(transport);
-    let status_line =
-        read_line_bounded(&mut reader, MAX_HTTP_HEADER_LINE_BYTES, budget.idle_timeout, deadline)
-            .await
-            .map_err(TransportFailure::Transient)?;
+    let status_line = read_line_bounded(
+        &mut reader,
+        MAX_HTTP_HEADER_LINE_BYTES,
+        budget.idle_timeout,
+        deadline,
+    )
+    .await
+    .map_err(TransportFailure::Transient)?;
     if status_line.is_empty() {
         return Err(TransportFailure::Transient(ProviderError::Transport(
             "server closed connection before status".into(),
@@ -703,10 +715,14 @@ pub(crate) async fn send_request(
                 "HTTP response exceeded max header count".to_string(),
             )));
         }
-        let hdr_line =
-            read_line_bounded(&mut reader, MAX_HTTP_HEADER_LINE_BYTES, budget.idle_timeout, deadline)
-                .await
-                .map_err(TransportFailure::Transient)?;
+        let hdr_line = read_line_bounded(
+            &mut reader,
+            MAX_HTTP_HEADER_LINE_BYTES,
+            budget.idle_timeout,
+            deadline,
+        )
+        .await
+        .map_err(TransportFailure::Transient)?;
         if hdr_line.is_empty() || hdr_line == "\r\n" || hdr_line == "\n" {
             break;
         }
@@ -824,10 +840,12 @@ where
                 )))
             })?;
             if chunk_size > max_bytes || total_decoded.saturating_add(chunk_size) > max_bytes {
-                return Err(BodyFailure::Fatal(ProviderError::IncompleteStream(format!(
-                    "HTTP chunk size ({}) exceeds max body size ({})",
-                    chunk_size, max_bytes
-                ))));
+                return Err(BodyFailure::Fatal(ProviderError::IncompleteStream(
+                    format!(
+                        "HTTP chunk size ({}) exceeds max body size ({})",
+                        chunk_size, max_bytes
+                    ),
+                )));
             }
             if chunk_size == 0 {
                 // Drain trailing CRLF / trailer headers.
@@ -844,8 +862,9 @@ where
             let mut remaining = chunk_size;
             while remaining > 0 {
                 let to_read = remaining.min(buf.len());
-                let read_to = step_timeout(deadline, budget.idle_timeout)
-                    .map_err(|e| BodyFailure::Stream(ProviderError::IncompleteStream(e.to_string())))?;
+                let read_to = step_timeout(deadline, budget.idle_timeout).map_err(|e| {
+                    BodyFailure::Stream(ProviderError::IncompleteStream(e.to_string()))
+                })?;
                 match tokio::time::timeout(read_to, head.reader.read(&mut buf[..to_read])).await {
                     Ok(Ok(0)) => {
                         return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
@@ -885,10 +904,9 @@ where
                     )));
                 }
                 Ok(Err(e)) => {
-                    return Err(BodyFailure::Stream(ProviderError::IncompleteStream(format!(
-                        "chunk terminator read error: {}",
-                        e
-                    ))));
+                    return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
+                        format!("chunk terminator read error: {}", e),
+                    )));
                 }
                 Err(_) => {
                     return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
@@ -897,10 +915,12 @@ where
                 }
             }
             if crlf != *b"\r\n" {
-                return Err(BodyFailure::Stream(ProviderError::IncompleteStream(format!(
-                    "malformed HTTP chunk terminator: expected CRLF, got {:02x?}",
-                    crlf
-                ))));
+                return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
+                    format!(
+                        "malformed HTTP chunk terminator: expected CRLF, got {:02x?}",
+                        crlf
+                    ),
+                )));
             }
         }
     }
@@ -931,10 +951,9 @@ where
                 on_chunk(&buf[..n]).map_err(BodyFailure::Fatal)?;
             }
             Ok(Err(e)) => {
-                return Err(BodyFailure::Stream(ProviderError::IncompleteStream(format!(
-                    "body read error: {}",
-                    e
-                ))));
+                return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
+                    format!("body read error: {}", e),
+                )));
             }
             Err(_) => {
                 return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
@@ -945,10 +964,12 @@ where
     }
     if let Some(len) = head.content_length {
         if total_read < len {
-            return Err(BodyFailure::Stream(ProviderError::IncompleteStream(format!(
-                "HTTP body ended prematurely: expected {} bytes, received {}",
-                len, total_read
-            ))));
+            return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
+                format!(
+                    "HTTP body ended prematurely: expected {} bytes, received {}",
+                    len, total_read
+                ),
+            )));
         }
     }
     Ok(())

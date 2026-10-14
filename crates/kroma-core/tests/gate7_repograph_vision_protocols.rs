@@ -33,7 +33,9 @@ use kroma_core::provider::{
     build_provider, ModelProvider, ProviderError, ProviderProtocol, ProviderRequest,
     ProviderSettings,
 };
-use kroma_core::repo_graph::{execute_code_graph, extract_reference_tokens, RepoGraph, MAX_GRAPH_FILES};
+use kroma_core::repo_graph::{
+    execute_code_graph, extract_reference_tokens, RepoGraph, MAX_GRAPH_FILES,
+};
 use kroma_core::tool::definition::builtin_tool_registrations;
 use kroma_core::tools::read::{base64_encode, execute_read, sniff_image};
 use kroma_core::types::{EffectClass, ToolCallId};
@@ -83,10 +85,7 @@ async fn spawn_mock_http_server(
     status_line: &'static str,
     extra_headers: Vec<(&'static str, String)>,
     body: String,
-) -> (
-    String,
-    tokio::sync::mpsc::UnboundedReceiver<String>,
-) {
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -143,9 +142,7 @@ async fn spawn_mock_http_server(
     (format!("http://{}", addr), rx)
 }
 
-async fn recv_request(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> String {
+async fn recv_request(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> String {
     tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await
         .expect("mock server received no request")
@@ -187,7 +184,11 @@ fn test_repo_graph_symbol_extraction_cross_file_edges_and_pagerank_ranking() {
 
     let cap = WorkspaceCap::new(&root).unwrap();
     let graph = RepoGraph::build_from_workspace(&cap, MAX_GRAPH_FILES);
-    assert_eq!(graph.total_files(), 4, "all four source files must be indexed");
+    assert_eq!(
+        graph.total_files(),
+        4,
+        "all four source files must be indexed"
+    );
     assert!(
         graph
             .symbols()
@@ -205,10 +206,9 @@ fn test_repo_graph_symbol_extraction_cross_file_edges_and_pagerank_ranking() {
 
     // Cross-file reference edges: auth -> db (lookup_session) and router -> auth (authenticate_user).
     assert!(
-        graph
-            .edges()
-            .iter()
-            .any(|e| e.from == "src/auth.rs" && e.to == "src/db.rs" && e.symbol == "lookup_session"),
+        graph.edges().iter().any(|e| e.from == "src/auth.rs"
+            && e.to == "src/db.rs"
+            && e.symbol == "lookup_session"),
         "auth.rs must depend on db.rs through lookup_session, edges={:?}",
         graph.edges()
     );
@@ -223,7 +223,8 @@ fn test_repo_graph_symbol_extraction_cross_file_edges_and_pagerank_ranking() {
     // directions of the call chain.
     let report = graph.query(&["authenticate_user".to_string()], &[], 4);
     assert_eq!(
-        report.ranked[0].path, "src/auth.rs",
+        report.ranked[0].path,
+        "src/auth.rs",
         "the defining file must rank first, got {:?}",
         report
             .ranked
@@ -232,7 +233,9 @@ fn test_repo_graph_symbol_extraction_cross_file_edges_and_pagerank_ranking() {
             .collect::<Vec<_>>()
     );
     assert!(
-        report.ranked[0].calls_into.contains(&"src/db.rs".to_string()),
+        report.ranked[0]
+            .calls_into
+            .contains(&"src/db.rs".to_string()),
         "auth.rs must list db.rs as a callee, got {:?}",
         report.ranked[0].calls_into
     );
@@ -244,10 +247,7 @@ fn test_repo_graph_symbol_extraction_cross_file_edges_and_pagerank_ranking() {
         report.ranked[0].called_by
     );
     assert!(
-        report
-            .ranked
-            .iter()
-            .any(|r| r.path == "src/router.rs"),
+        report.ranked.iter().any(|r| r.path == "src/router.rs"),
         "router.rs must appear in the top ranks for authenticate_user"
     );
     assert!(
@@ -274,13 +274,22 @@ fn test_repo_graph_symbol_extraction_cross_file_edges_and_pagerank_ranking() {
     );
 
     // The kernel tool renders the same report and is registered read-only.
-    let tool_out = execute_code_graph(
-        &cap,
-        r#"{"query":"authenticate_user","max_nodes":3}"#,
+    let tool_out = execute_code_graph(&cap, r#"{"query":"authenticate_user","max_nodes":3}"#);
+    assert!(
+        tool_out.outcome.is_success(),
+        "code_graph failed: {}",
+        tool_out.content
     );
-    assert!(tool_out.outcome.is_success(), "code_graph failed: {}", tool_out.content);
-    assert!(tool_out.content.contains("rank 1: src/auth.rs"), "{}", tool_out.content);
-    assert!(tool_out.content.contains("RepoGraph |"), "{}", tool_out.content);
+    assert!(
+        tool_out.content.contains("rank 1: src/auth.rs"),
+        "{}",
+        tool_out.content
+    );
+    assert!(
+        tool_out.content.contains("RepoGraph |"),
+        "{}",
+        tool_out.content
+    );
 
     let registered = builtin_tool_registrations()
         .into_iter()
@@ -617,9 +626,12 @@ async fn test_anthropic_stream_assembles_redacted_thinking_and_concatenates_spli
 
 #[tokio::test]
 async fn test_anthropic_messages_protocol_cache_control_breakpoints_and_sse_stream() {
-    let (base_url, mut rx) =
-        spawn_mock_http_server("HTTP/1.1 200 OK", vec![("Content-Type", "text/event-stream".to_string())], anthropic_sse_body())
-            .await;
+    let (base_url, mut rx) = spawn_mock_http_server(
+        "HTTP/1.1 200 OK",
+        vec![("Content-Type", "text/event-stream".to_string())],
+        anthropic_sse_body(),
+    )
+    .await;
 
     let client = AnthropicMessagesClient::new(AnthropicMessagesConfig {
         base_url,
@@ -669,7 +681,7 @@ async fn test_anthropic_messages_protocol_cache_control_breakpoints_and_sse_stre
             breakpoint: CacheBreakpoint::PinnedBaselineEnd,
             message_index: 0,
         }],
-            max_output_tokens: None,
+        max_output_tokens: None,
     };
 
     let (_tx, cancel_rx) = watch::channel(false);
@@ -742,20 +754,15 @@ async fn test_anthropic_messages_protocol_cache_control_breakpoints_and_sse_stre
     .unwrap();
     assert_eq!(parsed.content.as_deref(), Some("ok"));
     assert_eq!(parsed.tool_calls[0].name, "grep");
-    assert_eq!(parsed.tool_calls[0].raw_arguments, r#"{"pattern":"openat2"}"#);
+    assert_eq!(
+        parsed.tool_calls[0].raw_arguments,
+        r#"{"pattern":"openat2"}"#
+    );
     assert_eq!(parsed.finish_reason, FinishReason::ToolCalls);
     assert_eq!(parsed.usage.unwrap().input_tokens, 100);
 
     // The serializer is deterministic for identical input.
-    let a = serialize_anthropic_request_body(
-        "m",
-        "sys",
-        &tools,
-        &[],
-        &[],
-        true,
-        1024,
-    );
+    let a = serialize_anthropic_request_body("m", "sys", &tools, &[], &[], true, 1024);
     let b = serialize_anthropic_request_body("m", "sys", &tools, &[], &[], true, 1024);
     assert_eq!(a, b);
 }
@@ -856,7 +863,7 @@ async fn test_openai_responses_protocol_roundtrip_and_function_call() {
         messages,
         stream: true,
         cache_breakpoints: Vec::new(),
-            max_output_tokens: None,
+        max_output_tokens: None,
     };
 
     let (_tx, cancel_rx) = watch::channel(false);
@@ -871,7 +878,11 @@ async fn test_openai_responses_protocol_roundtrip_and_function_call() {
         "unexpected request line: {}",
         raw.lines().next().unwrap_or("")
     );
-    assert!(raw.contains("Authorization: Bearer sk-openai-test"), "{}", raw);
+    assert!(
+        raw.contains("Authorization: Bearer sk-openai-test"),
+        "{}",
+        raw
+    );
 
     let body = request_body(&raw);
     assert_eq!(body["model"], "gpt-5.2");
@@ -916,7 +927,10 @@ async fn test_openai_responses_protocol_roundtrip_and_function_call() {
 
 #[test]
 fn test_protocol_selection_auto_detection_and_provider_factory() {
-    assert_eq!(ProviderProtocol::parse("auto").unwrap(), ProviderProtocol::Auto);
+    assert_eq!(
+        ProviderProtocol::parse("auto").unwrap(),
+        ProviderProtocol::Auto
+    );
     assert_eq!(
         ProviderProtocol::parse("anthropic").unwrap(),
         ProviderProtocol::AnthropicMessages

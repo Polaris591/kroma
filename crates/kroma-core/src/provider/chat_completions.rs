@@ -1,7 +1,5 @@
 use crate::budget::BudgetConfig;
-use crate::messages::{
-    AssistantTurn, FinishReason, ReasoningBlock, ToolCall, TranscriptItem,
-};
+use crate::messages::{AssistantTurn, FinishReason, ReasoningBlock, ToolCall, TranscriptItem};
 use crate::provider::sse::{parse_usage_json, SseStreamAssembler, MAX_SSE_RESPONSE_BYTES};
 use crate::provider::transport::{
     pump_body, read_error_body, read_full_body, send_request, BodyFailure, HttpRequestSpec,

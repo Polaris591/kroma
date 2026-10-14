@@ -88,10 +88,7 @@ impl PromptBuilder {
                     }
                 )
             })?;
-        let attrs = format!(
-            " name=\"{}\"",
-            escape_fence_attribute(&skill.name)
-        );
+        let attrs = format!(" name=\"{}\"", escape_fence_attribute(&skill.name));
         self.system_prompt.push_str("\n\n");
         self.system_prompt.push_str(UNTRUSTED_CONTEXT_BANNER);
         self.system_prompt.push_str("\n\n");
@@ -137,7 +134,8 @@ impl PromptBuilder {
         }
         const OPEN_TAG: &str = "\n\n<untrusted_workspace_context>\n";
         const CLOSE_TAG: &str = "\n</untrusted_workspace_context>";
-        let max_inner = WORKSPACE_CONTEXT_MAX_BYTES.saturating_sub(OPEN_TAG.len() + CLOSE_TAG.len());
+        let max_inner =
+            WORKSPACE_CONTEXT_MAX_BYTES.saturating_sub(OPEN_TAG.len() + CLOSE_TAG.len());
         let cut = crate::tool::output_buffer::floor_char_boundary(&inner, max_inner);
         self.system_prompt.push_str(OPEN_TAG);
         self.system_prompt.push_str(&inner[..cut]);
@@ -345,13 +343,7 @@ pub fn fence_untrusted(tag: &str, attrs: &str, body: &str, max_body_bytes: usize
         sanitized = sanitized.replace('<', "&lt;").replace('>', "&gt;");
     }
     let cut = floor_entity_boundary(&sanitized, max_body_bytes);
-    format!(
-        "<{}{}>\n{}\n</{}>",
-        tag,
-        attrs,
-        &sanitized[..cut],
-        tag
-    )
+    format!("<{}{}>\n{}\n</{}>", tag, attrs, &sanitized[..cut], tag)
 }
 
 /// Escape a value that will be interpolated into a fence tag's double-quoted attribute.
@@ -437,7 +429,9 @@ mod tests {
             "workspace context must end with the closing fence tag"
         );
         assert_eq!(
-            system_prompt.matches("</untrusted_workspace_context>").count(),
+            system_prompt
+                .matches("</untrusted_workspace_context>")
+                .count(),
             1,
             "embedded closing tag inside AGENTS.md must be neutralized"
         );
@@ -459,7 +453,10 @@ mod tests {
         let prompt = PromptBuilder::default().with_workspace_context(&cap);
         let system_prompt = prompt.system_prompt();
 
-        assert!(!system_prompt.contains(".env"), "sensitive files must not be listed");
+        assert!(
+            !system_prompt.contains(".env"),
+            "sensitive files must not be listed"
+        );
         assert!(system_prompt.contains("main.rs"));
         let _ = fs::remove_dir_all(dir);
     }

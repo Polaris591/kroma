@@ -77,15 +77,16 @@ impl KromaRuntimeConfig {
     }
 
     /// `v1.3.0`: attach the merged layered configuration for `/config` inspection.
-    pub fn with_resolved_config(
-        mut self,
-        resolved: crate::config_file::ResolvedConfig,
-    ) -> Self {
+    pub fn with_resolved_config(mut self, resolved: crate::config_file::ResolvedConfig) -> Self {
         self.resolved_config = Some(resolved);
         self
     }
 
-    pub fn with_surface(mut self, surface: impl Into<String>, transport: impl Into<String>) -> Self {
+    pub fn with_surface(
+        mut self,
+        surface: impl Into<String>,
+        transport: impl Into<String>,
+    ) -> Self {
         self.surface_name = surface.into();
         self.transport_name = transport.into();
         self
@@ -111,18 +112,18 @@ impl KromaRuntimeConfig {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionStatusSnapshot {
-pub(crate) session_id: String,
-pub(crate) session_path: PathBuf,
-pub(crate) turn_count: usize,
-pub(crate) latest_revision_id: Option<String>,
-pub(crate) subtree_dirs: Vec<String>,
-pub(crate) mutations: Vec<MutationRecord>,
-pub(crate) subagents_spawned: usize,
-pub(crate) revisions: Vec<RevisionRecord>,
-pub(crate) activated_skills: Vec<String>,
-pub(crate) total_input_tokens: u64,
-pub(crate) total_cached_input_tokens: u64,
-pub(crate) total_output_tokens: u64,
+    pub(crate) session_id: String,
+    pub(crate) session_path: PathBuf,
+    pub(crate) turn_count: usize,
+    pub(crate) latest_revision_id: Option<String>,
+    pub(crate) subtree_dirs: Vec<String>,
+    pub(crate) mutations: Vec<MutationRecord>,
+    pub(crate) subagents_spawned: usize,
+    pub(crate) revisions: Vec<RevisionRecord>,
+    pub(crate) activated_skills: Vec<String>,
+    pub(crate) total_input_tokens: u64,
+    pub(crate) total_cached_input_tokens: u64,
+    pub(crate) total_output_tokens: u64,
 }
 
 /// `v1.3.0`: accepted thinking levels for `/thinking`.
@@ -173,40 +174,41 @@ pub trait ProviderFactory: Send + Sync {
 }
 
 pub(crate) struct RuntimeEngineInner {
-pub(crate) config: KromaRuntimeConfig,
-pub(crate) provider: Mutex<Arc<dyn ModelProvider>>,
-pub(crate) env: Arc<LocalHostEnv>,
-pub(crate) snapshot_store: Arc<SnapshotStore>,
-pub(crate) registry: ToolRegistry,
-pub(crate) policy_engine: PolicyEngine,
-pub(crate) approval_broker: Arc<RpcApprovalBroker>,
-pub(crate) workspace_skills: Vec<SkillEntry>,
-pub(crate) mounted_extensions: Vec<ExtensionId>,
-pub(crate) status: Mutex<SessionStatusSnapshot>,
-pub(crate) active_cancel: Mutex<Option<(watch::Sender<bool>, watch::Receiver<bool>)>>,
-pub(crate) in_flight: AtomicBool,
-pub(crate) shutting_down: AtomicBool,
-pub(crate) next_subscriber_id: std::sync::atomic::AtomicU64,
-pub(crate) subscribers: Mutex<Vec<(u64, SubscriberCallback)>>,
-pub(crate) op_lock: AsyncMutex<()>,
+    pub(crate) config: KromaRuntimeConfig,
+    pub(crate) provider: Mutex<Arc<dyn ModelProvider>>,
+    pub(crate) env: Arc<LocalHostEnv>,
+    pub(crate) snapshot_store: Arc<SnapshotStore>,
+    pub(crate) registry: ToolRegistry,
+    pub(crate) policy_engine: PolicyEngine,
+    pub(crate) approval_broker: Arc<RpcApprovalBroker>,
+    pub(crate) workspace_skills: Vec<SkillEntry>,
+    pub(crate) mounted_extensions: Vec<ExtensionId>,
+    pub(crate) status: Mutex<SessionStatusSnapshot>,
+    pub(crate) active_cancel: Mutex<Option<(watch::Sender<bool>, watch::Receiver<bool>)>>,
+    pub(crate) in_flight: AtomicBool,
+    pub(crate) shutting_down: AtomicBool,
+    pub(crate) next_subscriber_id: std::sync::atomic::AtomicU64,
+    pub(crate) subscribers: Mutex<Vec<(u64, SubscriberCallback)>>,
+    pub(crate) op_lock: AsyncMutex<()>,
     /// `v1.3.0`: active model id after any `/model` hot-swap.
-pub(crate) active_model: Mutex<Option<String>>,
+    pub(crate) active_model: Mutex<Option<String>>,
     /// `v1.3.0`: active wire protocol after any `/protocol` hot-swap.
-pub(crate) active_protocol: Mutex<Option<String>>,
+    pub(crate) active_protocol: Mutex<Option<String>>,
     /// `v1.3.0`: active reasoning/thinking effort after any `/thinking` hot-swap (`None` = off).
-pub(crate) active_reasoning_effort: Mutex<Option<String>>,
+    pub(crate) active_reasoning_effort: Mutex<Option<String>>,
     /// B2 (`v1.4.0`): active context projection profile after `/config set projection_profile`.
-pub(crate) active_projection_profile: Mutex<Option<crate::context_projector::ProjectionProfile>>,
+    pub(crate) active_projection_profile:
+        Mutex<Option<crate::context_projector::ProjectionProfile>>,
     /// Item #3 (`v1.4.0`): active adaptive-tournament candidate count (`0` = off).
-pub(crate) active_adaptive_tournament: Mutex<usize>,
+    pub(crate) active_adaptive_tournament: Mutex<usize>,
     /// `v1.3.0`: layered configuration view, refreshed by `/config set`.
-pub(crate) resolved_config: Mutex<Option<crate::config_file::ResolvedConfig>>,
+    pub(crate) resolved_config: Mutex<Option<crate::config_file::ResolvedConfig>>,
     /// `v1.5.0`: active terminal theme (`/theme zen|classic`); Design D (`Zen`) is the default.
-pub(crate) active_theme: Mutex<Theme>,
+    pub(crate) active_theme: Mutex<Theme>,
 }
 
 pub(crate) struct InFlightPromptGuard {
-pub(crate) inner: Arc<RuntimeEngineInner>,
+    pub(crate) inner: Arc<RuntimeEngineInner>,
 }
 
 impl Drop for InFlightPromptGuard {

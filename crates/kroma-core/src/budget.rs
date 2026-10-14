@@ -48,27 +48,27 @@ impl Default for BudgetConfig {
             max_model_request_attempts: 60,
             max_tool_calls: 80,
             max_tool_calls_per_response: 16,
-            max_tool_argument_bytes: 1024 * 1024,            // 1 MiB
+            max_tool_argument_bytes: 1024 * 1024, // 1 MiB
             max_run_duration: Duration::from_secs(15 * 60), // 15 min
             connect_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_secs(180),
             request_timeout: Duration::from_secs(360),
-            max_static_prefix_bytes: 8 * 1024,                 // 8 KiB
-            context_high_watermark_bytes: 1536 * 1024,         // 1.5 MiB
-            context_low_watermark_bytes: 768 * 1024,           // 768 KiB
-            context_tail_window_bytes: 256 * 1024,             // 256 KiB
+            max_static_prefix_bytes: 8 * 1024,         // 8 KiB
+            context_high_watermark_bytes: 1536 * 1024, // 1.5 MiB
+            context_low_watermark_bytes: 768 * 1024,   // 768 KiB
+            context_tail_window_bytes: 256 * 1024,     // 256 KiB
             context_min_tail_turns: 4,
             model_context_window_tokens: None,
-            max_total_tool_output_bytes: 4 * 1024 * 1024,      // 4 MiB
-            max_tool_inline_output_bytes: 64 * 1024,           // 64 KiB
+            max_total_tool_output_bytes: 4 * 1024 * 1024, // 4 MiB
+            max_tool_inline_output_bytes: 64 * 1024,      // 64 KiB
             max_tool_inline_lines: 2000,
-            bash_head_bytes: 16 * 1024,                        // 16 KiB
-            bash_tail_bytes: 48 * 1024,                        // 48 KiB
-            bash_spill_bytes: 4 * 1024 * 1024,                 // 4 MiB
+            bash_head_bytes: 16 * 1024,                          // 16 KiB
+            bash_tail_bytes: 48 * 1024,                          // 48 KiB
+            bash_spill_bytes: 4 * 1024 * 1024,                   // 4 MiB
             max_process_output_observed_bytes: 16 * 1024 * 1024, // 16 MiB
-            max_edit_file_bytes: 2 * 1024 * 1024,              // 2 MiB
-            max_edit_input_bytes: 512 * 1024,                  // 512 KiB
-            max_write_content_bytes: 1024 * 1024,              // 1 MiB
+            max_edit_file_bytes: 2 * 1024 * 1024,                // 2 MiB
+            max_edit_input_bytes: 512 * 1024,                    // 512 KiB
+            max_write_content_bytes: 1024 * 1024,                // 1 MiB
         }
     }
 }
@@ -84,7 +84,10 @@ impl BudgetConfig {
         }
 
         check_nonzero!(self.max_model_turns, "max_model_turns");
-        check_nonzero!(self.max_model_request_attempts, "max_model_request_attempts");
+        check_nonzero!(
+            self.max_model_request_attempts,
+            "max_model_request_attempts"
+        );
         check_nonzero!(self.max_tool_calls, "max_tool_calls");
         check_nonzero!(
             self.max_tool_calls_per_response,
@@ -335,7 +338,8 @@ impl BudgetTracker {
 
     /// F10 (`v1.4.0`): total (self + children) token spend, the number used for budget decisions.
     pub fn all_total_tokens(&self) -> u64 {
-        self.all_input_tokens().saturating_add(self.all_output_tokens())
+        self.all_input_tokens()
+            .saturating_add(self.all_output_tokens())
     }
 
     pub fn overall_cache_hit_ratio(&self) -> f64 {

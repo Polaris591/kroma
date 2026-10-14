@@ -139,7 +139,9 @@ pub fn execute_recall_evidence(
                     // Context lines are clamped to the requested window too, so following the
                     // continuation hint cannot re-serve lines outside it.
                     let candidate_no = candidate + 1;
-                    if candidate_no < window_start || window_end.is_some_and(|end| candidate_no > end) {
+                    if candidate_no < window_start
+                        || window_end.is_some_and(|end| candidate_no > end)
+                    {
                         continue;
                     }
                     if !wanted.contains(&candidate) {
@@ -231,7 +233,11 @@ fn render_lines(lines: &[&str], selected: &[usize]) -> RenderedLines {
     if body.is_empty() {
         body.push_str("[no lines selected]\n");
     }
-    RenderedLines { body, last_line, hit_byte_cap }
+    RenderedLines {
+        body,
+        last_line,
+        hit_byte_cap,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

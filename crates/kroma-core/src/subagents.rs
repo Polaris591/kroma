@@ -38,9 +38,9 @@ use crate::messages::{TranscriptItem, UserMessage};
 use crate::prompt::{escape_fence_attribute, fence_untrusted, PromptBuilder};
 use crate::provider::ModelProvider;
 use crate::revision::{
-    ensure_private_dir, is_ancestor_dir_of, live_entry_state, remove_tracked_file,
-    stat_live_entry, write_tracked_file, LiveEntryStat, LiveEntryState, RevisionError, RevisionId,
-    SnapshotStore, TrackedFile, WorkspaceRevision, SNAPSHOT_EXCLUDED_DIRS,
+    ensure_private_dir, is_ancestor_dir_of, live_entry_state, remove_tracked_file, stat_live_entry,
+    write_tracked_file, LiveEntryStat, LiveEntryState, RevisionError, RevisionId, SnapshotStore,
+    TrackedFile, WorkspaceRevision, SNAPSHOT_EXCLUDED_DIRS,
 };
 use crate::sensitive_paths::SensitivePathGuard;
 use crate::tool::definition::{RegisteredTool, ToolDefinition, ToolMetadata};
@@ -78,9 +78,7 @@ pub fn subagent_spawn_preflight(
     effect: EffectClass,
 ) -> Result<PolicyCheckResult, String> {
     if max_subagents == 0 {
-        return Err(
-            "subagent spawning is disabled for this session (max_subagents=0)".to_string(),
-        );
+        return Err("subagent spawning is disabled for this session (max_subagents=0)".to_string());
     }
     if already_spawned.saturating_add(requested) > max_subagents {
         return Err(format!(
@@ -286,7 +284,9 @@ impl SubagentBudget {
     pub fn clamped(&self) -> Self {
         Self {
             max_turns: self.max_turns.clamp(1, MAX_SUBAGENT_TURNS_CEILING),
-            max_tool_calls: self.max_tool_calls.clamp(1, MAX_SUBAGENT_TOOL_CALLS_CEILING),
+            max_tool_calls: self
+                .max_tool_calls
+                .clamp(1, MAX_SUBAGENT_TOOL_CALLS_CEILING),
             max_tokens: self.max_tokens.clamp(1, MAX_SUBAGENT_TOKENS_CEILING),
             timeout_ms: self.timeout_ms.clamp(1, MAX_SUBAGENT_TIMEOUT_MS_CEILING),
         }
@@ -791,7 +791,10 @@ pub fn path_is_protected(rel_path: &str, protected_globs: &[String]) -> bool {
 }
 
 /// Item #3 (`v1.4.0`): the subset of `changed_paths` that touches a protected path.
-pub fn protected_changed_paths(changed_paths: &[String], protected_globs: &[String]) -> Vec<String> {
+pub fn protected_changed_paths(
+    changed_paths: &[String],
+    protected_globs: &[String],
+) -> Vec<String> {
     changed_paths
         .iter()
         .filter(|p| path_is_protected(p, protected_globs))
@@ -1003,7 +1006,8 @@ impl IsolatedWorktree {
         revert_on_verify_failure: bool,
         turn_index: usize,
     ) -> Result<WorktreeMergeResult, RevisionError> {
-        let delta = self.compute_merge_delta(parent_workspace, snapshot_store, allowed_write_globs)?;
+        let delta =
+            self.compute_merge_delta(parent_workspace, snapshot_store, allowed_write_globs)?;
         let MergeDelta {
             written_entries,
             mut removed_files,
@@ -1192,7 +1196,8 @@ impl IsolatedWorktree {
         snapshot_store: &SnapshotStore,
         allowed_write_globs: Option<&[String]>,
     ) -> Result<bool, RevisionError> {
-        let delta = self.compute_merge_delta(parent_workspace, snapshot_store, allowed_write_globs)?;
+        let delta =
+            self.compute_merge_delta(parent_workspace, snapshot_store, allowed_write_globs)?;
         Ok(delta.conflicting_paths.is_empty())
     }
 
@@ -1368,7 +1373,8 @@ impl IsolatedWorktree {
                     }
                 },
             }
-        }        Ok(MergeDelta {
+        }
+        Ok(MergeDelta {
             written_entries,
             removed_files,
             delta_paths,
@@ -1665,7 +1671,11 @@ impl SubagentBackend for ProviderSubagentBackend {
                 .map(|d| d.name)
                 .collect();
 
-            let child_budget = req.spec.budget.clamped().to_budget_config(&req.parent_budget);
+            let child_budget = req
+                .spec
+                .budget
+                .clamped()
+                .to_budget_config(&req.parent_budget);
             let runtime = build_runtime_with_registry(
                 registry,
                 env.clone(),
@@ -1682,11 +1692,7 @@ impl SubagentBackend for ProviderSubagentBackend {
                     "\n\n[SUBAGENT ROLE: worker — Isolated worktree mutation subagent. You are operating inside an isolated copy of the workspace; `spawn_subagent` is disabled. Make minimal, targeted changes within your assigned scope and summarize the modified files.]"
                 }
             };
-            let system_prompt = format!(
-                "{}{}",
-                crate::prompt::DEFAULT_SYSTEM_PROMPT,
-                role_banner
-            );
+            let system_prompt = format!("{}{}", crate::prompt::DEFAULT_SYSTEM_PROMPT, role_banner);
             let prompt_builder =
                 PromptBuilder::new(system_prompt).with_workspace_context(env.workspace());
 
@@ -1731,10 +1737,9 @@ impl SubagentBackend for ProviderSubagentBackend {
 
             let (relevant_files, findings) =
                 extract_relevant_files_and_findings(&summary.transcript, &summary.modified_files);
-            let final_text = summary
-                .final_assistant_text
-                .clone()
-                .unwrap_or_else(|| format!("subagent terminated with {:?}", summary.terminal_reason));
+            let final_text = summary.final_assistant_text.clone().unwrap_or_else(|| {
+                format!("subagent terminated with {:?}", summary.terminal_reason)
+            });
             let tokens_used = summary
                 .total_input_tokens
                 .saturating_add(summary.total_output_tokens);
@@ -2139,9 +2144,7 @@ pub async fn run_worktree_tournament(
     // Materialize every worktree from the same baseline before any candidate starts.
     let mut worktrees: Vec<(String, IsolatedWorktree)> = Vec::with_capacity(spec.candidates.len());
     for (index, candidate) in spec.candidates.iter().enumerate() {
-        let wt_dir = spec
-            .worktree_base
-            .join(format!("wt-race-{:04}", index + 1));
+        let wt_dir = spec.worktree_base.join(format!("wt-race-{:04}", index + 1));
         let wt = IsolatedWorktree::materialize(
             format!("race-{:04}-{}", index + 1, candidate.label),
             parent_workspace,
@@ -2430,11 +2433,7 @@ pub async fn run_worktree_tournament(
                 continue;
             }
             let worktree = &worktrees[index].1;
-            match worktree.preflight_conflict_check(
-                parent_workspace,
-                snapshot_store,
-                allowed,
-            ) {
+            match worktree.preflight_conflict_check(parent_workspace, snapshot_store, allowed) {
                 Ok(conflict_free) => score.conflict_free_with_parent = conflict_free,
                 Err(_) => score.conflict_free_with_parent = false,
             }
@@ -2530,9 +2529,7 @@ pub async fn run_worktree_tournament(
                 scores[index].gate_status = GateVerificationStatus::Failed;
                 scores[index].gate_detail = format!(
                     "{} (post-merge verification failed, reverted={}: {})",
-                    scores[index].gate_detail,
-                    reverted,
-                    gate_output
+                    scores[index].gate_detail, reverted, gate_output
                 );
                 merge_result = Some(merge);
             }

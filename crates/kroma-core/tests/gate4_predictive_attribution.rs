@@ -17,18 +17,13 @@
 use kroma_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
 use kroma_core::attribution::{
     added_identifiers, language_name, parse_diagnostic_anchors, removed_identifiers,
-    top_level_symbol_names, AttributionCandidate, AttributionEngine, MutationLedger,
-    MutatedFileSpan,
-    PredictiveValidator, CANDIDATE_ATTRIBUTION_FRAMING,
+    top_level_symbol_names, AttributionCandidate, AttributionEngine, MutatedFileSpan,
+    MutationLedger, PredictiveValidator, CANDIDATE_ATTRIBUTION_FRAMING,
 };
 use kroma_core::budget::BudgetConfig;
-use kroma_core::env::{
-    CompletionGate, CompletionGateContext, GateOutcome, LocalHostEnv,
-};
+use kroma_core::env::{CompletionGate, CompletionGateContext, GateOutcome, LocalHostEnv};
 use kroma_core::events::{EventLogger, EventPayload};
-use kroma_core::messages::{
-    AssistantTurn, FinishReason, ToolCall, TranscriptItem, UserMessage,
-};
+use kroma_core::messages::{AssistantTurn, FinishReason, ToolCall, TranscriptItem, UserMessage};
 use kroma_core::provider::FakeProvider;
 use kroma_core::revision::{RevisionId, SnapshotStore};
 use kroma_core::session::{FileTouch, SessionJournal};
@@ -164,11 +159,15 @@ fn test_predictive_validator_catches_syntax_and_delimiter_errors_with_zero_false
     // ---- Clean files whose braces live inside strings / comments / raw strings ----
     let clean_rust = "pub fn f() {\n    let s = \"} { ) ]\";\n    let r = r#\"{ \"x\" }\"#;\n    let c = '}';\n    // } } }\n    /* } { */\n    let _ = 'a';\n}\n";
     assert!(
-        validator.validate_content("src/lib.rs", clean_rust).issues.is_empty(),
+        validator
+            .validate_content("src/lib.rs", clean_rust)
+            .issues
+            .is_empty(),
         "valid Rust must never warn: {:?}",
         validator.validate_content("src/lib.rs", clean_rust).issues
     );
-    let clean_js = "const s = `{ \"a\": [1, 2] }`;\nconst t = ')';\nfunction f() { return `${s} ${t}`; }\n";
+    let clean_js =
+        "const s = `{ \"a\": [1, 2] }`;\nconst t = ')';\nfunction f() { return `${s} ${t}`; }\n";
     assert!(validator
         .validate_content("src/app.js", clean_js)
         .issues
@@ -196,7 +195,9 @@ line three";
             .issues
             .is_empty(),
         "a multi-line Rust string literal must not warn: {:?}",
-        validator.validate_content("src/lib.rs", multi_line_rust).issues
+        validator
+            .validate_content("src/lib.rs", multi_line_rust)
+            .issues
     );
 
     // ---- Zero false-positive rollbacks: a validation run never mutates the file ----
@@ -217,7 +218,10 @@ line three";
     assert!(skipped.skipped_reason.is_some());
     // `--no-predictive-check` short-circuits everything.
     let disabled = PredictiveValidator::new(false);
-    assert_eq!(disabled.validate_content("src/lib.rs", rust).status, "skipped");
+    assert_eq!(
+        disabled.validate_content("src/lib.rs", rust).status,
+        "skipped"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -294,7 +298,10 @@ async fn test_edit_and_write_attach_predictive_warning_and_record_mutation_ledge
         stop_turn("done"),
     ]));
     let env = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
-    let policy = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let budget = BudgetConfig::default();
     let runtime = build_default_runtime(env, policy, budget.clone(), None);
     let cfg = AgentRunConfig::new("add two files", budget);
@@ -305,7 +312,12 @@ async fn test_edit_and_write_attach_predictive_warning_and_record_mutation_ledge
         .with_snapshot_store(store)
         .run(logger)
         .await;
-    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
 
     // The clean write carries no warning; the broken write carries the advisory block.
     let clean = summary
@@ -330,7 +342,9 @@ async fn test_edit_and_write_attach_predictive_warning_and_record_mutation_ledge
         })
         .expect("the broken write result");
     assert!(
-        broken.content.contains("<predictive_validation status=\"warning\""),
+        broken
+            .content
+            .contains("<predictive_validation status=\"warning\""),
         "{}",
         broken.content
     );
@@ -397,7 +411,9 @@ async fn test_edit_and_write_attach_predictive_warning_and_record_mutation_ledge
         .expect("the pre-change revision must be restorable");
     // And `revision_after` is the revision the failing state was captured at.
     let after = first.revision_after.clone().unwrap();
-    store.load_revision(&after).expect("the post-change revision");
+    store
+        .load_revision(&after)
+        .expect("the post-change revision");
     assert_ne!(before, after, "the mutation changed the workspace");
 
     let _ = fs::remove_dir_all(&root);
@@ -408,8 +424,8 @@ async fn test_edit_and_write_attach_predictive_warning_and_record_mutation_ledge
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_completion_gate_failure_emits_ranked_candidate_attribution_linked_to_evidence_and_revisions()
-{
+async fn test_completion_gate_failure_emits_ranked_candidate_attribution_linked_to_evidence_and_revisions(
+) {
     let root = temp_root("attribution");
     let ws_dir = root.join("ws");
     let state_dir = root.join("state");
@@ -463,7 +479,10 @@ async fn test_completion_gate_failure_emits_ranked_candidate_attribution_linked_
         stop_turn("fixed"),
     ]));
     let env = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
-    let policy = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let budget = BudgetConfig::default();
     let runtime = build_default_runtime(env, policy, budget.clone(), None);
     let cfg = AgentRunConfig::new("make b compile", budget);
@@ -479,7 +498,12 @@ async fn test_completion_gate_failure_emits_ranked_candidate_attribution_linked_
         .with_completion_gate(gate)
         .run(logger)
         .await;
-    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
 
     // The gate rejection prompt carries the candidate attribution block.
     let gate_message = summary
@@ -497,7 +521,11 @@ async fn test_completion_gate_failure_emits_ranked_candidate_attribution_linked_
         "{}",
         gate_message
     );
-    assert!(gate_message.contains("candidate_attribution"), "{}", gate_message);
+    assert!(
+        gate_message.contains("candidate_attribution"),
+        "{}",
+        gate_message
+    );
     assert!(gate_message.contains("CANDIDATES"), "{}", gate_message);
     // Top-1 is the turn-2 mutation on src/b.rs, with its evidence pointer and revisions.
     assert!(gate_message.contains("mut-0002"), "{}", gate_message);
@@ -508,7 +536,11 @@ async fn test_completion_gate_failure_emits_ranked_candidate_attribution_linked_
         "{}",
         gate_message
     );
-    assert!(gate_message.contains("--restore-rev r-"), "{}", gate_message);
+    assert!(
+        gate_message.contains("--restore-rev r-"),
+        "{}",
+        gate_message
+    );
     // The clean src/a.rs edit must not outrank the real cause.
     let b_position = gate_message.find("mut-0002").unwrap();
     let a_position = gate_message.find("mut-0001");
@@ -591,7 +623,14 @@ fn test_attribution_disambiguates_multiple_edits_by_file_line_and_symbol() {
     }
 
     let mut ledger = MutationLedger::new();
-    ledger.record_mutation(1, "edit", "call_a", None, None, vec![span("src/a.rs", 1, 3, &[])]);
+    ledger.record_mutation(
+        1,
+        "edit",
+        "call_a",
+        None,
+        None,
+        vec![span("src/a.rs", 1, 3, &[])],
+    );
     ledger.record_mutation(
         1,
         "edit",
@@ -646,8 +685,10 @@ fn test_attribution_disambiguates_multiple_edits_by_file_line_and_symbol() {
         added_identifiers("let a = old_name;", "let a = new_name;", 8),
         vec!["new_name".to_string()]
     );
-    assert!(top_level_symbol_names("pub fn helper() {}\nstruct Thing;\n", 8)
-        .contains(&"helper".to_string()));
+    assert!(
+        top_level_symbol_names("pub fn helper() {}\nstruct Thing;\n", 8)
+            .contains(&"helper".to_string())
+    );
     assert_eq!(language_name("src/x.tsx"), "typescript");
     assert_eq!(language_name("src/x.unknown"), "unknown");
 }
@@ -699,17 +740,49 @@ fn test_fork_rewind_prunes_future_mutations_from_ledger() {
     let ws_dir = root.join("ws");
     fs::create_dir_all(&ws_dir).unwrap();
     let mut journal = SessionJournal::create(root.join("sessions"), &ws_dir).unwrap();
-    journal.append_item(0, TranscriptItem::User(UserMessage { content: "t0".into() })).unwrap();
-    journal.append_item(1, TranscriptItem::User(UserMessage { content: "t1".into() })).unwrap();
     journal
-        .checkpoint_with_revision(1, 0, Vec::new(), "", None, Vec::new(), vec![record(1, "c1")])
+        .append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "t0".into(),
+            }),
+        )
         .unwrap();
-    journal.append_item(2, TranscriptItem::User(UserMessage { content: "t2".into() })).unwrap();
+    journal
+        .append_item(
+            1,
+            TranscriptItem::User(UserMessage {
+                content: "t1".into(),
+            }),
+        )
+        .unwrap();
+    journal
+        .checkpoint_with_revision(
+            1,
+            0,
+            Vec::new(),
+            "",
+            None,
+            Vec::new(),
+            vec![record(1, "c1")],
+        )
+        .unwrap();
+    journal
+        .append_item(
+            2,
+            TranscriptItem::User(UserMessage {
+                content: "t2".into(),
+            }),
+        )
+        .unwrap();
     journal
         .checkpoint_with_revision(
             2,
             0,
-            vec![FileTouch { path: "src/c3.rs".into(), last_touched_turn: 3 }],
+            vec![FileTouch {
+                path: "src/c3.rs".into(),
+                last_touched_turn: 3,
+            }],
             "",
             None,
             Vec::new(),
@@ -743,7 +816,11 @@ fn test_fork_rewind_prunes_future_mutations_from_ledger() {
     restored.restore(vec![record(1, "c1"), record(2, "c2"), record(3, "c3")]);
     restored.prune_after_turn(1);
     assert_eq!(
-        restored.records().iter().map(|r| r.turn).collect::<Vec<_>>(),
+        restored
+            .records()
+            .iter()
+            .map(|r| r.turn)
+            .collect::<Vec<_>>(),
         vec![1]
     );
 
@@ -776,7 +853,14 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
 
     // 1. Rust compile error at the exact edited span.
     let mut ledger = MutationLedger::new();
-    ledger.record_mutation(1, "edit", "c1", None, None, vec![span("src/a.rs", 10, 14, &[])]);
+    ledger.record_mutation(
+        1,
+        "edit",
+        "c1",
+        None,
+        None,
+        vec![span("src/a.rs", 10, 14, &[])],
+    );
     out.push(CorpusScenario {
         name: "rust_compile_error_at_edited_span",
         expected: Some("mut-0001"),
@@ -789,15 +873,15 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
     let mut ledger = MutationLedger::new();
     let mut rename_span = span("src/api.rs", 3, 5, &["compute_v2"]);
     rename_span.removed_symbols = vec!["compute".to_string()];
+    ledger.record_mutation(1, "edit", "c1", None, None, vec![rename_span]);
     ledger.record_mutation(
-        1,
+        2,
         "edit",
-        "c1",
+        "c2",
         None,
         None,
-        vec![rename_span],
+        vec![span("src/unrelated.rs", 1, 2, &[])],
     );
-    ledger.record_mutation(2, "edit", "c2", None, None, vec![span("src/unrelated.rs", 1, 2, &[])]);
     out.push(CorpusScenario {
         name: "rust_symbol_rename_break_in_caller_file",
         expected: Some("mut-0001"),
@@ -808,7 +892,14 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
 
     // 3. JSON syntax break.
     let mut ledger = MutationLedger::new();
-    ledger.record_mutation(1, "write", "c1", None, None, vec![span("config.json", 1, 9, &[])]);
+    ledger.record_mutation(
+        1,
+        "write",
+        "c1",
+        None,
+        None,
+        vec![span("config.json", 1, 9, &[])],
+    );
     out.push(CorpusScenario {
         name: "json_syntax_break",
         expected: Some("mut-0001"),
@@ -818,7 +909,14 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
 
     // 4. Unclosed brace in TypeScript.
     let mut ledger = MutationLedger::new();
-    ledger.record_mutation(1, "write", "c1", None, None, vec![span("src/app.ts", 1, 20, &[])]);
+    ledger.record_mutation(
+        1,
+        "write",
+        "c1",
+        None,
+        None,
+        vec![span("src/app.ts", 1, 20, &[])],
+    );
     out.push(CorpusScenario {
         name: "unclosed_brace_typescript",
         expected: Some("mut-0001"),
@@ -828,7 +926,14 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
 
     // 5. Python traceback.
     let mut ledger = MutationLedger::new();
-    ledger.record_mutation(1, "edit", "c1", None, None, vec![span("app.py", 5, 9, &["compute"])]);
+    ledger.record_mutation(
+        1,
+        "edit",
+        "c1",
+        None,
+        None,
+        vec![span("app.py", 5, 9, &["compute"])],
+    );
     out.push(CorpusScenario {
         name: "python_traceback",
         expected: Some("mut-0001"),
@@ -838,7 +943,14 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
 
     // 6. Clean edit, no failure output at all.
     let mut ledger = MutationLedger::new();
-    ledger.record_mutation(1, "edit", "c1", None, None, vec![span("src/clean.rs", 1, 3, &[])]);
+    ledger.record_mutation(
+        1,
+        "edit",
+        "c1",
+        None,
+        None,
+        vec![span("src/clean.rs", 1, 3, &[])],
+    );
     out.push(CorpusScenario {
         name: "clean_edit_no_errors",
         expected: None,
@@ -848,19 +960,48 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
 
     // 7. Pre-existing failure in a file nobody edited.
     let mut ledger = MutationLedger::new();
-    ledger.record_mutation(1, "edit", "c1", None, None, vec![span("src/x.rs", 1, 4, &[])]);
-    ledger.record_mutation(2, "edit", "c2", None, None, vec![span("src/y.rs", 20, 24, &[])]);
+    ledger.record_mutation(
+        1,
+        "edit",
+        "c1",
+        None,
+        None,
+        vec![span("src/x.rs", 1, 4, &[])],
+    );
+    ledger.record_mutation(
+        2,
+        "edit",
+        "c2",
+        None,
+        None,
+        vec![span("src/y.rs", 20, 24, &[])],
+    );
     out.push(CorpusScenario {
         name: "pre_existing_unrelated_error",
         expected: None,
         ledger,
-        failure_output: "vendor/legacy.c:40:5: error: implicit declaration of function 'legacy_init'\n",
+        failure_output:
+            "vendor/legacy.c:40:5: error: implicit declaration of function 'legacy_init'\n",
     });
 
     // 8. Multi-edit turn disambiguation.
     let mut ledger = MutationLedger::new();
-    ledger.record_mutation(3, "edit", "c1", None, None, vec![span("src/x.rs", 5, 8, &[])]);
-    ledger.record_mutation(3, "edit", "c2", None, None, vec![span("src/y.rs", 20, 24, &[])]);
+    ledger.record_mutation(
+        3,
+        "edit",
+        "c1",
+        None,
+        None,
+        vec![span("src/x.rs", 5, 8, &[])],
+    );
+    ledger.record_mutation(
+        3,
+        "edit",
+        "c2",
+        None,
+        None,
+        vec![span("src/y.rs", 20, 24, &[])],
+    );
     out.push(CorpusScenario {
         name: "multi_edit_turn_disambiguation",
         expected: Some("mut-0002"),
@@ -874,7 +1015,10 @@ fn corpus_scenarios() -> Vec<CorpusScenario> {
 #[test]
 fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
     let scenarios = corpus_scenarios();
-    assert!(scenarios.len() >= 8, "the corpus needs at least 8 scenarios");
+    assert!(
+        scenarios.len() >= 8,
+        "the corpus needs at least 8 scenarios"
+    );
 
     let validator = PredictiveValidator::new(true);
     let mut labeled = 0usize;
@@ -935,8 +1079,7 @@ fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
     assert_eq!(
         top1_hits, labeled,
         "every labeled scenario (including cross-file symbol rename) must rank #1: {}/{}",
-        top1_hits,
-        labeled
+        top1_hits, labeled
     );
     assert_eq!(
         top2_hits, labeled,
@@ -998,12 +1141,15 @@ fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
         rolled_back += 1;
     }
 
-    assert_eq!(probe_warnings, 0, "valid files must never produce a warning");
+    assert_eq!(
+        probe_warnings, 0,
+        "valid files must never produce a warning"
+    );
     assert_eq!(rolled_back, 0, "nothing may ever be rolled back");
-    let false_positive_rollback_rate = rolled_back as f64 / (probe_warnings + rolled_back + 1) as f64;
+    let false_positive_rollback_rate =
+        rolled_back as f64 / (probe_warnings + rolled_back + 1) as f64;
     assert_eq!(false_positive_rollback_rate, 0.0);
-    let mean_validation_overhead_ms =
-        validation_total_us as f64 / validation_calls as f64 / 1000.0;
+    let mean_validation_overhead_ms = validation_total_us as f64 / validation_calls as f64 / 1000.0;
 
     let artifact = serde_json::json!({
         "artifact": "gate4-predictive-validation-and-attribution-eval",
@@ -1037,13 +1183,16 @@ fn test_gate4_eval_corpus_metrics_and_artifact_generation() {
             "false_positive_rollback_rate is structurally 0.0: the predictive check is advisory and never mutates the workspace."
         ],
     });
-    let metrics_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/GATE4_EVAL_METRICS.json");
+    let metrics_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/GATE4_EVAL_METRICS.json");
     if std::env::var("KROMA_WRITE_EVAL_METRICS").ok().as_deref() == Some("1")
         || !metrics_path.exists()
     {
-        fs::write(&metrics_path, serde_json::to_string_pretty(&artifact).unwrap())
-            .unwrap_or_else(|e| panic!("failed to write {}: {}", metrics_path.display(), e));
+        fs::write(
+            &metrics_path,
+            serde_json::to_string_pretty(&artifact).unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("failed to write {}: {}", metrics_path.display(), e));
         eprintln!("[gate4-eval] wrote {}", metrics_path.display());
     } else {
         let on_disk: serde_json::Value =
@@ -1100,7 +1249,10 @@ fn test_scanner_edge_cases_eof_transitions_rust_raw_byte_strings_js_regex_and_te
     ] {
         let report = validator.validate_content(unclosed_comment.0, unclosed_comment.1);
         assert!(
-            report.issues.iter().any(|i| i.kind == "unclosed_block_comment"),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == "unclosed_block_comment"),
             "expected unclosed_block_comment on {:?}, got {:?}",
             unclosed_comment,
             report.issues
@@ -1193,7 +1345,10 @@ fn test_multi_span_attribution_windows_paths_and_revert_reapply_verification() {
     );
     let top = report.top().expect("top candidate");
     assert_eq!(top.line_range, Some((100, 110)));
-    assert!(report.render_for_model().unwrap().contains("src/lib.rs:100-110"));
+    assert!(report
+        .render_for_model()
+        .unwrap()
+        .contains("src/lib.rs:100-110"));
 
     // 2. Colon-containing paths, Windows drive letters, and URL port rejection.
     let anchors = parse_diagnostic_anchors(
@@ -1220,7 +1375,10 @@ fn test_multi_span_attribution_windows_paths_and_revert_reapply_verification() {
     let store = SnapshotStore::new(root.join("snapshots"));
 
     fs::write(ws_dir.join("lib.rs"), "pub fn compute() -> u32 { 1 }\n").unwrap();
-    let rev_before = store.capture_revision(&ws, None, None, 0).unwrap().revision_id;
+    let rev_before = store
+        .capture_revision(&ws, None, None, 0)
+        .unwrap()
+        .revision_id;
 
     fs::write(ws_dir.join("lib.rs"), "pub fn compute_v2() -> u32 { 1 }\n").unwrap();
     let rev_after = store
@@ -1268,17 +1426,16 @@ fn test_multi_span_attribution_windows_paths_and_revert_reapply_verification() {
     .expect("revert/reapply verification succeeds");
     assert!(verification.failure_resolved_on_revert);
     assert!(report.candidates[0].confidence > pre_conf);
-    assert!(report.candidates[0].rationale.contains("verified via revert/reapply"));
+    assert!(report.candidates[0]
+        .rationale
+        .contains("verified via revert/reapply"));
     // Working tree is restored back to `rev_after` (`compute_v2`).
-    assert!(
-        fs::read_to_string(ws_dir.join("lib.rs"))
-            .unwrap()
-            .contains("compute_v2")
-    );
+    assert!(fs::read_to_string(ws_dir.join("lib.rs"))
+        .unwrap()
+        .contains("compute_v2"));
 
     let _ = fs::remove_dir_all(&root);
 }
-
 
 /// `verify_candidate_in_isolated_worktree` had no test at all before this one: production never
 /// calls it (only `attribute_failure` is wired into the loop) and no test referenced it, so it was
@@ -1294,7 +1451,10 @@ fn test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_paren
     let store = SnapshotStore::new(root.join("snapshots"));
 
     fs::write(ws_dir.join("lib.rs"), "pub fn compute() -> u32 { 1 }\n").unwrap();
-    let rev_before = store.capture_revision(&ws, None, None, 0).unwrap().revision_id;
+    let rev_before = store
+        .capture_revision(&ws, None, None, 0)
+        .unwrap()
+        .revision_id;
     fs::write(ws_dir.join("lib.rs"), "pub fn compute_v2() -> u32 { 1 }\n").unwrap();
     let rev_after = store
         .capture_revision(&ws, Some(&rev_before), None, 1)
@@ -1343,8 +1503,7 @@ fn test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_paren
         worktree_root.clone(),
         |probe_ws| {
             *probed_root.borrow_mut() = probe_ws.root().to_path_buf();
-            *probed_text.borrow_mut() =
-                fs::read_to_string(probe_ws.root().join("lib.rs")).unwrap();
+            *probed_text.borrow_mut() = fs::read_to_string(probe_ws.root().join("lib.rs")).unwrap();
             existed_during_probe.set(worktree_root.exists());
             true
         },
@@ -1363,8 +1522,7 @@ fn test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_paren
     );
     assert!(verification.failure_resolved_on_revert);
     assert!(report.candidates[0].confidence > pre_conf);
-    assert!(report
-        .candidates[0]
+    assert!(report.candidates[0]
         .rationale
         .contains("verified in isolated worktree"));
     assert_eq!(
@@ -1416,7 +1574,10 @@ fn test_verify_candidate_verification_rejects_an_unusable_revision_before() {
     let ws = WorkspaceCap::new(&ws_dir).unwrap();
     let store = SnapshotStore::new(root.join("snapshots"));
     fs::write(ws_dir.join("lib.rs"), "pub fn compute() -> u32 { 1 }\n").unwrap();
-    let rev = store.capture_revision(&ws, None, None, 0).unwrap().revision_id;
+    let rev = store
+        .capture_revision(&ws, None, None, 0)
+        .unwrap()
+        .revision_id;
 
     let mut candidate = AttributionCandidate {
         mutation_id: "m-guard".to_string(),
@@ -1564,7 +1725,11 @@ async fn test_bash_changed_paths_backfill_predict_cmd_and_restore_rev_pruning() 
             _ => None,
         })
         .expect("predict-cmd feedback injected into transcript");
-    assert!(predict_msg.contains("mut-0001") && predict_msg.contains("b.rs"), "{}", predict_msg);
+    assert!(
+        predict_msg.contains("mut-0001") && predict_msg.contains("b.rs"),
+        "{}",
+        predict_msg
+    );
 
     // Verify `--predict-cmd` is NEVER executed when `--no-predictive-check` is active.
     let marker_file = root.join("predict_should_not_exist.marker");
@@ -1580,12 +1745,19 @@ async fn test_bash_changed_paths_backfill_predict_cmd_and_restore_rev_pruning() 
         ),
     );
     let env2 = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
-    let policy2 = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy2 = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let budget2 = BudgetConfig::default();
-    let runtime2 = build_default_runtime(env2, policy2, budget2.clone(), None)
-        .with_predictive_check(false);
+    let runtime2 =
+        build_default_runtime(env2, policy2, budget2.clone(), None).with_predictive_check(false);
     let provider2 = Arc::new(FakeProvider::new(vec![
-        tool_turn("call_w", "write", r#"{"path":"c.rs","content":"pub fn c() {}\n"}"#),
+        tool_turn(
+            "call_w",
+            "write",
+            r#"{"path":"c.rs","content":"pub fn c() {}\n"}"#,
+        ),
         stop_turn("done"),
     ]));
     let cfg2 = AgentRunConfig::new("no predictive check", budget2);
@@ -1603,4 +1775,3 @@ async fn test_bash_changed_paths_backfill_predict_cmd_and_restore_rev_pruning() 
 
     let _ = fs::remove_dir_all(&root);
 }
-

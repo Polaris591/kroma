@@ -18,8 +18,8 @@ use kroma_core::budget::BudgetConfig;
 use kroma_core::env::LocalHostEnv;
 use kroma_core::events::{EventLogger, EventPayload};
 use kroma_core::extensions::{
-    discover_skills, execute_activate_skill, CommandHookRunner, CommandObserverHook, CommandPolicyHook,
-    CustomToolContext, CustomToolHandler, ExtensionError, ExtensionManifest,
+    discover_skills, execute_activate_skill, CommandHookRunner, CommandObserverHook,
+    CommandPolicyHook, CustomToolContext, CustomToolHandler, ExtensionError, ExtensionManifest,
     ExtensionTrustLevel, HookContext, HookEngine, HookError, HookEvent, ObserverHook, PolicyHook,
     PolicyHookDecision, ScopedExtension, ScopedToolDefinition, SkillEntry, SubtreeContextTracker,
     EXTENSION_API_VERSION, RESERVED_KERNEL_TOOLS, SUBTREE_DOC_MAX_BYTES, SUBTREE_TOTAL_MAX_BYTES,
@@ -70,7 +70,10 @@ fn workspace_of(root: &std::path::Path) -> Arc<LocalHostEnv> {
 }
 
 fn read_only_engine() -> PolicyEngine {
-    PolicyEngine::new(PolicyMode::ReadOnly, Arc::new(NonInteractiveApprovalHandler))
+    PolicyEngine::new(
+        PolicyMode::ReadOnly,
+        Arc::new(NonInteractiveApprovalHandler),
+    )
 }
 
 fn ask_engine() -> PolicyEngine {
@@ -78,7 +81,10 @@ fn ask_engine() -> PolicyEngine {
 }
 
 fn allow_write_engine() -> PolicyEngine {
-    PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler))
+    PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    )
 }
 
 /// A skill entry with a fixed body, used by the collision and trust-boundary tests.
@@ -136,10 +142,7 @@ fn echo_tool(name: &str, effect: EffectClass, prefix: &'static str) -> ScopedToo
                 .get("value")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing>");
-            ToolExecutionOutput::success(
-                format!("{}{}", prefix, value),
-                ToolResultMeta::default(),
-            )
+            ToolExecutionOutput::success(format!("{}{}", prefix, value), ToolResultMeta::default())
         }),
     )
 }
@@ -271,7 +274,10 @@ impl ObserverHook for FixedObserverHook {
 fn failing_observer(id: &str) -> Arc<dyn ObserverHook> {
     Arc::new(FixedObserverHook {
         id: id.to_string(),
-        result: Err(HookError::Failed(id.to_string(), "observer exploded".to_string())),
+        result: Err(HookError::Failed(
+            id.to_string(),
+            "observer exploded".to_string(),
+        )),
         sleep_ms: 0,
     })
 }
@@ -354,12 +360,19 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
     assert_ne!(serde_json::to_string(&mounted_defs).unwrap(), baseline_json);
 
     // Hooks are live while mounted.
-    assert_eq!(registry.hook_engine().policy_hook_ids(), vec!["demo-policy"]);
-    assert_eq!(registry.hook_engine().observer_hook_ids(), vec!["demo-observer"]);
+    assert_eq!(
+        registry.hook_engine().policy_hook_ids(),
+        vec!["demo-policy"]
+    );
+    assert_eq!(
+        registry.hook_engine().observer_hook_ids(),
+        vec!["demo-observer"]
+    );
 
     // The extension tool dispatches and returns its handler output.
     let env = workspace_of(&root);
-    let runtime = build_runtime_with_registry(registry.clone(), env, ask_engine(), BudgetConfig::default());
+    let runtime =
+        build_runtime_with_registry(registry.clone(), env, ask_engine(), BudgetConfig::default());
     let (_tx, rx) = watch::channel(false);
     let (msg, decision, hooks) = runtime
         .execute_call(&call("echo_note", r#"{"value":"ping"}"#), 1, rx.clone())
@@ -381,8 +394,12 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
         registry.lookup_for_dispatch("mutate_note", PolicyMode::ReadOnly),
         Err(ToolLookupError::PolicyHidden(_))
     ));
-    let ro_runtime =
-        build_runtime_with_registry(registry.clone(), workspace_of(&root), read_only_engine(), BudgetConfig::default());
+    let ro_runtime = build_runtime_with_registry(
+        registry.clone(),
+        workspace_of(&root),
+        read_only_engine(),
+        BudgetConfig::default(),
+    );
     let (denied, decision, _) = ro_runtime
         .execute_call(&call("mutate_note", r#"{"value":"x"}"#), 1, rx.clone())
         .await;
@@ -398,8 +415,11 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
     let filtered = ToolRegistry::new(Some(vec!["read".to_string()]));
     let filtered_id = filtered
         .register_extension(
-            ScopedExtension::new(manifest("filtered"))
-                .with_tool(echo_tool("echo_note", EffectClass::ReadOnly, "echo:")),
+            ScopedExtension::new(manifest("filtered")).with_tool(echo_tool(
+                "echo_note",
+                EffectClass::ReadOnly,
+                "echo:",
+            )),
         )
         .unwrap();
     assert!(matches!(
@@ -424,11 +444,17 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
     ] {
         let err = registry
             .register_extension(
-                ScopedExtension::new(manifest("shadow"))
-                    .with_tool(echo_tool(reserved, EffectClass::ReadOnly, "x:")),
+                ScopedExtension::new(manifest("shadow")).with_tool(echo_tool(
+                    reserved,
+                    EffectClass::ReadOnly,
+                    "x:",
+                )),
             )
             .unwrap_err();
-        assert_eq!(err, ExtensionError::ReservedKernelTool(reserved.to_string()));
+        assert_eq!(
+            err,
+            ExtensionError::ReservedKernelTool(reserved.to_string())
+        );
     }
     // A failed mount must not have leaked a manifest or a tool.
     assert_eq!(registry.extension_ids(), vec![id.clone()]);
@@ -465,10 +491,11 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
 
     // Re-mounting the same id after unmount succeeds (the lifecycle is fully reversible).
     let again = registry
-        .register_extension(
-            ScopedExtension::new(manifest("demo"))
-                .with_tool(echo_tool("echo_note", EffectClass::ReadOnly, "echo:")),
-        )
+        .register_extension(ScopedExtension::new(manifest("demo")).with_tool(echo_tool(
+            "echo_note",
+            EffectClass::ReadOnly,
+            "echo:",
+        )))
         .unwrap();
     assert_eq!(again, id);
     registry.unregister_extension(&again).unwrap();
@@ -532,10 +559,9 @@ async fn test_policy_hook_fails_closed_on_deny_error_and_timeout() {
     // (a) explicit Deny
     let registry = ToolRegistry::new(None);
     registry
-        .register_extension(
-            ScopedExtension::new(manifest("deny"))
-                .with_policy_hook(FixedPolicyHook::deny("deny-hook", "project policy forbids reads")),
-        )
+        .register_extension(ScopedExtension::new(manifest("deny")).with_policy_hook(
+            FixedPolicyHook::deny("deny-hook", "project policy forbids reads"),
+        ))
         .unwrap();
     let runtime = build_runtime_with_registry(
         registry,
@@ -543,9 +569,7 @@ async fn test_policy_hook_fails_closed_on_deny_error_and_timeout() {
         read_only_engine(),
         BudgetConfig::default(),
     );
-    let (msg, decision, hooks) = runtime
-        .execute_call(&denied_call, 3, rx.clone())
-        .await;
+    let (msg, decision, hooks) = runtime.execute_call(&denied_call, 3, rx.clone()).await;
     assert_eq!(
         msg.outcome,
         ToolOutcome::Error {
@@ -553,7 +577,11 @@ async fn test_policy_hook_fails_closed_on_deny_error_and_timeout() {
         }
     );
     assert_eq!(decision, "deny_policy_hook");
-    assert!(msg.content.contains("project policy forbids reads"), "{}", msg.content);
+    assert!(
+        msg.content.contains("project policy forbids reads"),
+        "{}",
+        msg.content
+    );
     assert!(hooks
         .iter()
         .any(|h| h.hook_kind == "policy" && h.outcome == "deny" && h.event == "pre_tool_use"));
@@ -624,7 +652,11 @@ async fn test_policy_hook_fails_closed_on_deny_error_and_timeout() {
             ScopedExtension::new(manifest("cmd-deny")).with_policy_hook(Arc::new(
                 CommandPolicyHook::new(
                     "cmd-deny",
-                    vec!["/bin/sh".into(), "-c".into(), "echo blocked by cmd; exit 7".into()],
+                    vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "echo blocked by cmd; exit 7".into(),
+                    ],
                 ),
             )),
         )
@@ -741,12 +773,9 @@ async fn test_policy_hook_denial_is_logged_and_returned_to_the_model() {
 
     let registry = ToolRegistry::new(None);
     registry
-        .register_extension(
-            ScopedExtension::new(manifest("deny")).with_policy_hook(FixedPolicyHook::deny(
-                "deny-reads",
-                "reading is disabled for this repository",
-            )),
-        )
+        .register_extension(ScopedExtension::new(manifest("deny")).with_policy_hook(
+            FixedPolicyHook::deny("deny-reads", "reading is disabled for this repository"),
+        ))
         .unwrap();
     let runtime = build_runtime_with_registry(
         registry,
@@ -796,7 +825,10 @@ async fn test_policy_hook_denial_is_logged_and_returned_to_the_model() {
         "the run log must contain HookEvaluated events"
     );
     assert!(log.contains("deny-reads"), "the hook id must be logged");
-    assert!(log.contains("\"deny\""), "the denial outcome must be logged");
+    assert!(
+        log.contains("\"deny\""),
+        "the denial outcome must be logged"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -899,7 +931,10 @@ async fn test_pre_completion_policy_hook_blocks_completion_and_run_observers_fir
         })
         .filter(|c| c.contains("PreCompletion policy hook denied completion"))
         .count();
-    assert_eq!(feedback, 2, "each denial must be surfaced as a retry instruction");
+    assert_eq!(
+        feedback, 2,
+        "each denial must be surfaced as a retry instruction"
+    );
 
     let log = fs::read_dir(&state)
         .unwrap()
@@ -1053,7 +1088,11 @@ async fn test_failing_observers_never_abort_the_run() {
             "always-fail"
         }
         fn events(&self) -> &'static [HookEvent] {
-            &[HookEvent::PostToolUse, HookEvent::RunCompleted, HookEvent::TurnCompleted]
+            &[
+                HookEvent::PostToolUse,
+                HookEvent::RunCompleted,
+                HookEvent::TurnCompleted,
+            ]
         }
         fn observe(&self, _event: HookEvent, _ctx: &HookContext) -> Result<(), HookError> {
             Err(HookError::Failed(
@@ -1066,8 +1105,7 @@ async fn test_failing_observers_never_abort_the_run() {
     let registry = ToolRegistry::new(None);
     registry
         .register_extension(
-            ScopedExtension::new(manifest("obs"))
-                .with_observer_hook(Arc::new(AlwaysFailObserver)),
+            ScopedExtension::new(manifest("obs")).with_observer_hook(Arc::new(AlwaysFailObserver)),
         )
         .unwrap();
     let runtime = build_runtime_with_registry(
@@ -1086,7 +1124,12 @@ async fn test_failing_observers_never_abort_the_run() {
         .run(logger)
         .await;
 
-    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
     assert_eq!(summary.final_assistant_text.as_deref(), Some("done"));
 
     let log = fs::read_dir(&state)
@@ -1095,9 +1138,18 @@ async fn test_failing_observers_never_abort_the_run() {
         .map(|e| fs::read_to_string(e.path()).unwrap_or_default())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(log.contains("failed_open"), "observer failures must be logged");
-    assert!(log.contains("run_completed"), "RunCompleted observers must fire");
-    assert!(log.contains("turn_completed"), "TurnCompleted observers must fire");
+    assert!(
+        log.contains("failed_open"),
+        "observer failures must be logged"
+    );
+    assert!(
+        log.contains("run_completed"),
+        "RunCompleted observers must fire"
+    );
+    assert!(
+        log.contains("turn_completed"),
+        "TurnCompleted observers must fire"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -1165,13 +1217,18 @@ async fn test_subtree_jit_agents_md_loads_once_escapes_tags_and_preserves_prefix
     let logger = EventLogger::new(run_id, Some(state.clone()), false).unwrap();
     let (_tx, rx) = watch::channel(false);
     let (summary, _logger) = AgentRunner::new(cfg, provider.clone(), runtime, rx)
-        .with_prompt_builder(PromptBuilder::default().with_workspace_context(
-            &WorkspaceCap::new(&ws).unwrap(),
-        ))
+        .with_prompt_builder(
+            PromptBuilder::default().with_workspace_context(&WorkspaceCap::new(&ws).unwrap()),
+        )
         .with_subtree_context(SubtreeContextTracker::new(true))
         .run(logger)
         .await;
-    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
 
     let results: Vec<_> = summary
         .transcript
@@ -1187,7 +1244,8 @@ async fn test_subtree_jit_agents_md_loads_once_escapes_tags_and_preserves_prefix
         .find(|tr| tr.meta.relative_path.as_deref() == Some("crates/sub/src/lib.rs"))
         .expect("the first subtree read result must be recorded");
     assert!(
-        sub.content.contains("<untrusted_subtree_context directory=\"crates/sub\" file=\"AGENTS.md\">"),
+        sub.content
+            .contains("<untrusted_subtree_context directory=\"crates/sub\" file=\"AGENTS.md\">"),
         "the ancestor guidance must be fenced and attributed: {}",
         &sub.content[..sub.content.len().min(400)]
     );
@@ -1197,16 +1255,24 @@ async fn test_subtree_jit_agents_md_loads_once_escapes_tags_and_preserves_prefix
         "the embedded closing tag must be escaped: {}",
         sub.content
     );
-    assert!(!sub.content.contains("\n</untrusted_workspace_context>\n"),
-        "the hostile tag must not survive verbatim");
+    assert!(
+        !sub.content.contains("\n</untrusted_workspace_context>\n"),
+        "the hostile tag must not survive verbatim"
+    );
     assert_eq!(
         sub.content.matches("</untrusted_subtree_context>").count(),
         1,
         "the subtree fence must close exactly once"
     );
     // Control/Bidi characters are escaped, and the per-directory cap is respected.
-    assert!(!sub.content.contains('\u{202e}'), "bidi overrides must be escaped");
-    assert!(!sub.content.contains('\u{0007}'), "C0 bytes must be escaped");
+    assert!(
+        !sub.content.contains('\u{202e}'),
+        "bidi overrides must be escaped"
+    );
+    assert!(
+        !sub.content.contains('\u{0007}'),
+        "C0 bytes must be escaped"
+    );
     assert!(sub.content.contains("\\u{202e}"), "{}", sub.content);
     let guidance_bytes = sub.content.len();
     assert!(
@@ -1240,7 +1306,10 @@ async fn test_subtree_jit_agents_md_loads_once_escapes_tags_and_preserves_prefix
 
     // The frozen system prefix is byte-identical on every request, even after JIT injection.
     let requests = provider.recorded_requests();
-    assert!(requests.len() >= 2, "at least two model requests must be recorded");
+    assert!(
+        requests.len() >= 2,
+        "at least two model requests must be recorded"
+    );
     let first_prompt = requests[0].system_prompt.clone();
     for (i, request) in requests.iter().enumerate() {
         assert_eq!(
@@ -1330,7 +1399,9 @@ fn test_skills_discovery_activate_skill_tool_and_tag_sanitization() {
     // `activate_skill` on a known skill fences and escapes the body.
     let out = execute_activate_skill(&catalog, r#"{"name":"rust-audit"}"#);
     assert!(out.outcome.is_success(), "{}", out.content);
-    assert!(out.content.contains("<untrusted_skill_context name=\"rust-audit\">"));
+    assert!(out
+        .content
+        .contains("<untrusted_skill_context name=\"rust-audit\">"));
     assert!(out.content.contains("&lt;/untrusted_skill_context&gt;"));
     assert_eq!(out.content.matches("</untrusted_skill_context>").count(), 1);
 
@@ -1376,11 +1447,7 @@ fn test_skills_discovery_activate_skill_tool_and_tag_sanitization() {
     let (_tx, rx) = watch::channel(false);
     let (msg, decision, _) = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(runtime.execute_call(
-            &call("activate_skill", r#"{"name":"rust-audit"}"#),
-            1,
-            rx,
-        ));
+        .block_on(runtime.execute_call(&call("activate_skill", r#"{"name":"rust-audit"}"#), 1, rx));
     assert!(msg.outcome.is_success(), "{}", msg.content);
     assert_eq!(decision, "allow");
     assert!(msg.content.contains("untrusted_skill_context"));
@@ -1400,7 +1467,10 @@ fn test_skills_discovery_activate_skill_tool_and_tag_sanitization() {
     assert!(listed.content.contains("extension-skill"));
     registry.unregister_extension(&id).unwrap();
     assert_eq!(registry.skills().len(), 2);
-    assert!(!registry.skills().iter().any(|s| s.name == "extension-skill"));
+    assert!(!registry
+        .skills()
+        .iter()
+        .any(|s| s.name == "extension-skill"));
 
     // `--skill <name>` injects the skill into the initial untrusted context, bounded and fenced.
     let prompt = PromptBuilder::default()
@@ -1473,7 +1543,9 @@ async fn test_fork_rewind_resets_subtree_jit_state() {
             .subtree_dirs
             .clone(),
     );
-    assert!(resumed.load_for_path(&cap, "crates/sub/src/lib.rs").is_empty());
+    assert!(resumed
+        .load_for_path(&cap, "crates/sub/src/lib.rs")
+        .is_empty());
     assert_eq!(
         resumed.loaded_dirs(),
         vec![
@@ -1515,7 +1587,9 @@ async fn test_fork_rewind_resets_subtree_jit_state() {
         ]
     );
     // Reloading on the same (new) branch is still once-only.
-    assert!(forked.load_for_path(&cap, "crates/sub/src/lib.rs").is_empty());
+    assert!(forked
+        .load_for_path(&cap, "crates/sub/src/lib.rs")
+        .is_empty());
 
     // A tracker that was reset explicitly also drops its byte accounting.
     let mut tracker = SubtreeContextTracker::new(true);
@@ -1556,7 +1630,15 @@ async fn test_final_turn_subtree_dirs_persisted_in_checkpoint_and_preserved_on_f
         .unwrap();
     // The abandoned branch had already injected `crates/sub` guidance at this leaf.
     journal
-        .checkpoint_with_revision(0, 0, Vec::new(), "", None, vec!["crates/sub".to_string()], Vec::new())
+        .checkpoint_with_revision(
+            0,
+            0,
+            Vec::new(),
+            "",
+            None,
+            vec!["crates/sub".to_string()],
+            Vec::new(),
+        )
         .unwrap();
     journal
         .append_item(
@@ -1610,14 +1692,21 @@ async fn test_final_turn_subtree_dirs_persisted_in_checkpoint_and_preserved_on_f
         .with_subtree_context(tracker)
         .run(logger)
         .await;
-    assert_eq!(summary.status, RunStatus::Completed, "{:?}", summary.terminal_reason);
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
 
     let result_for = |path: &str| {
         summary
             .transcript
             .iter()
             .find_map(|item| match item {
-                TranscriptItem::ToolResult(tr) if tr.meta.relative_path.as_deref() == Some(path) => {
+                TranscriptItem::ToolResult(tr)
+                    if tr.meta.relative_path.as_deref() == Some(path) =>
+                {
                     Some(tr.clone())
                 }
                 _ => None,
@@ -1719,7 +1808,11 @@ fn test_capability_matrix_and_untrusted_extension_restrictions_and_checksum_retr
         trust_level: ExtensionTrustLevel::ProjectUntrusted,
         ..manifest("untrusted-write")
     })
-    .with_tool(echo_tool("untrusted_write_tool", EffectClass::Mutating, "m:"));
+    .with_tool(echo_tool(
+        "untrusted_write_tool",
+        EffectClass::Mutating,
+        "m:",
+    ));
     assert!(matches!(
         registry.register_extension(untrusted_write).unwrap_err(),
         ExtensionError::UntrustedCapability { .. }
@@ -1728,7 +1821,11 @@ fn test_capability_matrix_and_untrusted_extension_restrictions_and_checksum_retr
         trust_level: ExtensionTrustLevel::ProjectUntrusted,
         ..manifest("untrusted-shell")
     })
-    .with_tool(echo_tool("untrusted_shell_tool", EffectClass::SideEffect, "s:"));
+    .with_tool(echo_tool(
+        "untrusted_shell_tool",
+        EffectClass::SideEffect,
+        "s:",
+    ));
     assert!(matches!(
         registry.register_extension(untrusted_shell).unwrap_err(),
         ExtensionError::UntrustedCapability { .. }
@@ -1739,13 +1836,23 @@ fn test_capability_matrix_and_untrusted_extension_restrictions_and_checksum_retr
         trust_level: ExtensionTrustLevel::ProjectUntrusted,
         ..manifest("untrusted-readonly")
     })
-    .with_tool(echo_tool("untrusted_read_tool", EffectClass::ReadOnly, "r:"))
+    .with_tool(echo_tool(
+        "untrusted_read_tool",
+        EffectClass::ReadOnly,
+        "r:",
+    ))
     .with_observer_hook(failing_observer("untrusted-observer"))
     .with_skill(skill("untrusted-skill"));
     let untrusted_id = registry.register_extension(untrusted_ok).unwrap();
-    assert!(registry.skills().iter().any(|s| s.name == "untrusted-skill"));
+    assert!(registry
+        .skills()
+        .iter()
+        .any(|s| s.name == "untrusted-skill"));
     registry.unregister_extension(&untrusted_id).unwrap();
-    assert!(!registry.skills().iter().any(|s| s.name == "untrusted-skill"));
+    assert!(!registry
+        .skills()
+        .iter()
+        .any(|s| s.name == "untrusted-skill"));
 
     // (c) Source checksum re-trust: once a digest is pinned, a different digest is refused until an
     // operator explicitly re-trusts the extension.
@@ -1768,7 +1875,10 @@ fn test_capability_matrix_and_untrusted_extension_restrictions_and_checksum_retr
             found: "sha256:bbb".to_string(),
         }
     );
-    assert!(registry.extensions_are_empty(), "a checksum mismatch must not mount");
+    assert!(
+        registry.extensions_are_empty(),
+        "a checksum mismatch must not mount"
+    );
 
     // The unchanged digest still mounts after an unmount ...
     let same = ScopedExtension::new(ExtensionManifest {
@@ -1853,14 +1963,18 @@ async fn test_inflight_extension_tool_unmount_cancels_and_reports_side_effects()
     let spawned_runtime = runtime.clone();
     let (_tx2, rx2) = watch::channel(false);
     let slow_call = call("slow_mutate", r#"{"value":"y"}"#);
-    let handle = tokio::spawn(async move { spawned_runtime.execute_call(&slow_call, 1, rx2).await });
+    let handle =
+        tokio::spawn(async move { spawned_runtime.execute_call(&slow_call, 1, rx2).await });
     for _ in 0..2_000 {
         if started.load(Ordering::SeqCst) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    assert!(started.load(Ordering::SeqCst), "the extension handler must have started");
+    assert!(
+        started.load(Ordering::SeqCst),
+        "the extension handler must have started"
+    );
 
     let report = registry.unregister_extension(&id).unwrap();
     assert_eq!(report.extension_id, id);
@@ -2141,10 +2255,12 @@ fn test_duplicate_skill_collision_rejected_preserving_reversibility() {
     let registry = ToolRegistry::new(None).with_workspace_skills(vec![skill("workspace-skill")]);
 
     // (a) Colliding with a workspace-discovered skill is rejected and leaves no residue.
-    let workspace_collision = ScopedExtension::new(manifest("ws-collision"))
-        .with_skill(skill("workspace-skill"));
+    let workspace_collision =
+        ScopedExtension::new(manifest("ws-collision")).with_skill(skill("workspace-skill"));
     assert_eq!(
-        registry.register_extension(workspace_collision).unwrap_err(),
+        registry
+            .register_extension(workspace_collision)
+            .unwrap_err(),
         ExtensionError::DuplicateSkill("workspace-skill".to_string())
     );
     assert!(registry.extensions_are_empty());
@@ -2162,13 +2278,21 @@ fn test_duplicate_skill_collision_rejected_preserving_reversibility() {
     );
     assert_eq!(registry.extension_ids(), vec![first.clone()]);
     assert_eq!(
-        registry.skills().iter().filter(|s| s.name == "shared").count(),
+        registry
+            .skills()
+            .iter()
+            .filter(|s| s.name == "shared")
+            .count(),
         1,
         "the first extension's skill must survive the rejected mount"
     );
     registry.unregister_extension(&first).unwrap();
     assert!(!registry.skills().iter().any(|s| s.name == "shared"));
-    assert_eq!(registry.skills().len(), 1, "only the workspace skill remains");
+    assert_eq!(
+        registry.skills().len(),
+        1,
+        "only the workspace skill remains"
+    );
 
     // (c) A single extension declaring the same skill twice is rejected.
     let intra = ScopedExtension::new(manifest("dup"))
@@ -2180,8 +2304,8 @@ fn test_duplicate_skill_collision_rejected_preserving_reversibility() {
     );
 
     // (d) A skill name outside the conservative charset is rejected.
-    let hostile = ScopedExtension::new(manifest("bad-name"))
-        .with_skill(skill("bad name/../../escape"));
+    let hostile =
+        ScopedExtension::new(manifest("bad-name")).with_skill(skill("bad name/../../escape"));
     assert!(matches!(
         registry.register_extension(hostile).unwrap_err(),
         ExtensionError::InvalidManifest(_)

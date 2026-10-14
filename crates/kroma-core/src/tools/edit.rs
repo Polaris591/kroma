@@ -336,8 +336,14 @@ pub async fn execute_edit(
     for (idx, item) in args.edits.iter().enumerate() {
         let old_norm = normalize_crlf(&item.old_text);
         let new_norm = normalize_crlf(&item.new_text);
-        let (span, diag) =
-            match_one_edit(idx, &old_norm, &new_norm, body_raw, &file_lines, dominant_eol);
+        let (span, diag) = match_one_edit(
+            idx,
+            &old_norm,
+            &new_norm,
+            body_raw,
+            &file_lines,
+            dominant_eol,
+        );
         match span {
             Some(span) => validated_spans.push(span),
             None => any_failed = true,
@@ -583,7 +589,6 @@ fn match_one_edit(
     )
 }
 
-
 fn parse_raw_lines<'a>(body: &'a str) -> Vec<RawLineSlice<'a>> {
     if body.is_empty() {
         return Vec::new();
@@ -704,7 +709,9 @@ fn find_tier1_exact_matches(
 
 fn byte_offset_to_line_num(file_lines: &[RawLineSlice<'_>], byte_offset: usize) -> usize {
     for (idx, line) in file_lines.iter().enumerate() {
-        if byte_offset >= line.byte_start && byte_offset < line.byte_end_with_eol.max(line.byte_start + 1) {
+        if byte_offset >= line.byte_start
+            && byte_offset < line.byte_end_with_eol.max(line.byte_start + 1)
+        {
             return idx + 1;
         }
     }
@@ -730,7 +737,8 @@ fn find_tier2_trailing_ws_matches(
     let k = old_lines.len();
     let mut matches = Vec::new();
     for start_idx in 0..=(file_lines.len() - k) {
-        let window_matches = (0..k).all(|offset| file_lines[start_idx + offset].trimmed_end == old_lines[offset]);
+        let window_matches =
+            (0..k).all(|offset| file_lines[start_idx + offset].trimmed_end == old_lines[offset]);
         if window_matches {
             let first_line = &file_lines[start_idx];
             let last_line = &file_lines[start_idx + k - 1];
@@ -782,7 +790,10 @@ fn diagnose_mismatch(
     // 2. Check for leading indentation mismatch (ignoring leading & trailing horizontal whitespace)
     let k = old_lines.len();
     if k <= file_lines.len() {
-        let old_stripped: Vec<&str> = old_lines.iter().map(|l| l.trim_matches([' ', '\t'])).collect();
+        let old_stripped: Vec<&str> = old_lines
+            .iter()
+            .map(|l| l.trim_matches([' ', '\t']))
+            .collect();
         let mut indent_matches = Vec::new();
         for start_idx in 0..=(file_lines.len() - k) {
             let ok = (0..k).all(|off| {
@@ -806,7 +817,10 @@ fn diagnose_mismatch(
             );
             let old_indent = describe_indentation(old_lines.iter().copied());
             let ctx_start = start_line.saturating_sub(1).max(1);
-            let ctx_end = (end_line + 1).min(file_lines.len()).max(ctx_start + 9).min(file_lines.len());
+            let ctx_end = (end_line + 1)
+                .min(file_lines.len())
+                .max(ctx_start + 9)
+                .min(file_lines.len());
             let snippet = format_line_range(file_lines, ctx_start, ctx_end);
             return (
                 EditDiagKind::IndentationMismatch,
@@ -890,12 +904,18 @@ where
         if line.trim().is_empty() {
             continue;
         }
-        let leading: String = line.chars().take_while(|&c| c == ' ' || c == '\t').collect();
+        let leading: String = line
+            .chars()
+            .take_while(|&c| c == ' ' || c == '\t')
+            .collect();
         if leading.is_empty() {
             return "0-space indent".to_string();
         }
         if leading.contains('\t') {
-            return format!("{}-tab indent", leading.chars().filter(|&c| c == '\t').count());
+            return format!(
+                "{}-tab indent",
+                leading.chars().filter(|&c| c == '\t').count()
+            );
         }
         return format!("{}-space indent", leading.len());
     }
@@ -936,7 +956,11 @@ fn line_similarity(a: &str, b: &str) -> f64 {
     (2.0 * matches as f64) / ((a_bigrams.len() + b_bigrams.len()) as f64)
 }
 
-fn format_line_range(file_lines: &[RawLineSlice<'_>], start_line: usize, end_line: usize) -> String {
+fn format_line_range(
+    file_lines: &[RawLineSlice<'_>],
+    start_line: usize,
+    end_line: usize,
+) -> String {
     if file_lines.is_empty() || start_line == 0 || start_line > file_lines.len() {
         return String::new();
     }
@@ -951,7 +975,12 @@ fn format_line_range(file_lines: &[RawLineSlice<'_>], start_line: usize, end_lin
             while cut > 0 && !line_str.is_char_boundary(cut) {
                 cut -= 1;
             }
-            let _ = writeln!(&mut out, "{:>5}\t{}[line truncated]", idx + 1, &line_str[..cut]);
+            let _ = writeln!(
+                &mut out,
+                "{:>5}\t{}[line truncated]",
+                idx + 1,
+                &line_str[..cut]
+            );
         } else {
             let _ = writeln!(&mut out, "{:>5}\t{}", idx + 1, line_str);
         }
@@ -969,15 +998,11 @@ fn build_stale_file_snippet(file_lines: &[RawLineSlice<'_>], first_old_text: &st
         .map(|l| l.trim())
         .unwrap_or("");
     if !target_first.is_empty() {
-        if let Some((idx, _)) = file_lines
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| {
-                line_similarity(a.content_no_eol.trim(), target_first)
-                    .partial_cmp(&line_similarity(b.content_no_eol.trim(), target_first))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        {
+        if let Some((idx, _)) = file_lines.iter().enumerate().max_by(|(_, a), (_, b)| {
+            line_similarity(a.content_no_eol.trim(), target_first)
+                .partial_cmp(&line_similarity(b.content_no_eol.trim(), target_first))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             let start = (idx + 1).saturating_sub(3).max(1);
             let end = (idx + 6).min(file_lines.len());
             return format_line_range(file_lines, start, end);
@@ -1127,7 +1152,11 @@ mod match_tests {
         assert!(span.is_none(), "an ambiguous edit must not be applied");
         assert_eq!(diag.error_code, Some(ErrorCode::MatchNotUnique));
         assert_eq!(diag.diag_kind, Some(EditDiagKind::MatchNotUnique));
-        assert!(diag.detail.contains("MATCH_NOT_UNIQUE"), "got {}", diag.detail);
+        assert!(
+            diag.detail.contains("MATCH_NOT_UNIQUE"),
+            "got {}",
+            diag.detail
+        );
     }
 
     #[test]
@@ -1152,7 +1181,11 @@ mod match_tests {
             diag.diag_kind.is_some(),
             "the mismatch must carry an actionable diagnostic kind"
         );
-        assert!(diag.detail.contains("MATCH_NOT_FOUND"), "got {}", diag.detail);
+        assert!(
+            diag.detail.contains("MATCH_NOT_FOUND"),
+            "got {}",
+            diag.detail
+        );
     }
 
     #[test]
@@ -1162,6 +1195,10 @@ mod match_tests {
         let (span, diag, _) = run("a\n", "", "y\n", "\n");
         assert!(span.is_none(), "an empty old_text must not match");
         assert_eq!(diag.error_code, Some(ErrorCode::InvalidArguments));
-        assert!(diag.detail.contains("must not be empty"), "got {}", diag.detail);
+        assert!(
+            diag.detail.contains("must not be empty"),
+            "got {}",
+            diag.detail
+        );
     }
 }

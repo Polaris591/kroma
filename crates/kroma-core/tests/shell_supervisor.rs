@@ -34,8 +34,8 @@ fn test_stream_line_collector_3_byte_incomplete_utf8_across_chunks() {
     use kroma_core::tool::output_buffer::HeadTailBuffer;
     let mut ht = HeadTailBuffer::new(10, 50, 100, 1024, None);
     ht.push_str("123456789"); // 9 bytes in head_buf (1 byte remaining)
-    ht.push_str("中\n");      // 3-byte UTF-8 char doesn't fit in 1 remaining byte -> seals head_buf and goes to tail
-    ht.push_str("A\n");       // 2-byte ASCII must NOT jump into head_buf ahead of "中\n"!
+    ht.push_str("中\n"); // 3-byte UTF-8 char doesn't fit in 1 remaining byte -> seals head_buf and goes to tail
+    ht.push_str("A\n"); // 2-byte ASCII must NOT jump into head_buf ahead of "中\n"!
     let (out, truncated) = ht.finalize();
     assert!(!truncated);
     assert_eq!(out, "123456789中\nA\n");
@@ -228,7 +228,11 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
         if let Ok(sub_pid) = pid_str.trim().parse::<i32>() {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let alive = unsafe { libc::kill(sub_pid, 0) == 0 };
-            assert!(!alive, "Subprocess PID {} must be terminated with process group", sub_pid);
+            assert!(
+                !alive,
+                "Subprocess PID {} must be terminated with process group",
+                sub_pid
+            );
         }
     }
 

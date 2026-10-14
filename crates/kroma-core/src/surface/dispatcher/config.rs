@@ -134,9 +134,9 @@ impl RpcDispatcher {
         }
 
         let new_theme = match &ui_theme_raw {
-            Some(raw) => Some(
-                Theme::parse(raw).map_err(|e| JsonRpcError::new(JSONRPC_INVALID_PARAMS, e))?,
-            ),
+            Some(raw) => {
+                Some(Theme::parse(raw).map_err(|e| JsonRpcError::new(JSONRPC_INVALID_PARAMS, e))?)
+            }
             None => None,
         };
 
@@ -190,10 +190,8 @@ impl RpcDispatcher {
             new_reasoning = normalize_reasoning_effort(raw);
         }
 
-        let needs_provider_rebuild = model.is_some()
-            || protocol.is_some()
-            || profile.is_some()
-            || reasoning_raw.is_some();
+        let needs_provider_rebuild =
+            model.is_some() || protocol.is_some() || profile.is_some() || reasoning_raw.is_some();
 
         if !needs_provider_rebuild {
             // Only safe hot-swappable keys changed: apply them in place without touching the

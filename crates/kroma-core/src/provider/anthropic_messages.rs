@@ -16,7 +16,8 @@
 
 use crate::budget::BudgetConfig;
 use crate::messages::{
-    AssistantTurn, CacheBreakpoint, FinishReason, ReasoningBlock, TokenUsage, ToolCall, TranscriptItem,
+    AssistantTurn, CacheBreakpoint, FinishReason, ReasoningBlock, TokenUsage, ToolCall,
+    TranscriptItem,
 };
 use crate::provider::endpoint::{validate_base_url, ValidatedEndpoint};
 use crate::provider::sse::MAX_SSE_RESPONSE_BYTES;
@@ -504,8 +505,7 @@ impl AnthropicStreamAssembler {
                                 .and_then(Value::as_str)
                                 .map(str::to_string),
                         });
-                        self.reasoning_index
-                            .insert(index, self.reasoning.len() - 1);
+                        self.reasoning_index.insert(index, self.reasoning.len() - 1);
                     }
                 }
                 self.saw_business = true;
@@ -580,9 +580,8 @@ impl AnthropicStreamAssembler {
                     if let Some(out) = usage.get("output_tokens").and_then(Value::as_u64) {
                         merged.output_tokens = out;
                     }
-                    if let Some(cache_read) = usage
-                        .get("cache_read_input_tokens")
-                        .and_then(Value::as_u64)
+                    if let Some(cache_read) =
+                        usage.get("cache_read_input_tokens").and_then(Value::as_u64)
                     {
                         merged.cached_input_tokens = Some(cache_read);
                     }
@@ -708,7 +707,9 @@ impl ModelProvider for AnthropicMessagesClient {
             // F08 (`v1.4.0`): clamp the per-request output allowance to the remaining token budget
             // so one completion cannot overshoot the run's spend cap.
             let max_tokens = match req.max_output_tokens {
-                Some(limit) => configured_max_tokens.min(limit.min(u64::from(u32::MAX)) as u32).max(1),
+                Some(limit) => configured_max_tokens
+                    .min(limit.min(u64::from(u32::MAX)) as u32)
+                    .max(1),
                 None => configured_max_tokens,
             };
             let body_json = serialize_anthropic_request_body(
@@ -802,7 +803,10 @@ impl AnthropicMessagesClient {
         let path = self.messages_path();
         let headers = vec![
             ("x-api-key".to_string(), self.config.api_key.clone()),
-            ("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
+            (
+                "anthropic-version".to_string(),
+                ANTHROPIC_VERSION.to_string(),
+            ),
             (
                 "anthropic-beta".to_string(),
                 ANTHROPIC_PROMPT_CACHING_BETA.to_string(),

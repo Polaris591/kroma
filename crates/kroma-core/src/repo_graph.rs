@@ -171,9 +171,7 @@ impl RepoGraphReport {
             out.push_str(&format!("focus_files: {}\n", self.focus_files.join(", ")));
         }
         if self.ranked.is_empty() {
-            out.push_str(
-                "no ranked files (empty workspace or no indexable source files).\n",
-            );
+            out.push_str("no ranked files (empty workspace or no indexable source files).\n");
             return out;
         }
         for (i, node) in self.ranked.iter().enumerate() {
@@ -333,7 +331,8 @@ pub fn extract_import_tokens(rel: &str, content: &str) -> BTreeSet<String> {
             if ch.is_alphanumeric() || ch == '_' {
                 current.push(ch);
             } else {
-                if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
+                {
                     tokens.insert(std::mem::take(&mut current));
                 } else {
                     current.clear();
@@ -450,7 +449,8 @@ impl RepoGraph {
             let mut file = file;
             let mut bytes = Vec::with_capacity(len as usize);
             let mut limited = (&mut file).take(MAX_GRAPH_FILE_BYTES + 1);
-            if limited.read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_GRAPH_FILE_BYTES {
+            if limited.read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_GRAPH_FILE_BYTES
+            {
                 skipped_files += 1;
                 continue;
             }
@@ -676,12 +676,13 @@ impl RepoGraph {
 
         let mut personal = vec![1.0f64; n];
         let mut seeds: Vec<usize> = Vec::new();
-        let mark_seed = |personal: &mut Vec<f64>, seeds: &mut Vec<usize>, idx: usize, weight: f64| {
-            personal[idx] += weight;
-            if !seeds.contains(&idx) {
-                seeds.push(idx);
-            }
-        };
+        let mark_seed =
+            |personal: &mut Vec<f64>, seeds: &mut Vec<usize>, idx: usize, weight: f64| {
+                personal[idx] += weight;
+                if !seeds.contains(&idx) {
+                    seeds.push(idx);
+                }
+            };
         for (idx, path) in self.files.iter().enumerate() {
             let lowered_path = path.to_ascii_lowercase();
             if lowered_terms.iter().any(|t| lowered_path.contains(t)) {
@@ -832,8 +833,7 @@ fn personalized_pagerank(
             }
         }
         for i in 0..n {
-            next[i] = (1.0 - damping) * personal[i]
-                + damping * (next[i] + dangling * personal[i]);
+            next[i] = (1.0 - damping) * personal[i] + damping * (next[i] + dangling * personal[i]);
         }
         std::mem::swap(&mut rank, &mut next);
     }
@@ -911,7 +911,10 @@ pub fn extract_symbols_from_source(rel: &str, content: &str, out: &mut Vec<Symbo
     for (idx, raw_line) in content.lines().enumerate() {
         let line_no = idx + 1;
         let trimmed = raw_line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') && lang != Lang::Python {
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('#') && lang != Lang::Python
+        {
             continue;
         }
         let Some((name, kind)) = match_symbol(lang, trimmed) else {
@@ -1056,7 +1059,10 @@ fn match_symbol(lang: Lang, trimmed: &str) -> Option<(String, SymbolKind)> {
             None
         }
         Lang::Python => {
-            for (kw, kind) in [("def ", SymbolKind::Function), ("class ", SymbolKind::Class)] {
+            for (kw, kind) in [
+                ("def ", SymbolKind::Function),
+                ("class ", SymbolKind::Class),
+            ] {
                 if let Some(rest) = decl.strip_prefix(kw) {
                     return ident_at(rest).map(|n| (n, kind));
                 }
@@ -1206,7 +1212,8 @@ pub fn extract_reference_tokens(rel: &str, content: &str) -> BTreeSet<String> {
             current.push(ch);
         } else {
             if !current.is_empty() {
-                if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
+                {
                     tokens.insert(std::mem::take(&mut current));
                 } else {
                     current.clear();
@@ -1257,9 +1264,7 @@ fn rust_char_literal_len(chars: &[char], i: usize) -> Option<usize> {
         }
     }
     match chars.get(j) {
-        Some(c) if *c != '\'' && *c != '\n' && chars.get(j + 1) == Some(&'\'') => {
-            Some(j + 2 - i)
-        }
+        Some(c) if *c != '\'' && *c != '\n' && chars.get(j + 1) == Some(&'\'') => Some(j + 2 - i),
         _ => None,
     }
 }

@@ -145,8 +145,7 @@ pub fn execute_read(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
                 {
                     // The magic bytes must agree with the extension: a `.png` holding JPEG bytes
                     // is rejected rather than mislabelled on the wire.
-                    if let Some(detected) =
-                        sniff_image(&bytes).filter(|d| d.mime == expected_mime)
+                    if let Some(detected) = sniff_image(&bytes).filter(|d| d.mime == expected_mime)
                     {
                         let (width, height) = detected.dimensions;
                         let attachment = ImageAttachment {
@@ -199,7 +198,10 @@ pub fn execute_read(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
                 if slice.contains(&0u8) {
                     return ToolExecutionOutput::error(
                         ErrorCode::BinaryOrInvalidUtf8,
-                        format!("file '{}' contains NUL bytes and appears to be binary", rel_str),
+                        format!(
+                            "file '{}' contains NUL bytes and appears to be binary",
+                            rel_str
+                        ),
                         ToolResultMeta {
                             relative_path: Some(rel_str),
                             duration_ms: started.elapsed().as_millis() as u64,
@@ -306,7 +308,11 @@ pub fn execute_read(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
             let line_content = raw_line.strip_suffix('\r').unwrap_or(raw_line);
             let formatted_line = if line_content.len() > MAX_SINGLE_LINE_BYTES {
                 let cut = floor_char_boundary(line_content, MAX_SINGLE_LINE_BYTES);
-                format!("{:>5}\t{}[line truncated]\n", line_num, &line_content[..cut])
+                format!(
+                    "{:>5}\t{}[line truncated]\n",
+                    line_num,
+                    &line_content[..cut]
+                )
             } else {
                 format!("{:>5}\t{}\n", line_num, line_content)
             };
@@ -448,8 +454,7 @@ pub fn sniff_image(bytes: &[u8]) -> Option<DetectedImage> {
                 return None;
             }
             // SOF0..SOF15 except DHT (C4), JPG (C8) and DAC (CC).
-            let is_sof = (0xC0..=0xCF).contains(&marker)
-                && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+            let is_sof = (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
             if is_sof {
                 // A SOF segment is 2 (length) + 1 (precision) + 2 (height) + 2 (width) bytes and
                 // must fit entirely inside the buffer before the dimensions are read.
@@ -550,9 +555,7 @@ fn le16(b: &[u8]) -> Option<u16> {
 }
 
 fn le24(b: &[u8]) -> Option<u32> {
-    Some(
-        (*b.first()? as u32) | ((*b.get(1)? as u32) << 8) | ((*b.get(2)? as u32) << 16),
-    )
+    Some((*b.first()? as u32) | ((*b.get(1)? as u32) << 8) | ((*b.get(2)? as u32) << 16))
 }
 
 const BASE64_ALPHABET: &[u8; 64] =

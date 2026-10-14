@@ -4,8 +4,8 @@ use kroma_core::env::LocalHostEnv;
 use kroma_core::messages::{ToolCall, ToolOutcome};
 use kroma_core::sensitive_paths::SensitivePathGuard;
 use kroma_core::tool::policy::{
-    ApprovalDecision, ApprovalHandler, ApprovalRequest, NonInteractiveApprovalHandler, PolicyEngine,
-    PolicyMode,
+    ApprovalDecision, ApprovalHandler, ApprovalRequest, NonInteractiveApprovalHandler,
+    PolicyEngine, PolicyMode,
 };
 use kroma_core::types::{ErrorCode, ToolCallId};
 use kroma_core::workspace::{
@@ -36,40 +36,64 @@ fn symlink(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> 
 fn test_sensitive_path_guard_rules_and_exemptions() {
     // Blocked sensitive paths
     assert!(SensitivePathGuard::is_sensitive(Path::new(".env")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new("config/.env.production")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        "config/.env.production"
+    )));
     assert!(SensitivePathGuard::is_sensitive(Path::new(".env.local")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new("certs/server.pem")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new("certs/private.key")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        "certs/server.pem"
+    )));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        "certs/private.key"
+    )));
     assert!(SensitivePathGuard::is_sensitive(Path::new("id_rsa")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new("keys/id_ed25519")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new(".aws/credentials")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        "keys/id_ed25519"
+    )));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        ".aws/credentials"
+    )));
     assert!(SensitivePathGuard::is_sensitive(Path::new(".ssh/config")));
     assert!(SensitivePathGuard::is_sensitive(Path::new(".kube/config")));
     assert!(SensitivePathGuard::is_sensitive(Path::new(".npmrc")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new("gcp-credentials-prod.json")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new("terraform.tfstate.backup")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        "gcp-credentials-prod.json"
+    )));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        "terraform.tfstate.backup"
+    )));
 
     // BUG-04: the whole `.git` subtree is sensitive, not just `.git/hooks|config|credentials`.
     // `.git/modules/<sub>/hooks/*` runs on checkout, `.git/info/attributes` can install a malicious
     // `filter=` driver, and `.git/HEAD` / `.git/refs/*` are writable state.
     assert!(SensitivePathGuard::is_sensitive(Path::new(".git/HEAD")));
     assert!(SensitivePathGuard::is_sensitive(Path::new(".git/config")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new(".git/hooks/post-checkout")));
-    assert!(SensitivePathGuard::is_sensitive(Path::new(".git/info/attributes")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        ".git/hooks/post-checkout"
+    )));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        ".git/info/attributes"
+    )));
     assert!(SensitivePathGuard::is_sensitive(Path::new(
         ".git/modules/x/hooks/post-checkout"
     )));
-    assert!(SensitivePathGuard::is_sensitive(Path::new(".git/refs/heads/main")));
+    assert!(SensitivePathGuard::is_sensitive(Path::new(
+        ".git/refs/heads/main"
+    )));
     // Windows folds case, so the uppercase variant is covered by the same rule.
     assert!(SensitivePathGuard::is_sensitive(Path::new(".GIT/HEAD")));
     // Only the exact `.git` component is blocked; lookalikes stay ordinary files.
     assert!(!SensitivePathGuard::is_sensitive(Path::new(".gitignore")));
-    assert!(!SensitivePathGuard::is_sensitive(Path::new("src/.gitmodules")));
+    assert!(!SensitivePathGuard::is_sensitive(Path::new(
+        "src/.gitmodules"
+    )));
 
     // Explicitly exempted templates
     assert!(!SensitivePathGuard::is_sensitive(Path::new(".env.example")));
     assert!(!SensitivePathGuard::is_sensitive(Path::new(".env.sample")));
-    assert!(!SensitivePathGuard::is_sensitive(Path::new(".env.template")));
+    assert!(!SensitivePathGuard::is_sensitive(Path::new(
+        ".env.template"
+    )));
     assert!(!SensitivePathGuard::is_sensitive(Path::new(".env.test")));
     assert!(!SensitivePathGuard::is_sensitive(Path::new("src/main.rs")));
 }
@@ -406,7 +430,10 @@ async fn test_approved_sensitive_path_read_succeeds_but_stays_scoped_to_the_call
             code: ErrorCode::SensitivePathBlocked
         }
     );
-    assert_eq!(write_allow.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        write_allow.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
 
     // (d) Non-interactive mode denies outright, without prompting.
     let runtime_ni = build_default_runtime(
@@ -457,7 +484,10 @@ async fn test_inode_mutation_lock_stability_across_create_rename_and_idle_cleanu
         locks.acquire(&file_rel_alias),
     )
     .await;
-    assert!(acquire_b.is_err(), "Lock on same canonical parent+name should wait for guard_a");
+    assert!(
+        acquire_b.is_err(),
+        "Lock on same canonical parent+name should wait for guard_a"
+    );
     drop(guard_a);
 
     // Idle lock must be reclaimed from HashMap when last guard drops
@@ -642,8 +672,14 @@ async fn test_nav_tools_never_follow_swapped_symlinks_or_escape_the_workspace() 
         .iter()
         .find(|e| e.name == "escape_dir")
         .expect("escape_dir entry must be listed");
-    assert!(escape.is_symlink, "symlink entry must be classified as a symlink");
-    assert!(!escape.is_dir, "a symlink must never be classified as a directory");
+    assert!(
+        escape.is_symlink,
+        "symlink entry must be classified as a symlink"
+    );
+    assert!(
+        !escape.is_dir,
+        "a symlink must never be classified as a directory"
+    );
 
     // `open_dir_no_symlink` refuses to traverse it.
     assert!(matches!(
@@ -667,20 +703,27 @@ async fn test_inode_lock_keyed_from_open_fd_serializes_same_file() {
 
     let locks = InodeMutationLock::new();
     let cap = WorkspaceCap::new(&tmp_root).unwrap();
-    let (parent_dir1, leaf1) = cap.open_parent_dir_no_symlink(Path::new("x.txt"), false).unwrap();
+    let (parent_dir1, leaf1) = cap
+        .open_parent_dir_no_symlink(Path::new("x.txt"), false)
+        .unwrap();
     let (_k, guard) = locks
         .acquire_for_file(&parent_dir1, Some(leaf1.as_os_str()))
         .await
         .unwrap();
     assert_eq!(locks.active_lock_count(), 1);
 
-    let (parent_dir2, leaf2) = cap.open_parent_dir_no_symlink(Path::new("x.txt"), false).unwrap();
+    let (parent_dir2, leaf2) = cap
+        .open_parent_dir_no_symlink(Path::new("x.txt"), false)
+        .unwrap();
     let blocked = tokio::time::timeout(
         std::time::Duration::from_millis(30),
         locks.acquire_for_file(&parent_dir2, Some(leaf2.as_os_str())),
     )
     .await;
-    assert!(blocked.is_err(), "parent-handle + leaf-name lock must serialize concurrent write/edit");
+    assert!(
+        blocked.is_err(),
+        "parent-handle + leaf-name lock must serialize concurrent write/edit"
+    );
     drop(guard);
     assert_eq!(locks.active_lock_count(), 0);
 
@@ -917,4 +960,3 @@ fn test_windows_path_normalization_dos_devices_ntfs_ads_and_shell_resolution() {
         Path::new(r"\\server\share\repo")
     );
 }
-

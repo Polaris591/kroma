@@ -51,8 +51,21 @@ const MAX_SNAPSHOT_DEPTH: usize = 32;
 
 /// Build outputs and dependency caches are never part of a reviewable revision.
 pub(crate) const SNAPSHOT_EXCLUDED_DIRS: &[&str] = &[
-    ".git", ".hg", ".svn", "target", "node_modules", ".venv", "venv", "__pycache__",
-    ".mypy_cache", ".pytest_cache", ".gradle", ".tox", ".next", "dist", "build",
+    ".git",
+    ".hg",
+    ".svn",
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".gradle",
+    ".tox",
+    ".next",
+    "dist",
+    "build",
 ];
 
 #[derive(Debug, Error)]
@@ -176,9 +189,15 @@ pub enum RestoreResult {
 impl RestoreResult {
     pub fn restored_revision(&self) -> &RevisionId {
         match self {
-            RestoreResult::Applied { restored_revision, .. } => restored_revision,
-            RestoreResult::Conflict { target_revision, .. } => target_revision,
-            RestoreResult::RecoveryRequired { target_revision, .. } => target_revision,
+            RestoreResult::Applied {
+                restored_revision, ..
+            } => restored_revision,
+            RestoreResult::Conflict {
+                target_revision, ..
+            } => target_revision,
+            RestoreResult::RecoveryRequired {
+                target_revision, ..
+            } => target_revision,
         }
     }
 }
@@ -205,7 +224,11 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum RestoreOp {
-    Write { path: String, sha256: String, mode: u32 },
+    Write {
+        path: String,
+        sha256: String,
+        mode: u32,
+    },
     /// `force` is carried per operation rather than only on [`RestoreIntent`] so a merge-rollback
     /// removal can stay non-forced even when the surrounding intent restores forced writes; a
     /// crash mid-recovery then replays the exact same per-path semantics.
@@ -640,7 +663,9 @@ impl SnapshotStore {
     }
 
     pub fn revision_path(&self, id: &RevisionId) -> PathBuf {
-        self.root.join(REVISION_DIR).join(format!("{}.json", id.as_str()))
+        self.root
+            .join(REVISION_DIR)
+            .join(format!("{}.json", id.as_str()))
     }
 
     pub fn ensure_layout(&self) -> Result<(), RevisionError> {
@@ -756,7 +781,13 @@ impl SnapshotStore {
                 revisions.push(revision);
             }
         }
-        revisions.sort_by_key(|r| (r.turn_index, r.timestamp_ms, r.revision_id.as_str().to_string()));
+        revisions.sort_by_key(|r| {
+            (
+                r.turn_index,
+                r.timestamp_ms,
+                r.revision_id.as_str().to_string(),
+            )
+        });
         Ok(revisions)
     }
 
@@ -993,7 +1024,12 @@ impl SnapshotStore {
         })
     }
 
-    fn apply_op(&self, workspace: &WorkspaceCap, op: &RestoreOp, force: bool) -> Result<(), RevisionError> {
+    fn apply_op(
+        &self,
+        workspace: &WorkspaceCap,
+        op: &RestoreOp,
+        force: bool,
+    ) -> Result<(), RevisionError> {
         match op {
             RestoreOp::Write { path, sha256, mode } => {
                 let bytes = self.read_blob(sha256)?;
@@ -1006,7 +1042,10 @@ impl SnapshotStore {
             // before the per-op flag existed, and whose absent flag now defaults to `true`) honest:
             // an unforced restore must not have its removals silently upgraded to forced just
             // because the missing per-op field defaulted to `true`.
-            RestoreOp::Remove { path, force: remove_force } => {
+            RestoreOp::Remove {
+                path,
+                force: remove_force,
+            } => {
                 remove_tracked_file(workspace, path, *remove_force && force)?;
                 Ok(())
             }
@@ -1129,7 +1168,9 @@ impl SnapshotStore {
                     .is_none_or(|last| revision.turn_index >= last.turn)
             })
             .max_by_key(|revision| (revision.turn_index, revision.timestamp_ms));
-        let Some(newest) = candidate else { return Ok(None); };
+        let Some(newest) = candidate else {
+            return Ok(None);
+        };
         let turn = journal.max_active_turn();
         let parent = recorded.last().map(|r| r.revision_id.clone());
         journal
@@ -1247,7 +1288,8 @@ impl SnapshotStore {
                 continue;
             }
             let size = meta.len();
-            if size > MAX_SNAPSHOT_FILE_BYTES || total_bytes.saturating_add(size) > MAX_SNAPSHOT_TOTAL_BYTES
+            if size > MAX_SNAPSHOT_FILE_BYTES
+                || total_bytes.saturating_add(size) > MAX_SNAPSHOT_TOTAL_BYTES
             {
                 skipped.insert(child_str);
                 continue;
@@ -1270,14 +1312,7 @@ impl SnapshotStore {
             } else {
                 0o644
             };
-            tracked.insert(
-                child_str,
-                TrackedFile {
-                    sha256,
-                    mode,
-                    size,
-                },
-            );
+            tracked.insert(child_str, TrackedFile { sha256, mode, size });
         }
         Ok(())
     }
@@ -1325,7 +1360,6 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), RevisionError> {
 pub(crate) fn ensure_private_dir_io(dir: &Path) -> std::io::Result<()> {
     crate::secure_fs::ensure_private_dir_io(dir)
 }
-
 
 fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), RevisionError> {
     let dir = path.parent().ok_or_else(|| {
@@ -1430,14 +1464,21 @@ pub(crate) enum LiveEntryStat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LiveEntryState {
     Absent,
-    Regular { sha256: String, mode: u32, size: u64 },
+    Regular {
+        sha256: String,
+        mode: u32,
+        size: u64,
+    },
     Directory,
     NonRegular,
 }
 
 /// Inspect a workspace path without following symlinks, classifying absent / regular / directory /
 /// non-regular so a user-created symlink or directory can never masquerade as "unchanged".
-pub(crate) fn stat_live_entry(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryStat, RevisionError> {
+pub(crate) fn stat_live_entry(
+    workspace: &WorkspaceCap,
+    rel: &str,
+) -> Result<LiveEntryStat, RevisionError> {
     let norm = match WorkspaceCap::validate_relative_components(rel) {
         Ok(n) => n,
         Err(WorkspaceError::InvalidPath { .. }) => return Ok(LiveEntryStat::Absent),
@@ -1485,7 +1526,9 @@ pub(crate) fn stat_live_entry(workspace: &WorkspaceCap, rel: &str) -> Result<Liv
         let mut cur = workspace.root().to_path_buf();
         if let Some(parent) = norm.parent() {
             for comp in parent.components() {
-                let Component::Normal(part) = comp else { continue };
+                let Component::Normal(part) = comp else {
+                    continue;
+                };
                 if part.is_empty() {
                     continue;
                 }
@@ -1571,7 +1614,9 @@ fn classify_blocked_parent(
     }
     let mut cur = unsafe { File::from_raw_fd(root_dup) };
     for comp in parent.components() {
-        let Component::Normal(part) = comp else { continue };
+        let Component::Normal(part) = comp else {
+            continue;
+        };
         if part.is_empty() {
             continue;
         }
@@ -1612,7 +1657,10 @@ fn is_eisdir_error(_e: &std::io::Error) -> bool {
 /// Full live state of a path: absent / directory / non-regular, or a regular file with its content
 /// hash and permission bits. A regular file larger than the snapshot cap is reported by size
 /// rather than hashed in full, since it can never equal a tracked entry.
-pub(crate) fn live_entry_state(workspace: &WorkspaceCap, rel: &str) -> Result<LiveEntryState, RevisionError> {
+pub(crate) fn live_entry_state(
+    workspace: &WorkspaceCap,
+    rel: &str,
+) -> Result<LiveEntryState, RevisionError> {
     match stat_live_entry(workspace, rel)? {
         LiveEntryStat::Absent => Ok(LiveEntryState::Absent),
         LiveEntryStat::Directory => Ok(LiveEntryState::Directory),
@@ -1640,9 +1688,7 @@ pub(crate) fn live_entry_state(workspace: &WorkspaceCap, rel: &str) -> Result<Li
                 match file.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => hasher.update(&buf[..n]),
-                    Err(e) if is_eisdir_error(&e) => {
-                        return Ok(LiveEntryState::Directory)
-                    }
+                    Err(e) if is_eisdir_error(&e) => return Ok(LiveEntryState::Directory),
                     Err(e) => return Err(e.into()),
                 }
             }
@@ -1659,7 +1705,9 @@ pub(crate) fn live_entry_state(workspace: &WorkspaceCap, rel: &str) -> Result<Li
 /// example `foo` when `foo/bar.txt` is tracked). Such a directory is expected, not external work.
 pub(crate) fn is_ancestor_dir_of(rev: &WorkspaceRevision, path: &str) -> bool {
     let prefix = format!("{}/", path);
-    rev.tracked_files.keys().any(|candidate| candidate.starts_with(&prefix))
+    rev.tracked_files
+        .keys()
+        .any(|candidate| candidate.starts_with(&prefix))
 }
 
 fn classify_conflict_against_expected(
@@ -1702,16 +1750,12 @@ fn classify_conflict_against_expected(
             LiveEntryState::Directory | LiveEntryState::NonRegular => {
                 Some((ConflictKind::CreatedExternally, None, None))
             }
-            LiveEntryState::Regular { sha256, mode, .. } => {
-                match target.tracked_files.get(path) {
-                    Some(want)
-                        if &want.sha256 == sha256 && (want.mode & 0o7777) == (mode & 0o7777) =>
-                    {
-                        None
-                    }
-                    _ => Some((ConflictKind::CreatedExternally, None, Some(sha256.clone()))),
+            LiveEntryState::Regular { sha256, mode, .. } => match target.tracked_files.get(path) {
+                Some(want) if &want.sha256 == sha256 && (want.mode & 0o7777) == (mode & 0o7777) => {
+                    None
                 }
-            }
+                _ => Some((ConflictKind::CreatedExternally, None, Some(sha256.clone()))),
+            },
         },
     }
 }
@@ -1769,9 +1813,7 @@ pub(crate) fn write_tracked_file(
     }
     let (parent_dir, leaf) = workspace.open_parent_dir_no_symlink(&norm, true)?;
     crate::tools::write::atomic_write_at(&parent_dir, &leaf, bytes, mode, false).map_err(
-        |(code, message)| {
-            RevisionError::InvalidStore(format!("{}: {}", code.as_str(), message))
-        },
+        |(code, message)| RevisionError::InvalidStore(format!("{}: {}", code.as_str(), message)),
     )
 }
 
@@ -2043,7 +2085,14 @@ fn remove_entry_at(dir_fd: RawFd, name: &OsStr) -> Result<(), RevisionError> {
     let c_name = CString::new(name.as_bytes())
         .map_err(|_| RevisionError::InvalidStore("entry name contains a NUL byte".to_string()))?;
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstatat(dir_fd, c_name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
+    let rc = unsafe {
+        libc::fstatat(
+            dir_fd,
+            c_name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::ENOENT) {
@@ -2167,7 +2216,11 @@ mod tests {
         after.extend(tracked("new.rs", "y"));
         assert_eq!(
             diff_paths(Some(&before), &after),
-            vec!["a.rs".to_string(), "gone.rs".to_string(), "new.rs".to_string()]
+            vec![
+                "a.rs".to_string(),
+                "gone.rs".to_string(),
+                "new.rs".to_string()
+            ]
         );
         assert!(diff_paths(Some(&after), &after).is_empty());
         assert_eq!(diff_paths(None, &after).len(), 2);

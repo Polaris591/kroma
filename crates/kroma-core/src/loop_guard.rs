@@ -184,7 +184,12 @@ impl LoopGuard {
     }
 
     /// Record the outcome of a tool execution on a file path to maintain the per-file edit failure streak.
-    pub fn record_file_tool_outcome(&mut self, tool_name: &str, path: &str, success: bool) -> usize {
+    pub fn record_file_tool_outcome(
+        &mut self,
+        tool_name: &str,
+        path: &str,
+        success: bool,
+    ) -> usize {
         let norm_path = clean_relative_path(path);
         match (tool_name, success) {
             ("edit", false) => {

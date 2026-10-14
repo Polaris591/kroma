@@ -23,9 +23,7 @@ use kroma_core::completion_gate::WorkspaceCompletionGate;
 use kroma_core::env::{ExecutionEnv, LocalHostEnv};
 use kroma_core::events::{EventLogger, EventPayload};
 use kroma_core::messages::{AssistantTurn, FinishReason, TokenUsage, ToolCall, TranscriptItem};
-use kroma_core::provider::{
-    ModelProvider, ProviderCompletion, ProviderError, ProviderRequest,
-};
+use kroma_core::provider::{ModelProvider, ProviderCompletion, ProviderError, ProviderRequest};
 use kroma_core::revision::{RestoreResult, RevisionId, SnapshotStore};
 use kroma_core::session::SessionJournal;
 use kroma_core::subagents::{
@@ -185,7 +183,10 @@ async fn test_scout_subagent_is_strictly_read_only_and_cannot_spawn_recursively(
                     })
                     .collect();
                 assert_eq!(results.len(), 4);
-                assert!(results[0].outcome.is_success(), "read must succeed in scout");
+                assert!(
+                    results[0].outcome.is_success(),
+                    "read must succeed in scout"
+                );
                 assert!(
                     !results[1].outcome.is_success(),
                     "write must be denied in scout: {:?}",
@@ -272,7 +273,9 @@ async fn test_scout_subagent_is_strictly_read_only_and_cannot_spawn_recursively(
         .collect();
     assert_eq!(parent_tool_results.len(), 1);
     let report = parent_tool_results[0].content.as_ref();
-    assert!(report.starts_with("<subagent_report role=\"scout\" id=\"sub-0001\" status=\"completed\">"));
+    assert!(
+        report.starts_with("<subagent_report role=\"scout\" id=\"sub-0001\" status=\"completed\">")
+    );
     assert!(report.ends_with("</subagent_report>"));
     assert!(report.contains("relevant_files: src/lib.rs"));
     // Hostile closing tag inside the scout summary was neutralized (`&lt;/subagent_report&gt;`).
@@ -392,7 +395,8 @@ async fn test_worker_subagent_runs_in_isolated_worktree_and_merges_cleanly_with_
 
     let env = Arc::new(LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
     let store = Arc::new(SnapshotStore::new(state_dir.join("snapshots")));
-    let journal = SessionJournal::create(state_dir.join("sessions"), env.workspace().root()).unwrap();
+    let journal =
+        SessionJournal::create(state_dir.join("sessions"), env.workspace().root()).unwrap();
     let wal_path = journal.path().to_path_buf();
 
     let policy = PolicyEngine::new(
@@ -465,7 +469,11 @@ async fn test_worker_subagent_runs_in_isolated_worktree_and_merges_cleanly_with_
     let restore = store
         .restore_revision(env.workspace(), &baseline_rev, Some(&merged_rev), false)
         .unwrap();
-    assert!(matches!(restore, RestoreResult::Applied { .. }), "{:?}", restore);
+    assert!(
+        matches!(restore, RestoreResult::Applied { .. }),
+        "{:?}",
+        restore
+    );
     assert_eq!(
         fs::read_to_string(ws_dir.join("src/lib.rs")).unwrap(),
         "pub fn value() -> i32 { 1 }\n",
@@ -541,8 +549,16 @@ async fn test_worker_merge_detects_concurrent_parent_conflict_and_preserves_pare
     fs::create_dir_all(ws_dir.join("src/allowed")).unwrap();
     fs::create_dir_all(ws_dir.join("src/forbidden")).unwrap();
     fs::create_dir_all(&state_dir).unwrap();
-    fs::write(ws_dir.join("src/allowed/shared.rs"), "pub const V: i32 = 1;\n").unwrap();
-    fs::write(ws_dir.join("src/forbidden/secret.rs"), "pub const S: i32 = 0;\n").unwrap();
+    fs::write(
+        ws_dir.join("src/allowed/shared.rs"),
+        "pub const V: i32 = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        ws_dir.join("src/forbidden/secret.rs"),
+        "pub const S: i32 = 0;\n",
+    )
+    .unwrap();
 
     // Part A: Concurrent parent edit while worker is running -> Conflict, parent preserved!
     let parent_ws_for_concurrent_edit = ws_dir.clone();
@@ -605,7 +621,8 @@ async fn test_worker_merge_detects_concurrent_parent_conflict_and_preserves_pare
     let (_tx, rx) = watch::channel(false);
     let cfg = AgentRunConfig::new("Test worker conflict", BudgetConfig::default());
     let logger = EventLogger::new(cfg.run_id, Some(state_dir.clone()), true).unwrap();
-    let runner = AgentRunner::new(cfg, provider, runtime, rx).with_snapshot_store(Arc::clone(&store));
+    let runner =
+        AgentRunner::new(cfg, provider, runtime, rx).with_snapshot_store(Arc::clone(&store));
 
     let (summary, logger) = runner.run(logger).await;
     assert_eq!(summary.status, RunStatus::Completed);
@@ -832,7 +849,9 @@ async fn test_worker_merge_detects_concurrent_parent_conflict_and_preserves_pare
                 {
                     *hook_denied_c.lock().unwrap() = true;
                 }
-                Ok(assistant_stop("Out-of-scope writes were blocked in-flight."))
+                Ok(assistant_stop(
+                    "Out-of-scope writes were blocked in-flight.",
+                ))
             }
         } else if hook_parent_c.fetch_add(1, Ordering::SeqCst) == 0 {
             Ok(assistant_tools(vec![(
@@ -888,7 +907,10 @@ async fn test_worker_merge_detects_concurrent_parent_conflict_and_preserves_pare
             Ok(assistant_stop("Done"))
         }
     });
-    let ro_policy = PolicyEngine::new(PolicyMode::ReadOnly, Arc::new(NonInteractiveApprovalHandler));
+    let ro_policy = PolicyEngine::new(
+        PolicyMode::ReadOnly,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let ro_runtime = build_runtime_with_registry(
         ToolRegistry::default(),
         env,
@@ -1216,8 +1238,12 @@ async fn test_parallel_subagent_fanout_and_cancellation_cleanup() {
         })
         .unwrap();
     assert!(
-        race_tr.content.contains("id=\"sub-0001\" status=\"completed\"")
-            && race_tr.content.contains("id=\"sub-0002\" status=\"conflict\""),
+        race_tr
+            .content
+            .contains("id=\"sub-0001\" status=\"completed\"")
+            && race_tr
+                .content
+                .contains("id=\"sub-0002\" status=\"conflict\""),
         "expected sub-0001 completed and sub-0002 conflict, got: {}",
         race_tr.content
     );
@@ -1413,7 +1439,10 @@ async fn test_worker_post_merge_verification_gate_and_auto_revert_on_failure() {
                 "rolled-back unlinked merged_revision manifest must be removed from SnapshotStore"
             );
         }
-        other => panic!("expected VerificationFailed(reverted=true), got {:?}", other),
+        other => panic!(
+            "expected VerificationFailed(reverted=true), got {:?}",
+            other
+        ),
     }
     assert_eq!(
         fs::read_to_string(ws_dir.join("src/lib.rs")).unwrap(),
@@ -1432,7 +1461,9 @@ fn read_proc_rss_and_pss_kb() -> (u64, u64) {
     let mut rss_kb = 0u64;
     if let Ok(status) = fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmHWM:").or_else(|| line.strip_prefix("VmRSS:"))
+            if let Some(rest) = line
+                .strip_prefix("VmHWM:")
+                .or_else(|| line.strip_prefix("VmRSS:"))
             {
                 if let Some(num) = rest.split_whitespace().next() {
                     if let Ok(val) = num.parse::<u64>() {
@@ -1588,10 +1619,10 @@ async fn test_subagent_budget_and_gate5_eval_metrics_artifact() {
     // Argument validation & scope matching unit checks (including sibling prefix & '..' traversal).
     assert!(parse_spawn_subagent_specs(r#"{"role":"invalid","task":"x"}"#).is_err());
     assert!(parse_spawn_subagent_specs(r#"{"role":"scout","task":"   "}"#).is_err());
-    assert!(
-        parse_spawn_subagent_specs(r#"{"role":"worker","task":"x","allowed_paths":["../escape"]}"#)
-            .is_err()
-    );
+    assert!(parse_spawn_subagent_specs(
+        r#"{"role":"worker","task":"x","allowed_paths":["../escape"]}"#
+    )
+    .is_err());
     assert!(is_path_allowed_by_scope(
         "src/sub/mod.rs",
         &["src/sub".to_string()]
@@ -1796,7 +1827,10 @@ async fn test_subagent_budget_and_gate5_eval_metrics_artifact() {
         .and_then(|p| p.parent())
         .expect("workspace root");
     let metrics_path = repo_root.join("docs/GATE5_EVAL_METRICS.json");
-    assert!(metrics_path.exists(), "docs/GATE5_EVAL_METRICS.json must exist");
+    assert!(
+        metrics_path.exists(),
+        "docs/GATE5_EVAL_METRICS.json must exist"
+    );
     let raw_metrics = fs::read_to_string(&metrics_path).unwrap();
     let metrics_val: serde_json::Value = serde_json::from_str(&raw_metrics).unwrap();
     assert!(metrics_val.get("single_agent_baseline").is_some());
@@ -1807,16 +1841,38 @@ async fn test_subagent_budget_and_gate5_eval_metrics_artifact() {
     assert_eq!(benches.len(), 3);
     for (idx, expected_conc) in [1u64, 2, 4].iter().enumerate() {
         let entry = &benches[idx];
-        assert_eq!(entry.get("concurrency").and_then(|v| v.as_u64()), Some(*expected_conc));
-        assert!(entry.get("peak_rss_kb").and_then(|v| v.as_u64()).unwrap_or(0) > 0);
-        assert!(entry.get("peak_pss_kb").and_then(|v| v.as_u64()).unwrap_or(0) > 0);
-        assert!(entry.get("conflict_rate").and_then(|v| v.as_f64()).is_some());
         assert_eq!(
-            entry.get("conflict_detection_accuracy").and_then(|v| v.as_f64()),
+            entry.get("concurrency").and_then(|v| v.as_u64()),
+            Some(*expected_conc)
+        );
+        assert!(
+            entry
+                .get("peak_rss_kb")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            entry
+                .get("peak_pss_kb")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(entry
+            .get("conflict_rate")
+            .and_then(|v| v.as_f64())
+            .is_some());
+        assert_eq!(
+            entry
+                .get("conflict_detection_accuracy")
+                .and_then(|v| v.as_f64()),
             Some(1.0)
         );
         assert_eq!(
-            entry.get("post_merge_test_pass_rate").and_then(|v| v.as_f64()),
+            entry
+                .get("post_merge_test_pass_rate")
+                .and_then(|v| v.as_f64()),
             Some(1.0)
         );
         assert_eq!(

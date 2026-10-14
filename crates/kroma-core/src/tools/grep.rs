@@ -36,7 +36,10 @@ pub fn execute_grep(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOu
     };
 
     let rel_input = args.path.as_deref().unwrap_or(".");
-    let limit = args.limit.unwrap_or(DEFAULT_NAV_LIMIT).min(DEFAULT_NAV_LIMIT);
+    let limit = args
+        .limit
+        .unwrap_or(DEFAULT_NAV_LIMIT)
+        .min(DEFAULT_NAV_LIMIT);
     if limit == 0 || args.pattern.is_empty() {
         return ToolExecutionOutput::error(
             ErrorCode::InvalidArguments,

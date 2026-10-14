@@ -140,7 +140,9 @@ impl TtyApprovalUi {
             }
             out.push_str("--- End Command ---\n");
         }
-        out.push_str("Choose: [y] Allow once | [a] Allow this tool category for current run | [n] Deny: ");
+        out.push_str(
+            "Choose: [y] Allow once | [a] Allow this tool category for current run | [n] Deny: ",
+        );
         out
     }
 }
@@ -196,7 +198,8 @@ impl ApprovalHandler for TtyApprovalUi {
                 continue;
             }
             let mut b = [0u8; 1];
-            let n = unsafe { libc::read(libc::STDIN_FILENO, b.as_mut_ptr() as *mut libc::c_void, 1) };
+            let n =
+                unsafe { libc::read(libc::STDIN_FILENO, b.as_mut_ptr() as *mut libc::c_void, 1) };
             if n < 0 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {
@@ -220,7 +223,7 @@ impl ApprovalHandler for TtyApprovalUi {
             use windows_sys::Win32::Storage::FileSystem::ReadFile;
             use windows_sys::Win32::System::Console::{
                 GetConsoleMode, GetNumberOfConsoleInputEvents, GetStdHandle, ReadConsoleInputW,
-                 INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE,
+                INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE,
             };
             use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
@@ -398,6 +401,11 @@ mod tests {
             elapsed
         );
         let events = ui.drain_events();
-        assert_eq!(events.len(), 2, "expected ApprovalRequested + ApprovalResolved: {:?}", events);
+        assert_eq!(
+            events.len(),
+            2,
+            "expected ApprovalRequested + ApprovalResolved: {:?}",
+            events
+        );
     }
 }

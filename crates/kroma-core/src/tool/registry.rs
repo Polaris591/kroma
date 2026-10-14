@@ -44,7 +44,12 @@ impl ToolRegistry {
     pub fn new(tool_filter: Option<Vec<String>>) -> Self {
         let mut builtin = builtin_tool_registrations();
         // Strictly sort by tool name in ASCII ascending order
-        builtin.sort_by(|a, b| a.definition.name.as_bytes().cmp(b.definition.name.as_bytes()));
+        builtin.sort_by(|a, b| {
+            a.definition
+                .name
+                .as_bytes()
+                .cmp(b.definition.name.as_bytes())
+        });
 
         let filter_set = tool_filter.map(|list| {
             list.into_iter()
@@ -73,7 +78,8 @@ impl ToolRegistry {
     /// runtimes so `max_depth == 1` and recursive subagent spawning is structurally impossible, as
     /// well as when `--no-subagents` / `--max-subagents 0` is configured).
     pub fn without_subagents(mut self) -> Self {
-        self.builtin.retain(|t| t.definition.name != "spawn_subagent");
+        self.builtin
+            .retain(|t| t.definition.name != "spawn_subagent");
         self
     }
 
@@ -98,10 +104,7 @@ impl ToolRegistry {
     /// Unmount an extension, removing every tool, hook and skill it contributed. In-flight calls
     /// are signalled and drained within a bounded window; the report records what was cancelled and
     /// which irreversible side effects already happened.
-    pub fn unregister_extension(
-        &self,
-        id: &ExtensionId,
-    ) -> Result<UnmountReport, ExtensionError> {
+    pub fn unregister_extension(&self, id: &ExtensionId) -> Result<UnmountReport, ExtensionError> {
         self.ext().unregister(id)
     }
 
@@ -129,7 +132,12 @@ impl ToolRegistry {
     pub fn all_registered(&self) -> Vec<RegisteredTool> {
         let mut tools = self.builtin.clone();
         tools.extend(self.ext().extension_tools());
-        tools.sort_by(|a, b| a.definition.name.as_bytes().cmp(b.definition.name.as_bytes()));
+        tools.sort_by(|a, b| {
+            a.definition
+                .name
+                .as_bytes()
+                .cmp(b.definition.name.as_bytes())
+        });
         tools
     }
 
@@ -194,7 +202,10 @@ impl ToolRegistry {
     }
 
     /// Returns model-visible tool schemas for a `PolicyEngine` (hiding tools that will unconditionally be denied in non-interactive mode).
-    pub fn visible_definitions_for_engine(&self, policy_engine: &PolicyEngine) -> Vec<ToolDefinition> {
+    pub fn visible_definitions_for_engine(
+        &self,
+        policy_engine: &PolicyEngine,
+    ) -> Vec<ToolDefinition> {
         self.all_registered()
             .iter()
             .filter(|t| self.is_tool_enabled_for_engine(t, policy_engine))

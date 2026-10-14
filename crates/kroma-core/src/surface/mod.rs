@@ -13,7 +13,6 @@
 //!    over loopback TCP (or explicit `--auth-token` authenticated TCP) with bounded frame reading,
 //!    HTTP/browser request rejection, and connection concurrency limits.
 
-
 //!
 //! Physical module split: one file per responsibility (no behaviour change).
 
@@ -37,7 +36,9 @@ pub(crate) use crate::agent_loop::{build_runtime_with_registry, AgentRunConfig, 
 pub(crate) use crate::attribution::{MutationLedger, MutationRecord};
 pub(crate) use crate::budget::BudgetConfig;
 pub(crate) use crate::completion_gate::WorkspaceCompletionGate;
-pub(crate) use crate::context_projector::{source_entry_id, CompactionReason, ContextProjector, EvidenceLink};
+pub(crate) use crate::context_projector::{
+    source_entry_id, CompactionReason, ContextProjector, EvidenceLink,
+};
 pub(crate) use crate::env::{AllowAllGate, ExecutionEnv, LocalHostEnv, SharedCompletionGate};
 pub(crate) use crate::events::{DiagnosticEvent, EventLogger, EventPayload};
 pub(crate) use crate::extensions::{
@@ -45,10 +46,11 @@ pub(crate) use crate::extensions::{
     SubtreeContextTracker,
 };
 pub(crate) use crate::messages::{ToolCall, TranscriptItem};
-pub(crate) use crate::types::ToolCallId;
 pub(crate) use crate::prompt::{sha256_hex64, PromptBuilder};
 pub(crate) use crate::provider::ModelProvider;
-pub(crate) use crate::revision::{MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore, WorkspaceRevision};
+pub(crate) use crate::revision::{
+    MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore, WorkspaceRevision,
+};
 pub(crate) use crate::session::{RevisionRecord, SessionJournal};
 pub(crate) use crate::theme::{StatusDot, Theme, ThemeRenderer};
 pub(crate) use crate::tool::policy::{
@@ -56,6 +58,7 @@ pub(crate) use crate::tool::policy::{
 };
 pub(crate) use crate::tool::registry::ToolRegistry;
 pub(crate) use crate::tools::recall_evidence::execute_recall_evidence;
+pub(crate) use crate::types::ToolCallId;
 pub(crate) use crate::types::{EffectClass, RunId, RunStatus};
 pub(crate) use crate::workspace::WorkspaceCap;
 pub(crate) use serde::{Deserialize, Serialize};
@@ -66,7 +69,9 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant};
-pub(crate) use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+pub(crate) use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader,
+};
 pub(crate) use tokio::net::{TcpListener, TcpStream};
 pub(crate) use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Semaphore};
 

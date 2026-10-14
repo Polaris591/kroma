@@ -446,7 +446,10 @@ pub fn load_suite(path: &Path) -> Result<Vec<BenchTask>, String> {
 fn validate_task_paths(task: &BenchTask) -> Result<(), String> {
     for path in task.files.keys() {
         WorkspaceCap::validate_relative_components(path).map_err(|e| {
-            format!("task '{}': invalid path in 'files' '{}': {}", task.id, path, e)
+            format!(
+                "task '{}': invalid path in 'files' '{}': {}",
+                task.id, path, e
+            )
         })?;
     }
     for (path, _) in &task.expect_contains {
@@ -572,8 +575,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kroma-bench-suite-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let cases: [(&str, &str); 6] = [
-            ("files", r#"[{"id":"t1","prompt":"p","files":{"../escape.txt":"x"}}]"#),
-            ("files", r#"[{"id":"t1","prompt":"p","files":{"/tmp/abs.txt":"x"}}]"#),
+            (
+                "files",
+                r#"[{"id":"t1","prompt":"p","files":{"../escape.txt":"x"}}]"#,
+            ),
+            (
+                "files",
+                r#"[{"id":"t1","prompt":"p","files":{"/tmp/abs.txt":"x"}}]"#,
+            ),
             (
                 "expect_contains",
                 r#"[{"id":"t2","prompt":"p","expect_contains":[["../escape.txt","x"]]}]"#,
@@ -582,8 +591,14 @@ mod tests {
                 "expect_contains",
                 r#"[{"id":"t2","prompt":"p","expect_contains":[["/tmp/abs.txt","x"]]}]"#,
             ),
-            ("expect_absent", r#"[{"id":"t3","prompt":"p","expect_absent":["../escape.txt"]}]"#),
-            ("expect_absent", r#"[{"id":"t3","prompt":"p","expect_absent":["/tmp/abs.txt"]}]"#),
+            (
+                "expect_absent",
+                r#"[{"id":"t3","prompt":"p","expect_absent":["../escape.txt"]}]"#,
+            ),
+            (
+                "expect_absent",
+                r#"[{"id":"t3","prompt":"p","expect_absent":["/tmp/abs.txt"]}]"#,
+            ),
         ];
         for (index, (field, body)) in cases.iter().enumerate() {
             let path = dir.join(format!("suite-{}.json", index));

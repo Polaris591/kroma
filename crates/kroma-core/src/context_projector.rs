@@ -1,7 +1,5 @@
 use crate::budget::BudgetConfig;
-use crate::messages::{
-    CacheBreakpoint, CacheBreakpointMarker, ToolResultMessage, TranscriptItem,
-};
+use crate::messages::{CacheBreakpoint, CacheBreakpointMarker, ToolResultMessage, TranscriptItem};
 use crate::prompt::sha256_hex64;
 use crate::types::{TerminalReason, ToolCallId};
 use regex::Regex;
@@ -120,7 +118,8 @@ impl ContextBudgetBreakdown {
             tool_schema_tokens: self.tool_schema_bytes / 4,
             history_tokens: self.history_bytes / 4,
             tool_output_tokens: self.tool_output_bytes / 4,
-            total_tokens: (self.system_prefix_bytes + self.tool_schema_bytes + self.history_bytes) / 4,
+            total_tokens: (self.system_prefix_bytes + self.tool_schema_bytes + self.history_bytes)
+                / 4,
         }
     }
 }
@@ -338,10 +337,7 @@ impl ContextProjector {
         self.evidence_call_index
             .insert(link.call_id.clone(), link.source_entry_id.clone());
         let raw_len = raw.len();
-        if let Some(previous) = self
-            .evidence
-            .insert(link.source_entry_id.clone(), raw)
-        {
+        if let Some(previous) = self.evidence.insert(link.source_entry_id.clone(), raw) {
             self.evidence_bytes = self.evidence_bytes.saturating_sub(previous.len());
         }
         self.evidence_bytes = self.evidence_bytes.saturating_add(raw_len);
@@ -445,11 +441,16 @@ impl ContextProjector {
         for item in &self.projected_items {
             match item {
                 TranscriptItem::Assistant(_) => assistant_turn = assistant_turn.saturating_add(1),
-                TranscriptItem::ToolResult(tr) if tr.outcome.is_success() && tr.meta.modified_file => {
+                TranscriptItem::ToolResult(tr)
+                    if tr.outcome.is_success() && tr.meta.modified_file =>
+                {
                     if let Some(path) = &tr.meta.relative_path {
                         // Never regress a larger turn restored from the session checkpoint: a file
                         // touched deep in the history must not be re-stamped as "just modified".
-                        let slot = self.last_touched_turns.entry(path.clone()).or_insert(assistant_turn);
+                        let slot = self
+                            .last_touched_turns
+                            .entry(path.clone())
+                            .or_insert(assistant_turn);
                         *slot = (*slot).max(assistant_turn);
                     }
                 }
@@ -512,7 +513,10 @@ impl ContextProjector {
                 if let Some(dropped) = self.evidence.remove(&link.source_entry_id) {
                     self.evidence_bytes = self.evidence_bytes.saturating_sub(dropped.len());
                 }
-                if self.evidence_call_index.get(&link.call_id).map(String::as_str)
+                if self
+                    .evidence_call_index
+                    .get(&link.call_id)
+                    .map(String::as_str)
                     == Some(link.source_entry_id.as_str())
                 {
                     self.evidence_call_index.remove(&link.call_id);
@@ -596,8 +600,13 @@ impl ContextProjector {
             if after_total_bytes > budget.context_high_watermark_bytes
                 || (token_exceeded && after_history_bytes > effective_target_bytes)
             {
-                let (extra_seqs, _) =
-                    self.run_step_down_compaction(canonical, 1, 0, effective_target_bytes, current_turn);
+                let (extra_seqs, _) = self.run_step_down_compaction(
+                    canonical,
+                    1,
+                    0,
+                    effective_target_bytes,
+                    current_turn,
+                );
                 let mut all_seqs = compacted_seqs;
                 all_seqs.extend(extra_seqs);
                 after_history_bytes = self
@@ -966,7 +975,8 @@ impl ContextProjector {
                     }
                     self.compacted_indices.insert(idx);
                     compacted_seqs.push(idx);
-                }            }
+                }
+            }
         }
 
         (compacted_seqs, pinned_files)
@@ -1117,7 +1127,10 @@ pub fn build_outline_stub_for_profile(
         return append_bounded_tail(head, &tail_joined);
     }
 
-    let (start_l, end_l) = tr.meta.lines_range.unwrap_or((1, tr.content.lines().count()));
+    let (start_l, end_l) = tr
+        .meta
+        .lines_range
+        .unwrap_or((1, tr.content.lines().count()));
     let outline_items = extract_top_level_symbols_from(&tr.content, MAX_OUTLINE_SYMBOLS, start_l);
     let outline_str = if outline_items.is_empty() {
         "none".to_string()
@@ -1171,7 +1184,11 @@ pub fn extract_top_level_symbols(content: &str, max_symbols: usize) -> Vec<Strin
 /// absolute line number is derived from `start_line` (the first line reported by `lines_range`)
 /// plus the physical line index. Function-like declarations also carry the first 80 bytes of
 /// their signature so callers can still reason about parameters after the body was compacted.
-fn extract_top_level_symbols_from(content: &str, max_symbols: usize, start_line: usize) -> Vec<String> {
+fn extract_top_level_symbols_from(
+    content: &str,
+    max_symbols: usize,
+    start_line: usize,
+) -> Vec<String> {
     let re = symbol_regex();
     let mut symbols = Vec::new();
 
@@ -1348,9 +1365,15 @@ mod tests {
     #[test]
     fn working_set_pins_release_files_older_than_the_window_under_a_resume_offset() {
         let items = vec![
-            TranscriptItem::User(UserMessage { content: "task".into() }),
+            TranscriptItem::User(UserMessage {
+                content: "task".into(),
+            }),
             assistant_with(&["call_old_read".to_string(), "call_old_edit".to_string()]),
-            read_result("call_old_read", "src/old.rs", large_source("old\n", "pad\n")),
+            read_result(
+                "call_old_read",
+                "src/old.rs",
+                large_source("old\n", "pad\n"),
+            ),
             edit_result("call_old_edit", "src/old.rs"),
         ];
         let mut ledger = HashMap::new();
@@ -1358,8 +1381,14 @@ mod tests {
         ledger.insert("src/recent.rs".to_string(), 10usize);
 
         let (_, pinned) = compute_working_set_pins(&items, 13, &ledger);
-        assert!(pinned.contains(&"src/recent.rs".to_string()), "recent.rs (3 turns old) must stay pinned");
-        assert!(!pinned.contains(&"src/old.rs".to_string()), "old.rs (12 turns old) must be released from pinning");
+        assert!(
+            pinned.contains(&"src/recent.rs".to_string()),
+            "recent.rs (3 turns old) must stay pinned"
+        );
+        assert!(
+            !pinned.contains(&"src/old.rs".to_string()),
+            "old.rs (12 turns old) must be released from pinning"
+        );
     }
 
     /// `refresh_last_touched_from_transcript` must not overwrite a larger turn restored from the
@@ -1369,12 +1398,16 @@ mod tests {
         let mut projector = ContextProjector::new();
         projector.restore_last_touched(vec![("src/old.rs".to_string(), 9)]);
         let mut canonical = vec![
-            TranscriptItem::User(UserMessage { content: "task".into() }),
+            TranscriptItem::User(UserMessage {
+                content: "task".into(),
+            }),
             assistant_with(&["call_old_edit".to_string()]),
             edit_result("call_old_edit", "src/old.rs"),
         ];
         let budget = BudgetConfig::default();
-        let _ = projector.project(&mut canonical, &budget, 0, None, 13).unwrap();
+        let _ = projector
+            .project(&mut canonical, &budget, 0, None, 13)
+            .unwrap();
         assert_eq!(projector.last_touched_turns().get("src/old.rs"), Some(&9));
     }
 
@@ -1398,9 +1431,14 @@ mod tests {
             "   30\t// recent padding line\n",
         );
 
-        let mut canonical = vec![TranscriptItem::User(UserMessage { content: "task".into() })];
+        let mut canonical = vec![TranscriptItem::User(UserMessage {
+            content: "task".into(),
+        })];
         // Turn 1: read + edit the soon-to-be-stale file.
-        canonical.push(assistant_with(&["call_old_read".to_string(), "call_old_edit".to_string()]));
+        canonical.push(assistant_with(&[
+            "call_old_read".to_string(),
+            "call_old_edit".to_string(),
+        ]));
         canonical.push(read_result("call_old_read", "src/old.rs", old_body.clone()));
         canonical.push(edit_result("call_old_edit", "src/old.rs"));
         // Turns 2-9: filler reads that push the request over the high watermark.
@@ -1417,8 +1455,15 @@ mod tests {
             ));
         }
         // Turn 10: read + edit the recent file.
-        canonical.push(assistant_with(&["call_recent_read".to_string(), "call_recent_edit".to_string()]));
-        canonical.push(read_result("call_recent_read", "src/recent.rs", recent_body.clone()));
+        canonical.push(assistant_with(&[
+            "call_recent_read".to_string(),
+            "call_recent_edit".to_string(),
+        ]));
+        canonical.push(read_result(
+            "call_recent_read",
+            "src/recent.rs",
+            recent_body.clone(),
+        ));
         canonical.push(edit_result("call_recent_edit", "src/recent.rs"));
         // Turns 11-12: more filler so the resumed run lands on absolute turn 13.
         for turn in 11..=12 {
@@ -1438,7 +1483,10 @@ mod tests {
         let projected = projector
             .project(&mut canonical, &budget, 1000, None, 13)
             .expect("resumed compaction should succeed");
-        assert!(projected.compaction_event.is_some(), "high watermark should trigger compaction");
+        assert!(
+            projected.compaction_event.is_some(),
+            "high watermark should trigger compaction"
+        );
 
         let old_read = find_read(&projected.messages, "src/old.rs");
         assert!(

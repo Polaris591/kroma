@@ -133,4 +133,3 @@ fn parse_host_port(authority: &str, default_port: u16) -> Result<(String, u16), 
         Ok((authority.to_string(), default_port))
     }
 }
-

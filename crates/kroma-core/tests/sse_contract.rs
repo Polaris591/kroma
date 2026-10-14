@@ -27,7 +27,7 @@ fn test_sse_arbitrary_chunking_100_iterations_and_1_byte_splits() {
     // 1. Extreme 1-byte-at-a-time chunking
     let mut one_byte_asm = SseStreamAssembler::new();
     for b in raw_bytes {
-        one_byte_asm.feed_bytes( std::slice::from_ref(b) ).unwrap();
+        one_byte_asm.feed_bytes(std::slice::from_ref(b)).unwrap();
     }
     let baseline = one_byte_asm.finalize().unwrap();
 
@@ -45,10 +45,16 @@ fn test_sse_arbitrary_chunking_100_iterations_and_1_byte_splits() {
     assert_eq!(baseline.tool_calls.len(), 2);
     assert_eq!(baseline.tool_calls[0].call_id.as_str(), "call_alpha");
     assert_eq!(baseline.tool_calls[0].name, "read");
-    assert_eq!(baseline.tool_calls[0].raw_arguments, "{\"path\":\"src/a.rs\"}");
+    assert_eq!(
+        baseline.tool_calls[0].raw_arguments,
+        "{\"path\":\"src/a.rs\"}"
+    );
     assert_eq!(baseline.tool_calls[1].call_id.as_str(), "call_beta");
     assert_eq!(baseline.tool_calls[1].name, "read");
-    assert_eq!(baseline.tool_calls[1].raw_arguments, "{\"path\":\"src/b.rs\"}");
+    assert_eq!(
+        baseline.tool_calls[1].raw_arguments,
+        "{\"path\":\"src/b.rs\"}"
+    );
 
     let usage = baseline.usage.expect("trailing choices=[] usage parsed");
     assert_eq!(usage.input_tokens, 1200);
@@ -95,7 +101,10 @@ data: [DONE]\n\n";
     assert_eq!(turn.finish_reason, FinishReason::Length);
 
     let batch_res = validate_assistant_turn_batch(&turn, &budget, false);
-    assert!(matches!(batch_res, Err(ProviderError::TruncatedToolCall(_))));
+    assert!(matches!(
+        batch_res,
+        Err(ProviderError::TruncatedToolCall(_))
+    ));
 }
 
 #[test]
@@ -135,10 +144,22 @@ data: [DONE]\n\n";
     let turn = asm.finalize().unwrap();
 
     assert_eq!(turn.reasoning_blocks.len(), 2);
-    assert_eq!(turn.reasoning_blocks[0].text.as_deref(), Some("First thought"));
-    assert_eq!(turn.reasoning_blocks[0].signature.as_deref(), Some("sig_one"));
-    assert_eq!(turn.reasoning_blocks[1].text.as_deref(), Some("Second thought"));
-    assert_eq!(turn.reasoning_blocks[1].signature.as_deref(), Some("sig_two"));
+    assert_eq!(
+        turn.reasoning_blocks[0].text.as_deref(),
+        Some("First thought")
+    );
+    assert_eq!(
+        turn.reasoning_blocks[0].signature.as_deref(),
+        Some("sig_one")
+    );
+    assert_eq!(
+        turn.reasoning_blocks[1].text.as_deref(),
+        Some("Second thought")
+    );
+    assert_eq!(
+        turn.reasoning_blocks[1].signature.as_deref(),
+        Some("sig_two")
+    );
 
     assert_eq!(turn.tool_calls.len(), 2);
     assert_eq!(turn.tool_calls[0].call_id.as_str(), "call_a");

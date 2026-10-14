@@ -9,7 +9,10 @@ impl RpcDispatcher {
     /// evaluation with `EffectClass::Mutating`, the registered fail-closed `PolicyHook` gate, and an
     /// interactive approval round-trip for `Ask`. Before this fix the RPC path skipped all of these,
     /// so a `ReadOnly` session could write (and merge) files through `/race`.
-    pub(crate) async fn tournament_preflight(&self, candidate_count: usize) -> Result<(), JsonRpcError> {
+    pub(crate) async fn tournament_preflight(
+        &self,
+        candidate_count: usize,
+    ) -> Result<(), JsonRpcError> {
         // Quota + policy mode (shared helper, same as the tool path). P1 (`v1.5.0`): the live
         // session spawn count is passed in so repeated `/race` calls cannot bypass `max_subagents`.
         let already_spawned = self
@@ -47,10 +50,7 @@ impl RpcDispatcher {
         if let Err((denied, _)) = runtime.pre_tool_hook_gate(&hook_call, 0).await {
             return Err(JsonRpcError::new(
                 JSONRPC_INTERNAL_ERROR,
-                format!(
-                    "policy hook denied session.tournament: {}",
-                    denied.content
-                ),
+                format!("policy hook denied session.tournament: {}", denied.content),
             ));
         }
 
@@ -119,7 +119,10 @@ impl RpcDispatcher {
     /// ranked deterministically. The parent workspace is only touched when a candidate passed
     /// verification, and the winning merge is recorded as a single WAL revision so `/undo` reverts
     /// the whole tournament in one step.
-    pub(crate) async fn rpc_session_tournament(&self, params: &Value) -> Result<Value, JsonRpcError> {
+    pub(crate) async fn rpc_session_tournament(
+        &self,
+        params: &Value,
+    ) -> Result<Value, JsonRpcError> {
         if self.inner.in_flight.load(Ordering::SeqCst) {
             return Err(JsonRpcError::new(
                 JSONRPC_INTERNAL_ERROR,
@@ -173,11 +176,7 @@ impl RpcDispatcher {
         // after preflight (matching `execute_spawn_tournament`) so a second `/race` on the same
         // session is measured against what this one is about to spend.
         {
-            let mut status = self
-                .inner
-                .status
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut status = self.inner.status.lock().unwrap_or_else(|e| e.into_inner());
             status.subagents_spawned = status.subagents_spawned.saturating_add(count);
         }
 
@@ -237,15 +236,12 @@ impl RpcDispatcher {
         let mut candidates: Vec<crate::subagents::TournamentCandidate> = Vec::with_capacity(count);
         for index in 0..count {
             let label = format!("c{}", index + 1);
-            let strategy = strategies
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| default_strategies[index % default_strategies.len()].to_string());
+            let strategy = strategies.get(index).cloned().unwrap_or_else(|| {
+                default_strategies[index % default_strategies.len()].to_string()
+            });
             let mut spec = crate::subagents::SubagentSpec::worker(format!(
                 "{}\n\n[TOURNAMENT CANDIDATE {} STRATEGY] {}",
-                task,
-                label,
-                strategy
+                task, label, strategy
             ));
             if let Some(globs) = &allowed_write_globs {
                 spec = spec.with_allowed_write_globs(globs.clone());
@@ -254,18 +250,22 @@ impl RpcDispatcher {
                 spec = spec.with_max_turns(turns);
             }
             spec = spec.with_timeout_ms(timeout_ms);
-            candidates.push(
-                crate::subagents::TournamentCandidate {
-                    label,
-                    strategy: Some(strategy),
-                    spec,
-                },
-            );
+            candidates.push(crate::subagents::TournamentCandidate {
+                label,
+                strategy: Some(strategy),
+                spec,
+            });
         }
 
         let workspace = self.inner.env.workspace().clone();
         let store = Arc::clone(&self.inner.snapshot_store);
-        let provider = Arc::clone(&self.inner.provider.lock().unwrap_or_else(|e| e.into_inner()));
+        let provider = Arc::clone(
+            &self
+                .inner
+                .provider
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
         let backend: Arc<dyn crate::subagents::SubagentBackend> =
             Arc::new(crate::subagents::ProviderSubagentBackend::new(provider));
 

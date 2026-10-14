@@ -1,6 +1,6 @@
 use crate::attribution::{
     added_symbols_for_call, language_name, mutation_summary, removed_symbols_for_call,
-    MutationTelemetry, MutatedFileSpan, PredictiveReport, PredictiveValidator,
+    MutatedFileSpan, MutationTelemetry, PredictiveReport, PredictiveValidator,
 };
 use crate::budget::BudgetConfig;
 use crate::env::SharedExecutionEnv;
@@ -11,9 +11,7 @@ use crate::loop_guard::MAX_EDIT_FAILURE_STREAK;
 use crate::messages::{ToolCall, ToolResultMessage, ToolResultMeta};
 use crate::prompt::sha256_hex16;
 use crate::sensitive_paths::SensitivePathGuard;
-use crate::tool::policy::{
-    ApprovalDecision, ApprovalRequest, PolicyCheckResult, PolicyEngine,
-};
+use crate::tool::policy::{ApprovalDecision, ApprovalRequest, PolicyCheckResult, PolicyEngine};
 use crate::tool::registry::{ToolLookupError, ToolRegistry};
 use crate::tools::{
     bash::execute_bash, edit::execute_edit, find::execute_find, grep::execute_grep, ls::execute_ls,
@@ -297,7 +295,11 @@ impl ToolRuntime {
                     format!("unknown tool '{}'", call.name),
                     ToolResultMeta::default(),
                 );
-                return (Self::into_message(call, out), "deny_unknown".to_string(), Vec::new());
+                return (
+                    Self::into_message(call, out),
+                    "deny_unknown".to_string(),
+                    Vec::new(),
+                );
             }
         };
 
@@ -348,18 +350,20 @@ impl ToolRuntime {
                                 ..Default::default()
                             },
                         );
-                        return (Self::into_message(call, out), "deny_path_escape".to_string(), hook_evaluations);
+                        return (
+                            Self::into_message(call, out),
+                            "deny_path_escape".to_string(),
+                            hook_evaluations,
+                        );
                     }
                 }
             }
         }
 
         // Evaluate Policy & SensitivePathGuard
-        let check = self.policy_engine.evaluate(
-            &call.name,
-            registered.metadata.effect_class,
-            is_sensitive,
-        );
+        let check =
+            self.policy_engine
+                .evaluate(&call.name, registered.metadata.effect_class, is_sensitive);
 
         let mut effective_raw_args = call.raw_arguments.clone();
         // BUG-08: a user approval for a sensitive path is scoped to exactly this call. The token
@@ -383,7 +387,11 @@ impl ToolRuntime {
                         ..Default::default()
                     },
                 );
-                return (Self::into_message(call, out), format!("deny:{}", reason), hook_evaluations);
+                return (
+                    Self::into_message(call, out),
+                    format!("deny:{}", reason),
+                    hook_evaluations,
+                );
             }
             PolicyCheckResult::Ask => {
                 let compute_target_sha = |rel: &str| -> Option<String> {
@@ -401,9 +409,7 @@ impl ToolRuntime {
                 };
 
                 // Capture pre-approval SHA256 for TOCTOU protection on edit/write (§2.1, §5.2)
-                let pre_approval_sha = rel_path_opt
-                    .as_deref()
-                    .and_then(&compute_target_sha);
+                let pre_approval_sha = rel_path_opt.as_deref().and_then(&compute_target_sha);
 
                 let diff_preview = if matches!(call.name.as_str(), "edit" | "write") {
                     Some(Self::build_approval_diff_preview(
@@ -441,12 +447,15 @@ impl ToolRuntime {
                             ..Default::default()
                         },
                     );
-                    return (Self::into_message(call, out), "ask_cancelled".to_string(), hook_evaluations);
+                    return (
+                        Self::into_message(call, out),
+                        "ask_cancelled".to_string(),
+                        hook_evaluations,
+                    );
                 }
 
                 let pe = self.policy_engine.clone();
-                let mut prompt_task =
-                    tokio::task::spawn_blocking(move || pe.prompt_approval(&req));
+                let mut prompt_task = tokio::task::spawn_blocking(move || pe.prompt_approval(&req));
 
                 let decision = tokio::select! {
                     res = &mut prompt_task => res.unwrap_or(ApprovalDecision::Deny),
@@ -486,16 +495,17 @@ impl ToolRuntime {
                         };
                         let out = ToolExecutionOutput::error(
                             code,
-                            format!(
-                                "tool '{}' execution denied by approval policy",
-                                call.name
-                            ),
+                            format!("tool '{}' execution denied by approval policy", call.name),
                             ToolResultMeta {
                                 relative_path: rel_path_opt,
                                 ..Default::default()
                             },
                         );
-                        return (Self::into_message(call, out), "ask_denied".to_string(), hook_evaluations);
+                        return (
+                            Self::into_message(call, out),
+                            "ask_denied".to_string(),
+                            hook_evaluations,
+                        );
                     }
                     ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => {
                         // Secondary SHA-256 TOCTOU check after user approval wait
@@ -527,13 +537,13 @@ impl ToolRuntime {
                                 {
                                     if let Some(map) = arg_obj.as_object_mut() {
                                         if let Some(ref sha) = now_sha {
-                                            map.entry("expected_sha256".to_string()).or_insert_with(
-                                                || serde_json::Value::String(sha.clone()),
-                                            );
+                                            map.entry("expected_sha256".to_string())
+                                                .or_insert_with(|| {
+                                                    serde_json::Value::String(sha.clone())
+                                                });
                                         } else if call.name == "write" {
-                                            map.entry("if_not_exists".to_string()).or_insert_with(
-                                                || serde_json::Value::Bool(true),
-                                            );
+                                            map.entry("if_not_exists".to_string())
+                                                .or_insert_with(|| serde_json::Value::Bool(true));
                                         }
                                         if let Ok(re_ser) = serde_json::to_string(&arg_obj) {
                                             effective_raw_args = re_ser;
@@ -549,9 +559,7 @@ impl ToolRuntime {
                         // `is_sensitive_path`), so a sensitive grant is always per-call.
                         if is_sensitive {
                             if let Some(rel) = rel_path_opt.as_deref() {
-                                if let Ok(norm) =
-                                    WorkspaceCap::validate_relative_components(rel)
-                                {
+                                if let Ok(norm) = WorkspaceCap::validate_relative_components(rel) {
                                     sensitive_approval = Some(SensitivePathApproval::new(norm));
                                 }
                             }
@@ -565,8 +573,8 @@ impl ToolRuntime {
         // Dispatch to concrete tool implementation
         // BUG-08: hand the approved clone only to the tools whose sensitive-path detection set
         // `is_sensitive`; every other tool (and every unapproved call) keeps the plain workspace.
-        let approved_workspace = sensitive_approval
-            .map(|approval| self.env.workspace().with_approval(approval));
+        let approved_workspace =
+            sensitive_approval.map(|approval| self.env.workspace().with_approval(approval));
         let tool_workspace: &WorkspaceCap = approved_workspace
             .as_ref()
             .unwrap_or_else(|| self.env.workspace());
@@ -642,7 +650,11 @@ impl ToolRuntime {
 
         let exec_out = self.attach_gate4_telemetry(call, exec_out, &effective_raw_args);
 
-        (Self::into_message(call, exec_out), decision_label, hook_evaluations)
+        (
+            Self::into_message(call, exec_out),
+            decision_label,
+            hook_evaluations,
+        )
     }
 
     /// Gate 4: run the post-mutation structural check on a successful `edit`/`write`, attach the
@@ -664,8 +676,9 @@ impl ToolRuntime {
         };
         let content = crate::attribution::read_workspace_text(self.env.workspace(), &rel).ok();
         let report = match &content {
-            Some(content) => PredictiveValidator::new(self.predictive_check)
-                .validate_content(&rel, content),
+            Some(content) => {
+                PredictiveValidator::new(self.predictive_check).validate_content(&rel, content)
+            }
             None => PredictiveReport::skipped(
                 &rel,
                 language_name(&rel),
@@ -752,11 +765,7 @@ impl ToolRuntime {
 
     pub fn augment_edit_streak_warning(msg: &mut ToolResultMessage, streak: usize) {
         if streak >= MAX_EDIT_FAILURE_STREAK {
-            let path = msg
-                .meta
-                .relative_path
-                .as_deref()
-                .unwrap_or("<target_file>");
+            let path = msg.meta.relative_path.as_deref().unwrap_or("<target_file>");
             let appended = format!(
                 "{}\n[CIRCUIT BREAKER: {} consecutive failed `edit` attempts on '{}'. \
                 You MUST call `read` on '{}' around the target lines before attempting another `edit`.]",

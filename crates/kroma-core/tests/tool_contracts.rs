@@ -43,7 +43,11 @@ async fn test_read_write_ls_find_grep_contracts() {
     fs::write(tmp_ws.join("important.log"), "kept log\n").unwrap();
 
     // Symlink inside workspace (should not be followed by ls/find/grep)
-    fs::write(tmp_ws.join("src/real.rs"), "pub fn alpha_target() -> i32 { 42 }\n").unwrap();
+    fs::write(
+        tmp_ws.join("src/real.rs"),
+        "pub fn alpha_target() -> i32 { 42 }\n",
+    )
+    .unwrap();
     symlink(tmp_ws.join("src/real.rs"), tmp_ws.join("src/sym.rs")).unwrap();
 
     let ws = WorkspaceCap::new(&tmp_ws).unwrap();
@@ -114,7 +118,9 @@ async fn test_read_write_ls_find_grep_contracts() {
 
     let r_long = execute_read(&ws, r#"{"path":"src/long.txt","offset":1,"limit":2}"#);
     assert!(r_long.outcome.is_success());
-    assert!(r_long.content.contains("[File: src/long.txt | Lines: 1-2 of 3 | SHA256: "));
+    assert!(r_long
+        .content
+        .contains("[File: src/long.txt | Lines: 1-2 of 3 | SHA256: "));
     assert!(r_long.content.contains("[line truncated]"));
     assert!(r_long
         .content
@@ -163,7 +169,9 @@ async fn test_read_write_ls_find_grep_contracts() {
 
     let grep_out = execute_grep(&ws, r#"{"pattern":"alpha_target"}"#);
     assert!(grep_out.outcome.is_success());
-    assert!(grep_out.content.contains("src/real.rs:1:pub fn alpha_target() -> i32 { 42 }"));
+    assert!(grep_out
+        .content
+        .contains("src/real.rs:1:pub fn alpha_target() -> i32 { 42 }"));
     assert!(!grep_out.content.contains("sym.rs"));
     assert!(grep_out.content.contains("[Skipped 3 sensitive file(s)]"));
 
