@@ -211,6 +211,14 @@ struct TurnState {
     last_gate_failure_hash: Option<String>,
 }
 
+/// Result of one extracted turn phase: either the run keeps going (carrying `logger` back, because
+/// `finish_run` consumes it by value) or the run is finished.
+enum TurnFlow {
+    Continue(EventLogger),
+    Finish((RunSummary, EventLogger)),
+}
+
+
 impl AgentRunner {
     pub fn new(
         config: AgentRunConfig,
@@ -714,345 +722,16 @@ impl AgentRunner {
 
             // If model stopped with no tool calls, run CompletionGate if files were modified (§3.2 V6-07)
             if tool_calls.is_empty() {
-                // Gate 3: `PreCompletion` policy hooks run before the completion gate. A denial is
-                // fail-closed and is treated exactly like a gate rejection, so the model must keep
-                // working instead of the run silently finishing.
-                let pre_completion_denial = {
-                    let hooks = self.tool_runtime.hook_engine();
-                    if hooks.is_empty() {
-                        None
-                    } else {
-                        let ctx = HookContext::new(
-                            current_turn,
-                            self.tool_runtime.env().workspace().root().to_path_buf(),
-                        );
-                        let outcome = hooks
-                            .evaluate_policy(crate::extensions::HookEvent::PreCompletion, &ctx)
-                            .await;
-                        Self::log_hook_evaluations(&mut logger, outcome.evaluations());
-                        outcome.reason().map(|r| r.to_string())
+                match self
+                    .handle_completion_turn(&mut state, logger, current_turn, absolute_turn)
+                    .await
+                {
+                    TurnFlow::Continue(returned) => {
+                        logger = returned;
+                        continue;
                     }
-                };
-                if let Some(reason) = pre_completion_denial {
-                    state.gate_failure_count = state.gate_failure_count.saturating_add(1);
-                    let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
-                    mod_list.sort();
-                    if state.gate_failure_count >= self.completion_gate_max_retries {
-                        return self.finish_run(
-                            TerminalReason::ProviderProtocolError(format!(
-                                "PreCompletion policy hook denied completion {} times (max retries={}): {}",
-                                state.gate_failure_count, self.completion_gate_max_retries, reason
-                            )),
-                            &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
-                            state.transcript, logger,
-                        );
-                    }
-                    self.record_transcript_item(
-                        &mut state.transcript,
-                        TranscriptItem::User(UserMessage {
-                            content: format!(
-                                "[PreCompletion policy hook denied completion, attempt {}/{}]: {}\nAddress the denial before finishing.",
-                                state.gate_failure_count, self.completion_gate_max_retries, reason
-                            ),
-                        }),
-                        current_turn.saturating_add(1),
-                    );
-                    if let Some(err) = self.session_persist_error.clone() {
-                        return self.finish_run(
-                            TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                            &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
-                            state.transcript, logger,
-                        );
-                    }
-                    continue;
+                    TurnFlow::Finish((summary, returned)) => return (summary, returned),
                 }
-                if !state.modified_files_set.is_empty() {
-                    let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
-                    mod_list.sort();
-                    let gate_ctx = CompletionGateContext {
-                        run_id: self.config.run_id,
-                        workspace_root: self
-                            .tool_runtime
-                            .env()
-                            .workspace()
-                            .root()
-                            .to_path_buf(),
-                        modified_files: mod_list.clone(),
-                        turns_used: current_turn,
-                    };
-                    match self.completion_gate.check(&gate_ctx).await {
-                        Ok(GateOutcome::Approved) => {
-                            if let Some(journal) = self.session_journal.as_mut() {
-                                if let Err(err) = journal.mark_completion_approved() {
-                                    self.session_persist_error = Some(err.to_string());
-                                }
-                            }
-                            if let Some(err) = self.session_persist_error.clone() {
-                                return self.finish_run(
-                                    TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
-                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
-                                    state.transcript, logger,
-                                );
-                            }
-                        }
-                        Ok(GateOutcome::Skipped { reason }) => {
-                            if logger.live_stderr() {
-                                eprintln!("[CompletionGate] verification skipped: {}", reason);
-                            }
-                            if let Some(journal) = self.session_journal.as_mut() {
-                                if let Err(err) = journal.mark_completion_skipped(reason) {
-                                    self.session_persist_error = Some(err.to_string());
-                                }
-                            }
-                            if let Some(err) = self.session_persist_error.clone() {
-                                return self.finish_run(
-                                    TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
-                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
-                                    state.transcript, logger,
-                                );
-                            }
-                        }
-                        Ok(GateOutcome::Rejected { feedback }) => {
-                            state.gate_failure_count = state.gate_failure_count.saturating_add(1);
-                            let fingerprint = failure_fingerprint(&feedback);
-                            let repeated = state.last_gate_failure_hash.as_deref() == Some(fingerprint.as_str());
-                            state.last_gate_failure_hash = Some(fingerprint.clone());
-                            let mut gate_message = format!(
-                                "[CompletionGate Rejected, attempt {}/{}]: {}\nFix the reported issue before finishing.",
-                                state.gate_failure_count, self.completion_gate_max_retries, feedback
-                            );
-                            if repeated {
-                                gate_message.push_str(
-                                    "\n\n[ANTI-OSCILLATION WARNING] The failure fingerprint is identical to the previous attempt. First use `read` to inspect the relevant source and surrounding context; choose a different fix strategy; do not repeat the previous `edit` unchanged."
-                                );
-                            }
-                            // Gate 4: rank the session's recorded mutations against the gate's
-                            // diagnostics and hand the model a *candidate* list with the exact
-                            // evidence pointer and pre-change revision for each hypothesis.
-                            let report = AttributionEngine::attribute_failure(
-                                &self.mutation_ledger,
-                                &feedback,
-                                "completion_gate",
-                                ATTRIBUTION_TOP_K,
-                            );
-                            Self::log_failure_attribution(&mut logger, "completion_gate", &report);
-                            if let Some(block) = report.render_for_model() {
-                                gate_message.push_str("\n\n");
-                                gate_message.push_str(&block);
-                            }
-                            self.record_transcript_item(
-                                &mut state.transcript,
-                                TranscriptItem::User(UserMessage { content: gate_message }),
-                                current_turn.saturating_add(1),
-                            );
-                            self.drain_steering_messages(
-                                &mut state.transcript,
-                                current_turn.saturating_add(1),
-                            );
-                            if let Some(err) = self.session_persist_error.clone() {
-                                return self.finish_run(
-                                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
-                                    state.transcript, logger,
-                                );
-                            }
-                            // Item #3 (`v1.4.0`): adaptive escalation. Instead of tripping the
-                            // circuit breaker on a stall (2+ consecutive verification failures),
-                            // race N diverse repair candidates in isolated worktrees and merge the
-                            // best verified one.
-                            if !self.adaptive_tournament_attempted
-                                && state.gate_failure_count >= 2
-                                && self.adaptive_tournament_candidates
-                                    >= crate::subagents::MIN_TOURNAMENT_CANDIDATES
-                                && self.max_subagent_spawns > 0
-                                && !*self.cancel_rx.borrow()
-                            {
-                                let preflight = crate::subagents::subagent_spawn_preflight(
-                                    self.tool_runtime.policy_engine(),
-                                    self.adaptive_tournament_candidates,
-                                    self.subagents_spawned,
-                                    self.max_subagent_spawns,
-                                    EffectClass::Mutating,
-                                );
-                                if matches!(preflight, Ok(PolicyCheckResult::Allow)) {
-                                    self.adaptive_tournament_attempted = true;
-                                    let excerpt: String = feedback.chars().take(1200).collect();
-                                    let request = crate::subagents::TournamentRequest {
-                                        task: format!(
-                                            "{}\n\n[ADAPTIVE ESCALATION] The single-agent attempt failed verification {} time(s). Race independent repair strategies. Last verification failure:\n{}",
-                                            self.config.task, state.gate_failure_count, excerpt
-                                        ),
-                                        candidates: self.adaptive_tournament_candidates,
-                                        allowed_write_globs: None,
-                                        max_turns: None,
-                                        timeout_ms: crate::subagents::DEFAULT_SUBAGENT_TIMEOUT_MS,
-                                        disallow_test_tampering: true,
-                                        protected_paths: Vec::new(),
-                                    };
-                                    let (tournament_out, _label, merged) = self
-                                        .execute_spawn_tournament(
-                                            request,
-                                            absolute_turn,
-                                            &mut state.modified_files_set,
-                                            &mut logger,
-                                            "adaptive_tournament".to_string(),
-                                        )
-                                        .await;
-                                    // F10 (`v1.5.0`): the adaptive path never reaches
-                                    // `execute_tool_batch`, so drain the child spend here instead of
-                                    // leaking it when the model stops on the next turn.
-                                    self.drain_children_tokens(&mut state.budget_tracker);
-                                    if merged {
-                                        // A candidate was verified and merged: the stall is broken.
-                                        state.gate_failure_count = 0;
-                                        state.last_gate_failure_hash = None;
-                                        self.record_transcript_item(
-                                            &mut state.transcript,
-                                            TranscriptItem::User(UserMessage {
-                                                content: format!(
-                                                    "[ADAPTIVE TOURNAMENT MERGED] {}",
-                                                    tournament_out.content
-                                                ),
-                                            }),
-                                            current_turn.saturating_add(1),
-                                        );
-                                        // BUG-02 (`v1.5.1`): the merge already landed on disk, but
-                                        // this branch `continue`s past the post-tool-batch
-                                        // capture/ledger/checkpoint block. Record it here so the
-                                        // merge is durably in the WAL (and `--undo` can revert it)
-                                        // even when the run ends via MaxTurns/cancel before another
-                                        // completion-gate cycle, and so Gate 4 can attribute a
-                                        // tournament-introduced regression to a mutation.
-                                        let revision_before = self.current_revision_id.clone();
-                                        let merged_changed_paths = self.capture_workspace_revision(
-                                            absolute_turn,
-                                            "mutation",
-                                            &mut logger,
-                                        );
-                                        for path in &merged_changed_paths {
-                                            state.modified_files_set.insert(path.clone());
-                                        }
-                                        if !merged_changed_paths.is_empty() {
-                                            let spans = build_worker_mutation_spans(
-                                                self.tool_runtime.env().workspace(),
-                                                "adaptive_tournament",
-                                                &merged_changed_paths,
-                                                &[],
-                                            );
-                                            self.mutation_ledger.record_mutation(
-                                                absolute_turn as u32,
-                                                "adaptive_tournament",
-                                                format!("adaptive-tournament-{}", absolute_turn),
-                                                None,
-                                                revision_before,
-                                                spans,
-                                            );
-                                        }
-                                        self.mutation_ledger.backfill_revision_and_paths(
-                                            absolute_turn as u32,
-                                            self.current_revision_id.clone(),
-                                            &merged_changed_paths,
-                                            self.snapshot_store.is_some()
-                                                && (self.batch_mutated
-                                                    || self.batch_ran_side_effect
-                                                    || !merged_changed_paths.is_empty()),
-                                        );
-                                        // The merge is captured; clear the batch flags so a later
-                                        // read-only turn cannot re-trigger a stale capture.
-                                        self.batch_mutated = false;
-                                        self.batch_ran_side_effect = false;
-                                        if let Some(err) = self.revision_error.clone() {
-                                            return self.finish_run(
-                                                TerminalReason::StrictLogFailure(err),
-                                                &state.budget_tracker,
-                                                &state.projector,
-                                                state.modified_files_set.into_iter().collect(),
-                                                state.last_assistant_text,
-                                                state.transcript,
-                                                logger,
-                                            );
-                                        }
-                                        self.persist_session_checkpoint(
-                                            &state.projector,
-                                            &state.transcript,
-                                            current_turn,
-                                        );
-                                        if let Some(err) = self.session_persist_error.clone() {
-                                            return self.finish_run(
-                                                TerminalReason::StrictLogFailure(format!(
-                                                    "session checkpoint failed: {}",
-                                                    err
-                                                )),
-                                                &state.budget_tracker,
-                                                &state.projector,
-                                                state.modified_files_set.into_iter().collect(),
-                                                state.last_assistant_text,
-                                                state.transcript,
-                                                logger,
-                                            );
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                            if state.gate_failure_count >= self.completion_gate_max_retries {
-                                let excerpt: String = feedback.chars().take(1600).collect();
-                                return self.finish_run(
-                                    TerminalReason::ProviderProtocolError(format!(
-                                        "CompletionGate rejected completion {} times (max retries={}); fingerprint={}; last failure:\n{}",
-                                        state.gate_failure_count, self.completion_gate_max_retries, fingerprint, excerpt
-                                    )),
-                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text,
-                                    state.transcript, logger,
-                                );
-                            }
-                            continue;
-                        }
-                        Err(err) => {
-                            return self.finish_run(
-                                TerminalReason::ProviderProtocolError(format!(
-                                    "CompletionGate error: {}",
-                                    err
-                                )),
-                                &state.budget_tracker,
-                                &state.projector,
-                                mod_list,
-                                state.last_assistant_text,
-                                state.transcript,
-                                logger,
-                            );
-                        }
-                    }
-                }
-
-                // O1: a verification command can rewrite the workspace (formatters, codegen).
-                // Capture the resulting state so `latest_revision_id()` never drifts from disk.
-                // The capture must carry the *absolute* session turn: `current_turn` restarts at 1
-                // on `--resume`, which would misorder revision records against the restored turns.
-                self.capture_workspace_revision(absolute_turn, "verification", &mut logger);
-                if let Some(err) = self.revision_error.clone() {
-                    return self.finish_run(
-                        TerminalReason::StrictLogFailure(err),
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-
-                let mut mod_list: Vec<String> = state.modified_files_set.into_iter().collect();
-                mod_list.sort();
-                return self.finish_run(
-                    TerminalReason::ModelStop,
-                    &state.budget_tracker,
-                    &state.projector,
-                    mod_list,
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
             }
 
             if let Err(e) = logger.log(EventPayload::ToolBatchReceived {
@@ -1295,6 +974,361 @@ impl AgentRunner {
             }
         }
     }
+
+    /// Handle a turn where the model stopped without calling any tool: run the pre-completion
+    /// policy hooks, the completion gate and the adaptive escalation, or finish the run.
+    ///
+    /// Split out of `run_inner`'s loop body (341 lines of its 905). The body is the original code
+    /// verbatim; `state` is threaded through by reference and `logger` is returned because
+    /// `finish_run` consumes it.
+    async fn handle_completion_turn(
+        &mut self,
+        state: &mut TurnState,
+        mut logger: EventLogger,
+        current_turn: usize,
+        absolute_turn: usize,
+    ) -> TurnFlow {
+                // Gate 3: `PreCompletion` policy hooks run before the completion gate. A denial is
+                // fail-closed and is treated exactly like a gate rejection, so the model must keep
+                // working instead of the run silently finishing.
+                let pre_completion_denial = {
+                    let hooks = self.tool_runtime.hook_engine();
+                    if hooks.is_empty() {
+                        None
+                    } else {
+                        let ctx = HookContext::new(
+                            current_turn,
+                            self.tool_runtime.env().workspace().root().to_path_buf(),
+                        );
+                        let outcome = hooks
+                            .evaluate_policy(crate::extensions::HookEvent::PreCompletion, &ctx)
+                            .await;
+                        Self::log_hook_evaluations(&mut logger, outcome.evaluations());
+                        outcome.reason().map(|r| r.to_string())
+                    }
+                };
+                if let Some(reason) = pre_completion_denial {
+                    state.gate_failure_count = state.gate_failure_count.saturating_add(1);
+                    let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
+                    mod_list.sort();
+                    if state.gate_failure_count >= self.completion_gate_max_retries {
+                        return TurnFlow::Finish(self.finish_run(
+                            TerminalReason::ProviderProtocolError(format!(
+                                "PreCompletion policy hook denied completion {} times (max retries={}): {}",
+                                state.gate_failure_count, self.completion_gate_max_retries, reason
+                            )),
+                            &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                            std::mem::take(&mut state.transcript), logger,
+                        ));
+                    }
+                    self.record_transcript_item(
+                        &mut state.transcript,
+                        TranscriptItem::User(UserMessage {
+                            content: format!(
+                                "[PreCompletion policy hook denied completion, attempt {}/{}]: {}\nAddress the denial before finishing.",
+                                state.gate_failure_count, self.completion_gate_max_retries, reason
+                            ),
+                        }),
+                        current_turn.saturating_add(1),
+                    );
+                    if let Some(err) = self.session_persist_error.clone() {
+                        return TurnFlow::Finish(self.finish_run(
+                            TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                            &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                            std::mem::take(&mut state.transcript), logger,
+                        ));
+                    }
+                    return TurnFlow::Continue(logger);
+                }
+                if !state.modified_files_set.is_empty() {
+                    let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
+                    mod_list.sort();
+                    let gate_ctx = CompletionGateContext {
+                        run_id: self.config.run_id,
+                        workspace_root: self
+                            .tool_runtime
+                            .env()
+                            .workspace()
+                            .root()
+                            .to_path_buf(),
+                        modified_files: mod_list.clone(),
+                        turns_used: current_turn,
+                    };
+                    match self.completion_gate.check(&gate_ctx).await {
+                        Ok(GateOutcome::Approved) => {
+                            if let Some(journal) = self.session_journal.as_mut() {
+                                if let Err(err) = journal.mark_completion_approved() {
+                                    self.session_persist_error = Some(err.to_string());
+                                }
+                            }
+                            if let Some(err) = self.session_persist_error.clone() {
+                                return TurnFlow::Finish(self.finish_run(
+                                    TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
+                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                                    std::mem::take(&mut state.transcript), logger,
+                                ));
+                            }
+                        }
+                        Ok(GateOutcome::Skipped { reason }) => {
+                            if logger.live_stderr() {
+                                eprintln!("[CompletionGate] verification skipped: {}", reason);
+                            }
+                            if let Some(journal) = self.session_journal.as_mut() {
+                                if let Err(err) = journal.mark_completion_skipped(reason) {
+                                    self.session_persist_error = Some(err.to_string());
+                                }
+                            }
+                            if let Some(err) = self.session_persist_error.clone() {
+                                return TurnFlow::Finish(self.finish_run(
+                                    TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
+                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                                    std::mem::take(&mut state.transcript), logger,
+                                ));
+                            }
+                        }
+                        Ok(GateOutcome::Rejected { feedback }) => {
+                            state.gate_failure_count = state.gate_failure_count.saturating_add(1);
+                            let fingerprint = failure_fingerprint(&feedback);
+                            let repeated = state.last_gate_failure_hash.as_deref() == Some(fingerprint.as_str());
+                            state.last_gate_failure_hash = Some(fingerprint.clone());
+                            let mut gate_message = format!(
+                                "[CompletionGate Rejected, attempt {}/{}]: {}\nFix the reported issue before finishing.",
+                                state.gate_failure_count, self.completion_gate_max_retries, feedback
+                            );
+                            if repeated {
+                                gate_message.push_str(
+                                    "\n\n[ANTI-OSCILLATION WARNING] The failure fingerprint is identical to the previous attempt. First use `read` to inspect the relevant source and surrounding context; choose a different fix strategy; do not repeat the previous `edit` unchanged."
+                                );
+                            }
+                            // Gate 4: rank the session's recorded mutations against the gate's
+                            // diagnostics and hand the model a *candidate* list with the exact
+                            // evidence pointer and pre-change revision for each hypothesis.
+                            let report = AttributionEngine::attribute_failure(
+                                &self.mutation_ledger,
+                                &feedback,
+                                "completion_gate",
+                                ATTRIBUTION_TOP_K,
+                            );
+                            Self::log_failure_attribution(&mut logger, "completion_gate", &report);
+                            if let Some(block) = report.render_for_model() {
+                                gate_message.push_str("\n\n");
+                                gate_message.push_str(&block);
+                            }
+                            self.record_transcript_item(
+                                &mut state.transcript,
+                                TranscriptItem::User(UserMessage { content: gate_message }),
+                                current_turn.saturating_add(1),
+                            );
+                            self.drain_steering_messages(
+                                &mut state.transcript,
+                                current_turn.saturating_add(1),
+                            );
+                            if let Some(err) = self.session_persist_error.clone() {
+                                return TurnFlow::Finish(self.finish_run(
+                                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                                    std::mem::take(&mut state.transcript), logger,
+                                ));
+                            }
+                            // Item #3 (`v1.4.0`): adaptive escalation. Instead of tripping the
+                            // circuit breaker on a stall (2+ consecutive verification failures),
+                            // race N diverse repair candidates in isolated worktrees and merge the
+                            // best verified one.
+                            if !self.adaptive_tournament_attempted
+                                && state.gate_failure_count >= 2
+                                && self.adaptive_tournament_candidates
+                                    >= crate::subagents::MIN_TOURNAMENT_CANDIDATES
+                                && self.max_subagent_spawns > 0
+                                && !*self.cancel_rx.borrow()
+                            {
+                                let preflight = crate::subagents::subagent_spawn_preflight(
+                                    self.tool_runtime.policy_engine(),
+                                    self.adaptive_tournament_candidates,
+                                    self.subagents_spawned,
+                                    self.max_subagent_spawns,
+                                    EffectClass::Mutating,
+                                );
+                                if matches!(preflight, Ok(PolicyCheckResult::Allow)) {
+                                    self.adaptive_tournament_attempted = true;
+                                    let excerpt: String = feedback.chars().take(1200).collect();
+                                    let request = crate::subagents::TournamentRequest {
+                                        task: format!(
+                                            "{}\n\n[ADAPTIVE ESCALATION] The single-agent attempt failed verification {} time(s). Race independent repair strategies. Last verification failure:\n{}",
+                                            self.config.task, state.gate_failure_count, excerpt
+                                        ),
+                                        candidates: self.adaptive_tournament_candidates,
+                                        allowed_write_globs: None,
+                                        max_turns: None,
+                                        timeout_ms: crate::subagents::DEFAULT_SUBAGENT_TIMEOUT_MS,
+                                        disallow_test_tampering: true,
+                                        protected_paths: Vec::new(),
+                                    };
+                                    let (tournament_out, _label, merged) = self
+                                        .execute_spawn_tournament(
+                                            request,
+                                            absolute_turn,
+                                            &mut state.modified_files_set,
+                                            &mut logger,
+                                            "adaptive_tournament".to_string(),
+                                        )
+                                        .await;
+                                    // F10 (`v1.5.0`): the adaptive path never reaches
+                                    // `execute_tool_batch`, so drain the child spend here instead of
+                                    // leaking it when the model stops on the next turn.
+                                    self.drain_children_tokens(&mut state.budget_tracker);
+                                    if merged {
+                                        // A candidate was verified and merged: the stall is broken.
+                                        state.gate_failure_count = 0;
+                                        state.last_gate_failure_hash = None;
+                                        self.record_transcript_item(
+                                            &mut state.transcript,
+                                            TranscriptItem::User(UserMessage {
+                                                content: format!(
+                                                    "[ADAPTIVE TOURNAMENT MERGED] {}",
+                                                    tournament_out.content
+                                                ),
+                                            }),
+                                            current_turn.saturating_add(1),
+                                        );
+                                        // BUG-02 (`v1.5.1`): the merge already landed on disk, but
+                                        // this branch `continue`s past the post-tool-batch
+                                        // capture/ledger/checkpoint block. Record it here so the
+                                        // merge is durably in the WAL (and `--undo` can revert it)
+                                        // even when the run ends via MaxTurns/cancel before another
+                                        // completion-gate cycle, and so Gate 4 can attribute a
+                                        // tournament-introduced regression to a mutation.
+                                        let revision_before = self.current_revision_id.clone();
+                                        let merged_changed_paths = self.capture_workspace_revision(
+                                            absolute_turn,
+                                            "mutation",
+                                            &mut logger,
+                                        );
+                                        for path in &merged_changed_paths {
+                                            state.modified_files_set.insert(path.clone());
+                                        }
+                                        if !merged_changed_paths.is_empty() {
+                                            let spans = build_worker_mutation_spans(
+                                                self.tool_runtime.env().workspace(),
+                                                "adaptive_tournament",
+                                                &merged_changed_paths,
+                                                &[],
+                                            );
+                                            self.mutation_ledger.record_mutation(
+                                                absolute_turn as u32,
+                                                "adaptive_tournament",
+                                                format!("adaptive-tournament-{}", absolute_turn),
+                                                None,
+                                                revision_before,
+                                                spans,
+                                            );
+                                        }
+                                        self.mutation_ledger.backfill_revision_and_paths(
+                                            absolute_turn as u32,
+                                            self.current_revision_id.clone(),
+                                            &merged_changed_paths,
+                                            self.snapshot_store.is_some()
+                                                && (self.batch_mutated
+                                                    || self.batch_ran_side_effect
+                                                    || !merged_changed_paths.is_empty()),
+                                        );
+                                        // The merge is captured; clear the batch flags so a later
+                                        // read-only turn cannot re-trigger a stale capture.
+                                        self.batch_mutated = false;
+                                        self.batch_ran_side_effect = false;
+                                        if let Some(err) = self.revision_error.clone() {
+                                            return TurnFlow::Finish(self.finish_run(
+                                                TerminalReason::StrictLogFailure(err),
+                                                &state.budget_tracker,
+                                                &state.projector,
+                                                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                                                state.last_assistant_text.take(),
+                                                std::mem::take(&mut state.transcript),
+                                                logger,
+                                            ));
+                                        }
+                                        self.persist_session_checkpoint(
+                                            &state.projector,
+                                            &state.transcript,
+                                            current_turn,
+                                        );
+                                        if let Some(err) = self.session_persist_error.clone() {
+                                            return TurnFlow::Finish(self.finish_run(
+                                                TerminalReason::StrictLogFailure(format!(
+                                                    "session checkpoint failed: {}",
+                                                    err
+                                                )),
+                                                &state.budget_tracker,
+                                                &state.projector,
+                                                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                                                state.last_assistant_text.take(),
+                                                std::mem::take(&mut state.transcript),
+                                                logger,
+                                            ));
+                                        }
+                                        return TurnFlow::Continue(logger);
+                                    }
+                                }
+                            }
+                            if state.gate_failure_count >= self.completion_gate_max_retries {
+                                let excerpt: String = feedback.chars().take(1600).collect();
+                                return TurnFlow::Finish(self.finish_run(
+                                    TerminalReason::ProviderProtocolError(format!(
+                                        "CompletionGate rejected completion {} times (max retries={}); fingerprint={}; last failure:\n{}",
+                                        state.gate_failure_count, self.completion_gate_max_retries, fingerprint, excerpt
+                                    )),
+                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                                    std::mem::take(&mut state.transcript), logger,
+                                ));
+                            }
+                            return TurnFlow::Continue(logger);
+                        }
+                        Err(err) => {
+                            return TurnFlow::Finish(self.finish_run(
+                                TerminalReason::ProviderProtocolError(format!(
+                                    "CompletionGate error: {}",
+                                    err
+                                )),
+                                &state.budget_tracker,
+                                &state.projector,
+                                mod_list,
+                                state.last_assistant_text.take(),
+                                std::mem::take(&mut state.transcript),
+                                logger,
+                            ));
+                        }
+                    }
+                }
+
+                // O1: a verification command can rewrite the workspace (formatters, codegen).
+                // Capture the resulting state so `latest_revision_id()` never drifts from disk.
+                // The capture must carry the *absolute* session turn: `current_turn` restarts at 1
+                // on `--resume`, which would misorder revision records against the restored turns.
+                self.capture_workspace_revision(absolute_turn, "verification", &mut logger);
+                if let Some(err) = self.revision_error.clone() {
+                    return TurnFlow::Finish(self.finish_run(
+                        TerminalReason::StrictLogFailure(err),
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+
+                let mut mod_list: Vec<String> = std::mem::take(&mut state.modified_files_set).into_iter().collect();
+                mod_list.sort();
+                return TurnFlow::Finish(self.finish_run(
+                    TerminalReason::ModelStop,
+                    &state.budget_tracker,
+                    &state.projector,
+                    mod_list,
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+    }
+
 
     /// Restore session state, capture the baseline revision and build everything the main
     /// loop needs, so `run_inner` reads as "prepare, then loop".
