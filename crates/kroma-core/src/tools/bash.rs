@@ -53,6 +53,86 @@ pub fn collect_sanitized_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> 
         .collect()
 }
 
+/// Drain one child pipe into the shared head/tail buffer.
+///
+/// Runs until the child exits (plus a bounded drain grace period so a `setsid`ed grandchild
+/// cannot pin the reader), the flood cap trips, or the pipe closes. Both pipes run exactly this
+/// logic -- only the stream differs -- so it lives here once instead of being spelled out for
+/// stdout and stderr separately.
+fn spawn_pipe_drain<R>(
+    stream: Option<R>,
+    shared_buf: Arc<Mutex<HeadTailBuffer>>,
+    flood_notify: Arc<Notify>,
+    mut exited_rx: watch::Receiver<bool>,
+    flood_cap: usize,
+) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let Some(mut reader) = stream else { return };
+        let mut collector = StreamLineCollector::new(2048);
+        let mut chunk = [0u8; 4096];
+        let mut drain_deadline: Option<tokio::time::Instant> = None;
+        loop {
+            let read_res = if *exited_rx.borrow() {
+                let deadline = *drain_deadline
+                    .get_or_insert_with(|| tokio::time::Instant::now() + PIPE_DRAIN_TIMEOUT);
+                match tokio::time::timeout_at(deadline, reader.read(&mut chunk)).await {
+                    Ok(res) => res,
+                    Err(_) => break,
+                }
+            } else {
+                tokio::select! {
+                    res = reader.read(&mut chunk) => res,
+                    _ = async {
+                        loop {
+                            if exited_rx.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                            if *exited_rx.borrow() {
+                                break;
+                            }
+                        }
+                    } => {
+                        let deadline = *drain_deadline
+                            .get_or_insert_with(|| tokio::time::Instant::now() + PIPE_DRAIN_TIMEOUT);
+                        match tokio::time::timeout_at(deadline, reader.read(&mut chunk)).await {
+                            Ok(res) => res,
+                            Err(_) => break,
+                        }
+                    }
+                }
+            };
+            match read_res {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut exceeded = false;
+                    collector.push_chunk(&chunk[..n], |seg| {
+                        let mut guard = shared_buf.lock().unwrap();
+                        guard.push_str(seg);
+                        if guard.total_observed_bytes() > flood_cap {
+                            exceeded = true;
+                        }
+                    });
+                    if exceeded {
+                        flood_notify.notify_one();
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        collector.finish(|seg| {
+            let mut guard = shared_buf.lock().unwrap();
+            guard.push_str(seg);
+            if guard.total_observed_bytes() > flood_cap {
+                flood_notify.notify_one();
+            }
+        });
+})
+}
+
 pub async fn execute_bash(
     workspace_root: &Path,
     state_dir: &Path,
@@ -134,141 +214,21 @@ pub async fn execute_bash(
     let flood_notify = Arc::new(Notify::new());
     let (child_exited_tx, child_exited_rx) = watch::channel(false);
 
-    let stdout_task = {
-        let buf = Arc::clone(&shared_buf);
-        let notify = Arc::clone(&flood_notify);
-        let mut exited_rx = child_exited_rx.clone();
-        tokio::spawn(async move {
-            let Some(mut reader) = stdout else { return };
-            let mut collector = StreamLineCollector::new(2048);
-            let mut chunk = [0u8; 4096];
-            let mut drain_deadline: Option<tokio::time::Instant> = None;
-            loop {
-                let read_res = if *exited_rx.borrow() {
-                    let deadline = *drain_deadline
-                        .get_or_insert_with(|| tokio::time::Instant::now() + PIPE_DRAIN_TIMEOUT);
-                    match tokio::time::timeout_at(deadline, reader.read(&mut chunk)).await {
-                        Ok(res) => res,
-                        Err(_) => break,
-                    }
-                } else {
-                    tokio::select! {
-                        res = reader.read(&mut chunk) => res,
-                        _ = async {
-                            loop {
-                                if exited_rx.changed().await.is_err() {
-                                    std::future::pending::<()>().await;
-                                }
-                                if *exited_rx.borrow() {
-                                    break;
-                                }
-                            }
-                        } => {
-                            let deadline = *drain_deadline
-                                .get_or_insert_with(|| tokio::time::Instant::now() + PIPE_DRAIN_TIMEOUT);
-                            match tokio::time::timeout_at(deadline, reader.read(&mut chunk)).await {
-                                Ok(res) => res,
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                };
-                match read_res {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let mut exceeded = false;
-                        collector.push_chunk(&chunk[..n], |seg| {
-                            let mut guard = buf.lock().unwrap();
-                            guard.push_str(seg);
-                            if guard.total_observed_bytes() > flood_cap {
-                                exceeded = true;
-                            }
-                        });
-                        if exceeded {
-                            notify.notify_one();
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            collector.finish(|seg| {
-                let mut guard = buf.lock().unwrap();
-                guard.push_str(seg);
-                if guard.total_observed_bytes() > flood_cap {
-                    notify.notify_one();
-                }
-            });
-        })
-    };
+    let stdout_task = spawn_pipe_drain(
+        stdout,
+        Arc::clone(&shared_buf),
+        Arc::clone(&flood_notify),
+        child_exited_rx.clone(),
+        flood_cap,
+    );
 
-    let stderr_task = {
-        let buf = Arc::clone(&shared_buf);
-        let notify = Arc::clone(&flood_notify);
-        let mut exited_rx = child_exited_rx;
-        tokio::spawn(async move {
-            let Some(mut reader) = stderr else { return };
-            let mut collector = StreamLineCollector::new(2048);
-            let mut chunk = [0u8; 4096];
-            let mut drain_deadline: Option<tokio::time::Instant> = None;
-            loop {
-                let read_res = if *exited_rx.borrow() {
-                    let deadline = *drain_deadline
-                        .get_or_insert_with(|| tokio::time::Instant::now() + PIPE_DRAIN_TIMEOUT);
-                    match tokio::time::timeout_at(deadline, reader.read(&mut chunk)).await {
-                        Ok(res) => res,
-                        Err(_) => break,
-                    }
-                } else {
-                    tokio::select! {
-                        res = reader.read(&mut chunk) => res,
-                        _ = async {
-                            loop {
-                                if exited_rx.changed().await.is_err() {
-                                    std::future::pending::<()>().await;
-                                }
-                                if *exited_rx.borrow() {
-                                    break;
-                                }
-                            }
-                        } => {
-                            let deadline = *drain_deadline
-                                .get_or_insert_with(|| tokio::time::Instant::now() + PIPE_DRAIN_TIMEOUT);
-                            match tokio::time::timeout_at(deadline, reader.read(&mut chunk)).await {
-                                Ok(res) => res,
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                };
-                match read_res {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let mut exceeded = false;
-                        collector.push_chunk(&chunk[..n], |seg| {
-                            let mut guard = buf.lock().unwrap();
-                            guard.push_str(seg);
-                            if guard.total_observed_bytes() > flood_cap {
-                                exceeded = true;
-                            }
-                        });
-                        if exceeded {
-                            notify.notify_one();
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            collector.finish(|seg| {
-                let mut guard = buf.lock().unwrap();
-                guard.push_str(seg);
-                if guard.total_observed_bytes() > flood_cap {
-                    notify.notify_one();
-                }
-            });
-        })
-    };
+    let stderr_task = spawn_pipe_drain(
+        stderr,
+        Arc::clone(&shared_buf),
+        Arc::clone(&flood_notify),
+        child_exited_rx,
+        flood_cap,
+    );
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum StopTrigger {
