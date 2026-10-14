@@ -1773,6 +1773,31 @@ impl AgentRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Finish one tool call: apply subtree context, record its mutation, and append the result.
+    ///
+    /// Both the parallel read-only sub-batch and the serial barrier must complete a call exactly
+    /// this way, and the ordering is load-bearing: `canonical_index` has to be the transcript
+    /// length *before* the result is appended, because Gate 4 binds the mutation to that entry so
+    /// the candidate can carry the Gate 2 `source_entry_id`. Spelling the sequence out twice let
+    /// the two paths drift, so it lives here once.
+    fn record_tool_result(
+        &mut self,
+        mut msg: ToolResultMessage,
+        transcript: &mut Vec<TranscriptItem>,
+        budget_tracker: &mut BudgetTracker,
+        logger: &mut EventLogger,
+    ) {
+        self.apply_subtree_context(&mut msg, logger);
+        let canonical_index = transcript.len();
+        self.record_mutation_from_result(&msg, canonical_index, budget_tracker.turns_used(), logger);
+        self.record_transcript_item(
+            transcript,
+            TranscriptItem::ToolResult(msg),
+            budget_tracker.turns_used(),
+        );
+    }
+
+
     async fn execute_tool_batch(
         &mut self,
         tool_calls: &[ToolCall],
@@ -1937,7 +1962,7 @@ impl AgentRunner {
                 for local_i in 0..commit_limit {
                     let call = &tool_calls[idx + local_i];
                     Self::log_hook_evaluations(logger, &hook_reports[local_i]);
-                    if let Some(mut msg) = pre_resolved[local_i].take() {
+                    if let Some(msg) = pre_resolved[local_i].take() {
                         if let Some(ref dec) = decisions[local_i] {
                             let _ = logger.log(EventPayload::PolicyDecision {
                                 call_id: call.call_id.clone(),
@@ -1980,20 +2005,7 @@ impl AgentRunner {
                             diag_kind: msg.meta.diag_kind,
                             compaction_reread_count: projector.compaction_reread_count(),
                         });
-                        self.apply_subtree_context(&mut msg, logger);
-                        // Gate 4: record the mutation against the canonical transcript index of this
-                        // tool result, so the candidate can carry the Gate 2 `source_entry_id`.
-                        let canonical_index = transcript.len();
-                        self.record_mutation_from_result(
-                            &msg,
-                            canonical_index,
-                            budget_tracker.turns_used(),
-                            logger,
-                        );
-                        self.record_transcript_item(
-                            transcript, TranscriptItem::ToolResult(msg),
-                            budget_tracker.turns_used(),
-                        );
+                        self.record_tool_result(msg, transcript, budget_tracker, logger);
                     }
                 }
 
@@ -2233,19 +2245,7 @@ impl AgentRunner {
                         compaction_reread_count: projector.compaction_reread_count(),
                     });
 
-                    self.apply_subtree_context(&mut msg, logger);
-                    // Gate 4: record the mutation (including a pathless `bash` side-effect record).
-                    let canonical_index = transcript.len();
-                    self.record_mutation_from_result(
-                        &msg,
-                        canonical_index,
-                        budget_tracker.turns_used(),
-                        logger,
-                    );
-                    self.record_transcript_item(
-                        transcript, TranscriptItem::ToolResult(msg),
-                        budget_tracker.turns_used(),
-                    );
+                    self.record_tool_result(msg, transcript, budget_tracker, logger);
                 }
             }
 
