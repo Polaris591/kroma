@@ -214,14 +214,6 @@ struct TurnState {
     tool_calls: Vec<ToolCall>,
 }
 
-/// Result of one extracted turn phase: either the run keeps going (carrying `logger` back, because
-/// `finish_run` consumes it by value) or the run is finished.
-enum TurnFlow {
-    Continue(EventLogger),
-    Finish((RunSummary, EventLogger)),
-}
-
-
 impl AgentRunner {
     pub fn new(
         config: AgentRunConfig,
@@ -402,262 +394,275 @@ impl AgentRunner {
             Err(outcome) => return outcome,
         };
         loop {
-        logger = match self.run_provider_turn(&mut state, logger).await {
-            Ok(returned) => returned,
-            Err(outcome) => return outcome,
-        };
-            if state.tool_calls.is_empty() {
-                match self
-                    .handle_completion_turn(&mut state, logger)
-                    .await
-                {
-                    TurnFlow::Continue(returned) => {
-                        logger = returned;
-                        continue;
-                    }
-                    TurnFlow::Finish((summary, returned)) => return (summary, returned),
-                }
-            }
-
-            if let Err(e) = logger.log(EventPayload::ToolBatchReceived {
-                turn: state.current_turn,
-                call_count: state.tool_calls.len(),
-                call_ids: state.tool_calls.iter().map(|tc| tc.call_id.clone()).collect(),
-            }) {
-                self.synthesize_remaining_results(
-                    &state.tool_calls,
-                    ErrorCode::NotExecutedCancelled,
-                    "NOT_EXECUTED_CANCELLED: strict log failure",
-                    &mut state.transcript,
-                    state.current_turn,
-                );
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(e.to_string()),
-                    &state.budget_tracker,
-                    &state.projector,
-                    state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
-            }
-
-            // Execute tool batch with Read-Only Parallel Sub-Batches (`Semaphore(8)`) + Mutating Barriers,
-            // guaranteeing 1:1 `tool_call_id` closure in exact index order (§4.1 V6-06).
-            self.batch_mutated = false;
-            self.batch_ran_side_effect = false;
-            let batch_abort = self
-                .execute_tool_batch(
-                    &state.tool_calls,
-                    &mut state.transcript,
-                    &mut state.budget_tracker,
-                    &mut state.loop_guard,
-                    &mut state.projector,
-                    &mut state.modified_files_set,
-                    &mut logger,
-                )
-                .await;
-
-            debug_assert!(verify_tool_call_pairing(&state.transcript));
-
-            // F10 (`v1.4.0`): fold any child subagent / tournament token spend accumulated during
-            // this batch into the parent budget tracker so the run summary reports
-            // `self` + `children` cost.
-            self.drain_children_tokens(&mut state.budget_tracker);
-
-            // Gate 1: a batch that mutated files — directly via `edit`/`write`, or indirectly via a
-            // `bash` command whose writes the tool cannot report (O1) — gets a fresh revision bound
-            // to this turn.
-            let batch_changed_paths = if self.batch_mutated || self.batch_ran_side_effect {
-                self.capture_workspace_revision(state.absolute_turn, "mutation", &mut logger)
-            } else {
-                Vec::new()
+            logger = match self.run_provider_turn(&mut state, logger).await {
+                Ok(returned) => returned,
+                Err(outcome) => return outcome,
             };
-            for path in &batch_changed_paths {
-                state.modified_files_set.insert(path.clone());
-                self.batch_mutated = true;
-            }
-            // Gate 4: bind the post-batch revision (and any `changed_paths` discovered by the
-            // snapshot store for `bash` / side-effect extension calls) to every mutation recorded
-            // during this batch, dropping read-only `bash` records that changed 0 files.
-            self.mutation_ledger.backfill_revision_and_paths(
-                state.absolute_turn as u32,
-                self.current_revision_id.clone(),
-                &batch_changed_paths,
-                self.snapshot_store.is_some() && (self.batch_mutated || self.batch_ran_side_effect),
-            );
-            if let Some(err) = self.revision_error.clone() {
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(err),
-                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text, state.transcript, logger,
-                );
-            }
-
-            if let Some(err) = self.session_persist_error.clone() {
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text, state.transcript, logger,
-                );
-            }
-
-            // Gate 3: checkpoint the post-batch leaf so the `subtree_dirs` (and pinned baseline /
-            // last-touched ledger) loaded by *this* batch survive a later `--resume` / `--fork`,
-            // even when the run ends here (`MaxTurns`, `MaxToolCalls`, `LoopDetected`, cancellation).
-            self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
-            if let Some(err) = self.session_persist_error.clone() {
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
-                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text, state.transcript, logger,
-                );
-            }
-
-            if let Some(abort_reason) = batch_abort {
-                let mut mod_list: Vec<String> = state.modified_files_set.into_iter().collect();
-                mod_list.sort();
-                return self.finish_run(
-                    abort_reason,
-                    &state.budget_tracker,
-                    &state.projector,
-                    mod_list,
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
-            }
-
-            // Gate 4: optional `--predict-cmd`. Run once per mutating batch (bounded) so a fast
-            // syntax/type check can surface an early failure — with its candidate attribution —
-            // before the model spends the rest of the budget on a broken tree.
-            let mut post_batch_updated = false;
-            if (self.batch_mutated || self.batch_ran_side_effect)
-                && self.tool_runtime.predictive_check_enabled()
-                && self.tool_runtime.policy_engine().mode() != crate::tool::policy::PolicyMode::ReadOnly
-                && self.predict_cmd.is_some()
-                && self.predict_cmd_runs < MAX_PREDICT_CMD_RUNS
-            {
-                self.predict_cmd_runs += 1;
-                let gate = self.predict_cmd.clone().expect("checked above");
-                let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
-                mod_list.sort();
-                let ctx = CompletionGateContext {
-                    run_id: self.config.run_id,
-                    workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
-                    modified_files: mod_list,
-                    turns_used: state.current_turn,
+            if state.tool_calls.is_empty() {
+                logger = match self.handle_completion_turn(&mut state, logger).await {
+                    Ok(returned) => returned,
+                    Err(outcome) => return outcome,
                 };
-                let check_res = gate.check(&ctx).await;
-                let predict_changed =
-                    self.capture_workspace_revision(state.absolute_turn, "predict_cmd", &mut logger);
-                if !predict_changed.is_empty() {
-                    state.modified_files_set.extend(predict_changed);
-                    post_batch_updated = true;
-                }
-                if let Some(err) = self.revision_error.clone() {
-                    return self.finish_run(
-                        TerminalReason::StrictLogFailure(err),
-                        &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text, state.transcript, logger,
-                    );
-                }
-                if let Ok(GateOutcome::Rejected { feedback }) = check_res {
-                    let report = AttributionEngine::attribute_failure(
-                        &self.mutation_ledger,
-                        &feedback,
-                        "predict_cmd",
-                        ATTRIBUTION_TOP_K,
-                    );
-                    let _ = logger.log(EventPayload::PredictiveCheck {
-                        path: report
-                            .top()
-                            .and_then(|c| c.relative_path.clone())
-                            .unwrap_or_else(|| "<run>".to_string()),
-                        status: "warning".to_string(),
-                        issue_count: report.anchors.len(),
-                        duration_ms: 0,
-                        summary: Some(format!(
-                            "--predict-cmd failed on attempt {}/{}",
-                            self.predict_cmd_runs, MAX_PREDICT_CMD_RUNS
-                        )),
-                    });
-                    Self::log_failure_attribution(&mut logger, "predict_cmd", &report);
-                    let mut message = format!(
-                        "[Predictive check failed, attempt {}/{}]: {}\nFix this now; the failure is cheaper to resolve before more edits.",
-                        self.predict_cmd_runs, MAX_PREDICT_CMD_RUNS, feedback
-                    );
-                    if let Some(block) = report.render_for_model() {
-                        message.push_str("\n\n");
-                        message.push_str(&block);
-                    }
-                    self.record_transcript_item(
-                        &mut state.transcript,
-                        TranscriptItem::User(UserMessage { content: message }),
-                        state.current_turn.saturating_add(1),
-                    );
-                    post_batch_updated = true;
-                    if let Some(err) = self.session_persist_error.clone() {
-                        return self.finish_run(
-                            TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                            &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                            state.last_assistant_text, state.transcript, logger,
-                        );
-                    }
-                }
+                continue;
             }
+            logger = match self.handle_tool_batch_turn(&mut state, logger).await {
+                Ok(returned) => returned,
+                Err(outcome) => return outcome,
+            };
+        }
+    }
 
-            // §3.2 V6-07: Mid-Run Steering — non-blocking check on `steer_rx.try_recv()` after 1:1 tool closure
-            let pre_steer_len = state.transcript.len();
-            self.drain_steering_messages(
+    /// Run the tool batch the model asked for, bind the resulting revision and mutations, run the
+    /// optional post-batch prediction, drain mid-run steering and emit the TurnCompleted observers.
+    ///
+    /// Split out of `run_inner`'s loop body (240 of its 560 lines). Returns `logger` on success or
+    /// the finished run.
+    async fn handle_tool_batch_turn(
+        &mut self,
+        state: &mut TurnState,
+        mut logger: EventLogger,
+    ) -> Result<EventLogger, (RunSummary, EventLogger)> {
+
+        if let Err(e) = logger.log(EventPayload::ToolBatchReceived {
+            turn: state.current_turn,
+            call_count: state.tool_calls.len(),
+            call_ids: state.tool_calls.iter().map(|tc| tc.call_id.clone()).collect(),
+        }) {
+            self.synthesize_remaining_results(
+                &state.tool_calls,
+                ErrorCode::NotExecutedCancelled,
+                "NOT_EXECUTED_CANCELLED: strict log failure",
                 &mut state.transcript,
-                state.current_turn.saturating_add(1),
+                state.current_turn,
             );
-            if state.transcript.len() != pre_steer_len {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(e.to_string()),
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
+
+        // Execute tool batch with Read-Only Parallel Sub-Batches (`Semaphore(8)`) + Mutating Barriers,
+        // guaranteeing 1:1 `tool_call_id` closure in exact index order (§4.1 V6-06).
+        self.batch_mutated = false;
+        self.batch_ran_side_effect = false;
+        let batch_abort = self
+            .execute_tool_batch(
+                &state.tool_calls,
+                &mut state.transcript,
+                &mut state.budget_tracker,
+                &mut state.loop_guard,
+                &mut state.projector,
+                &mut state.modified_files_set,
+                &mut logger,
+            )
+            .await;
+
+        debug_assert!(verify_tool_call_pairing(&state.transcript));
+
+        // F10 (`v1.4.0`): fold any child subagent / tournament token spend accumulated during
+        // this batch into the parent budget tracker so the run summary reports
+        // `self` + `children` cost.
+        self.drain_children_tokens(&mut state.budget_tracker);
+
+        // Gate 1: a batch that mutated files — directly via `edit`/`write`, or indirectly via a
+        // `bash` command whose writes the tool cannot report (O1) — gets a fresh revision bound
+        // to this turn.
+        let batch_changed_paths = if self.batch_mutated || self.batch_ran_side_effect {
+            self.capture_workspace_revision(state.absolute_turn, "mutation", &mut logger)
+        } else {
+            Vec::new()
+        };
+        for path in &batch_changed_paths {
+            state.modified_files_set.insert(path.clone());
+            self.batch_mutated = true;
+        }
+        // Gate 4: bind the post-batch revision (and any `changed_paths` discovered by the
+        // snapshot store for `bash` / side-effect extension calls) to every mutation recorded
+        // during this batch, dropping read-only `bash` records that changed 0 files.
+        self.mutation_ledger.backfill_revision_and_paths(
+            state.absolute_turn as u32,
+            self.current_revision_id.clone(),
+            &batch_changed_paths,
+            self.snapshot_store.is_some() && (self.batch_mutated || self.batch_ran_side_effect),
+        );
+        if let Some(err) = self.revision_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(err),
+                &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+            ));
+        }
+
+        if let Some(err) = self.session_persist_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+            ));
+        }
+
+        // Gate 3: checkpoint the post-batch leaf so the `subtree_dirs` (and pinned baseline /
+        // last-touched ledger) loaded by *this* batch survive a later `--resume` / `--fork`,
+        // even when the run ends here (`MaxTurns`, `MaxToolCalls`, `LoopDetected`, cancellation).
+        self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
+        if let Some(err) = self.session_persist_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
+                &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+            ));
+        }
+
+        if let Some(abort_reason) = batch_abort {
+            let mut mod_list: Vec<String> = std::mem::take(&mut state.modified_files_set).into_iter().collect();
+            mod_list.sort();
+            return Err(self.finish_run(
+                abort_reason,
+                &state.budget_tracker,
+                &state.projector,
+                mod_list,
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
+
+        // Gate 4: optional `--predict-cmd`. Run once per mutating batch (bounded) so a fast
+        // syntax/type check can surface an early failure — with its candidate attribution —
+        // before the model spends the rest of the budget on a broken tree.
+        let mut post_batch_updated = false;
+        if (self.batch_mutated || self.batch_ran_side_effect)
+            && self.tool_runtime.predictive_check_enabled()
+            && self.tool_runtime.policy_engine().mode() != crate::tool::policy::PolicyMode::ReadOnly
+            && self.predict_cmd.is_some()
+            && self.predict_cmd_runs < MAX_PREDICT_CMD_RUNS
+        {
+            self.predict_cmd_runs += 1;
+            let gate = self.predict_cmd.clone().expect("checked above");
+            let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
+            mod_list.sort();
+            let ctx = CompletionGateContext {
+                run_id: self.config.run_id,
+                workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
+                modified_files: mod_list,
+                turns_used: state.current_turn,
+            };
+            let check_res = gate.check(&ctx).await;
+            let predict_changed =
+                self.capture_workspace_revision(state.absolute_turn, "predict_cmd", &mut logger);
+            if !predict_changed.is_empty() {
+                state.modified_files_set.extend(predict_changed);
                 post_batch_updated = true;
             }
-            if let Some(err) = self.session_persist_error.clone() {
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text, state.transcript, logger,
+            if let Some(err) = self.revision_error.clone() {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(err),
+                    &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+                ));
+            }
+            if let Ok(GateOutcome::Rejected { feedback }) = check_res {
+                let report = AttributionEngine::attribute_failure(
+                    &self.mutation_ledger,
+                    &feedback,
+                    "predict_cmd",
+                    ATTRIBUTION_TOP_K,
                 );
-            }
-            if post_batch_updated {
-                self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
-                if let Some(err) = self.session_persist_error.clone() {
-                    return self.finish_run(
-                        TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
-                        &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text, state.transcript, logger,
-                    );
+                let _ = logger.log(EventPayload::PredictiveCheck {
+                    path: report
+                        .top()
+                        .and_then(|c| c.relative_path.clone())
+                        .unwrap_or_else(|| "<run>".to_string()),
+                    status: "warning".to_string(),
+                    issue_count: report.anchors.len(),
+                    duration_ms: 0,
+                    summary: Some(format!(
+                        "--predict-cmd failed on attempt {}/{}",
+                        self.predict_cmd_runs, MAX_PREDICT_CMD_RUNS
+                    )),
+                });
+                Self::log_failure_attribution(&mut logger, "predict_cmd", &report);
+                let mut message = format!(
+                    "[Predictive check failed, attempt {}/{}]: {}\nFix this now; the failure is cheaper to resolve before more edits.",
+                    self.predict_cmd_runs, MAX_PREDICT_CMD_RUNS, feedback
+                );
+                if let Some(block) = report.render_for_model() {
+                    message.push_str("\n\n");
+                    message.push_str(&block);
                 }
-            }
-
-            // Gate 3: `TurnCompleted` observers are fail-open telemetry and never affect control flow.
-            {
-                let hooks = self.tool_runtime.hook_engine();
-                if !hooks.is_empty() {
-                    let ctx = HookContext::new(
-                        state.current_turn,
-                        self.tool_runtime.env().workspace().root().to_path_buf(),
-                    );
-                    for evaluation in hooks
-                        .run_observers(crate::extensions::HookEvent::TurnCompleted, &ctx)
-                        .await
-                    {
-                        let _ = logger.log(EventPayload::HookEvaluated {
-                            hook_id: evaluation.hook_id,
-                            hook_kind: evaluation.hook_kind,
-                            event: evaluation.event,
-                            outcome: evaluation.outcome,
-                            duration_ms: evaluation.duration_ms,
-                            message: evaluation.message,
-                        });
-                    }
+                self.record_transcript_item(
+                    &mut state.transcript,
+                    TranscriptItem::User(UserMessage { content: message }),
+                    state.current_turn.saturating_add(1),
+                );
+                post_batch_updated = true;
+                if let Some(err) = self.session_persist_error.clone() {
+                    return Err(self.finish_run(
+                        TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                        &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+                    ));
                 }
             }
         }
+
+        // §3.2 V6-07: Mid-Run Steering — non-blocking check on `steer_rx.try_recv()` after 1:1 tool closure
+        let pre_steer_len = state.transcript.len();
+        self.drain_steering_messages(
+            &mut state.transcript,
+            state.current_turn.saturating_add(1),
+        );
+        if state.transcript.len() != pre_steer_len {
+            post_batch_updated = true;
+        }
+        if let Some(err) = self.session_persist_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+            ));
+        }
+        if post_batch_updated {
+            self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
+            if let Some(err) = self.session_persist_error.clone() {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
+                    &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+                ));
+            }
+        }
+
+        // Gate 3: `TurnCompleted` observers are fail-open telemetry and never affect control flow.
+        {
+            let hooks = self.tool_runtime.hook_engine();
+            if !hooks.is_empty() {
+                let ctx = HookContext::new(
+                    state.current_turn,
+                    self.tool_runtime.env().workspace().root().to_path_buf(),
+                );
+                for evaluation in hooks
+                    .run_observers(crate::extensions::HookEvent::TurnCompleted, &ctx)
+                    .await
+                {
+                    let _ = logger.log(EventPayload::HookEvaluated {
+                        hook_id: evaluation.hook_id,
+                        hook_kind: evaluation.hook_kind,
+                        event: evaluation.event,
+                        outcome: evaluation.outcome,
+                        duration_ms: evaluation.duration_ms,
+                        message: evaluation.message,
+                    });
+                }
+            }
+        }
+
+        Ok(logger)
     }
 
     /// Run one provider turn: preflight budget/cancellation, project context, persist the
@@ -670,9 +675,36 @@ impl AgentRunner {
         state: &mut TurnState,
         mut logger: EventLogger,
     ) -> Result<EventLogger, (RunSummary, EventLogger)> {
-            if *self.cancel_rx.borrow() {
+        if *self.cancel_rx.borrow() {
+            return Err(self.finish_run(
+                TerminalReason::UserCancelled,
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
+
+        if state.budget_tracker.is_deadline_exceeded() {
+            return Err(self.finish_run(
+                TerminalReason::RunDeadlineExceeded,
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
+
+        // F08 (`v1.4.0`): budget accounting covers `self` *and* child subagent spend, and the
+        // stop reason is a dedicated `TokenBudgetExhausted` (not `MaxTurns`).
+        if let Some(max_tok) = self.max_total_tokens {
+            if state.budget_tracker.all_total_tokens() >= max_tok {
                 return Err(self.finish_run(
-                    TerminalReason::UserCancelled,
+                    TerminalReason::TokenBudgetExhausted,
                     &state.budget_tracker,
                     &state.projector,
                     std::mem::take(&mut state.modified_files_set).into_iter().collect(),
@@ -681,10 +713,40 @@ impl AgentRunner {
                     logger,
                 ));
             }
+        }
 
-            if state.budget_tracker.is_deadline_exceeded() {
+        if !state.budget_tracker.try_begin_turn() {
+            return Err(self.finish_run(
+                TerminalReason::MaxTurns,
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
+
+        state.current_turn = state.budget_tracker.turns_used();
+        // `current_turn` is relative to this process; the projector's turn accounting is over
+        // the whole session transcript, so it must receive the absolute session turn. On a
+        // `--resume` run `current_turn` starts at 1 again while the restored transcript already
+        // holds `session_turn_offset` turns, and feeding the relative turn here would make every
+        // pre-existing hot file look "0 turns old" and pin it forever.
+        state.absolute_turn = self.session_turn_offset.saturating_add(state.current_turn);
+
+        // Project context (100% Append-Only unless watermark crossed)
+        let projected = match state.projector.project(
+            &mut state.transcript,
+            state.budget_tracker.config(),
+            state.static_prefix.static_prefix_bytes,
+            state.last_input_tokens,
+            state.absolute_turn,
+        ) {
+            Ok(p) => p,
+            Err(term_reason) => {
                 return Err(self.finish_run(
-                    TerminalReason::RunDeadlineExceeded,
+                    term_reason,
                     &state.budget_tracker,
                     &state.projector,
                     std::mem::take(&mut state.modified_files_set).into_iter().collect(),
@@ -693,111 +755,14 @@ impl AgentRunner {
                     logger,
                 ));
             }
+        };
 
-            // F08 (`v1.4.0`): budget accounting covers `self` *and* child subagent spend, and the
-            // stop reason is a dedicated `TokenBudgetExhausted` (not `MaxTurns`).
-            if let Some(max_tok) = self.max_total_tokens {
-                if state.budget_tracker.all_total_tokens() >= max_tok {
-                    return Err(self.finish_run(
-                        TerminalReason::TokenBudgetExhausted,
-                        &state.budget_tracker,
-                        &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                        state.last_assistant_text.take(),
-                        std::mem::take(&mut state.transcript),
-                        logger,
-                    ));
-                }
-            }
-
-            if !state.budget_tracker.try_begin_turn() {
-                return Err(self.finish_run(
-                    TerminalReason::MaxTurns,
-                    &state.budget_tracker,
-                    &state.projector,
-                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                    state.last_assistant_text.take(),
-                    std::mem::take(&mut state.transcript),
-                    logger,
-                ));
-            }
-
-            state.current_turn = state.budget_tracker.turns_used();
-            // `current_turn` is relative to this process; the projector's turn accounting is over
-            // the whole session transcript, so it must receive the absolute session turn. On a
-            // `--resume` run `current_turn` starts at 1 again while the restored transcript already
-            // holds `session_turn_offset` turns, and feeding the relative turn here would make every
-            // pre-existing hot file look "0 turns old" and pin it forever.
-            state.absolute_turn = self.session_turn_offset.saturating_add(state.current_turn);
-
-            // Project context (100% Append-Only unless watermark crossed)
-            let projected = match state.projector.project(
-                &mut state.transcript,
-                state.budget_tracker.config(),
-                state.static_prefix.static_prefix_bytes,
-                state.last_input_tokens,
-                state.absolute_turn,
-            ) {
-                Ok(p) => p,
-                Err(term_reason) => {
-                    return Err(self.finish_run(
-                        term_reason,
-                        &state.budget_tracker,
-                        &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                        state.last_assistant_text.take(),
-                        std::mem::take(&mut state.transcript),
-                        logger,
-                    ));
-                }
-            };
-
-            if let Some(comp) = projected.compaction_event {
-                if let Err(e) = logger.log(EventPayload::ContextCompacted {
-                    before_bytes: comp.before_bytes,
-                    after_bytes: comp.after_bytes,
-                    compacted_seq_indices: comp.compacted_seq_indices,
-                    pinned_files: comp.pinned_files,
-                }) {
-                    return Err(self.finish_run(
-                        TerminalReason::StrictLogFailure(e.to_string()),
-                        &state.budget_tracker,
-                        &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                        state.last_assistant_text.take(),
-                        std::mem::take(&mut state.transcript),
-                        logger,
-                    ));
-                }
-            }
-
-            self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
-            if let Some(err) = self.session_persist_error.clone() {
-                return Err(self.finish_run(
-                    TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
-                    &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                    state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
-                ));
-            }
-
-            if !state.budget_tracker.try_record_request_attempt() {
-                return Err(self.finish_run(
-                    TerminalReason::MaxRequestAttempts,
-                    &state.budget_tracker,
-                    &state.projector,
-                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                    state.last_assistant_text.take(),
-                    std::mem::take(&mut state.transcript),
-                    logger,
-                ));
-            }
-
-            if let Err(e) = logger.log(EventPayload::ModelRequestStarted {
-                turn: state.current_turn,
-                attempt: state.budget_tracker.request_attempts_used(),
-                request_body_bytes: state.static_prefix.static_prefix_bytes
-                    + projected.message_history_bytes,
-                message_history_bytes: projected.message_history_bytes,
+        if let Some(comp) = projected.compaction_event {
+            if let Err(e) = logger.log(EventPayload::ContextCompacted {
+                before_bytes: comp.before_bytes,
+                after_bytes: comp.after_bytes,
+                compacted_seq_indices: comp.compacted_seq_indices,
+                pinned_files: comp.pinned_files,
             }) {
                 return Err(self.finish_run(
                     TerminalReason::StrictLogFailure(e.to_string()),
@@ -809,161 +774,63 @@ impl AgentRunner {
                     logger,
                 ));
             }
+        }
 
-            // F08 (`v1.4.0`): reserve budget *before* sending the request. Estimate the prompt
-            // input tokens from the projected byte size and refuse to start a request that would
-            // already blow the remaining budget; otherwise cap this request's output so a single
-            // completion cannot overshoot what is left.
-            // `static_prefix_bytes` already includes `system_prompt.len()` (see
-            // `prompt.rs::build_static_prefix`), so it must not be added again here.
-            let estimated_input_tokens = estimate_prompt_input_tokens(
-                state.static_prefix.static_prefix_bytes,
-                projected.message_history_bytes,
-            );
-            let max_output_tokens = if let Some(max_tok) = self.max_total_tokens {
-                let spent = state.budget_tracker.all_total_tokens();
-                let projected_total = spent.saturating_add(estimated_input_tokens);
-                if projected_total >= max_tok {
-                    return Err(self.finish_run(
-                        TerminalReason::TokenBudgetExhausted,
-                        &state.budget_tracker,
-                        &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                        state.last_assistant_text.take(),
-                        std::mem::take(&mut state.transcript),
-                        logger,
-                    ));
-                }
-                Some(max_tok.saturating_sub(projected_total))
-            } else {
-                None
-            };
+        self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
+        if let Some(err) = self.session_persist_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
+                &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+            ));
+        }
 
-            let req = ProviderRequest {
-                system_prompt: state.static_prefix.system_prompt.clone(),
-                tools: state.visible_tools.clone(),
-                messages: projected.messages,
-                stream: self.config.stream,
-                // Gate 7: hand the projector's logical cache boundaries to the protocol client so
-                // Anthropic-style explicit prompt caching can pin the frozen prefix.
-                cache_breakpoints: projected.breakpoints,
-                // F08: remaining output-token allowance derived from `--max-tokens`.
-                max_output_tokens,
-            };
+        if !state.budget_tracker.try_record_request_attempt() {
+            return Err(self.finish_run(
+                TerminalReason::MaxRequestAttempts,
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
 
-            let completion = match self
-                .provider
-                .complete(req, state.budget_tracker.config(), self.cancel_rx.clone())
-                .await
-            {
-                Ok(c) => c,
-                Err(err) => {
-                    return Err(self.finish_run(
-                        err.into_terminal_reason(),
-                        &state.budget_tracker,
-                        &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                        state.last_assistant_text.take(),
-                        std::mem::take(&mut state.transcript),
-                        logger,
-                    ));
-                }
-            };
+        if let Err(e) = logger.log(EventPayload::ModelRequestStarted {
+            turn: state.current_turn,
+            attempt: state.budget_tracker.request_attempts_used(),
+            request_body_bytes: state.static_prefix.static_prefix_bytes
+                + projected.message_history_bytes,
+            message_history_bytes: projected.message_history_bytes,
+        }) {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(e.to_string()),
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
 
-            for _ in 1..completion.attempts_used {
-                if !state.budget_tracker.try_record_request_attempt() {
-                    return Err(self.finish_run(
-                        TerminalReason::MaxRequestAttempts,
-                        &state.budget_tracker,
-                        &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                        state.last_assistant_text.take(),
-                        std::mem::take(&mut state.transcript),
-                        logger,
-                    ));
-                }
-            }
-
-            let assistant_turn = completion.turn;
-            if let Some(usage) = assistant_turn.usage {
-                state.budget_tracker.record_token_usage(
-                    usage.input_tokens,
-                    usage.cached_input_tokens,
-                    usage.output_tokens,
-                );
-                state.last_input_tokens = Some(usage.input_tokens);
-                if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
-                    turn: state.current_turn,
-                    input_tokens: usage.input_tokens,
-                    cached_input_tokens: usage.cached_input_tokens,
-                    uncached_input_tokens: usage.uncached_input_tokens(),
-                    output_tokens: usage.output_tokens,
-                    reasoning_tokens: usage.reasoning_tokens,
-                    prefix_cache_hit_ratio: usage.prefix_cache_hit_ratio(),
-                    latency_ms: completion.latency_ms,
-                    ttft_ms: completion.ttft_ms,
-                }) {
-                    return Err(self.finish_run(
-                        TerminalReason::StrictLogFailure(e.to_string()),
-                        &state.budget_tracker,
-                        &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                        state.last_assistant_text.take(),
-                        std::mem::take(&mut state.transcript),
-                        logger,
-                    ));
-                }
-            } else {
-                // F08 (`v1.4.0`): a provider that omits `usage` must not bypass the token cap.
-                // Conservatively estimate both directions from byte length (~4 bytes per token).
-                let est_input = estimated_input_tokens;
-                let est_output = approx_tokens(
-                    assistant_turn
-                        .content
-                        .as_ref()
-                        .map(|t| t.len())
-                        .unwrap_or(0)
-                        .saturating_add(
-                            assistant_turn
-                                .tool_calls
-                                .iter()
-                                .map(|c| c.raw_arguments.len() + c.name.len())
-                                .sum::<usize>(),
-                        ),
-                );
-                state.budget_tracker.record_token_usage(est_input, None, est_output);
-                state.last_input_tokens = Some(est_input);
-                if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
-                    turn: state.current_turn,
-                    input_tokens: est_input,
-                    cached_input_tokens: None,
-                    uncached_input_tokens: est_input,
-                    output_tokens: est_output,
-                    reasoning_tokens: None,
-                    prefix_cache_hit_ratio: 0.0,
-                    latency_ms: completion.latency_ms,
-                    ttft_ms: completion.ttft_ms,
-                }) {
-                    return Err(self.finish_run(
-                        TerminalReason::StrictLogFailure(e.to_string()),
-                        &state.budget_tracker,
-                        &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                        state.last_assistant_text.take(),
-                        std::mem::take(&mut state.transcript),
-                        logger,
-                    ));
-                }
-            }
-
-            // §4.1: Pre-dispatch batch validation BEFORE adding to transcript or running any tools!
-            if let Err(batch_err) = validate_assistant_turn_batch(
-                &assistant_turn,
-                state.budget_tracker.config(),
-                self.config.allow_tool_calls_on_stop,
-            ) {
+        // F08 (`v1.4.0`): reserve budget *before* sending the request. Estimate the prompt
+        // input tokens from the projected byte size and refuse to start a request that would
+        // already blow the remaining budget; otherwise cap this request's output so a single
+        // completion cannot overshoot what is left.
+        // `static_prefix_bytes` already includes `system_prompt.len()` (see
+        // `prompt.rs::build_static_prefix`), so it must not be added again here.
+        let estimated_input_tokens = estimate_prompt_input_tokens(
+            state.static_prefix.static_prefix_bytes,
+            projected.message_history_bytes,
+        );
+        let max_output_tokens = if let Some(max_tok) = self.max_total_tokens {
+            let spent = state.budget_tracker.all_total_tokens();
+            let projected_total = spent.saturating_add(estimated_input_tokens);
+            if projected_total >= max_tok {
                 return Err(self.finish_run(
-                    batch_err.into_terminal_reason(),
+                    TerminalReason::TokenBudgetExhausted,
                     &state.budget_tracker,
                     &state.projector,
                     std::mem::take(&mut state.modified_files_set).into_iter().collect(),
@@ -972,26 +839,164 @@ impl AgentRunner {
                     logger,
                 ));
             }
+            Some(max_tok.saturating_sub(projected_total))
+        } else {
+            None
+        };
 
-            if let Some(ref c) = assistant_turn.content {
-                state.last_assistant_text = Some(c.clone());
-            }
+        let req = ProviderRequest {
+            system_prompt: state.static_prefix.system_prompt.clone(),
+            tools: state.visible_tools.clone(),
+            messages: projected.messages,
+            stream: self.config.stream,
+            // Gate 7: hand the projector's logical cache boundaries to the protocol client so
+            // Anthropic-style explicit prompt caching can pin the frozen prefix.
+            cache_breakpoints: projected.breakpoints,
+            // F08: remaining output-token allowance derived from `--max-tokens`.
+            max_output_tokens,
+        };
 
-            state.tool_calls = assistant_turn.tool_calls.clone();
-            self.record_transcript_item(
-                &mut state.transcript,
-                TranscriptItem::Assistant(assistant_turn),
-                state.current_turn,
-            );
-            if let Some(err) = self.session_persist_error.clone() {
+        let completion = match self
+            .provider
+            .complete(req, state.budget_tracker.config(), self.cancel_rx.clone())
+            .await
+        {
+            Ok(c) => c,
+            Err(err) => {
                 return Err(self.finish_run(
-                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                    &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                    state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+                    err.into_terminal_reason(),
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
                 ));
             }
+        };
 
-            // If model stopped with no tool calls, run CompletionGate if files were modified (§3.2 V6-07)
+        for _ in 1..completion.attempts_used {
+            if !state.budget_tracker.try_record_request_attempt() {
+                return Err(self.finish_run(
+                    TerminalReason::MaxRequestAttempts,
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+        }
+
+        let assistant_turn = completion.turn;
+        if let Some(usage) = assistant_turn.usage {
+            state.budget_tracker.record_token_usage(
+                usage.input_tokens,
+                usage.cached_input_tokens,
+                usage.output_tokens,
+            );
+            state.last_input_tokens = Some(usage.input_tokens);
+            if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
+                turn: state.current_turn,
+                input_tokens: usage.input_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+                uncached_input_tokens: usage.uncached_input_tokens(),
+                output_tokens: usage.output_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+                prefix_cache_hit_ratio: usage.prefix_cache_hit_ratio(),
+                latency_ms: completion.latency_ms,
+                ttft_ms: completion.ttft_ms,
+            }) {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(e.to_string()),
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+        } else {
+            // F08 (`v1.4.0`): a provider that omits `usage` must not bypass the token cap.
+            // Conservatively estimate both directions from byte length (~4 bytes per token).
+            let est_input = estimated_input_tokens;
+            let est_output = approx_tokens(
+                assistant_turn
+                    .content
+                    .as_ref()
+                    .map(|t| t.len())
+                    .unwrap_or(0)
+                    .saturating_add(
+                        assistant_turn
+                            .tool_calls
+                            .iter()
+                            .map(|c| c.raw_arguments.len() + c.name.len())
+                            .sum::<usize>(),
+                    ),
+            );
+            state.budget_tracker.record_token_usage(est_input, None, est_output);
+            state.last_input_tokens = Some(est_input);
+            if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
+                turn: state.current_turn,
+                input_tokens: est_input,
+                cached_input_tokens: None,
+                uncached_input_tokens: est_input,
+                output_tokens: est_output,
+                reasoning_tokens: None,
+                prefix_cache_hit_ratio: 0.0,
+                latency_ms: completion.latency_ms,
+                ttft_ms: completion.ttft_ms,
+            }) {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(e.to_string()),
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+        }
+
+        // §4.1: Pre-dispatch batch validation BEFORE adding to transcript or running any tools!
+        if let Err(batch_err) = validate_assistant_turn_batch(
+            &assistant_turn,
+            state.budget_tracker.config(),
+            self.config.allow_tool_calls_on_stop,
+        ) {
+            return Err(self.finish_run(
+                batch_err.into_terminal_reason(),
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
+
+        if let Some(ref c) = assistant_turn.content {
+            state.last_assistant_text = Some(c.clone());
+        }
+
+        state.tool_calls = assistant_turn.tool_calls.clone();
+        self.record_transcript_item(
+            &mut state.transcript,
+            TranscriptItem::Assistant(assistant_turn),
+            state.current_turn,
+        );
+        if let Some(err) = self.session_persist_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+            ));
+        }
+
+        // If model stopped with no tool calls, run CompletionGate if files were modified (§3.2 V6-07)
 
         Ok(logger)
     }
@@ -1007,346 +1012,346 @@ impl AgentRunner {
         &mut self,
         state: &mut TurnState,
         mut logger: EventLogger,
-    ) -> TurnFlow {
-                // Gate 3: `PreCompletion` policy hooks run before the completion gate. A denial is
-                // fail-closed and is treated exactly like a gate rejection, so the model must keep
-                // working instead of the run silently finishing.
-                let pre_completion_denial = {
-                    let hooks = self.tool_runtime.hook_engine();
-                    if hooks.is_empty() {
-                        None
-                    } else {
-                        let ctx = HookContext::new(
-                            state.current_turn,
-                            self.tool_runtime.env().workspace().root().to_path_buf(),
-                        );
-                        let outcome = hooks
-                            .evaluate_policy(crate::extensions::HookEvent::PreCompletion, &ctx)
-                            .await;
-                        Self::log_hook_evaluations(&mut logger, outcome.evaluations());
-                        outcome.reason().map(|r| r.to_string())
+    ) -> Result<EventLogger, (RunSummary, EventLogger)> {
+        // Gate 3: `PreCompletion` policy hooks run before the completion gate. A denial is
+        // fail-closed and is treated exactly like a gate rejection, so the model must keep
+        // working instead of the run silently finishing.
+        let pre_completion_denial = {
+            let hooks = self.tool_runtime.hook_engine();
+            if hooks.is_empty() {
+                None
+            } else {
+                let ctx = HookContext::new(
+                    state.current_turn,
+                    self.tool_runtime.env().workspace().root().to_path_buf(),
+                );
+                let outcome = hooks
+                    .evaluate_policy(crate::extensions::HookEvent::PreCompletion, &ctx)
+                    .await;
+                Self::log_hook_evaluations(&mut logger, outcome.evaluations());
+                outcome.reason().map(|r| r.to_string())
+            }
+        };
+        if let Some(reason) = pre_completion_denial {
+            state.gate_failure_count = state.gate_failure_count.saturating_add(1);
+            let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
+            mod_list.sort();
+            if state.gate_failure_count >= self.completion_gate_max_retries {
+                return Err(self.finish_run(
+                    TerminalReason::ProviderProtocolError(format!(
+                        "PreCompletion policy hook denied completion {} times (max retries={}): {}",
+                        state.gate_failure_count, self.completion_gate_max_retries, reason
+                    )),
+                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript), logger,
+                ));
+            }
+            self.record_transcript_item(
+                &mut state.transcript,
+                TranscriptItem::User(UserMessage {
+                    content: format!(
+                        "[PreCompletion policy hook denied completion, attempt {}/{}]: {}\nAddress the denial before finishing.",
+                        state.gate_failure_count, self.completion_gate_max_retries, reason
+                    ),
+                }),
+                state.current_turn.saturating_add(1),
+            );
+            if let Some(err) = self.session_persist_error.clone() {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript), logger,
+                ));
+            }
+            return Ok(logger);
+        }
+        if !state.modified_files_set.is_empty() {
+            let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
+            mod_list.sort();
+            let gate_ctx = CompletionGateContext {
+                run_id: self.config.run_id,
+                workspace_root: self
+                    .tool_runtime
+                    .env()
+                    .workspace()
+                    .root()
+                    .to_path_buf(),
+                modified_files: mod_list.clone(),
+                turns_used: state.current_turn,
+            };
+            match self.completion_gate.check(&gate_ctx).await {
+                Ok(GateOutcome::Approved) => {
+                    if let Some(journal) = self.session_journal.as_mut() {
+                        if let Err(err) = journal.mark_completion_approved() {
+                            self.session_persist_error = Some(err.to_string());
+                        }
                     }
-                };
-                if let Some(reason) = pre_completion_denial {
-                    state.gate_failure_count = state.gate_failure_count.saturating_add(1);
-                    let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
-                    mod_list.sort();
-                    if state.gate_failure_count >= self.completion_gate_max_retries {
-                        return TurnFlow::Finish(self.finish_run(
-                            TerminalReason::ProviderProtocolError(format!(
-                                "PreCompletion policy hook denied completion {} times (max retries={}): {}",
-                                state.gate_failure_count, self.completion_gate_max_retries, reason
-                            )),
+                    if let Some(err) = self.session_persist_error.clone() {
+                        return Err(self.finish_run(
+                            TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
                             &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
                             std::mem::take(&mut state.transcript), logger,
                         ));
                     }
+                }
+                Ok(GateOutcome::Skipped { reason }) => {
+                    if logger.live_stderr() {
+                        eprintln!("[CompletionGate] verification skipped: {}", reason);
+                    }
+                    if let Some(journal) = self.session_journal.as_mut() {
+                        if let Err(err) = journal.mark_completion_skipped(reason) {
+                            self.session_persist_error = Some(err.to_string());
+                        }
+                    }
+                    if let Some(err) = self.session_persist_error.clone() {
+                        return Err(self.finish_run(
+                            TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
+                            &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                            std::mem::take(&mut state.transcript), logger,
+                        ));
+                    }
+                }
+                Ok(GateOutcome::Rejected { feedback }) => {
+                    state.gate_failure_count = state.gate_failure_count.saturating_add(1);
+                    let fingerprint = failure_fingerprint(&feedback);
+                    let repeated = state.last_gate_failure_hash.as_deref() == Some(fingerprint.as_str());
+                    state.last_gate_failure_hash = Some(fingerprint.clone());
+                    let mut gate_message = format!(
+                        "[CompletionGate Rejected, attempt {}/{}]: {}\nFix the reported issue before finishing.",
+                        state.gate_failure_count, self.completion_gate_max_retries, feedback
+                    );
+                    if repeated {
+                        gate_message.push_str(
+                            "\n\n[ANTI-OSCILLATION WARNING] The failure fingerprint is identical to the previous attempt. First use `read` to inspect the relevant source and surrounding context; choose a different fix strategy; do not repeat the previous `edit` unchanged."
+                        );
+                    }
+                    // Gate 4: rank the session's recorded mutations against the gate's
+                    // diagnostics and hand the model a *candidate* list with the exact
+                    // evidence pointer and pre-change revision for each hypothesis.
+                    let report = AttributionEngine::attribute_failure(
+                        &self.mutation_ledger,
+                        &feedback,
+                        "completion_gate",
+                        ATTRIBUTION_TOP_K,
+                    );
+                    Self::log_failure_attribution(&mut logger, "completion_gate", &report);
+                    if let Some(block) = report.render_for_model() {
+                        gate_message.push_str("\n\n");
+                        gate_message.push_str(&block);
+                    }
                     self.record_transcript_item(
                         &mut state.transcript,
-                        TranscriptItem::User(UserMessage {
-                            content: format!(
-                                "[PreCompletion policy hook denied completion, attempt {}/{}]: {}\nAddress the denial before finishing.",
-                                state.gate_failure_count, self.completion_gate_max_retries, reason
-                            ),
-                        }),
+                        TranscriptItem::User(UserMessage { content: gate_message }),
+                        state.current_turn.saturating_add(1),
+                    );
+                    self.drain_steering_messages(
+                        &mut state.transcript,
                         state.current_turn.saturating_add(1),
                     );
                     if let Some(err) = self.session_persist_error.clone() {
-                        return TurnFlow::Finish(self.finish_run(
+                        return Err(self.finish_run(
                             TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
                             &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
                             std::mem::take(&mut state.transcript), logger,
                         ));
                     }
-                    return TurnFlow::Continue(logger);
-                }
-                if !state.modified_files_set.is_empty() {
-                    let mut mod_list: Vec<String> = state.modified_files_set.iter().cloned().collect();
-                    mod_list.sort();
-                    let gate_ctx = CompletionGateContext {
-                        run_id: self.config.run_id,
-                        workspace_root: self
-                            .tool_runtime
-                            .env()
-                            .workspace()
-                            .root()
-                            .to_path_buf(),
-                        modified_files: mod_list.clone(),
-                        turns_used: state.current_turn,
-                    };
-                    match self.completion_gate.check(&gate_ctx).await {
-                        Ok(GateOutcome::Approved) => {
-                            if let Some(journal) = self.session_journal.as_mut() {
-                                if let Err(err) = journal.mark_completion_approved() {
-                                    self.session_persist_error = Some(err.to_string());
-                                }
-                            }
-                            if let Some(err) = self.session_persist_error.clone() {
-                                return TurnFlow::Finish(self.finish_run(
-                                    TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
-                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
-                                    std::mem::take(&mut state.transcript), logger,
-                                ));
-                            }
-                        }
-                        Ok(GateOutcome::Skipped { reason }) => {
-                            if logger.live_stderr() {
-                                eprintln!("[CompletionGate] verification skipped: {}", reason);
-                            }
-                            if let Some(journal) = self.session_journal.as_mut() {
-                                if let Err(err) = journal.mark_completion_skipped(reason) {
-                                    self.session_persist_error = Some(err.to_string());
-                                }
-                            }
-                            if let Some(err) = self.session_persist_error.clone() {
-                                return TurnFlow::Finish(self.finish_run(
-                                    TerminalReason::StrictLogFailure(format!("session completion marker failed: {}", err)),
-                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
-                                    std::mem::take(&mut state.transcript), logger,
-                                ));
-                            }
-                        }
-                        Ok(GateOutcome::Rejected { feedback }) => {
-                            state.gate_failure_count = state.gate_failure_count.saturating_add(1);
-                            let fingerprint = failure_fingerprint(&feedback);
-                            let repeated = state.last_gate_failure_hash.as_deref() == Some(fingerprint.as_str());
-                            state.last_gate_failure_hash = Some(fingerprint.clone());
-                            let mut gate_message = format!(
-                                "[CompletionGate Rejected, attempt {}/{}]: {}\nFix the reported issue before finishing.",
-                                state.gate_failure_count, self.completion_gate_max_retries, feedback
-                            );
-                            if repeated {
-                                gate_message.push_str(
-                                    "\n\n[ANTI-OSCILLATION WARNING] The failure fingerprint is identical to the previous attempt. First use `read` to inspect the relevant source and surrounding context; choose a different fix strategy; do not repeat the previous `edit` unchanged."
-                                );
-                            }
-                            // Gate 4: rank the session's recorded mutations against the gate's
-                            // diagnostics and hand the model a *candidate* list with the exact
-                            // evidence pointer and pre-change revision for each hypothesis.
-                            let report = AttributionEngine::attribute_failure(
-                                &self.mutation_ledger,
-                                &feedback,
-                                "completion_gate",
-                                ATTRIBUTION_TOP_K,
-                            );
-                            Self::log_failure_attribution(&mut logger, "completion_gate", &report);
-                            if let Some(block) = report.render_for_model() {
-                                gate_message.push_str("\n\n");
-                                gate_message.push_str(&block);
-                            }
-                            self.record_transcript_item(
-                                &mut state.transcript,
-                                TranscriptItem::User(UserMessage { content: gate_message }),
-                                state.current_turn.saturating_add(1),
-                            );
-                            self.drain_steering_messages(
-                                &mut state.transcript,
-                                state.current_turn.saturating_add(1),
-                            );
-                            if let Some(err) = self.session_persist_error.clone() {
-                                return TurnFlow::Finish(self.finish_run(
-                                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
-                                    std::mem::take(&mut state.transcript), logger,
-                                ));
-                            }
-                            // Item #3 (`v1.4.0`): adaptive escalation. Instead of tripping the
-                            // circuit breaker on a stall (2+ consecutive verification failures),
-                            // race N diverse repair candidates in isolated worktrees and merge the
-                            // best verified one.
-                            if !self.adaptive_tournament_attempted
-                                && state.gate_failure_count >= 2
-                                && self.adaptive_tournament_candidates
-                                    >= crate::subagents::MIN_TOURNAMENT_CANDIDATES
-                                && self.max_subagent_spawns > 0
-                                && !*self.cancel_rx.borrow()
-                            {
-                                let preflight = crate::subagents::subagent_spawn_preflight(
-                                    self.tool_runtime.policy_engine(),
-                                    self.adaptive_tournament_candidates,
-                                    self.subagents_spawned,
-                                    self.max_subagent_spawns,
-                                    EffectClass::Mutating,
-                                );
-                                if matches!(preflight, Ok(PolicyCheckResult::Allow)) {
-                                    self.adaptive_tournament_attempted = true;
-                                    let excerpt: String = feedback.chars().take(1200).collect();
-                                    let request = crate::subagents::TournamentRequest {
-                                        task: format!(
-                                            "{}\n\n[ADAPTIVE ESCALATION] The single-agent attempt failed verification {} time(s). Race independent repair strategies. Last verification failure:\n{}",
-                                            self.config.task, state.gate_failure_count, excerpt
+                    // Item #3 (`v1.4.0`): adaptive escalation. Instead of tripping the
+                    // circuit breaker on a stall (2+ consecutive verification failures),
+                    // race N diverse repair candidates in isolated worktrees and merge the
+                    // best verified one.
+                    if !self.adaptive_tournament_attempted
+                        && state.gate_failure_count >= 2
+                        && self.adaptive_tournament_candidates
+                            >= crate::subagents::MIN_TOURNAMENT_CANDIDATES
+                        && self.max_subagent_spawns > 0
+                        && !*self.cancel_rx.borrow()
+                    {
+                        let preflight = crate::subagents::subagent_spawn_preflight(
+                            self.tool_runtime.policy_engine(),
+                            self.adaptive_tournament_candidates,
+                            self.subagents_spawned,
+                            self.max_subagent_spawns,
+                            EffectClass::Mutating,
+                        );
+                        if matches!(preflight, Ok(PolicyCheckResult::Allow)) {
+                            self.adaptive_tournament_attempted = true;
+                            let excerpt: String = feedback.chars().take(1200).collect();
+                            let request = crate::subagents::TournamentRequest {
+                                task: format!(
+                                    "{}\n\n[ADAPTIVE ESCALATION] The single-agent attempt failed verification {} time(s). Race independent repair strategies. Last verification failure:\n{}",
+                                    self.config.task, state.gate_failure_count, excerpt
+                                ),
+                                candidates: self.adaptive_tournament_candidates,
+                                allowed_write_globs: None,
+                                max_turns: None,
+                                timeout_ms: crate::subagents::DEFAULT_SUBAGENT_TIMEOUT_MS,
+                                disallow_test_tampering: true,
+                                protected_paths: Vec::new(),
+                            };
+                            let (tournament_out, _label, merged) = self
+                                .execute_spawn_tournament(
+                                    request,
+                                    state.absolute_turn,
+                                    &mut state.modified_files_set,
+                                    &mut logger,
+                                    "adaptive_tournament".to_string(),
+                                )
+                                .await;
+                            // F10 (`v1.5.0`): the adaptive path never reaches
+                            // `execute_tool_batch`, so drain the child spend here instead of
+                            // leaking it when the model stops on the next turn.
+                            self.drain_children_tokens(&mut state.budget_tracker);
+                            if merged {
+                                // A candidate was verified and merged: the stall is broken.
+                                state.gate_failure_count = 0;
+                                state.last_gate_failure_hash = None;
+                                self.record_transcript_item(
+                                    &mut state.transcript,
+                                    TranscriptItem::User(UserMessage {
+                                        content: format!(
+                                            "[ADAPTIVE TOURNAMENT MERGED] {}",
+                                            tournament_out.content
                                         ),
-                                        candidates: self.adaptive_tournament_candidates,
-                                        allowed_write_globs: None,
-                                        max_turns: None,
-                                        timeout_ms: crate::subagents::DEFAULT_SUBAGENT_TIMEOUT_MS,
-                                        disallow_test_tampering: true,
-                                        protected_paths: Vec::new(),
-                                    };
-                                    let (tournament_out, _label, merged) = self
-                                        .execute_spawn_tournament(
-                                            request,
-                                            state.absolute_turn,
-                                            &mut state.modified_files_set,
-                                            &mut logger,
-                                            "adaptive_tournament".to_string(),
-                                        )
-                                        .await;
-                                    // F10 (`v1.5.0`): the adaptive path never reaches
-                                    // `execute_tool_batch`, so drain the child spend here instead of
-                                    // leaking it when the model stops on the next turn.
-                                    self.drain_children_tokens(&mut state.budget_tracker);
-                                    if merged {
-                                        // A candidate was verified and merged: the stall is broken.
-                                        state.gate_failure_count = 0;
-                                        state.last_gate_failure_hash = None;
-                                        self.record_transcript_item(
-                                            &mut state.transcript,
-                                            TranscriptItem::User(UserMessage {
-                                                content: format!(
-                                                    "[ADAPTIVE TOURNAMENT MERGED] {}",
-                                                    tournament_out.content
-                                                ),
-                                            }),
-                                            state.current_turn.saturating_add(1),
-                                        );
-                                        // BUG-02 (`v1.5.1`): the merge already landed on disk, but
-                                        // this branch `continue`s past the post-tool-batch
-                                        // capture/ledger/checkpoint block. Record it here so the
-                                        // merge is durably in the WAL (and `--undo` can revert it)
-                                        // even when the run ends via MaxTurns/cancel before another
-                                        // completion-gate cycle, and so Gate 4 can attribute a
-                                        // tournament-introduced regression to a mutation.
-                                        let revision_before = self.current_revision_id.clone();
-                                        let merged_changed_paths = self.capture_workspace_revision(
-                                            state.absolute_turn,
-                                            "mutation",
-                                            &mut logger,
-                                        );
-                                        for path in &merged_changed_paths {
-                                            state.modified_files_set.insert(path.clone());
-                                        }
-                                        if !merged_changed_paths.is_empty() {
-                                            let spans = build_worker_mutation_spans(
-                                                self.tool_runtime.env().workspace(),
-                                                "adaptive_tournament",
-                                                &merged_changed_paths,
-                                                &[],
-                                            );
-                                            self.mutation_ledger.record_mutation(
-                                                state.absolute_turn as u32,
-                                                "adaptive_tournament",
-                                                format!("adaptive-tournament-{}", state.absolute_turn),
-                                                None,
-                                                revision_before,
-                                                spans,
-                                            );
-                                        }
-                                        self.mutation_ledger.backfill_revision_and_paths(
-                                            state.absolute_turn as u32,
-                                            self.current_revision_id.clone(),
-                                            &merged_changed_paths,
-                                            self.snapshot_store.is_some()
-                                                && (self.batch_mutated
-                                                    || self.batch_ran_side_effect
-                                                    || !merged_changed_paths.is_empty()),
-                                        );
-                                        // The merge is captured; clear the batch flags so a later
-                                        // read-only turn cannot re-trigger a stale capture.
-                                        self.batch_mutated = false;
-                                        self.batch_ran_side_effect = false;
-                                        if let Some(err) = self.revision_error.clone() {
-                                            return TurnFlow::Finish(self.finish_run(
-                                                TerminalReason::StrictLogFailure(err),
-                                                &state.budget_tracker,
-                                                &state.projector,
-                                                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                                                state.last_assistant_text.take(),
-                                                std::mem::take(&mut state.transcript),
-                                                logger,
-                                            ));
-                                        }
-                                        self.persist_session_checkpoint(
-                                            &state.projector,
-                                            &state.transcript,
-                                            state.current_turn,
-                                        );
-                                        if let Some(err) = self.session_persist_error.clone() {
-                                            return TurnFlow::Finish(self.finish_run(
-                                                TerminalReason::StrictLogFailure(format!(
-                                                    "session checkpoint failed: {}",
-                                                    err
-                                                )),
-                                                &state.budget_tracker,
-                                                &state.projector,
-                                                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
-                                                state.last_assistant_text.take(),
-                                                std::mem::take(&mut state.transcript),
-                                                logger,
-                                            ));
-                                        }
-                                        return TurnFlow::Continue(logger);
-                                    }
+                                    }),
+                                    state.current_turn.saturating_add(1),
+                                );
+                                // BUG-02 (`v1.5.1`): the merge already landed on disk, but
+                                // this branch `continue`s past the post-tool-batch
+                                // capture/ledger/checkpoint block. Record it here so the
+                                // merge is durably in the WAL (and `--undo` can revert it)
+                                // even when the run ends via MaxTurns/cancel before another
+                                // completion-gate cycle, and so Gate 4 can attribute a
+                                // tournament-introduced regression to a mutation.
+                                let revision_before = self.current_revision_id.clone();
+                                let merged_changed_paths = self.capture_workspace_revision(
+                                    state.absolute_turn,
+                                    "mutation",
+                                    &mut logger,
+                                );
+                                for path in &merged_changed_paths {
+                                    state.modified_files_set.insert(path.clone());
                                 }
+                                if !merged_changed_paths.is_empty() {
+                                    let spans = build_worker_mutation_spans(
+                                        self.tool_runtime.env().workspace(),
+                                        "adaptive_tournament",
+                                        &merged_changed_paths,
+                                        &[],
+                                    );
+                                    self.mutation_ledger.record_mutation(
+                                        state.absolute_turn as u32,
+                                        "adaptive_tournament",
+                                        format!("adaptive-tournament-{}", state.absolute_turn),
+                                        None,
+                                        revision_before,
+                                        spans,
+                                    );
+                                }
+                                self.mutation_ledger.backfill_revision_and_paths(
+                                    state.absolute_turn as u32,
+                                    self.current_revision_id.clone(),
+                                    &merged_changed_paths,
+                                    self.snapshot_store.is_some()
+                                        && (self.batch_mutated
+                                            || self.batch_ran_side_effect
+                                            || !merged_changed_paths.is_empty()),
+                                );
+                                // The merge is captured; clear the batch flags so a later
+                                // read-only turn cannot re-trigger a stale capture.
+                                self.batch_mutated = false;
+                                self.batch_ran_side_effect = false;
+                                if let Some(err) = self.revision_error.clone() {
+                                    return Err(self.finish_run(
+                                        TerminalReason::StrictLogFailure(err),
+                                        &state.budget_tracker,
+                                        &state.projector,
+                                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                                        state.last_assistant_text.take(),
+                                        std::mem::take(&mut state.transcript),
+                                        logger,
+                                    ));
+                                }
+                                self.persist_session_checkpoint(
+                                    &state.projector,
+                                    &state.transcript,
+                                    state.current_turn,
+                                );
+                                if let Some(err) = self.session_persist_error.clone() {
+                                    return Err(self.finish_run(
+                                        TerminalReason::StrictLogFailure(format!(
+                                            "session checkpoint failed: {}",
+                                            err
+                                        )),
+                                        &state.budget_tracker,
+                                        &state.projector,
+                                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                                        state.last_assistant_text.take(),
+                                        std::mem::take(&mut state.transcript),
+                                        logger,
+                                    ));
+                                }
+                                return Ok(logger);
                             }
-                            if state.gate_failure_count >= self.completion_gate_max_retries {
-                                let excerpt: String = feedback.chars().take(1600).collect();
-                                return TurnFlow::Finish(self.finish_run(
-                                    TerminalReason::ProviderProtocolError(format!(
-                                        "CompletionGate rejected completion {} times (max retries={}); fingerprint={}; last failure:\n{}",
-                                        state.gate_failure_count, self.completion_gate_max_retries, fingerprint, excerpt
-                                    )),
-                                    &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
-                                    std::mem::take(&mut state.transcript), logger,
-                                ));
-                            }
-                            return TurnFlow::Continue(logger);
-                        }
-                        Err(err) => {
-                            return TurnFlow::Finish(self.finish_run(
-                                TerminalReason::ProviderProtocolError(format!(
-                                    "CompletionGate error: {}",
-                                    err
-                                )),
-                                &state.budget_tracker,
-                                &state.projector,
-                                mod_list,
-                                state.last_assistant_text.take(),
-                                std::mem::take(&mut state.transcript),
-                                logger,
-                            ));
                         }
                     }
+                    if state.gate_failure_count >= self.completion_gate_max_retries {
+                        let excerpt: String = feedback.chars().take(1600).collect();
+                        return Err(self.finish_run(
+                            TerminalReason::ProviderProtocolError(format!(
+                                "CompletionGate rejected completion {} times (max retries={}); fingerprint={}; last failure:\n{}",
+                                state.gate_failure_count, self.completion_gate_max_retries, fingerprint, excerpt
+                            )),
+                            &state.budget_tracker, &state.projector, mod_list, state.last_assistant_text.take(),
+                            std::mem::take(&mut state.transcript), logger,
+                        ));
+                    }
+                    return Ok(logger);
                 }
-
-                // O1: a verification command can rewrite the workspace (formatters, codegen).
-                // Capture the resulting state so `latest_revision_id()` never drifts from disk.
-                // The capture must carry the *absolute* session turn: `current_turn` restarts at 1
-                // on `--resume`, which would misorder revision records against the restored turns.
-                self.capture_workspace_revision(state.absolute_turn, "verification", &mut logger);
-                if let Some(err) = self.revision_error.clone() {
-                    return TurnFlow::Finish(self.finish_run(
-                        TerminalReason::StrictLogFailure(err),
+                Err(err) => {
+                    return Err(self.finish_run(
+                        TerminalReason::ProviderProtocolError(format!(
+                            "CompletionGate error: {}",
+                            err
+                        )),
                         &state.budget_tracker,
                         &state.projector,
-                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        mod_list,
                         state.last_assistant_text.take(),
                         std::mem::take(&mut state.transcript),
                         logger,
                     ));
                 }
+            }
+        }
 
-                let mut mod_list: Vec<String> = std::mem::take(&mut state.modified_files_set).into_iter().collect();
-                mod_list.sort();
-                return TurnFlow::Finish(self.finish_run(
-                    TerminalReason::ModelStop,
-                    &state.budget_tracker,
-                    &state.projector,
-                    mod_list,
-                    state.last_assistant_text.take(),
-                    std::mem::take(&mut state.transcript),
-                    logger,
-                ));
+        // O1: a verification command can rewrite the workspace (formatters, codegen).
+        // Capture the resulting state so `latest_revision_id()` never drifts from disk.
+        // The capture must carry the *absolute* session turn: `current_turn` restarts at 1
+        // on `--resume`, which would misorder revision records against the restored turns.
+        self.capture_workspace_revision(state.absolute_turn, "verification", &mut logger);
+        if let Some(err) = self.revision_error.clone() {
+            return Err(self.finish_run(
+                TerminalReason::StrictLogFailure(err),
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
+
+        let mut mod_list: Vec<String> = std::mem::take(&mut state.modified_files_set).into_iter().collect();
+        mod_list.sort();
+        Err(self.finish_run(
+            TerminalReason::ModelStop,
+            &state.budget_tracker,
+            &state.projector,
+            mod_list,
+            state.last_assistant_text.take(),
+            std::mem::take(&mut state.transcript),
+            logger,
+        ))
     }
 
 
