@@ -12,7 +12,7 @@ use kroma_core::budget::BudgetConfig;
 use kroma_core::env::{AllowAllGate, ExecutionEnv, LocalHostEnv};
 use kroma_core::events::{EventLogger, EVENT_SCHEMA_VERSION};
 use kroma_core::extensions::discover_skills;
-use kroma_core::messages::{AssistantTurn, FinishReason, TokenUsage, ToolCall};
+use kroma_core::messages::{AssistantTurn, FinishReason, TokenUsage, ToolCall, TranscriptItem};
 use kroma_core::prompt::PromptBuilder;
 use kroma_core::provider::{
     ModelProvider, ProviderCompletion, ProviderError, ProviderRequest,
@@ -1109,6 +1109,25 @@ async fn test_interactive_repl_slash_commands_and_multiturn_session() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Zero every wall-clock measurement in a transcript item.
+///
+/// Headless and RPC run the same tool twice, at different moments, so `duration_ms` (and the
+/// predictive-check duration nested in the mutation telemetry) legitimately differ by a millisecond
+/// or two. Comparing the raw items therefore asserted something the surfaces never promised; the
+/// parity contract is about *content*, so timings are zeroed before the comparison.
+fn normalize_wall_clock(item: &TranscriptItem) -> TranscriptItem {
+    let mut item = item.clone();
+    if let TranscriptItem::ToolResult(result) = &mut item {
+        result.meta.duration_ms = 0;
+        if let Some(mutation) = result.meta.mutation.as_mut() {
+            if let Some(predictive) = mutation.predictive.as_mut() {
+                predictive.duration_ms = 0;
+            }
+        }
+    }
+    item
+}
+
 /// Test 5: Verify that running the same task via Headless `AgentRunner` vs. JSON-RPC
 /// `session.prompt` produces identical workspace revisions and WAL structure.
 #[tokio::test]
@@ -1218,7 +1237,12 @@ async fn test_cross_surface_parity_headless_vs_rpc_produce_identical_wal_and_rev
     assert_eq!(entries_h.len(), entries_rpc.len());
     for (eh, er) in entries_h.iter().zip(entries_rpc.iter()) {
         assert_eq!(eh.turn, er.turn);
-        assert_eq!(eh.item, er.item);
+        assert_eq!(
+            normalize_wall_clock(&eh.item),
+            normalize_wall_clock(&er.item),
+            "the two surfaces must record the same transcript entry (wall-clock durations zeroed, \
+             they are measurements of the machine, not of the surface)"
+        );
     }
 
     let _ = fs::remove_dir_all(&root);

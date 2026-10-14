@@ -2090,7 +2090,12 @@ fn test_command_hook_stdin_writer_stops_at_its_deadline() {
     // return to its pre-run thread/fd baseline while the grandchild is still alive — i.e. no
     // thread/fd leak. Other tests in this binary run concurrently and briefly add threads/fds, so
     // poll for a quiet sample instead of demanding one; a leaked writer never settles.
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    //
+    // The window has to outlast those concurrent tests, not just this one's writer: the whole
+    // binary finishes in ~3s, so a 3s window could give up while a sibling test still held its
+    // hook pipes and worker threads (observed as a ~1-in-10 flake). 15s is comfortably longer than
+    // the binary itself, and a genuine leak still fails because it never settles at all.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut settled = false;
     while std::time::Instant::now() < deadline {
         if live_thread_count() <= threads_before && live_fd_count() <= fds_before {
