@@ -1962,7 +1962,6 @@ impl AttributionEngine {
     /// removed.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-
     pub fn verify_candidate_in_isolated_worktree<F>(
         store: &crate::revision::SnapshotStore,
         parent_workspace: &WorkspaceCap,
