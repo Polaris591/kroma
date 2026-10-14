@@ -1,0 +1,187 @@
+name: Release
+
+# Full six-target build, triggered by a version tag. This is the job that would have caught the
+# arm64 musl binary shipping with stub SSL symbols (every HTTPS request failed at runtime) and the
+# Windows build breaking on an unguarded `#[link(name = "ssl")]`.
+#
+# The macOS binaries are built on a real Mac runner: since the Gate-3 audit macOS uses native-tls,
+# so the link needs Security.framework and CoreFoundation.framework, i.e. a genuine SDK.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  OPENSSL_VERSION: '3.5.7'
+
+jobs:
+  linux:
+    name: linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p kroma-cli
+      - run: ./target/release/kroma --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: target/release/kroma
+          if-no-files-found: error
+
+  windows:
+    name: win32-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: rustup target add x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target x86_64-pc-windows-gnu -p kroma-cli
+      - name: The Windows binary must not depend on OpenSSL
+        run: |
+          if x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/kroma.exe \
+             | grep -iE 'DLL Name: .*(ssl|crypto)'; then
+            echo "::error::the Windows binary links an OpenSSL DLL; it should use schannel only"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win32-x64
+          path: target/x86_64-pc-windows-gnu/release/kroma.exe
+          if-no-files-found: error
+
+  macos:
+    name: darwin-arm64 + darwin-x64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target aarch64-apple-darwin -p kroma-cli
+      - run: cargo build --release --target x86_64-apple-darwin -p kroma-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64
+          path: target/aarch64-apple-darwin/release/kroma
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-x64
+          path: target/x86_64-apple-darwin/release/kroma
+          if-no-files-found: error
+
+  android:
+    name: android-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: rustup target add aarch64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install the NDK
+        run: sdkmanager --install "ndk;26.3.11579264"
+      - uses: Swatinem/rust-cache@v2
+      # The NDK sysroot carries no libssl/libcrypto; these stubs declare the symbols kroma calls so
+      # the linker is satisfied, and Android's own /system/lib64 libraries provide them at runtime.
+      - name: Generate the Android TLS link stubs
+        run: scripts/gen-android-tls-stubs.sh "$ANDROID_HOME/ndk/26.3.11579264" 24
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ github.workspace }}/android-linker.sh
+        run: |
+          NDK="$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64"
+          printf '#!/bin/sh\nexec "%s/bin/aarch64-linux-android24-clang" "$@"\n' "$NDK" > android-linker.sh
+          chmod +x android-linker.sh
+          cargo build --release --target aarch64-linux-android -p kroma-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64
+          path: target/aarch64-linux-android/release/kroma
+          if-no-files-found: error
+
+  musl:
+    name: linux-arm64 (musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: rustup target add aarch64-unknown-linux-musl
+      - name: Install zig
+        run: pip install --break-system-packages ziglang
+      - name: Fetch OpenSSL sources
+        run: |
+          curl -fsSL --retry 3 -o openssl.tar.gz \
+            "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
+            || curl -fsSL --retry 3 -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar -xzf openssl.tar.gz
+      - uses: Swatinem/rust-cache@v2
+      # The arm64 musl binary used to be linked against *stub* SSL symbols, so it had no working
+      # TLS at all. Build a real static OpenSSL instead; the script refuses to be a stub.
+      - name: Build static OpenSSL for aarch64-musl
+        env:
+          ZIG: ${{ github.workspace }}/.zig/zig
+        run: |
+          mkdir -p .zig
+          cp "$(python3 -c 'import ziglang,os;print(os.path.dirname(ziglang.__file__))')/zig" .zig/zig
+          chmod +x .zig/zig
+          scripts/build-musl-openssl.sh "openssl-${OPENSSL_VERSION}" "$PWD/openssl-musl"
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C link-self-contained=no
+        run: |
+          ZIG="$(python3 -c 'import ziglang,os;print(os.path.dirname(ziglang.__file__))')/zig"
+          printf '#!/bin/sh\nexport ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-cache"\nexport ZIG_LOCAL_CACHE_DIR="$PWD/.zig-cache"\nexec "%s" cc -target aarch64-linux-musl -L"$PWD/openssl-musl/lib" "$@"\n' "$ZIG" > musl-linker.sh
+          chmod +x musl-linker.sh
+          head -1 musl-linker.sh
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$PWD/musl-linker.sh" \
+            cargo build --release --target aarch64-unknown-linux-musl -p kroma-cli
+      # A stub-linked musl binary contains no OpenSSL at all; this is the cheap proof that the real
+      # library went in, and it is what the broken artifact would have failed.
+      - name: The musl binary must actually contain OpenSSL
+        run: |
+          if ! strings -a target/aarch64-unknown-linux-musl/release/kroma | grep -q 'OpenSSL 3'; then
+            echo "::error::the musl binary has no OpenSSL in it; TLS would fail at runtime"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: target/aarch64-unknown-linux-musl/release/kroma
+          if-no-files-found: error
+
+  pack:
+    name: pack npm tarball
+    needs: [linux, windows, macos, android, musl]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect the six binaries
+        uses: actions/download-artifact@v4
+      - name: Place them where the packaging script expects them
+        run: |
+          set -euo pipefail
+          install -Dm755 linux-x64/kroma   target/release/kroma
+          install -Dm755 win32-x64/kroma.exe target/x86_64-pc-windows-gnu/release/kroma.exe
+          install -Dm755 linux-arm64/kroma target/aarch64-unknown-linux-musl/release/kroma
+          install -Dm755 android-arm64/kroma target/aarch64-linux-android/release/kroma
+          install -Dm755 darwin-arm64/kroma target/aarch64-apple-darwin/release/kroma
+          install -Dm755 darwin-x64/kroma  target/x86_64-apple-darwin/release/kroma
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm/build-npm-packages.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kroma-cli-tarball
+          path: npm/dist/*.tgz
+          if-no-files-found: error

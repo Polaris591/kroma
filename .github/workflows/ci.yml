@@ -1,0 +1,98 @@
+name: CI
+
+# Why this exists: the Windows release build was broken for three months without anyone noticing,
+# because verification used `cargo check` (which type-checks but never links) on all six targets.
+# A single `cargo build --release --target x86_64-pc-windows-gnu` catches that whole class, so the
+# per-push jobs below always *link* the artifacts users actually run.
+#
+# The Android and musl targets need extra toolchains (an NDK, a musl OpenSSL) and live in
+# release.yml, which runs on tags.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-and-test:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt --component clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: JavaScript upgrade-helper checks
+        run: node scripts/test-kroma-js-upgrade.js
+
+      - name: The two bin/kroma.js copies must stay identical
+        run: |
+          if ! diff -q bin/kroma.js npm/kroma-cli/bin/kroma.js; then
+            echo "::error::bin/kroma.js and npm/kroma-cli/bin/kroma.js have diverged; sync them"
+            exit 1
+          fi
+
+  build-linux:
+    name: release build (linux-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p kroma-cli
+      - run: ./target/release/kroma --version
+
+  build-windows:
+    name: release build (windows-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: rustup target add x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target x86_64-pc-windows-gnu -p kroma-cli
+      # A spurious OpenSSL dependency on this target is exactly the bug this job exists for:
+      # mingw-w64 has no libssl, and Windows uses schannel, so no libssl/libcrypto may appear.
+      - name: Windows binary must not depend on OpenSSL
+        run: |
+          if x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/kroma.exe \
+             | grep -iE 'DLL Name: .*(ssl|crypto)'; then
+            echo "::error::the Windows binary links an OpenSSL DLL; it should use schannel only"
+            exit 1
+          fi
+
+  build-macos:
+    name: release build (macOS, native)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      # Built on a real Mac on purpose: since the Gate-3 audit macOS uses native-tls, so the link
+      # needs Security.framework and CoreFoundation.framework and therefore a genuine SDK. Apple's
+      # .tbd stubs carry per-symbol availability data that a hand-made stub cannot reproduce.
+      - run: cargo build --release --target aarch64-apple-darwin -p kroma-cli
+      - run: cargo build --release --target x86_64-apple-darwin -p kroma-cli
+      - run: ./target/aarch64-apple-darwin/release/kroma --version
+      - run: ./target/x86_64-apple-darwin/release/kroma --version
