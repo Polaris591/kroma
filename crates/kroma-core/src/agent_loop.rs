@@ -209,6 +209,9 @@ struct TurnState {
     last_assistant_text: Option<String>,
     gate_failure_count: usize,
     last_gate_failure_hash: Option<String>,
+    current_turn: usize,
+    absolute_turn: usize,
+    tool_calls: Vec<ToolCall>,
 }
 
 /// Result of one extracted turn phase: either the run keeps going (carrying `logger` back, because
@@ -399,331 +402,13 @@ impl AgentRunner {
             Err(outcome) => return outcome,
         };
         loop {
-            if *self.cancel_rx.borrow() {
-                return self.finish_run(
-                    TerminalReason::UserCancelled,
-                    &state.budget_tracker,
-                    &state.projector,
-                    state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
-            }
-
-            if state.budget_tracker.is_deadline_exceeded() {
-                return self.finish_run(
-                    TerminalReason::RunDeadlineExceeded,
-                    &state.budget_tracker,
-                    &state.projector,
-                    state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
-            }
-
-            // F08 (`v1.4.0`): budget accounting covers `self` *and* child subagent spend, and the
-            // stop reason is a dedicated `TokenBudgetExhausted` (not `MaxTurns`).
-            if let Some(max_tok) = self.max_total_tokens {
-                if state.budget_tracker.all_total_tokens() >= max_tok {
-                    return self.finish_run(
-                        TerminalReason::TokenBudgetExhausted,
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-            }
-
-            if !state.budget_tracker.try_begin_turn() {
-                return self.finish_run(
-                    TerminalReason::MaxTurns,
-                    &state.budget_tracker,
-                    &state.projector,
-                    state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
-            }
-
-            let current_turn = state.budget_tracker.turns_used();
-            // `current_turn` is relative to this process; the projector's turn accounting is over
-            // the whole session transcript, so it must receive the absolute session turn. On a
-            // `--resume` run `current_turn` starts at 1 again while the restored transcript already
-            // holds `session_turn_offset` turns, and feeding the relative turn here would make every
-            // pre-existing hot file look "0 turns old" and pin it forever.
-            let absolute_turn = self.session_turn_offset.saturating_add(current_turn);
-
-            // Project context (100% Append-Only unless watermark crossed)
-            let projected = match state.projector.project(
-                &mut state.transcript,
-                state.budget_tracker.config(),
-                state.static_prefix.static_prefix_bytes,
-                state.last_input_tokens,
-                absolute_turn,
-            ) {
-                Ok(p) => p,
-                Err(term_reason) => {
-                    return self.finish_run(
-                        term_reason,
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-            };
-
-            if let Some(comp) = projected.compaction_event {
-                if let Err(e) = logger.log(EventPayload::ContextCompacted {
-                    before_bytes: comp.before_bytes,
-                    after_bytes: comp.after_bytes,
-                    compacted_seq_indices: comp.compacted_seq_indices,
-                    pinned_files: comp.pinned_files,
-                }) {
-                    return self.finish_run(
-                        TerminalReason::StrictLogFailure(e.to_string()),
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-            }
-
-            self.persist_session_checkpoint(&state.projector, &state.transcript, current_turn);
-            if let Some(err) = self.session_persist_error.clone() {
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
-                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text, state.transcript, logger,
-                );
-            }
-
-            if !state.budget_tracker.try_record_request_attempt() {
-                return self.finish_run(
-                    TerminalReason::MaxRequestAttempts,
-                    &state.budget_tracker,
-                    &state.projector,
-                    state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
-            }
-
-            if let Err(e) = logger.log(EventPayload::ModelRequestStarted {
-                turn: current_turn,
-                attempt: state.budget_tracker.request_attempts_used(),
-                request_body_bytes: state.static_prefix.static_prefix_bytes
-                    + projected.message_history_bytes,
-                message_history_bytes: projected.message_history_bytes,
-            }) {
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(e.to_string()),
-                    &state.budget_tracker,
-                    &state.projector,
-                    state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
-            }
-
-            // F08 (`v1.4.0`): reserve budget *before* sending the request. Estimate the prompt
-            // input tokens from the projected byte size and refuse to start a request that would
-            // already blow the remaining budget; otherwise cap this request's output so a single
-            // completion cannot overshoot what is left.
-            // `static_prefix_bytes` already includes `system_prompt.len()` (see
-            // `prompt.rs::build_static_prefix`), so it must not be added again here.
-            let estimated_input_tokens = estimate_prompt_input_tokens(
-                state.static_prefix.static_prefix_bytes,
-                projected.message_history_bytes,
-            );
-            let max_output_tokens = if let Some(max_tok) = self.max_total_tokens {
-                let spent = state.budget_tracker.all_total_tokens();
-                let projected_total = spent.saturating_add(estimated_input_tokens);
-                if projected_total >= max_tok {
-                    return self.finish_run(
-                        TerminalReason::TokenBudgetExhausted,
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-                Some(max_tok.saturating_sub(projected_total))
-            } else {
-                None
-            };
-
-            let req = ProviderRequest {
-                system_prompt: state.static_prefix.system_prompt.clone(),
-                tools: state.visible_tools.clone(),
-                messages: projected.messages,
-                stream: self.config.stream,
-                // Gate 7: hand the projector's logical cache boundaries to the protocol client so
-                // Anthropic-style explicit prompt caching can pin the frozen prefix.
-                cache_breakpoints: projected.breakpoints,
-                // F08: remaining output-token allowance derived from `--max-tokens`.
-                max_output_tokens,
-            };
-
-            let completion = match self
-                .provider
-                .complete(req, state.budget_tracker.config(), self.cancel_rx.clone())
-                .await
-            {
-                Ok(c) => c,
-                Err(err) => {
-                    return self.finish_run(
-                        err.into_terminal_reason(),
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-            };
-
-            for _ in 1..completion.attempts_used {
-                if !state.budget_tracker.try_record_request_attempt() {
-                    return self.finish_run(
-                        TerminalReason::MaxRequestAttempts,
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-            }
-
-            let assistant_turn = completion.turn;
-            if let Some(usage) = assistant_turn.usage {
-                state.budget_tracker.record_token_usage(
-                    usage.input_tokens,
-                    usage.cached_input_tokens,
-                    usage.output_tokens,
-                );
-                state.last_input_tokens = Some(usage.input_tokens);
-                if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
-                    turn: current_turn,
-                    input_tokens: usage.input_tokens,
-                    cached_input_tokens: usage.cached_input_tokens,
-                    uncached_input_tokens: usage.uncached_input_tokens(),
-                    output_tokens: usage.output_tokens,
-                    reasoning_tokens: usage.reasoning_tokens,
-                    prefix_cache_hit_ratio: usage.prefix_cache_hit_ratio(),
-                    latency_ms: completion.latency_ms,
-                    ttft_ms: completion.ttft_ms,
-                }) {
-                    return self.finish_run(
-                        TerminalReason::StrictLogFailure(e.to_string()),
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-            } else {
-                // F08 (`v1.4.0`): a provider that omits `usage` must not bypass the token cap.
-                // Conservatively estimate both directions from byte length (~4 bytes per token).
-                let est_input = estimated_input_tokens;
-                let est_output = approx_tokens(
-                    assistant_turn
-                        .content
-                        .as_ref()
-                        .map(|t| t.len())
-                        .unwrap_or(0)
-                        .saturating_add(
-                            assistant_turn
-                                .tool_calls
-                                .iter()
-                                .map(|c| c.raw_arguments.len() + c.name.len())
-                                .sum::<usize>(),
-                        ),
-                );
-                state.budget_tracker.record_token_usage(est_input, None, est_output);
-                state.last_input_tokens = Some(est_input);
-                if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
-                    turn: current_turn,
-                    input_tokens: est_input,
-                    cached_input_tokens: None,
-                    uncached_input_tokens: est_input,
-                    output_tokens: est_output,
-                    reasoning_tokens: None,
-                    prefix_cache_hit_ratio: 0.0,
-                    latency_ms: completion.latency_ms,
-                    ttft_ms: completion.ttft_ms,
-                }) {
-                    return self.finish_run(
-                        TerminalReason::StrictLogFailure(e.to_string()),
-                        &state.budget_tracker,
-                        &state.projector,
-                        state.modified_files_set.into_iter().collect(),
-                        state.last_assistant_text,
-                        state.transcript,
-                        logger,
-                    );
-                }
-            }
-
-            // §4.1: Pre-dispatch batch validation BEFORE adding to transcript or running any tools!
-            if let Err(batch_err) = validate_assistant_turn_batch(
-                &assistant_turn,
-                state.budget_tracker.config(),
-                self.config.allow_tool_calls_on_stop,
-            ) {
-                return self.finish_run(
-                    batch_err.into_terminal_reason(),
-                    &state.budget_tracker,
-                    &state.projector,
-                    state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text,
-                    state.transcript,
-                    logger,
-                );
-            }
-
-            if let Some(ref c) = assistant_turn.content {
-                state.last_assistant_text = Some(c.clone());
-            }
-
-            let tool_calls = assistant_turn.tool_calls.clone();
-            self.record_transcript_item(
-                &mut state.transcript,
-                TranscriptItem::Assistant(assistant_turn),
-                current_turn,
-            );
-            if let Some(err) = self.session_persist_error.clone() {
-                return self.finish_run(
-                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
-                    &state.budget_tracker, &state.projector, state.modified_files_set.into_iter().collect(),
-                    state.last_assistant_text, state.transcript, logger,
-                );
-            }
-
-            // If model stopped with no tool calls, run CompletionGate if files were modified (§3.2 V6-07)
-            if tool_calls.is_empty() {
+        logger = match self.run_provider_turn(&mut state, logger).await {
+            Ok(returned) => returned,
+            Err(outcome) => return outcome,
+        };
+            if state.tool_calls.is_empty() {
                 match self
-                    .handle_completion_turn(&mut state, logger, current_turn, absolute_turn)
+                    .handle_completion_turn(&mut state, logger)
                     .await
                 {
                     TurnFlow::Continue(returned) => {
@@ -735,16 +420,16 @@ impl AgentRunner {
             }
 
             if let Err(e) = logger.log(EventPayload::ToolBatchReceived {
-                turn: current_turn,
-                call_count: tool_calls.len(),
-                call_ids: tool_calls.iter().map(|tc| tc.call_id.clone()).collect(),
+                turn: state.current_turn,
+                call_count: state.tool_calls.len(),
+                call_ids: state.tool_calls.iter().map(|tc| tc.call_id.clone()).collect(),
             }) {
                 self.synthesize_remaining_results(
-                    &tool_calls,
+                    &state.tool_calls,
                     ErrorCode::NotExecutedCancelled,
                     "NOT_EXECUTED_CANCELLED: strict log failure",
                     &mut state.transcript,
-                    current_turn,
+                    state.current_turn,
                 );
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(e.to_string()),
@@ -763,7 +448,7 @@ impl AgentRunner {
             self.batch_ran_side_effect = false;
             let batch_abort = self
                 .execute_tool_batch(
-                    &tool_calls,
+                    &state.tool_calls,
                     &mut state.transcript,
                     &mut state.budget_tracker,
                     &mut state.loop_guard,
@@ -784,7 +469,7 @@ impl AgentRunner {
             // `bash` command whose writes the tool cannot report (O1) — gets a fresh revision bound
             // to this turn.
             let batch_changed_paths = if self.batch_mutated || self.batch_ran_side_effect {
-                self.capture_workspace_revision(absolute_turn, "mutation", &mut logger)
+                self.capture_workspace_revision(state.absolute_turn, "mutation", &mut logger)
             } else {
                 Vec::new()
             };
@@ -796,7 +481,7 @@ impl AgentRunner {
             // snapshot store for `bash` / side-effect extension calls) to every mutation recorded
             // during this batch, dropping read-only `bash` records that changed 0 files.
             self.mutation_ledger.backfill_revision_and_paths(
-                absolute_turn as u32,
+                state.absolute_turn as u32,
                 self.current_revision_id.clone(),
                 &batch_changed_paths,
                 self.snapshot_store.is_some() && (self.batch_mutated || self.batch_ran_side_effect),
@@ -820,7 +505,7 @@ impl AgentRunner {
             // Gate 3: checkpoint the post-batch leaf so the `subtree_dirs` (and pinned baseline /
             // last-touched ledger) loaded by *this* batch survive a later `--resume` / `--fork`,
             // even when the run ends here (`MaxTurns`, `MaxToolCalls`, `LoopDetected`, cancellation).
-            self.persist_session_checkpoint(&state.projector, &state.transcript, current_turn);
+            self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
             if let Some(err) = self.session_persist_error.clone() {
                 return self.finish_run(
                     TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
@@ -861,11 +546,11 @@ impl AgentRunner {
                     run_id: self.config.run_id,
                     workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
                     modified_files: mod_list,
-                    turns_used: current_turn,
+                    turns_used: state.current_turn,
                 };
                 let check_res = gate.check(&ctx).await;
                 let predict_changed =
-                    self.capture_workspace_revision(absolute_turn, "predict_cmd", &mut logger);
+                    self.capture_workspace_revision(state.absolute_turn, "predict_cmd", &mut logger);
                 if !predict_changed.is_empty() {
                     state.modified_files_set.extend(predict_changed);
                     post_batch_updated = true;
@@ -909,7 +594,7 @@ impl AgentRunner {
                     self.record_transcript_item(
                         &mut state.transcript,
                         TranscriptItem::User(UserMessage { content: message }),
-                        current_turn.saturating_add(1),
+                        state.current_turn.saturating_add(1),
                     );
                     post_batch_updated = true;
                     if let Some(err) = self.session_persist_error.clone() {
@@ -926,7 +611,7 @@ impl AgentRunner {
             let pre_steer_len = state.transcript.len();
             self.drain_steering_messages(
                 &mut state.transcript,
-                current_turn.saturating_add(1),
+                state.current_turn.saturating_add(1),
             );
             if state.transcript.len() != pre_steer_len {
                 post_batch_updated = true;
@@ -939,7 +624,7 @@ impl AgentRunner {
                 );
             }
             if post_batch_updated {
-                self.persist_session_checkpoint(&state.projector, &state.transcript, current_turn);
+                self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
                 if let Some(err) = self.session_persist_error.clone() {
                     return self.finish_run(
                         TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
@@ -954,7 +639,7 @@ impl AgentRunner {
                 let hooks = self.tool_runtime.hook_engine();
                 if !hooks.is_empty() {
                     let ctx = HookContext::new(
-                        current_turn,
+                        state.current_turn,
                         self.tool_runtime.env().workspace().root().to_path_buf(),
                     );
                     for evaluation in hooks
@@ -975,6 +660,343 @@ impl AgentRunner {
         }
     }
 
+    /// Run one provider turn: preflight budget/cancellation, project context, persist the
+    /// checkpoint, call the provider and record the assistant turn plus its tool calls.
+    ///
+    /// Split out of `run_inner`'s loop body (322 of its 560 lines). Returns `logger` on success
+    /// (it is consumed by `finish_run` on the failure paths) or the finished run.
+    async fn run_provider_turn(
+        &mut self,
+        state: &mut TurnState,
+        mut logger: EventLogger,
+    ) -> Result<EventLogger, (RunSummary, EventLogger)> {
+            if *self.cancel_rx.borrow() {
+                return Err(self.finish_run(
+                    TerminalReason::UserCancelled,
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+
+            if state.budget_tracker.is_deadline_exceeded() {
+                return Err(self.finish_run(
+                    TerminalReason::RunDeadlineExceeded,
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+
+            // F08 (`v1.4.0`): budget accounting covers `self` *and* child subagent spend, and the
+            // stop reason is a dedicated `TokenBudgetExhausted` (not `MaxTurns`).
+            if let Some(max_tok) = self.max_total_tokens {
+                if state.budget_tracker.all_total_tokens() >= max_tok {
+                    return Err(self.finish_run(
+                        TerminalReason::TokenBudgetExhausted,
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+            }
+
+            if !state.budget_tracker.try_begin_turn() {
+                return Err(self.finish_run(
+                    TerminalReason::MaxTurns,
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+
+            state.current_turn = state.budget_tracker.turns_used();
+            // `current_turn` is relative to this process; the projector's turn accounting is over
+            // the whole session transcript, so it must receive the absolute session turn. On a
+            // `--resume` run `current_turn` starts at 1 again while the restored transcript already
+            // holds `session_turn_offset` turns, and feeding the relative turn here would make every
+            // pre-existing hot file look "0 turns old" and pin it forever.
+            state.absolute_turn = self.session_turn_offset.saturating_add(state.current_turn);
+
+            // Project context (100% Append-Only unless watermark crossed)
+            let projected = match state.projector.project(
+                &mut state.transcript,
+                state.budget_tracker.config(),
+                state.static_prefix.static_prefix_bytes,
+                state.last_input_tokens,
+                state.absolute_turn,
+            ) {
+                Ok(p) => p,
+                Err(term_reason) => {
+                    return Err(self.finish_run(
+                        term_reason,
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+            };
+
+            if let Some(comp) = projected.compaction_event {
+                if let Err(e) = logger.log(EventPayload::ContextCompacted {
+                    before_bytes: comp.before_bytes,
+                    after_bytes: comp.after_bytes,
+                    compacted_seq_indices: comp.compacted_seq_indices,
+                    pinned_files: comp.pinned_files,
+                }) {
+                    return Err(self.finish_run(
+                        TerminalReason::StrictLogFailure(e.to_string()),
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+            }
+
+            self.persist_session_checkpoint(&state.projector, &state.transcript, state.current_turn);
+            if let Some(err) = self.session_persist_error.clone() {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(format!("session checkpoint failed: {}", err)),
+                    &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+                ));
+            }
+
+            if !state.budget_tracker.try_record_request_attempt() {
+                return Err(self.finish_run(
+                    TerminalReason::MaxRequestAttempts,
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+
+            if let Err(e) = logger.log(EventPayload::ModelRequestStarted {
+                turn: state.current_turn,
+                attempt: state.budget_tracker.request_attempts_used(),
+                request_body_bytes: state.static_prefix.static_prefix_bytes
+                    + projected.message_history_bytes,
+                message_history_bytes: projected.message_history_bytes,
+            }) {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(e.to_string()),
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+
+            // F08 (`v1.4.0`): reserve budget *before* sending the request. Estimate the prompt
+            // input tokens from the projected byte size and refuse to start a request that would
+            // already blow the remaining budget; otherwise cap this request's output so a single
+            // completion cannot overshoot what is left.
+            // `static_prefix_bytes` already includes `system_prompt.len()` (see
+            // `prompt.rs::build_static_prefix`), so it must not be added again here.
+            let estimated_input_tokens = estimate_prompt_input_tokens(
+                state.static_prefix.static_prefix_bytes,
+                projected.message_history_bytes,
+            );
+            let max_output_tokens = if let Some(max_tok) = self.max_total_tokens {
+                let spent = state.budget_tracker.all_total_tokens();
+                let projected_total = spent.saturating_add(estimated_input_tokens);
+                if projected_total >= max_tok {
+                    return Err(self.finish_run(
+                        TerminalReason::TokenBudgetExhausted,
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+                Some(max_tok.saturating_sub(projected_total))
+            } else {
+                None
+            };
+
+            let req = ProviderRequest {
+                system_prompt: state.static_prefix.system_prompt.clone(),
+                tools: state.visible_tools.clone(),
+                messages: projected.messages,
+                stream: self.config.stream,
+                // Gate 7: hand the projector's logical cache boundaries to the protocol client so
+                // Anthropic-style explicit prompt caching can pin the frozen prefix.
+                cache_breakpoints: projected.breakpoints,
+                // F08: remaining output-token allowance derived from `--max-tokens`.
+                max_output_tokens,
+            };
+
+            let completion = match self
+                .provider
+                .complete(req, state.budget_tracker.config(), self.cancel_rx.clone())
+                .await
+            {
+                Ok(c) => c,
+                Err(err) => {
+                    return Err(self.finish_run(
+                        err.into_terminal_reason(),
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+            };
+
+            for _ in 1..completion.attempts_used {
+                if !state.budget_tracker.try_record_request_attempt() {
+                    return Err(self.finish_run(
+                        TerminalReason::MaxRequestAttempts,
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+            }
+
+            let assistant_turn = completion.turn;
+            if let Some(usage) = assistant_turn.usage {
+                state.budget_tracker.record_token_usage(
+                    usage.input_tokens,
+                    usage.cached_input_tokens,
+                    usage.output_tokens,
+                );
+                state.last_input_tokens = Some(usage.input_tokens);
+                if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
+                    turn: state.current_turn,
+                    input_tokens: usage.input_tokens,
+                    cached_input_tokens: usage.cached_input_tokens,
+                    uncached_input_tokens: usage.uncached_input_tokens(),
+                    output_tokens: usage.output_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
+                    prefix_cache_hit_ratio: usage.prefix_cache_hit_ratio(),
+                    latency_ms: completion.latency_ms,
+                    ttft_ms: completion.ttft_ms,
+                }) {
+                    return Err(self.finish_run(
+                        TerminalReason::StrictLogFailure(e.to_string()),
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+            } else {
+                // F08 (`v1.4.0`): a provider that omits `usage` must not bypass the token cap.
+                // Conservatively estimate both directions from byte length (~4 bytes per token).
+                let est_input = estimated_input_tokens;
+                let est_output = approx_tokens(
+                    assistant_turn
+                        .content
+                        .as_ref()
+                        .map(|t| t.len())
+                        .unwrap_or(0)
+                        .saturating_add(
+                            assistant_turn
+                                .tool_calls
+                                .iter()
+                                .map(|c| c.raw_arguments.len() + c.name.len())
+                                .sum::<usize>(),
+                        ),
+                );
+                state.budget_tracker.record_token_usage(est_input, None, est_output);
+                state.last_input_tokens = Some(est_input);
+                if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
+                    turn: state.current_turn,
+                    input_tokens: est_input,
+                    cached_input_tokens: None,
+                    uncached_input_tokens: est_input,
+                    output_tokens: est_output,
+                    reasoning_tokens: None,
+                    prefix_cache_hit_ratio: 0.0,
+                    latency_ms: completion.latency_ms,
+                    ttft_ms: completion.ttft_ms,
+                }) {
+                    return Err(self.finish_run(
+                        TerminalReason::StrictLogFailure(e.to_string()),
+                        &state.budget_tracker,
+                        &state.projector,
+                        std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                        state.last_assistant_text.take(),
+                        std::mem::take(&mut state.transcript),
+                        logger,
+                    ));
+                }
+            }
+
+            // §4.1: Pre-dispatch batch validation BEFORE adding to transcript or running any tools!
+            if let Err(batch_err) = validate_assistant_turn_batch(
+                &assistant_turn,
+                state.budget_tracker.config(),
+                self.config.allow_tool_calls_on_stop,
+            ) {
+                return Err(self.finish_run(
+                    batch_err.into_terminal_reason(),
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+
+            if let Some(ref c) = assistant_turn.content {
+                state.last_assistant_text = Some(c.clone());
+            }
+
+            state.tool_calls = assistant_turn.tool_calls.clone();
+            self.record_transcript_item(
+                &mut state.transcript,
+                TranscriptItem::Assistant(assistant_turn),
+                state.current_turn,
+            );
+            if let Some(err) = self.session_persist_error.clone() {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(format!("session WAL append failed: {}", err)),
+                    &state.budget_tracker, &state.projector, std::mem::take(&mut state.modified_files_set).into_iter().collect(),
+                    state.last_assistant_text.take(), std::mem::take(&mut state.transcript), logger,
+                ));
+            }
+
+            // If model stopped with no tool calls, run CompletionGate if files were modified (§3.2 V6-07)
+
+        Ok(logger)
+    }
+
+
     /// Handle a turn where the model stopped without calling any tool: run the pre-completion
     /// policy hooks, the completion gate and the adaptive escalation, or finish the run.
     ///
@@ -985,8 +1007,6 @@ impl AgentRunner {
         &mut self,
         state: &mut TurnState,
         mut logger: EventLogger,
-        current_turn: usize,
-        absolute_turn: usize,
     ) -> TurnFlow {
                 // Gate 3: `PreCompletion` policy hooks run before the completion gate. A denial is
                 // fail-closed and is treated exactly like a gate rejection, so the model must keep
@@ -997,7 +1017,7 @@ impl AgentRunner {
                         None
                     } else {
                         let ctx = HookContext::new(
-                            current_turn,
+                            state.current_turn,
                             self.tool_runtime.env().workspace().root().to_path_buf(),
                         );
                         let outcome = hooks
@@ -1029,7 +1049,7 @@ impl AgentRunner {
                                 state.gate_failure_count, self.completion_gate_max_retries, reason
                             ),
                         }),
-                        current_turn.saturating_add(1),
+                        state.current_turn.saturating_add(1),
                     );
                     if let Some(err) = self.session_persist_error.clone() {
                         return TurnFlow::Finish(self.finish_run(
@@ -1052,7 +1072,7 @@ impl AgentRunner {
                             .root()
                             .to_path_buf(),
                         modified_files: mod_list.clone(),
-                        turns_used: current_turn,
+                        turns_used: state.current_turn,
                     };
                     match self.completion_gate.check(&gate_ctx).await {
                         Ok(GateOutcome::Approved) => {
@@ -1117,11 +1137,11 @@ impl AgentRunner {
                             self.record_transcript_item(
                                 &mut state.transcript,
                                 TranscriptItem::User(UserMessage { content: gate_message }),
-                                current_turn.saturating_add(1),
+                                state.current_turn.saturating_add(1),
                             );
                             self.drain_steering_messages(
                                 &mut state.transcript,
-                                current_turn.saturating_add(1),
+                                state.current_turn.saturating_add(1),
                             );
                             if let Some(err) = self.session_persist_error.clone() {
                                 return TurnFlow::Finish(self.finish_run(
@@ -1166,7 +1186,7 @@ impl AgentRunner {
                                     let (tournament_out, _label, merged) = self
                                         .execute_spawn_tournament(
                                             request,
-                                            absolute_turn,
+                                            state.absolute_turn,
                                             &mut state.modified_files_set,
                                             &mut logger,
                                             "adaptive_tournament".to_string(),
@@ -1188,7 +1208,7 @@ impl AgentRunner {
                                                     tournament_out.content
                                                 ),
                                             }),
-                                            current_turn.saturating_add(1),
+                                            state.current_turn.saturating_add(1),
                                         );
                                         // BUG-02 (`v1.5.1`): the merge already landed on disk, but
                                         // this branch `continue`s past the post-tool-batch
@@ -1199,7 +1219,7 @@ impl AgentRunner {
                                         // tournament-introduced regression to a mutation.
                                         let revision_before = self.current_revision_id.clone();
                                         let merged_changed_paths = self.capture_workspace_revision(
-                                            absolute_turn,
+                                            state.absolute_turn,
                                             "mutation",
                                             &mut logger,
                                         );
@@ -1214,16 +1234,16 @@ impl AgentRunner {
                                                 &[],
                                             );
                                             self.mutation_ledger.record_mutation(
-                                                absolute_turn as u32,
+                                                state.absolute_turn as u32,
                                                 "adaptive_tournament",
-                                                format!("adaptive-tournament-{}", absolute_turn),
+                                                format!("adaptive-tournament-{}", state.absolute_turn),
                                                 None,
                                                 revision_before,
                                                 spans,
                                             );
                                         }
                                         self.mutation_ledger.backfill_revision_and_paths(
-                                            absolute_turn as u32,
+                                            state.absolute_turn as u32,
                                             self.current_revision_id.clone(),
                                             &merged_changed_paths,
                                             self.snapshot_store.is_some()
@@ -1249,7 +1269,7 @@ impl AgentRunner {
                                         self.persist_session_checkpoint(
                                             &state.projector,
                                             &state.transcript,
-                                            current_turn,
+                                            state.current_turn,
                                         );
                                         if let Some(err) = self.session_persist_error.clone() {
                                             return TurnFlow::Finish(self.finish_run(
@@ -1303,7 +1323,7 @@ impl AgentRunner {
                 // Capture the resulting state so `latest_revision_id()` never drifts from disk.
                 // The capture must carry the *absolute* session turn: `current_turn` restarts at 1
                 // on `--resume`, which would misorder revision records against the restored turns.
-                self.capture_workspace_revision(absolute_turn, "verification", &mut logger);
+                self.capture_workspace_revision(state.absolute_turn, "verification", &mut logger);
                 if let Some(err) = self.revision_error.clone() {
                     return TurnFlow::Finish(self.finish_run(
                         TerminalReason::StrictLogFailure(err),
@@ -1551,6 +1571,9 @@ impl AgentRunner {
                 last_assistant_text,
                 gate_failure_count,
                 last_gate_failure_hash,
+                current_turn: 0,
+                absolute_turn: 0,
+                tool_calls: Vec::new(),
             },
             logger,
         ))
