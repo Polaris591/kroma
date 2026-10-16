@@ -5,7 +5,7 @@ pub mod openai_responses;
 pub mod sse;
 mod transport;
 
-use crate::budget::BudgetConfig;
+use crate::budget::{BudgetConfig, TokenBudget, TokenReservation};
 use crate::messages::{AssistantTurn, CacheBreakpointMarker, FinishReason, TranscriptItem};
 use crate::tool::definition::ToolDefinition;
 use crate::types::TerminalReason;
@@ -36,6 +36,8 @@ pub enum ProviderError {
     Timeout,
     #[error("max request attempts exhausted")]
     MaxAttemptsExhausted,
+    #[error("insufficient token allowance for another provider attempt")]
+    RetryBudgetExhausted,
     #[error("transport error: {0}")]
     Transport(String),
 }
@@ -45,8 +47,26 @@ impl ProviderError {
         match self {
             ProviderError::Cancelled => TerminalReason::UserCancelled,
             ProviderError::MaxAttemptsExhausted => TerminalReason::MaxRequestAttempts,
+            ProviderError::RetryBudgetExhausted => TerminalReason::TokenBudgetExhausted,
             other => TerminalReason::ProviderProtocolError(other.to_string()),
         }
+    }
+
+    /// Returns true if the error represents a provably pre-dispatch failure where no network
+    /// transmission ever took place and provider consumption is guaranteed to be zero.
+    ///
+    /// Only client-side pre-dispatch rejections (e.g. `InsecureUrl` validation failure before any socket
+    /// is opened) fall into this category. Post-dispatch errors (HTTP 500/502/503/504, 4xx, redirects,
+    /// mid-stream disconnects, timeouts, cancellations, or final rejections following earlier retry
+    /// attempts) cannot prove zero backend consumption; those reservations are conservatively left
+    /// un-settled so `Drop` commits them to the ledger to keep budget ceilings fail-closed.
+    pub fn is_provably_zero_consumption(&self) -> bool {
+        matches!(self, ProviderError::InsecureUrl(_))
+    }
+
+    /// Backwards-compatible alias for [`Self::is_provably_zero_consumption`].
+    pub fn is_definitive_rejection(&self) -> bool {
+        self.is_provably_zero_consumption()
     }
 }
 
@@ -63,9 +83,131 @@ pub struct ProviderRequest {
     pub cache_breakpoints: Vec<CacheBreakpointMarker>,
     /// F08 (`v1.4.0`): the remaining output-token allowance for *this* request, derived from the
     /// run's token budget. `None` means unbounded (no token budget configured). Protocols map this
-    /// onto their native output cap (`max_tokens` / `max_output_tokens`) so a single response can
-    /// never overshoot the remaining budget.
+    /// onto their native output cap (`max_tokens` / `max_output_tokens`). Input allowance is still
+    /// an estimate and providers may report overage; this is not an exact run-token hard cap.
     pub max_output_tokens: Option<u64>,
+    /// The runner already reserves the first attempt. Additional HTTP attempts must obtain their
+    /// own allowance before transmission; dropping a failed attempt conservatively retains it.
+    pub retry_budget: Option<RetryBudget>,
+    /// Optional counter the provider increments once per transmitted HTTP attempt, so a failed call
+    /// still reports how many requests it actually sent.
+    pub wire_attempts: Option<WireAttempts>,
+}
+
+/// Counts the HTTP attempts a provider call actually transmitted.
+///
+/// The runner records the first attempt before dispatch; when a call *fails* after retrying, the
+/// completion summary would otherwise only describe the logical turn and under-report what reached
+/// the provider. Sharing a counter lets the failure path report the real number too.
+#[derive(Debug, Clone, Default)]
+pub struct WireAttempts(Arc<std::sync::atomic::AtomicUsize>);
+
+impl WireAttempts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one transmitted attempt.
+    pub fn record(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many attempts were transmitted so far.
+    pub fn get(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Shared allowance for wire retries. Its presence opts a direct provider caller into accounting;
+/// without it, retries retain the historical unbudgeted API behaviour.
+#[derive(Debug, Clone)]
+pub struct RetryBudget {
+    pub ledger: Arc<TokenBudget>,
+    pub per_attempt: u64,
+}
+
+impl RetryBudget {
+    fn reserve(&self) -> Result<TokenReservation, ProviderError> {
+        if self.per_attempt == 0 {
+            return Err(ProviderError::RetryBudgetExhausted);
+        }
+        self.ledger
+            .try_reserve(self.per_attempt)
+            .ok_or(ProviderError::RetryBudgetExhausted)
+    }
+}
+
+/// First attempt is reserved by AgentRunner; this helper reserves only later wire attempts.
+fn reserve_retry(
+    req: &ProviderRequest,
+    attempts_used: usize,
+) -> Result<Option<TokenReservation>, ProviderError> {
+    if attempts_used == 0 {
+        Ok(None)
+    } else {
+        req.retry_budget.as_ref().map(RetryBudget::reserve).transpose()
+    }
+}
+
+#[cfg(test)]
+mod retry_budget_tests {
+    use super::*;
+
+    #[test]
+    fn reported_identity_is_unknown_when_missing_and_conflicts_are_rejected() {
+        assert_eq!(model_from_json(r#"{"choices":[]}"#).unwrap(), None);
+        assert_eq!(model_from_json(r#"{"model":" "}"#).unwrap(), None);
+        assert_eq!(model_from_json(r#"{"model":"returned-model"}"#).unwrap().as_deref(), Some("returned-model"));
+        let mut model = Some("first".to_string());
+        assert!(capture_reported_model(&mut model, &serde_json::json!({"model":"second"})).is_err());
+        assert_eq!(model.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn zero_allowance_is_refused_and_dropped_retry_is_unknown() {
+        let ledger = Arc::new(TokenBudget::new(Some(200)));
+        let mut req = ProviderRequest {
+            retry_budget: Some(RetryBudget { ledger: Arc::clone(&ledger), per_attempt: 0 }),
+            ..ProviderRequest::default()
+        };
+        assert!(matches!(reserve_retry(&req, 1), Err(ProviderError::RetryBudgetExhausted)));
+        req.retry_budget.as_mut().unwrap().per_attempt = 100;
+        assert!(reserve_retry(&req, 0).unwrap().is_none());
+        let in_flight = reserve_retry(&req, 1).unwrap().unwrap();
+        assert_eq!(ledger.reserved(), 100);
+        // Cancellation/unwind drops an in-flight retry: no refund and no invented usage.
+        drop(in_flight);
+        let snapshot = ledger.accounting_snapshot();
+        assert_eq!(snapshot.unknown_tokens, 100);
+        assert_eq!(snapshot.settled_tokens, 0);
+        assert_eq!(snapshot.reserved, 0);
+    }
+}
+
+/// Merge repeated stream identity assertions, rejecting conflicting identities instead of silently
+/// attributing usage to whichever chunk happened to arrive last.
+fn capture_reported_model(current: &mut Option<String>, value: &serde_json::Value) -> Result<(), ProviderError> {
+    let Some(model) = value.get("model").and_then(serde_json::Value::as_str)
+        .filter(|model| !model.trim().is_empty()) else { return Ok(()); };
+    if current.as_deref().is_some_and(|existing| existing != model) {
+        return Err(ProviderError::Transport("response changed its reported model identity".to_string()));
+    }
+    *current = Some(model.to_string());
+    Ok(())
+}
+
+fn model_from_json(text: &str) -> Result<Option<String>, ProviderError> {
+    let value = serde_json::from_str(text).map_err(|e| ProviderError::Transport(format!("invalid response identity JSON: {}", e)))?;
+    let mut model = None;
+    capture_reported_model(&mut model, &value)?;
+    Ok(model)
+}
+
+fn settle_retry(reservation: Option<TokenReservation>, turn: &AssistantTurn) {
+    if let (Some(reservation), Some(usage)) = (reservation, turn.usage.as_ref()) {
+        reservation.settle(usage.input_tokens.saturating_add(usage.output_tokens));
+    }
+    // No usage: the reservation drops as unknown, never a fictional measured zero.
 }
 
 /// Gate 7 (`v1.2.0`): the wire protocol used to talk to a model endpoint.
@@ -140,6 +282,8 @@ pub struct ProviderCompletion {
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
     pub attempts_used: usize,
+    /// Exact nonblank identity reported by the response, never backfilled from the request alias.
+    pub reported_model: Option<String>,
 }
 
 pub trait ModelProvider: Send + Sync {
@@ -331,6 +475,7 @@ impl ModelProvider for FakeProvider {
                 latency_ms: 1,
                 ttft_ms: Some(1),
                 attempts_used: 1,
+                reported_model: None,
             })
         })
     }

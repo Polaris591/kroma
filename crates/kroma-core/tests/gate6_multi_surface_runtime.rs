@@ -32,6 +32,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -43,6 +45,10 @@ fn temp_root(tag: &str) -> PathBuf {
     fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+/// B11b: the exact capability refusal an `Ask` parent gets for a `worker` delegation.
+#[cfg(unix)]
+const ASK_WORKER_REFUSAL: &str = "policy denied: cannot spawn a `worker` subagent while the parent policy is `ask`; a worker auto-applies mutations and would exceed the parent's automatic authority. Authorize automatic writes explicitly (e.g. `--allow-write`) instead of relying on a single spawn approval";
 
 fn assistant_stop(text: &str) -> AssistantTurn {
     AssistantTurn {
@@ -113,6 +119,7 @@ where
                 latency_ms: 2,
                 ttft_ms: Some(1),
                 attempts_used: 1,
+                reported_model: None,
             })
         })
     }
@@ -139,6 +146,7 @@ impl ModelProvider for SlowCancellableProvider {
                         latency_ms: delay.as_millis() as u64,
                         ttft_ms: Some(10),
                         attempts_used: 1,
+                reported_model: None,
                     })
                 }
                 _ = async {
@@ -720,10 +728,62 @@ async fn test_rpc_approval_pause_and_resume_approve_and_deny_and_disconnect_fail
         ))
         .await;
     assert!(resp_d_approve.is_ok());
-    // Second write (`s2.txt`) must succeed automatically without a second approval prompt!
+
+    // B12a: an `approve_session` category grant is scoped to the exact workspace revision it was
+    // granted against (plus the run id, tool entry, TTL and remaining uses), not to the whole
+    // session. The first approved write mutates the workspace, so the second write must raise a
+    // *second, real* approval under the new revision instead of silently reusing the category grant.
+    let second_request = loop {
+        let note = tokio::time::timeout(Duration::from_secs(3), note_rx_d.recv())
+            .await
+            .expect("the second write must re-ask for approval under the new workspace revision")
+            .unwrap();
+        if note.method == "approval/requested" {
+            break note;
+        }
+    };
+    let req_id_d2 = second_request.params["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        req_id_d2, req_id_d,
+        "the second write reused the first approval's request id"
+    );
+    assert_eq!(
+        second_request.params["tool_name"], "write",
+        "the re-asked approval must be the second write: {}",
+        second_request.params
+    );
+    assert!(
+        second_request.params["arguments_summary"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("s2.txt"),
+        "the re-asked approval must target the second write's path: {}",
+        second_request.params
+    );
+    // The first approved write landed, and the second file must not exist before the second
+    // approval is answered: there is no automatic cross-revision write.
+    assert_eq!(fs::read_to_string(ws.join("s1.txt")).unwrap(), "one\n");
+    assert!(
+        !ws.join("s2.txt").exists(),
+        "s2.txt was written without a second approval (approve_session auto-approved a new revision)"
+    );
+
+    let resp_d_approve2 = disp_d
+        .handle_request(JsonRpcRequest::new(
+            42,
+            "approval.respond",
+            json!({ "request_id": req_id_d2, "decision": "approve_once" }),
+        ))
+        .await;
+    assert!(resp_d_approve2.is_ok());
+
+    // With the second approval answered, both writes succeed and the run resumes to completion.
     let res_d = tokio::time::timeout(Duration::from_secs(3), prompt_d)
         .await
-        .expect("second write should auto-approve under approve_session")
+        .expect("run must resume after the second approval is answered")
         .unwrap();
     assert!(res_d.is_ok());
     assert_eq!(fs::read_to_string(ws.join("s1.txt")).unwrap(), "one\n");
@@ -1537,9 +1597,14 @@ async fn test_unix_domain_socket_daemon_0600_permissions_and_worker_subagent_rpc
     let sock_path = root.join("kroma.sock");
     let listen_spec = format!("unix://{}", sock_path.display());
 
+    // --- Case 1: Ask parent. A real `spawn_subagent` approval is granted, and only then does B11b's
+    // capability decay refuse the `worker` — before any worktree, state dir, or child provider turn
+    // exists. This is a capability refusal, not a cancel and not an approval denial. ---
     let step = Arc::new(AtomicUsize::new(0));
+    let refusal = Arc::new(Mutex::new(None::<String>));
     let step_c = Arc::clone(&step);
-    let provider = FnProvider::new(move |_req| {
+    let refusal_c = Arc::clone(&refusal);
+    let provider = FnProvider::new(move |req: ProviderRequest| {
         let n = step_c.fetch_add(1, Ordering::SeqCst);
         match n {
             // Parent turn 0: spawn a worker subagent.
@@ -1552,19 +1617,18 @@ async fn test_unix_domain_socket_daemon_0600_permissions_and_worker_subagent_rpc
                     "allowed_paths": ["worker_out.txt"]
                 }),
             )])),
-            // Worker child turn 0: write `worker_out.txt`.
-            1 => Ok(assistant_tools(vec![(
-                "worker_write_1",
-                "write",
-                json!({
-                    "path": "worker_out.txt",
-                    "content": "created by worker\n"
-                }),
-            )])),
-            // Worker child turn 1: stop.
-            2 => Ok(assistant_stop("Worker finished writing worker_out.txt.")),
-            // Parent turn 1: stop.
-            _ => Ok(assistant_stop("Parent merged worker output.")),
+            // Parent turn 1: capture the refusal the tool returned, then stop. A refused delegation
+            // never dispatches a child, so this is the parent's last provider turn.
+            _ => {
+                let text = req.messages.iter().rev().find_map(|m| match m {
+                    TranscriptItem::ToolResult(result) => Some(result.content.to_string()),
+                    _ => None,
+                });
+                if let Some(text) = text {
+                    *refusal_c.lock().unwrap() = Some(text);
+                }
+                Ok(assistant_stop("Parent observed the refused delegation."))
+            }
         }
     });
 
@@ -1643,12 +1707,32 @@ async fn test_unix_domain_socket_daemon_0600_permissions_and_worker_subagent_rpc
         approved,
         "worker spawn_subagent must request approval under PolicyMode::Ask"
     );
+    // The real approval was accepted, and only *then* did the capability decay refuse the worker:
+    // the exact refusal reaches the parent as the tool result.
+    let refusal_text = refusal
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the refused spawn must return its reason to the parent");
     assert_eq!(
-        fs::read_to_string(ws.join("worker_out.txt")).unwrap(),
-        "created by worker\n"
+        refusal_text,
+        format!("POLICY_DENIED: {ASK_WORKER_REFUSAL}"),
+        "expected the exact B11b capability refusal, got: {refusal_text}"
+    );
+    // A refused delegation has no side effect at all: no child provider turn ran and no file was
+    // written.
+    assert_eq!(
+        step.load(Ordering::SeqCst),
+        2,
+        "a refused delegation must not dispatch any child provider turn"
+    );
+    assert!(
+        !ws.join("worker_out.txt").exists(),
+        "a refused delegation must not create worker_out.txt"
     );
 
-    // Verify causal ordering: ApprovalRequested & ApprovalResolved MUST precede SubagentSpawned!
+    // Approval ordering holds; the refusal happens before materialization, so there is no
+    // `SubagentSpawned` event for a refused delegation.
     let pos_req = event_order
         .iter()
         .position(|e| e == "ApprovalRequested")
@@ -1657,21 +1741,123 @@ async fn test_unix_domain_socket_daemon_0600_permissions_and_worker_subagent_rpc
         .iter()
         .position(|e| e == "ApprovalResolved")
         .expect("missing ApprovalResolved event");
-    let pos_spawn = event_order
-        .iter()
-        .position(|e| e == "SubagentSpawned")
-        .expect("missing SubagentSpawned event");
     assert!(
-        pos_req < pos_res && pos_res < pos_spawn,
-        "expected ApprovalRequested ({}) < ApprovalResolved ({}) < SubagentSpawned ({}), got {:?}",
+        pos_req < pos_res,
+        "expected ApprovalRequested ({}) < ApprovalResolved ({}), got {:?}",
         pos_req,
         pos_res,
-        pos_spawn,
+        event_order
+    );
+    assert!(
+        !event_order.iter().any(|e| e == "SubagentSpawned"),
+        "a refused delegation must not emit SubagentSpawned, got {:?}",
         event_order
     );
 
     drop(uw);
     let _ = cancel_tx.send(true);
     daemon_task.await.unwrap();
+
+    // --- Case 2 (complementary success): an `AllowWrite` parent authorizes the delegation by its own
+    // mode, so a real worker runs in an isolated worktree, merges `worker_out.txt`, and the worktree
+    // is cleaned up afterwards. ---
+    let sock_path_ok = root.join("kroma-allow-write.sock");
+    let listen_spec_ok = format!("unix://{}", sock_path_ok.display());
+    let state_ok = root.join("state-allow-write");
+    fs::create_dir_all(&state_ok).unwrap();
+
+    let step_ok = Arc::new(AtomicUsize::new(0));
+    let step_ok_c = Arc::clone(&step_ok);
+    let provider_ok = FnProvider::new(move |_req| {
+        let n = step_ok_c.fetch_add(1, Ordering::SeqCst);
+        match n {
+            // Parent turn 0: spawn a worker subagent.
+            0 => Ok(assistant_tools(vec![(
+                "call_spawn_worker",
+                "spawn_subagent",
+                json!({
+                    "role": "worker",
+                    "task": "Write worker_out.txt",
+                    "allowed_paths": ["worker_out.txt"]
+                }),
+            )])),
+            // Worker child turn 0: write `worker_out.txt`.
+            1 => Ok(assistant_tools(vec![(
+                "worker_write_1",
+                "write",
+                json!({
+                    "path": "worker_out.txt",
+                    "content": "created by worker\n"
+                }),
+            )])),
+            // Worker child turn 1: stop.
+            2 => Ok(assistant_stop("Worker finished writing worker_out.txt.")),
+            // Parent turn 1: stop.
+            _ => Ok(assistant_stop("Parent merged worker output.")),
+        }
+    });
+
+    let cfg_ok = KromaRuntimeConfig::new(&ws, &state_ok, PolicyMode::AllowWrite)
+        .with_surface("serve", "unix");
+    let dispatcher_ok = RpcDispatcher::new(cfg_ok, provider_ok).unwrap();
+    let daemon_ok = KromaDaemon::bind(&listen_spec_ok, dispatcher_ok.clone())
+        .await
+        .unwrap();
+    let (cancel_tx_ok, cancel_rx_ok) = watch::channel(false);
+    let daemon_task_ok = tokio::spawn(async move {
+        daemon_ok.serve(cancel_rx_ok).await.unwrap();
+    });
+
+    let unix_stream_ok = tokio::net::UnixStream::connect(&sock_path_ok).await.unwrap();
+    let (ur_ok, mut uw_ok) = unix_stream_ok.into_split();
+    let mut ulines_ok = BufReader::new(ur_ok).lines();
+
+    uw_ok.write_all(
+        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.prompt\",\"params\":{\"prompt\":\"Delegate worker_out.txt\"}}\n",
+    )
+    .await
+    .unwrap();
+    uw_ok.flush().await.unwrap();
+
+    let mut event_order_ok = Vec::new();
+    loop {
+        let line = tokio::time::timeout(Duration::from_secs(5), ulines_ok.next_line())
+            .await
+            .expect("timed out on Unix domain socket RPC stream")
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        if v.get("method").and_then(Value::as_str) == Some("kroma/event") {
+            if let Some(et) = v["params"]["event_type"].as_str() {
+                event_order_ok.push(et.to_string());
+            }
+        } else if v.get("id").and_then(Value::as_i64) == Some(1) {
+            assert_eq!(v["result"]["status"], "completed");
+            break;
+        }
+    }
+
+    assert_eq!(
+        fs::read_to_string(ws.join("worker_out.txt")).unwrap(),
+        "created by worker\n"
+    );
+    assert!(
+        event_order_ok.iter().any(|e| e == "SubagentSpawned"),
+        "an authorized delegation must emit SubagentSpawned, got {:?}",
+        event_order_ok
+    );
+    // The isolated worktree is removed once the child's delta is merged back.
+    let worktrees = state_ok.join("worktrees");
+    if worktrees.exists() {
+        let leftover: Vec<_> = fs::read_dir(&worktrees).unwrap().collect();
+        assert!(
+            leftover.is_empty(),
+            "leftover subagent worktrees: {leftover:?}"
+        );
+    }
+
+    drop(uw_ok);
+    let _ = cancel_tx_ok.send(true);
+    daemon_task_ok.await.unwrap();
     let _ = fs::remove_dir_all(&root);
 }

@@ -1,6 +1,7 @@
 //! `RpcDispatcher` methods for the tournament surface.
 
 use super::*;
+use crate::tool::policy::{canonical_arguments_digest, AuthEntry, AuthScope, GrantRejection};
 
 impl RpcDispatcher {
     /// F01 (`v1.4.0`): shared authorization + quota preflight for `session.tournament`.
@@ -70,6 +71,7 @@ impl RpcDispatcher {
                 }
                 let req = ApprovalRequest {
                     tool_name: "spawn_subagent".to_string(),
+                    call_id: None,
                     effect_class: EffectClass::Mutating,
                     is_sensitive_path: false,
                     target_path: None,
@@ -77,9 +79,38 @@ impl RpcDispatcher {
                     command_preview: None,
                     workspace_root: self.inner.env.workspace().root().to_path_buf(),
                 };
+                // B11a: the RPC tournament gate is a distinct authority entry point from the
+                // `spawn_subagent` tool, and the RPC carries no run identity, so a category answer
+                // degrades to a single call rather than becoming a reusable cross-request grant.
+                // B12a: bind it to the session's current revision too, so an approval cannot
+                // survive a `revision.restore`/`--undo` that moved the workspace.
+                let revision = self
+                    .inner
+                    .status
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .latest_revision_id
+                    .as_deref()
+                    .and_then(|id| RevisionId::parse(id).ok());
+                let auth_scope = AuthScope {
+                    entry: AuthEntry::Tournament,
+                    tool_name: "spawn_subagent".to_string(),
+                    run_id: None,
+                    workspace_root: self.inner.env.workspace().root().to_path_buf(),
+                    revision,
+                };
+                let args_digest = canonical_arguments_digest(&hook_call.raw_arguments);
                 let engine = self.inner.policy_engine.clone();
-                let mut prompt_task =
-                    tokio::task::spawn_blocking(move || engine.prompt_approval(&req));
+                let scope_for_prompt = auth_scope.clone();
+                let digest_for_prompt = args_digest.clone();
+                let mut prompt_task = tokio::task::spawn_blocking(move || {
+                    engine.prompt_approval_scoped(
+                        &scope_for_prompt,
+                        &req,
+                        digest_for_prompt.as_deref(),
+                        None,
+                    )
+                });
                 let decision = tokio::select! {
                     res = &mut prompt_task => res.unwrap_or(ApprovalDecision::Deny),
                     _ = async {
@@ -104,7 +135,27 @@ impl RpcDispatcher {
                     }
                 };
                 match decision {
-                    ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => Ok(()),
+                    ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => {
+                        // B11a: consume the one-shot grant the approval minted for this entry.
+                        if let Some(ref digest) = args_digest {
+                            if let Err(rejection) = self
+                                .inner
+                                .policy_engine
+                                .consume_grant(&auth_scope, digest)
+                            {
+                                if !matches!(rejection, GrantRejection::Missing) {
+                                    return Err(JsonRpcError::new(
+                                        JSONRPC_INTERNAL_ERROR,
+                                        format!(
+                                            "session.tournament approval grant rejected: {:?}",
+                                            rejection
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(())
+                    }
                     ApprovalDecision::Deny => Err(JsonRpcError::new(
                         JSONRPC_INTERNAL_ERROR,
                         "session.tournament denied by approval policy",
@@ -134,6 +185,33 @@ impl RpcDispatcher {
                 JSONRPC_INTERNAL_ERROR,
                 "cannot run a tournament while another session operation is in progress",
             ));
+        };
+        // A tournament merges its winner into the parent workspace, so it is a writer: it must own
+        // the workspace lease and refuse to run over a half-applied interrupted restore.
+        self.validate_session_param(params)?;
+        let _writer_lease = self.acquire_writer_lease()?;
+        self.ensure_no_pending_restore()?;
+
+        // B01: bind this tournament run to the connection that dispatched it before the approval
+        // preflight, so a disconnect during that wait cancels it instead of leaking a writer lease.
+        let conn = CONNECTION_CONTEXT.try_with(|c| c.clone()).ok();
+        let request = RUN_REQUEST.try_with(|r| r.clone()).ok();
+        let Some(claim) = self.claim_run(conn.as_ref(), request.as_ref()) else {
+            return Err(JsonRpcError::new(
+                JSONRPC_INTERNAL_ERROR,
+                "the connection that started this tournament closed before it began",
+            ));
+        };
+        let RunClaim {
+            run_id,
+            cancel_rx,
+            acp_owner,
+        } = claim;
+        let _run_guard = RunGuard {
+            inner: Arc::clone(&self.inner),
+            run_id,
+            in_flight: false,
+            acp_owner,
         };
 
         let task = params
@@ -301,14 +379,31 @@ impl RpcDispatcher {
             worktree_base: self.inner.config.state_dir.join("worktrees"),
             state_base: self.inner.config.state_dir.join("subagents"),
             allowed_write_globs,
-            budget: self.inner.config.budget.clone(),
+            // F05 (`v1.5.1`): honor the live `/config set max_tokens` cap for a standalone race,
+            // exactly like `session.prompt` does.
+            budget: {
+                let mut budget = self.inner.config.budget.clone();
+                budget.max_total_tokens = self.active_max_tokens();
+                budget
+            },
+            // F05 (`v1.5.1`): the tournament derives its own shared ledger from the run budget's
+            // `max_total_tokens` (a single RPC call has no parent runner to share with).
+            token_budget: None,
             policy_mode: self.inner.policy_engine.mode(),
+            // B11b: read the parent's fail-closed policy-hook constraints from the real session
+            // registry, so a candidate is refused rather than run without the parent's constraints.
+            parent_policy_hooks: crate::subagents::ParentPolicyHooks::from_registry(
+                &self.inner.registry,
+            ),
             workspace_skills: self.inner.registry.skills(),
             predictive_check: self.inner.config.predictive_check,
-            cancel_rx: self.ensure_active_cancel_receiver(),
+            cancel_rx,
             timeout_ms,
             disallow_test_tampering,
             protected_paths: protected_paths.clone(),
+            // Capability gap #5 (`v1.5.2`): an RPC repair race is strict by default — a candidate
+            // whose verification was skipped cannot win.
+            require_verified: true,
         };
 
         let outcome = crate::subagents::run_worktree_tournament(

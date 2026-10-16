@@ -384,6 +384,72 @@ pub(crate) fn ensure_private_dir_io(dir: &Path) -> std::io::Result<()> {
     })
 }
 
+/// `fsync` a directory so a rename/unlink/mkdir within it survives a power loss.
+///
+/// On Unix the directory is opened with [`open_existing_no_symlink`] so a symlinked store directory
+/// is refused rather than followed; platforms without directory `fsync` treat this as a best-effort
+/// no-op. This is the single place every durability seam (snapshot store, session WAL) syncs a
+/// directory, so the no-follow policy and the test fault seam live in exactly one module.
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let handle = open_existing_no_symlink(dir)?;
+        sync_dir_handle(&handle)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// [`sync_dir`] for a caller that already holds the verified directory descriptor (the atomic-write
+/// path in `tools::write` and the workspace-relative removals in `revision`). Syncing the handle
+/// avoids re-opening by path and races nothing.
+#[cfg(unix)]
+pub(crate) fn sync_dir_handle(handle: &File) -> std::io::Result<()> {
+    #[cfg(test)]
+    if dir_sync_fault_armed() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "injected directory-sync failure",
+        ));
+    }
+    handle.sync_all()
+}
+
+/// Test-only RAII guard that makes every directory `fsync` on the current thread fail until it is
+/// dropped. Instance-free but thread-scoped, so a test that arms it cannot perturb another test
+/// running in parallel; it exists so a directory-sync failure can be exercised without relying on
+/// filesystem permissions (which root ignores).
+#[cfg(all(test, unix))]
+pub(crate) struct DirSyncFaultGuard;
+
+#[cfg(all(test, unix))]
+impl DirSyncFaultGuard {
+    pub(crate) fn arm() -> Self {
+        DIR_SYNC_FAILING.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for DirSyncFaultGuard {
+    fn drop(&mut self) {
+        DIR_SYNC_FAILING.with(|flag| flag.set(false));
+    }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static DIR_SYNC_FAILING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, unix))]
+fn dir_sync_fault_armed() -> bool {
+    DIR_SYNC_FAILING.with(|flag| flag.get())
+}
+
 /// Strict dirfd walk: create every missing component with `mkdirat` and re-open each one with
 /// `O_NOFOLLOW | O_DIRECTORY`, so a symlinked component is refused rather than traversed. Only the
 /// final component is chmod-ed: pre-existing ancestors (e.g. `/tmp`) keep their own permissions and

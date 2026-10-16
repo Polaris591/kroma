@@ -317,6 +317,7 @@ struct ResponsesStreamAssembler {
     /// `output_index` → in-flight `function_call` (call_id, name, arguments).
     pending_calls: std::collections::HashMap<usize, (String, String, String)>,
     usage: Option<TokenUsage>,
+    reported_model: Option<String>,
     status: Option<String>,
     saw_business: bool,
     /// Set only on `response.completed` / `response.incomplete`: the explicit end-of-stream signal.
@@ -331,6 +332,9 @@ impl ResponsesStreamAssembler {
         let val: Value = serde_json::from_str(data).map_err(|e| {
             ProviderError::IncompleteStream(format!("invalid Responses SSE payload: {}", e))
         })?;
+        if let Some(response) = val.get("response") {
+            super::capture_reported_model(&mut self.reported_model, response)?;
+        }
         match event {
             "response.created" | "response.in_progress" => {
                 self.saw_business = true;
@@ -577,7 +581,11 @@ impl ModelProvider for OpenAiResponsesClient {
                 if *cancel_rx.borrow() {
                     return Err(ProviderError::Cancelled);
                 }
+                let retry_reservation = super::reserve_retry(&req, attempts_used)?;
                 attempts_used += 1;
+                if let Some(wire) = &req.wire_attempts {
+                    wire.record();
+                }
                 let attempt_start = Instant::now();
                 let outcome = tokio::select! {
                     res = self.attempt(&body_json, req.stream, budget, attempt_start) => res,
@@ -594,13 +602,15 @@ impl ModelProvider for OpenAiResponsesClient {
                 };
 
                 match outcome {
-                    Ok((turn, latency_ms, ttft_ms)) => {
+                    Ok((turn, latency_ms, ttft_ms, reported_model)) => {
+                        super::settle_retry(retry_reservation, &turn);
                         return Ok(ProviderCompletion {
                             turn,
                             request_body_bytes,
                             latency_ms,
                             ttft_ms,
                             attempts_used,
+                            reported_model,
                         });
                     }
                     Err(AttemptFailure::Fatal(err)) => return Err(err),
@@ -646,7 +656,7 @@ impl OpenAiResponsesClient {
         stream: bool,
         budget: &BudgetConfig,
         attempt_start: Instant,
-    ) -> Result<(AssistantTurn, u64, Option<u64>), AttemptFailure> {
+    ) -> Result<(AssistantTurn, u64, Option<u64>, Option<String>), AttemptFailure> {
         let deadline = attempt_start + budget.request_timeout;
         let path = self.responses_path();
         let headers = vec![(
@@ -700,7 +710,8 @@ impl OpenAiResponsesClient {
                 .map_err(|e| AttemptFailure::Fatal(ProviderError::Transport(e.to_string())))?;
             let turn = parse_responses_response(text).map_err(AttemptFailure::Fatal)?;
             let latency_ms = attempt_start.elapsed().as_millis() as u64;
-            return Ok((turn, latency_ms, Some(latency_ms)));
+            let reported_model = super::model_from_json(text).map_err(AttemptFailure::Fatal)?;
+            return Ok((turn, latency_ms, Some(latency_ms), reported_model));
         }
 
         let mut assembler = ResponsesStreamAssembler::default();
@@ -725,11 +736,12 @@ impl OpenAiResponsesClient {
         let saw_business = assembler.saw_business;
         outcome.map_err(|failure| classify_stream_failure(saw_business, failure))?;
 
+        let reported_model = assembler.reported_model.clone();
         let turn = assembler
             .finalize()
             .map_err(|e| classify_error(saw_business, e))?;
         let latency_ms = attempt_start.elapsed().as_millis() as u64;
-        Ok((turn, latency_ms, ttft_ms))
+        Ok((turn, latency_ms, ttft_ms, reported_model))
     }
 }
 

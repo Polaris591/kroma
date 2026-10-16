@@ -330,7 +330,8 @@ pub fn extract_import_tokens(rel: &str, content: &str) -> BTreeSet<String> {
         for ch in line.chars() {
             if ch.is_alphanumeric() || ch == '_' {
                 current.push(ch);
-            } else if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
+            } else if current.len() >= 3
+                && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
             {
                 tokens.insert(std::mem::take(&mut current));
             } else {
@@ -1209,8 +1210,7 @@ pub fn extract_reference_tokens(rel: &str, content: &str) -> BTreeSet<String> {
         if ch.is_alphanumeric() || ch == '_' {
             current.push(ch);
         } else if !current.is_empty() {
-            if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit())
-            {
+            if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 tokens.insert(std::mem::take(&mut current));
             } else {
                 current.clear();

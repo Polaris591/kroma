@@ -157,7 +157,10 @@ pub async fn execute_write(
                     },
                 );
             }
-            Some(stat_buf.st_mode & 0o7777)
+            // Darwin mode_t is u16; Linux mode_t is u32.
+            #[allow(clippy::unnecessary_cast)]
+            let mode = (stat_buf.st_mode & 0o7777) as u32;
+            Some(mode)
         } else {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ENOENT) {
@@ -466,9 +469,19 @@ pub fn atomic_write_at(
                 unsafe {
                     let _ = libc::unlinkat(parent_fd, c_tmp.as_ptr(), 0);
                 }
-                let _ = parent_dir.sync_all();
                 temp_guard.mark_committed();
-                return Ok(());
+                // The link committed the target; make the new directory entry durable. A failure
+                // here leaves the file visible but its durability unconfirmed, so report it rather
+                // than acknowledge a write a power loss could drop.
+                return crate::secure_fs::sync_dir_handle(parent_dir).map_err(|e| {
+                    (
+                        ErrorCode::IoError,
+                        format!(
+                            "atomic write committed '{}' but its directory could not be synced: {}",
+                            file_name_lossy, e
+                        ),
+                    )
+                });
             }
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EEXIST) {
@@ -528,9 +541,18 @@ pub fn atomic_write_at(
             ));
         }
 
-        let _ = parent_dir.sync_all();
         temp_guard.mark_committed();
-        Ok(())
+        // The rename committed the target; make the new directory entry durable before reporting
+        // success, so an acknowledged write survives a power loss.
+        crate::secure_fs::sync_dir_handle(parent_dir).map_err(|e| {
+            (
+                ErrorCode::IoError,
+                format!(
+                    "atomic write committed '{}' but its directory could not be synced: {}",
+                    file_name_lossy, e
+                ),
+            )
+        })
     }
     #[cfg(windows)]
     {

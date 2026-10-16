@@ -1,7 +1,7 @@
 //! Completion verification gate and bounded failure localization.
 
-use crate::env::{CompletionGate, CompletionGateContext, GateOutcome};
-use crate::process_group::ChildProcessGroup;
+use crate::env::{CompletionGate, CompletionGateContext, CompletionGateStatus, GateOutcome};
+use crate::process_launch::{EnvironmentPolicy, ProcessLaunch};
 use crate::tool::output_buffer::{HeadTailBuffer, StreamLineCollector};
 use crate::tools::bash::PIPE_DRAIN_TIMEOUT;
 use sha2::{Digest, Sha256};
@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::watch;
 
 const HEAD_BYTES: usize = 16 * 1024;
@@ -123,35 +122,30 @@ impl CompletionGate for WorkspaceCompletionGate {
                 });
             };
 
-            let mut command = Command::new(&argv[0]);
-            command
-                .args(&argv[1..])
-                .current_dir(&ctx.workspace_root)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .env_clear()
-                .envs(crate::tools::bash::collect_sanitized_env())
-                .env("CI", "true")
-                .env("NO_COLOR", "1")
-                .kill_on_drop(true);
-            // Verification is arbitrary project code. Give it its own process group / Windows Job Object
-            // so timeout cleanup can terminate descendants, and use the same secret-env filtering as `bash`.
-            ChildProcessGroup::configure_tokio_command(&mut command);
-
-            let mut child = match command.spawn() {
-                Ok(child) => child,
-                Err(err) => {
-                    return Ok(GateOutcome::Rejected {
-                        feedback: format!(
-                            "verification command could not execute ({}): {}",
-                            display_argv(&argv),
-                            err
-                        ),
-                    })
-                }
-            };
-            let proc_group = ChildProcessGroup::from_tokio_child(&child);
+            // Verification is arbitrary project code. Launch it through the shared seam so the
+            // credential scrub, the process group / Windows Job Object, and the fail-closed
+            // containment attach are identical to every other supervised spawn. The explicit
+            // `CI` / `NO_COLOR` baseline is preserved by `SanitizedMinimal`, and the stdio contract
+            // (null stdin, piped stdout/stderr) is spelled out rather than assumed.
+            let (mut child, proc_group) =
+                match ProcessLaunch::new(argv[0].clone(), argv[1..].to_vec())
+                    .cwd(&ctx.workspace_root)
+                    .stdio(Stdio::null(), Stdio::piped(), Stdio::piped())
+                    .env_policy(EnvironmentPolicy::SanitizedMinimal)
+                    .kill_on_drop(true)
+                    .spawn_tokio()
+                {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        return Ok(GateOutcome::Rejected {
+                            feedback: format!(
+                                "verification command could not execute ({}): {}",
+                                display_argv(&argv),
+                                err
+                            ),
+                        })
+                    }
+                };
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
 
@@ -163,7 +157,12 @@ impl CompletionGate for WorkspaceCompletionGate {
             let (stdout_task, stdout_buf) = spawn_stream_collector(stdout, child_exited_rx.clone());
             let (stderr_task, stderr_buf) = spawn_stream_collector(stderr, child_exited_rx);
 
-            let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+            // F04 (`v1.5.1`): clamp the verification timeout to the enclosing run's remaining
+            // time, so a long test suite cannot outlive the run's deadline. The existing timeout
+            // path still terminates the whole process group, so the future is never dropped with
+            // the child still alive.
+            let effective_timeout = ctx.deadline.map_or(self.timeout, |d| d.clamp(self.timeout));
+            let status = match tokio::time::timeout(effective_timeout, child.wait()).await {
                 Ok(Ok(status)) => status,
                 Ok(Err(err)) => {
                     let _ = child_exited_tx.send(true);
@@ -189,7 +188,7 @@ impl CompletionGate for WorkspaceCompletionGate {
                     return Ok(GateOutcome::Rejected {
                         feedback: format!(
                             "verification timed out after {} seconds: {}",
-                            self.timeout.as_secs(),
+                            effective_timeout.as_secs(),
                             display_argv(&argv)
                         ),
                     });
@@ -235,6 +234,17 @@ impl CompletionGate for WorkspaceCompletionGate {
                 ),
             })
         })
+    }
+
+    fn status(&self) -> CompletionGateStatus {
+        match &self.command {
+            Some(command) => CompletionGateStatus::Command {
+                command: command.clone(),
+            },
+            None => CompletionGateStatus::AutoDetected {
+                allow_auto_detected: self.allow_auto_detected,
+            },
+        }
     }
 }
 
@@ -670,6 +680,7 @@ mod tests {
             workspace_root: root.clone(),
             modified_files: vec!["src/lib.rs".into()],
             turns_used: 1,
+            deadline: None,
         };
         let started = Instant::now();
         let outcome = gate.check(&ctx).await.unwrap();
@@ -703,6 +714,7 @@ mod tests {
             workspace_root: root.clone(),
             modified_files: vec!["src/index.js".into()],
             turns_used: 1,
+            deadline: None,
         };
         match gate.check(&ctx).await.unwrap() {
             GateOutcome::Skipped { reason } => assert!(reason.contains("--allow-shell")),
@@ -769,6 +781,7 @@ mod tests {
             workspace_root: root.clone(),
             modified_files: vec!["src/lib.rs".into()],
             turns_used: 2,
+            deadline: None,
         };
         match gate.check(&ctx).await.unwrap() {
             GateOutcome::Rejected { feedback } => {
@@ -792,6 +805,7 @@ mod tests {
             workspace_root: std::env::temp_dir(),
             modified_files: vec![],
             turns_used: 1,
+            deadline: None,
         };
         assert_eq!(gate.check(&ctx).await.unwrap(), GateOutcome::Approved);
     }

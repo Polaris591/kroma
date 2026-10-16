@@ -1,10 +1,14 @@
-use crate::attribution::{AttributionEngine, AttributionReport, MutationLedger, MutationTelemetry};
-use crate::budget::{BudgetConfig, BudgetTracker};
+use crate::attribution::{
+    AttributionCandidate, AttributionEngine, AttributionReport, CounterfactualProbeConfig,
+    CounterfactualProbeOutcome, DenyProbes, MutationLedger, MutationTelemetry, ProbeApproval,
+    ProbeRequest,
+};
+use crate::budget::{BudgetConfig, BudgetTracker, RunDeadline, TokenBudget, TokenReservation};
 use crate::completion_gate::{failure_fingerprint, WorkspaceCompletionGate};
 use crate::context_projector::{source_entry_id, verify_tool_call_pairing, ContextProjector};
 use crate::env::{
-    AllowAllGate, CompletionGate, CompletionGateContext, GateOutcome, SharedCompletionGate,
-    SharedExecutionEnv,
+    AllowAllGate, CompletionGate, CompletionGateContext, ExecutionContext, GateOutcome,
+    SharedCompletionGate, SharedExecutionEnv,
 };
 use crate::events::{EventLogger, EventPayload};
 use crate::extensions::{
@@ -25,7 +29,10 @@ use crate::subagents::{
     SubagentRole, SubagentRunOutcome, TournamentCandidate, TournamentRequest, TournamentSpec,
     WorktreeMergeResult, DEFAULT_MAX_SUBAGENT_SPAWNS,
 };
-use crate::tool::policy::{ApprovalDecision, ApprovalRequest, PolicyCheckResult};
+use crate::tool::policy::{
+    canonical_arguments_digest, ApprovalDecision, ApprovalRequest, AuthEntry, AuthScope,
+    GrantRejection, PolicyCheckResult,
+};
 use crate::tool::runtime::ToolRuntime;
 use crate::tools::recall_evidence::execute_recall_evidence;
 use crate::tools::ToolExecutionOutput;
@@ -62,6 +69,16 @@ pub(crate) fn estimate_prompt_input_tokens(
     approx_tokens(static_prefix_bytes.saturating_add(message_history_bytes))
 }
 
+/// Account for wire attempts that were actually transmitted. The first attempt is recorded before
+/// dispatch, so only the remainder is added here; a saturated cap simply stops recording.
+fn record_wire_attempts(tracker: &mut crate::budget::BudgetTracker, attempts: usize) {
+    for _ in 1..attempts {
+        if !tracker.try_record_request_attempt() {
+            break;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunSummary {
     pub run_id: RunId,
@@ -76,6 +93,12 @@ pub struct RunSummary {
     /// F10 (`v1.4.0`): input/output tokens spent by child subagents and tournament candidates
     /// (including failed/cancelled ones), tracked separately from the parent's own spend.
     pub children_input_tokens: u64,
+    /// B16: the cached part of `children_input_tokens`, kept separate so a priced report can use the
+    /// cached rate where the operator's table distinguishes it.
+    pub children_cached_input_tokens: u64,
+    /// B16: `provider_reported` | `byte_estimate_not_measured` | `mixed` | `unknown`. A consumer
+    /// must not treat an estimated total as measured provider usage.
+    pub usage_basis: String,
     pub children_output_tokens: u64,
     pub cache_hit_ratio: f64,
     pub compaction_reread_count: u64,
@@ -96,6 +119,37 @@ pub struct AgentRunConfig {
     /// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`), configurable via
     /// `config.toml` / `.kroma.toml` / `/config set projection_profile <p>`. `None` = default (`P2`).
     pub projection_profile: Option<crate::context_projector::ProjectionProfile>,
+    /// Capability gap #3 (`v1.5.2`): opt-in causal citation pinning + dead-end negative-sample
+    /// compression. Off by default; the paired-benchmark ablation switch flips it per arm.
+    pub causal_pruning: bool,
+    /// Capability gap #6 (`v1.5.2`): when set, only the core tool set (plus `discover_tools`) is
+    /// pinned in the initial request; every other tool schema is fetched on demand. Off by default.
+    pub on_demand_tools: bool,
+    /// Capability gap #4 (`v1.5.2`): the durable-task host, when present, records every child
+    /// subagent this run spawns (state, spend, artifact, notification) so `tasks.control` reflects
+    /// real work. `None` for library/test callers that do not host a control plane.
+    pub durable_tasks: Option<Arc<crate::task_host::DurableTaskHost>>,
+}
+
+/// Capability gap #6 (`v1.5.2`): the tools pinned in the initial request under on-demand schema
+/// mode. Every other policy-permitted tool is still dispatchable, but the model must fetch its
+/// schema with `discover_tools` first.
+pub const CORE_TOOL_NAMES: &[&str] = &[
+    "activate_skill",
+    "bash",
+    "discover_tools",
+    "edit",
+    "find",
+    "grep",
+    "ls",
+    "read",
+    "recall_evidence",
+    "write",
+];
+
+/// `true` when `name` belongs to the core tool set pinned under on-demand schema mode.
+pub fn is_core_tool(name: &str) -> bool {
+    CORE_TOOL_NAMES.contains(&name)
 }
 
 impl AgentRunConfig {
@@ -108,7 +162,19 @@ impl AgentRunConfig {
             allow_tool_calls_on_stop: false,
             strict_log: false,
             projection_profile: None,
+            causal_pruning: false,
+            on_demand_tools: false,
+            durable_tasks: None,
         }
+    }
+
+    /// Capability gap #4 (`v1.5.2`): attach the durable-task host that records child subagents.
+    pub fn with_durable_tasks(
+        mut self,
+        host: Option<Arc<crate::task_host::DurableTaskHost>>,
+    ) -> Self {
+        self.durable_tasks = host;
+        self
     }
 
     /// B2 (`v1.4.0`): select the context projection profile for this run.
@@ -117,6 +183,19 @@ impl AgentRunConfig {
         profile: Option<crate::context_projector::ProjectionProfile>,
     ) -> Self {
         self.projection_profile = profile;
+        self
+    }
+
+    /// Capability gap #3 (`v1.5.2`): enable causal citation pinning and dead-end compression.
+    pub fn with_causal_pruning(mut self, enabled: bool) -> Self {
+        self.causal_pruning = enabled;
+        self
+    }
+
+    /// Capability gap #6 (`v1.5.2`): pin only the core tool schemas and expose the rest through
+    /// on-demand discovery (`discover_tools`).
+    pub fn with_on_demand_tools(mut self, enabled: bool) -> Self {
+        self.on_demand_tools = enabled;
         self
     }
 }
@@ -154,6 +233,10 @@ pub struct AgentRunner {
     subagents_spawned: usize,
     /// Gate 5: optional total token cap (input + output) enforced on child subagent runs.
     max_total_tokens: Option<u64>,
+    /// F05 (`v1.5.1`): the shared token ledger for this run tree. The parent reserves from it before
+    /// every provider request, and every parallel child subagent draws its own allocation from the
+    /// same ledger, so a concurrent batch/tournament can never spend more than the run's cap.
+    token_budget: Arc<TokenBudget>,
     /// F10 (`v1.4.0`): token spend accumulated by child subagents / tournament candidates during
     /// the current turn, drained into the parent [`BudgetTracker`] after each tool batch so the run
     /// summary can attribute `self` vs `children` cost.
@@ -165,6 +248,21 @@ pub struct AgentRunner {
     adaptive_tournament_candidates: usize,
     /// Item #3: guards against escalating more than once per run.
     adaptive_tournament_attempted: bool,
+    /// Capability gap #5 (`v1.5.2`): whether a repair race requires a candidate to have actually
+    /// passed verification before it may merge. Strict by default, so a `Skipped` gate is never
+    /// mistaken for a verified success.
+    tournament_require_verified: bool,
+    /// Capability gap #2 (`v1.5.2`): opt-in isolated counterfactual probe configuration.
+    counterfactual_probe: CounterfactualProbeConfig,
+    /// Capability gap #2: approval seam; defaults to denying every probe.
+    probe_approval: Arc<dyn ProbeApproval>,
+    /// Capability gap #2: probes actually executed this run (bounded by the config).
+    counterfactual_probes_run: usize,
+    /// Capability gap #2: probes whose revert resolved the failure (precision numerator).
+    counterfactual_probes_resolved: usize,
+    /// F04 (`v1.5.1`): absolute deadline of this run, published by [`Self::prepare_run`] so phases
+    /// that run outside the main loop (subagents, tournaments) can clamp to the same instant.
+    run_deadline: Option<RunDeadline>,
 }
 
 /// Inputs for [`AgentRunner::run_subagent_batch`], grouped so the extracted phase takes a single
@@ -217,6 +315,9 @@ impl AgentRunner {
         cancel_rx: watch::Receiver<bool>,
     ) -> Self {
         let subagent_backend = Arc::new(ProviderSubagentBackend::new(Arc::clone(&provider)));
+        // F05 (`v1.5.1`): seed the shared token ledger from the unified cap carried on the run's
+        // `BudgetConfig` (set by the CLI, config file or RPC surface).
+        let max_total_tokens = config.budget.max_total_tokens;
         Self {
             config,
             provider,
@@ -241,11 +342,18 @@ impl AgentRunner {
             subagent_backend,
             max_subagent_spawns: DEFAULT_MAX_SUBAGENT_SPAWNS,
             subagents_spawned: 0,
-            max_total_tokens: None,
+            max_total_tokens,
+            token_budget: Arc::new(TokenBudget::new(max_total_tokens)),
             children_tokens_pending_input: 0,
             children_tokens_pending_output: 0,
             adaptive_tournament_candidates: 0,
             adaptive_tournament_attempted: false,
+            tournament_require_verified: true,
+            counterfactual_probe: CounterfactualProbeConfig::disabled(),
+            probe_approval: Arc::new(DenyProbes),
+            counterfactual_probes_run: 0,
+            counterfactual_probes_resolved: 0,
+            run_deadline: None,
         }
     }
 
@@ -287,6 +395,37 @@ impl AgentRunner {
     pub fn with_adaptive_tournament_candidates(mut self, candidates: usize) -> Self {
         self.adaptive_tournament_candidates = candidates;
         self
+    }
+
+    /// Capability gap #5 (`v1.5.2`): require a repair-race winner to have actually passed
+    /// verification. Defaults to `true`; set `false` to restore the legacy behaviour where a
+    /// skipped gate was accepted. An explicit `require_verified` tool argument still wins.
+    pub fn with_tournament_require_verified(mut self, require_verified: bool) -> Self {
+        self.tournament_require_verified = require_verified;
+        self
+    }
+
+    /// Capability gap #2 (`v1.5.2`): opt in to the isolated counterfactual probe. Disabled by
+    /// default; even when enabled, `approval` must authorize each probe and the live workspace is
+    /// never modified or rolled back.
+    pub fn with_counterfactual_probe(
+        mut self,
+        config: CounterfactualProbeConfig,
+        approval: Arc<dyn ProbeApproval>,
+    ) -> Self {
+        self.counterfactual_probe = config;
+        self.probe_approval = approval;
+        self
+    }
+
+    /// Capability gap #2: number of counterfactual probes actually executed this run.
+    pub fn counterfactual_probes_run(&self) -> usize {
+        self.counterfactual_probes_run
+    }
+
+    /// Capability gap #2: probes whose revert resolved the failure.
+    pub fn counterfactual_probes_resolved(&self) -> usize {
+        self.counterfactual_probes_resolved
     }
 
     pub fn with_prompt_builder(mut self, pb: PromptBuilder) -> Self {
@@ -351,9 +490,32 @@ impl AgentRunner {
     }
 
     /// Gate 5: enforce a hard total-token ceiling (input + output) on this runner.
+    ///
+    /// F05 (`v1.5.1`): this is the runner's *own* ceiling. On a root runner it also becomes the
+    /// shared ledger's limit, so child subagents inherit it. A child runner is instead given its
+    /// allocation through [`Self::with_token_budget`], which must be called *after* this method.
     pub fn with_max_total_tokens(mut self, max_tokens: Option<u64>) -> Self {
         self.max_total_tokens = max_tokens;
+        self.token_budget = Arc::new(TokenBudget::new(max_tokens));
         self
+    }
+
+    /// F05 (`v1.5.1`): draw this runner's requests from an existing shared ledger.
+    ///
+    /// Used for child subagents and tournament candidates: the parent reserves a per-child
+    /// allocation from the run's ledger, then hands the child a ledger limited to that allocation.
+    /// This overrides both the local ceiling and the ledger set by [`Self::with_max_total_tokens`],
+    /// so it must be the last token-budget builder applied.
+    pub fn with_token_budget(mut self, token_budget: Arc<TokenBudget>) -> Self {
+        self.max_total_tokens = token_budget.limit();
+        self.token_budget = token_budget;
+        self
+    }
+
+    /// F05 (`v1.5.1`): the run tree's shared token ledger. Exposed so a surface can inspect spend
+    /// and so tests can assert the cap is shared across parent and children.
+    pub fn token_budget(&self) -> &Arc<TokenBudget> {
+        &self.token_budget
     }
 
     /// Run the agent loop, then emit fail-open `RunCompleted` observer hooks (Gate 3).
@@ -552,6 +714,26 @@ impl AgentRunner {
             ));
         }
 
+        // F04 (`v1.5.1`): a tool can consume the last of the run's wall-clock time (or finish a
+        // process group right at the deadline) without the pre-dispatch check in
+        // `execute_tool_batch` seeing it. The mutation snapshot above has already run, so the
+        // deadline stop is still consistent with what is on disk.
+        if state.budget_tracker.is_deadline_exceeded() {
+            let mut mod_list: Vec<String> = std::mem::take(&mut state.modified_files_set)
+                .into_iter()
+                .collect();
+            mod_list.sort();
+            return Err(self.finish_run(
+                TerminalReason::RunDeadlineExceeded,
+                &state.budget_tracker,
+                &state.projector,
+                mod_list,
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
+
         // Gate 4: optional `--predict-cmd`. Run once per mutating batch (bounded) so a fast
         // syntax/type check can surface an early failure — with its candidate attribution —
         // before the model spends the rest of the budget on a broken tree.
@@ -571,8 +753,21 @@ impl AgentRunner {
                 workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
                 modified_files: mod_list,
                 turns_used: state.current_turn,
+                deadline: Some(state.budget_tracker.deadline()),
             };
-            let check_res = gate.check(&ctx).await;
+            // F04: the predictive check is clamped to the run deadline; the gate itself clamps its
+            // own process timeout via `ctx.deadline`, and this outer bound is a backstop.
+            let check_res = match tokio::time::timeout_at(
+                state.budget_tracker.deadline().tokio_instant(),
+                gate.check(&ctx),
+            )
+            .await
+            {
+                Ok(res) => res,
+                Err(_) => Ok(GateOutcome::Rejected {
+                    feedback: "run deadline exceeded during --predict-cmd".to_string(),
+                }),
+            };
             let predict_changed =
                 self.capture_workspace_revision(state.absolute_turn, "predict_cmd", &mut logger);
             if !predict_changed.is_empty() {
@@ -895,10 +1090,24 @@ impl AgentRunner {
             state.static_prefix.static_prefix_bytes,
             projected.message_history_bytes,
         );
-        let max_output_tokens = if let Some(max_tok) = self.max_total_tokens {
-            let spent = state.budget_tracker.all_total_tokens();
-            let projected_total = spent.saturating_add(estimated_input_tokens);
-            if projected_total >= max_tok {
+        // F05 (`v1.5.1`): the token cap is enforced through the shared [`TokenBudget`], not a
+        // per-run counter, so the parent and every concurrent child subagent draw from the same
+        // balance. The runner's own ceiling (`max_total_tokens`) still applies — for a child that
+        // is the allocation its parent reserved — and the tighter of the two wins.
+        let local_remaining = self
+            .max_total_tokens
+            .map(|max_tok| max_tok.saturating_sub(state.budget_tracker.all_total_tokens()));
+        let allowed = match (local_remaining, self.token_budget.remaining()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let max_output_tokens = match allowed {
+            Some(remaining) if remaining > estimated_input_tokens => {
+                Some(remaining - estimated_input_tokens)
+            }
+            Some(_) => {
                 return Err(self.finish_run(
                     TerminalReason::TokenBudgetExhausted,
                     &state.budget_tracker,
@@ -911,32 +1120,17 @@ impl AgentRunner {
                     logger,
                 ));
             }
-            Some(max_tok.saturating_sub(projected_total))
-        } else {
-            None
+            None => None,
         };
-
-        let req = ProviderRequest {
-            system_prompt: state.static_prefix.system_prompt.clone(),
-            tools: state.visible_tools.clone(),
-            messages: projected.messages,
-            stream: self.config.stream,
-            // Gate 7: hand the projector's logical cache boundaries to the protocol client so
-            // Anthropic-style explicit prompt caching can pin the frozen prefix.
-            cache_breakpoints: projected.breakpoints,
-            // F08: remaining output-token allowance derived from `--max-tokens`.
-            max_output_tokens,
-        };
-
-        let completion = match self
-            .provider
-            .complete(req, state.budget_tracker.config(), self.cancel_rx.clone())
-            .await
-        {
-            Ok(c) => c,
-            Err(err) => {
+        // F05: reserve *before* dispatching. A failed reservation means another request or child
+        // already holds the remaining balance, so this request must not be sent (zero backend
+        // calls). Dropping the reservation later (cancel/timeout) records the estimate as spent.
+        let reserve_amount = estimated_input_tokens.saturating_add(max_output_tokens.unwrap_or(0));
+        let token_reservation = match self.token_budget.try_reserve(reserve_amount) {
+            Some(reservation) => reservation,
+            None => {
                 return Err(self.finish_run(
-                    err.into_terminal_reason(),
+                    TerminalReason::TokenBudgetExhausted,
                     &state.budget_tracker,
                     &state.projector,
                     std::mem::take(&mut state.modified_files_set)
@@ -949,7 +1143,131 @@ impl AgentRunner {
             }
         };
 
-        for _ in 1..completion.attempts_used {
+        // B16: track the attempts that are really transmitted, so a failed call can report them.
+        let wire_attempts = crate::provider::WireAttempts::new();
+        let req = ProviderRequest {
+            system_prompt: state.static_prefix.system_prompt.clone(),
+            tools: state.visible_tools.clone(),
+            messages: projected.messages,
+            stream: self.config.stream,
+            // Gate 7: hand the projector's logical cache boundaries to the protocol client so
+            // Anthropic-style explicit prompt caching can pin the frozen prefix.
+            cache_breakpoints: projected.breakpoints,
+            // F08: remaining output-token allowance derived from `--max-tokens`.
+            max_output_tokens,
+            retry_budget: Some(crate::provider::RetryBudget {
+                ledger: Arc::clone(&self.token_budget),
+                per_attempt: reserve_amount,
+            }),
+            wire_attempts: Some(wire_attempts.clone()),
+        };
+
+        // F04 (`v1.5.1`): every provider phase is clamped to the run's absolute deadline.
+        // F09 (`v1.5.1`): hand the provider only the *remaining* request attempts (plus the one
+        // already reserved above), so its internal retry loop cannot send more HTTP requests than
+        // the run still allows.
+        let deadline = state.budget_tracker.deadline();
+        let remaining_attempts = state
+            .budget_tracker
+            .config()
+            .max_model_request_attempts
+            .saturating_sub(state.budget_tracker.request_attempts_used())
+            .saturating_add(1)
+            .max(1);
+        let provider_budget = state
+            .budget_tracker
+            .config()
+            .clamped_to_deadline(deadline, remaining_attempts);
+
+        let completion = match tokio::time::timeout_at(
+            deadline.tokio_instant(),
+            self.provider
+                .complete(req, &provider_budget, self.cancel_rx.clone()),
+        )
+        .await
+        {
+            Ok(Ok(c)) => c,
+            Ok(Err(err)) => {
+                let reason = if deadline.is_exceeded() {
+                    TerminalReason::RunDeadlineExceeded
+                } else {
+                    err.clone().into_terminal_reason()
+                };
+                // Only provably pre-dispatch errors where zero network transmission took place
+                // (e.g. client-side InsecureUrl validation failure) are proven zero-consumption.
+                // Any post-dispatch failure (HttpStatus 500/502/503/504, retried transport drops,
+                // redirects, timeouts, cancellations) cannot prove zero backend consumption;
+                // those reservations are conservatively left un-settled so Drop commits them to
+                // the ledger to keep budget ceilings fail-closed.
+                if !deadline.is_exceeded() && err.is_provably_zero_consumption() {
+                    token_reservation.settle(0);
+                }
+                // A failed call must still report the attempts it actually transmitted: the summary
+                // is the only accounting a failed sample has.
+                record_wire_attempts(&mut state.budget_tracker, wire_attempts.get());
+                return Err(self.finish_run(
+                    reason,
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set)
+                        .into_iter()
+                        .collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+            Err(_) => {
+                return Err(self.finish_run(
+                    TerminalReason::RunDeadlineExceeded,
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set)
+                        .into_iter()
+                        .collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+        };
+
+        // F05 (`v1.5.1`): settle the reservation as soon as the response is in hand. A provider
+        // that reports `usage` gives an exact count; otherwise the pre-dispatch byte estimate is
+        // recorded so an omitted `usage` cannot bypass the cap. Settling here (rather than after
+        // the attempts loop below) keeps the accounting exact even on an early return.
+        let estimated_output_tokens = approx_tokens(
+            completion
+                .turn
+                .content
+                .as_ref()
+                .map(|t| t.len())
+                .unwrap_or(0)
+                .saturating_add(
+                    completion
+                        .turn
+                        .tool_calls
+                        .iter()
+                        .map(|c| c.raw_arguments.len() + c.name.len())
+                        .sum::<usize>(),
+                ),
+        );
+        let settled_tokens = completion.turn.usage.as_ref().map_or(
+            estimated_input_tokens.saturating_add(estimated_output_tokens),
+            |usage| usage.input_tokens.saturating_add(usage.output_tokens),
+        );
+        if completion.attempts_used > 1 {
+            // The first attempt failed with unknown consumption; retain its allowance.
+            // Protocol clients settled the successful retry against its own reservation.
+            drop(token_reservation);
+        } else {
+            token_reservation.settle(settled_tokens);
+        }
+
+        // Prefer the observed count: a provider that mis-reports `attempts_used` cannot make the
+        // summary under-count what it sent.
+        let observed_attempts = wire_attempts.get().max(completion.attempts_used);
+        for _ in 1..observed_attempts {
             if !state.budget_tracker.try_record_request_attempt() {
                 return Err(self.finish_run(
                     TerminalReason::MaxRequestAttempts,
@@ -975,6 +1293,9 @@ impl AgentRunner {
             state.last_input_tokens = Some(usage.input_tokens);
             if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
                 turn: state.current_turn,
+                usage_basis: Some("provider_reported".to_string()),
+                reported_model: completion.reported_model.clone(),
+                token_accounting: Some(self.token_budget.accounting_snapshot()),
                 input_tokens: usage.input_tokens,
                 cached_input_tokens: usage.cached_input_tokens,
                 uncached_input_tokens: usage.uncached_input_tokens(),
@@ -1000,26 +1321,16 @@ impl AgentRunner {
             // F08 (`v1.4.0`): a provider that omits `usage` must not bypass the token cap.
             // Conservatively estimate both directions from byte length (~4 bytes per token).
             let est_input = estimated_input_tokens;
-            let est_output = approx_tokens(
-                assistant_turn
-                    .content
-                    .as_ref()
-                    .map(|t| t.len())
-                    .unwrap_or(0)
-                    .saturating_add(
-                        assistant_turn
-                            .tool_calls
-                            .iter()
-                            .map(|c| c.raw_arguments.len() + c.name.len())
-                            .sum::<usize>(),
-                    ),
-            );
+            let est_output = estimated_output_tokens;
             state
                 .budget_tracker
-                .record_token_usage(est_input, None, est_output);
+                .record_estimated_token_usage(est_input, None, est_output);
             state.last_input_tokens = Some(est_input);
             if let Err(e) = logger.log(EventPayload::ModelRequestCompleted {
                 turn: state.current_turn,
+                usage_basis: Some("byte_estimate_not_measured".to_string()),
+                reported_model: completion.reported_model.clone(),
+                token_accounting: Some(self.token_budget.accounting_snapshot()),
                 input_tokens: est_input,
                 cached_input_tokens: None,
                 uncached_input_tokens: est_input,
@@ -1170,8 +1481,54 @@ impl AgentRunner {
                 workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
                 modified_files: mod_list.clone(),
                 turns_used: state.current_turn,
+                deadline: Some(state.budget_tracker.deadline()),
             };
-            match self.completion_gate.check(&gate_ctx).await {
+            // F04 (`v1.5.1`): verification is bounded by the run's absolute deadline. A compliant
+            // gate clamps its own process timeout via `ctx.deadline`; this outer bound is a backstop.
+            let gate_outcome = match tokio::time::timeout_at(
+                state.budget_tracker.deadline().tokio_instant(),
+                self.completion_gate.check(&gate_ctx),
+            )
+            .await
+            {
+                Ok(res) => res,
+                Err(_) => Err("run deadline exceeded during completion verification".to_string()),
+            };
+            // F02 (`v1.5.1`): a verification gate can rewrite the workspace (formatter, codegen, a
+            // failing test that regenerates fixtures). Capture it on *every* outcome — Approved,
+            // Skipped, Rejected and Err — before acting on the result, so the latest revision and
+            // the WAL always match disk and a rejected run can still be undone. The capture carries
+            // the absolute session turn (`current_turn` restarts at 1 on `--resume`).
+            let verification_changed =
+                self.capture_workspace_revision(state.absolute_turn, "verification", &mut logger);
+            if !verification_changed.is_empty() {
+                state.modified_files_set.extend(verification_changed);
+                mod_list = state.modified_files_set.iter().cloned().collect();
+                mod_list.sort();
+            }
+            if let Some(err) = self.revision_error.clone() {
+                return Err(self.finish_run(
+                    TerminalReason::StrictLogFailure(err),
+                    &state.budget_tracker,
+                    &state.projector,
+                    mod_list,
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+            if state.budget_tracker.is_deadline_exceeded() {
+                return Err(self.finish_run(
+                    TerminalReason::RunDeadlineExceeded,
+                    &state.budget_tracker,
+                    &state.projector,
+                    mod_list,
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+            match gate_outcome {
                 Ok(GateOutcome::Approved) => {
                     if let Some(journal) = self.session_journal.as_mut() {
                         if let Err(err) = journal.mark_completion_approved() {
@@ -1242,6 +1599,28 @@ impl AgentRunner {
                         ATTRIBUTION_TOP_K,
                     );
                     Self::log_failure_attribution(&mut logger, "completion_gate", &report);
+                    // Capability gap #2 (`v1.5.2`): opt-in isolated counterfactual probe. Only
+                    // annotates the failure message with evidence; it never reverts anything.
+                    let probe_outcomes = match self.current_revision_id.clone() {
+                        Some(current_revision) => {
+                            self.run_counterfactual_probes(
+                                &report,
+                                state.absolute_turn,
+                                &current_revision,
+                                &mut logger,
+                            )
+                            .await
+                        }
+                        None => Vec::new(),
+                    };
+                    if !probe_outcomes.is_empty() {
+                        gate_message.push_str(
+                            "\n\n[Counterfactual probe — isolated; the parent workspace was not modified]\n",
+                        );
+                        for outcome in &probe_outcomes {
+                            gate_message.push_str(&format!("- {}\n", outcome.note));
+                        }
+                    }
                     if let Some(block) = report.render_for_model() {
                         gate_message.push_str("\n\n");
                         gate_message.push_str(&block);
@@ -1303,6 +1682,9 @@ impl AgentRunner {
                                 timeout_ms: crate::subagents::DEFAULT_SUBAGENT_TIMEOUT_MS,
                                 disallow_test_tampering: true,
                                 protected_paths: Vec::new(),
+                                // Capability gap #5 (`v1.5.2`): the adaptive repair race inherits
+                                // the run's strict-verification policy.
+                                require_verified: Some(self.tournament_require_verified),
                             };
                             let (tournament_out, _label, merged) = self
                                 .execute_spawn_tournament(
@@ -1503,6 +1885,22 @@ impl AgentRunner {
             }
         };
 
+        // F04 (`v1.5.1`): publish the run's absolute deadline to the tool runtime and to the
+        // phases that run outside the main loop (subagents, tournaments), so `bash`, the approval
+        // prompt, verification and child runs all clamp to the same instant.
+        self.run_deadline = Some(budget_tracker.deadline());
+        self.tool_runtime
+            .set_run_deadline(Some(budget_tracker.deadline()));
+        let initial_exec_ctx = ExecutionContext::new(
+            Some(self.config.run_id),
+            Some(budget_tracker.deadline()),
+            Some(self.cancel_rx.clone()),
+            Some(Arc::clone(&self.token_budget)),
+            Some(Arc::new(self.tool_runtime.policy_engine().clone())),
+        )
+        .with_revision(self.current_revision_id.clone());
+        self.tool_runtime.set_execution_context(initial_exec_ctx);
+
         let policy_engine = self.tool_runtime.policy_engine();
         let policy_mode = policy_engine.mode();
         let mut visible_tools = self
@@ -1511,6 +1909,12 @@ impl AgentRunner {
             .visible_definitions_for_engine(policy_engine);
         if self.max_subagent_spawns == 0 {
             visible_tools.retain(|t| t.name != "spawn_subagent");
+        }
+        // Capability gap #6 (`v1.5.2`): on-demand tool schema mode. The `discover_tools` kernel tool
+        // stays visible so the model can fetch any hidden schema, and the runtime can still
+        // dispatch every policy-permitted tool; only the *initial* schema set shrinks.
+        if self.config.on_demand_tools {
+            visible_tools.retain(|t| is_core_tool(&t.name));
         }
         let static_prefix = self.prompt_builder.build_static_prefix(&visible_tools);
 
@@ -1615,6 +2019,10 @@ impl AgentRunner {
         // B2 (`v1.4.0`): honour a configured projection profile (default `P2`).
         if let Some(profile) = self.config.projection_profile {
             projector = projector.with_profile(profile);
+        }
+        // Capability gap #3 (`v1.5.2`): opt-in causal pruning / dead-end compression.
+        if self.config.causal_pruning {
+            projector = projector.with_causal_pruning(true);
         }
         // Freeze the system-prefix / tool-schema byte split so the Gate 2 budget breakdown can
         // report them separately instead of one opaque `static_prefix_bytes`.
@@ -2132,10 +2540,18 @@ impl AgentRunner {
                     let rt = self.tool_runtime.clone();
                     let cancel = self.cancel_rx.clone();
                     let call_for_task = call.clone();
+                    let batch_exec_ctx = ExecutionContext::new(
+                        Some(self.config.run_id),
+                        Some(budget_tracker.deadline()),
+                        Some(cancel),
+                        Some(Arc::clone(&self.token_budget)),
+                        Some(Arc::new(rt.policy_engine().clone())),
+                    )
+                    .with_revision(self.current_revision_id.clone());
                     let handle = tokio::spawn(async move {
                         let _permit = sem.acquire_owned().await.ok();
                         let (msg, decision, hooks) =
-                            rt.execute_call(&call_for_task, batch_turn, cancel).await;
+                            rt.execute_call_with_context(&call_for_task, batch_turn, &batch_exec_ctx).await;
                         (local_i, msg, decision, hooks)
                     });
                     join_handles.push((local_i, call, rel_path, handle));
@@ -2402,8 +2818,16 @@ impl AgentRunner {
                         )
                         .await
                     } else {
+                        let call_exec_ctx = ExecutionContext::new(
+                            Some(self.config.run_id),
+                            Some(budget_tracker.deadline()),
+                            Some(self.cancel_rx.clone()),
+                            Some(Arc::clone(&self.token_budget)),
+                            Some(Arc::new(self.tool_runtime.policy_engine().clone())),
+                        )
+                        .with_revision(self.current_revision_id.clone());
                         self.tool_runtime
-                            .execute_call(call, budget_tracker.turns_used(), self.cancel_rx.clone())
+                            .execute_call_with_context(call, budget_tracker.turns_used(), &call_exec_ctx)
                             .await
                     };
                     for approval_ev in self.tool_runtime.policy_engine().drain_approval_events() {
@@ -2437,7 +2861,13 @@ impl AgentRunner {
                                     EffectClass::Mutating | EffectClass::SideEffect
                                 )
                             });
-                    if is_side_effect_or_mutating && msg.outcome.is_success() {
+                    // F01 (`v1.5.1`): a dispatched `bash` / side-effect tool can have written to the
+                    // workspace even when it reported failure (non-zero exit, timeout, cancellation,
+                    // output flood) or an extension error. The snapshot trigger must follow dispatch,
+                    // not business success; a pre-dispatch refusal must not fabricate a mutation.
+                    if is_side_effect_or_mutating
+                        && crate::tool::runtime::decision_dispatched(&decision)
+                    {
                         self.batch_ran_side_effect = true;
                     }
 
@@ -2653,19 +3083,45 @@ impl AgentRunner {
             });
         }
 
+        // F04 (`v1.5.1`): bound the tournament by the parent run's remaining wall-clock time —
+        // both the candidate budget and the tournament's own timeout.
+        let deadline = self.run_deadline;
         let spec = TournamentSpec {
             candidates,
             worktree_base: self.tool_runtime.env().state_dir().join("worktrees"),
             state_base: self.tool_runtime.env().state_dir().join("subagents"),
             allowed_write_globs: request.allowed_write_globs.clone(),
-            budget: self.config.budget.clone(),
+            budget: deadline.map_or_else(
+                || self.config.budget.clone(),
+                |d| {
+                    self.config
+                        .budget
+                        .clamped_to_deadline(d, self.config.budget.max_model_request_attempts)
+                },
+            ),
+            // F05 (`v1.5.1`): candidates reserve from the same run-tree ledger as the parent and
+            // its plain subagents, so a race cannot overspend the remaining budget.
+            token_budget: Some(Arc::clone(&self.token_budget)),
             policy_mode: self.tool_runtime.policy_engine().mode(),
+            // B11b: read the parent's fail-closed policy-hook constraints from the real registry so
+            // a tournament candidate is refused rather than run without the parent's constraints.
+            parent_policy_hooks: crate::subagents::ParentPolicyHooks::from_registry(
+                self.tool_runtime.registry(),
+            ),
             workspace_skills: self.tool_runtime.registry().skills(),
             predictive_check: self.tool_runtime.predictive_check_enabled(),
             cancel_rx: self.cancel_rx.clone(),
-            timeout_ms: request.timeout_ms.max(1),
+            timeout_ms: deadline.map_or(request.timeout_ms.max(1), |d| {
+                let remaining_ms = d.remaining().as_millis().min(u64::MAX as u128) as u64;
+                request.timeout_ms.max(1).min(remaining_ms.max(1))
+            }),
             disallow_test_tampering: request.disallow_test_tampering,
             protected_paths: request.protected_paths.clone(),
+            // Capability gap #5 (`v1.5.2`): a repair race defaults to requiring a real
+            // verification pass; the tool argument can explicitly relax it.
+            require_verified: request
+                .require_verified
+                .unwrap_or(self.tournament_require_verified),
         };
 
         let outcome = match run_worktree_tournament(
@@ -2856,6 +3312,7 @@ impl AgentRunner {
                 }
                 let req = ApprovalRequest {
                     tool_name: call.name.clone(),
+                    call_id: Some(call.call_id.clone()),
                     effect_class: effective_effect,
                     is_sensitive_path: false,
                     target_path: None,
@@ -2863,9 +3320,29 @@ impl AgentRunner {
                     command_preview: Some(call.raw_arguments.clone()),
                     workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
                 };
+                // B11a: bind the approval to the subagent entry point and this run, so a grant for
+                // the kernel tool dispatcher (or another run) can never authorize a spawn.
+                let auth_scope = AuthScope {
+                    entry: AuthEntry::Subagent,
+                    tool_name: call.name.clone(),
+                    run_id: Some(self.config.run_id),
+                    workspace_root: self.tool_runtime.env().workspace().root().to_path_buf(),
+                    revision: self.current_revision_id.clone(),
+                };
+                let args_digest = canonical_arguments_digest(&call.raw_arguments);
+                let budget_remaining = self.run_deadline.map(|d| d.remaining());
                 let pe = self.tool_runtime.policy_engine().clone();
+                let scope_for_prompt = auth_scope.clone();
+                let digest_for_prompt = args_digest.clone();
                 let mut approval_cancel_rx = self.cancel_rx.clone();
-                let mut prompt_task = tokio::task::spawn_blocking(move || pe.prompt_approval(&req));
+                let mut prompt_task = tokio::task::spawn_blocking(move || {
+                    pe.prompt_approval_scoped(
+                        &scope_for_prompt,
+                        &req,
+                        digest_for_prompt.as_deref(),
+                        budget_remaining,
+                    )
+                });
                 let decision = tokio::select! {
                     res = &mut prompt_task => res.unwrap_or(ApprovalDecision::Deny),
                     _ = async {
@@ -2911,6 +3388,27 @@ impl AgentRunner {
                 }
                 match decision {
                     ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => {
+                        // B11a: consume the grant the approval just minted for this exact scope and
+                        // argument digest. Anything but a base-policy `Missing` fails closed.
+                        if let Some(ref digest) = args_digest {
+                            if let Err(rejection) =
+                                self.tool_runtime.policy_engine().consume_grant(&auth_scope, digest)
+                            {
+                                if !matches!(rejection, GrantRejection::Missing) {
+                                    return (
+                                        ToolExecutionOutput::error(
+                                            ErrorCode::PolicyDenied,
+                                            format!(
+                                                "spawn_subagent approval grant rejected: {:?}",
+                                                rejection
+                                            ),
+                                            ToolResultMeta::default(),
+                                        ),
+                                        "deny_grant_rejected".to_string(),
+                                    );
+                                }
+                            }
+                        }
                         "ask_approved".to_string()
                     }
                     ApprovalDecision::Deny => {
@@ -2995,8 +3493,46 @@ impl AgentRunner {
         let subagents_state_base = self.tool_runtime.env().state_dir().join("subagents");
         let workspace_skills = self.tool_runtime.registry().skills();
         let parent_policy_mode = self.tool_runtime.policy_engine().mode();
-        let parent_budget = self.config.budget.clone();
+        // F04 (`v1.5.1`): clamp the child-run ceiling to the parent's remaining wall-clock time, so
+        // `to_budget_config` cannot grant a subagent a longer run than the parent has left.
+        let parent_budget = match self.run_deadline {
+            Some(d) => self
+                .config
+                .budget
+                .clamped_to_deadline(d, self.config.budget.max_model_request_attempts),
+            None => self.config.budget.clone(),
+        };
         let predictive_check = self.tool_runtime.predictive_check_enabled();
+
+        // B11b: refuse an unsupported delegation *before* any worktree or state dir is materialized,
+        // so a rejection leaves no side effect (the backend repeats this check as the final gate).
+        if let Err(reason) = crate::subagents::ParentPolicyHooks::from_registry(
+            self.tool_runtime.registry(),
+        )
+        .ensure_delegatable()
+        {
+            return (
+                ToolExecutionOutput::error(
+                    ErrorCode::PolicyDenied,
+                    reason,
+                    ToolResultMeta::default(),
+                ),
+                "deny:unsupported_delegation".to_string(),
+            );
+        }
+        for spec in &specs {
+            if let Err(reason) = crate::subagents::child_policy_mode_for(parent_policy_mode, spec.role)
+            {
+                return (
+                    ToolExecutionOutput::error(
+                        ErrorCode::PolicyDenied,
+                        reason,
+                        ToolResultMeta::default(),
+                    ),
+                    "deny:capability_decay".to_string(),
+                );
+            }
+        }
 
         let mut prepared = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -3084,7 +3620,20 @@ impl AgentRunner {
             String,
             crate::subagents::SubagentSpec,
             Option<IsolatedWorktree>,
+            Option<String>,
         )> = Vec::with_capacity(prepared.len());
+        // F05 (`v1.5.1`): reserve a per-child token allocation out of the run tree's shared ledger
+        // *before* launching the child, so concurrent children cannot both spend the same balance.
+        // The child's ledger is limited to its allocation; after the child ends the reservation is
+        // settled with what the child actually consumed and the remainder returns to the pool.
+        let mut child_ledgers: Vec<Arc<TokenBudget>> = Vec::with_capacity(prepared.len());
+        let mut child_reservations: Vec<TokenReservation> = Vec::with_capacity(prepared.len());
+        let mut budget_rejections: Vec<SubagentResult> = Vec::new();
+        // B11b: read the parent's fail-closed policy-hook constraints once from the real registry.
+        // The child runs in its own registry and cannot execute these hooks, so the chokepoint
+        // refuses the delegation instead of running an unconstrained child.
+        let parent_policy_hooks =
+            crate::subagents::ParentPolicyHooks::from_registry(self.tool_runtime.registry());
 
         for (subagent_id, spec, worktree) in prepared {
             let child_workspace = match &worktree {
@@ -3100,9 +3649,99 @@ impl AgentRunner {
             let skills = workspace_skills.clone();
             let budget_clone = parent_budget.clone();
 
+            let allocation = match self.token_budget.remaining() {
+                Some(remaining) => spec.budget.clamped().max_tokens.min(remaining),
+                None => spec.budget.clamped().max_tokens,
+            };
+            if allocation == 0 {
+                if let Some(mut wt) = worktree {
+                    let _ = wt.cleanup();
+                }
+                budget_rejections.push(SubagentResult {
+                    subagent_id,
+                    role: spec.role,
+                    status: RunStatus::BudgetExhausted,
+                    terminal_reason: format!("{:?}", TerminalReason::TokenBudgetExhausted),
+                    summary: "subagent skipped: no token budget remaining".to_string(),
+                    relevant_files: Vec::new(),
+                    findings: Vec::new(),
+                    turns_used: 0,
+                    tool_calls_used: 0,
+                    tokens_used: 0,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    merge_result: None,
+                    worktree_cleaned_up: true,
+                });
+                continue;
+            }
+            let reservation = match self.token_budget.try_reserve(allocation) {
+                Some(reservation) => reservation,
+                // A concurrent request or sibling batch may have taken the balance between the
+                // `remaining()` read above and this reservation. Lose gracefully: skip the child
+                // (zero backend calls) instead of treating an impossible-in-isolation allocation
+                // as a hard invariant and panicking.
+                None => {
+                    if let Some(mut wt) = worktree {
+                        let _ = wt.cleanup();
+                    }
+                    budget_rejections.push(SubagentResult {
+                        subagent_id,
+                        role: spec.role,
+                        status: RunStatus::BudgetExhausted,
+                        terminal_reason: format!("{:?}", TerminalReason::TokenBudgetExhausted),
+                        summary: "subagent skipped: token budget was claimed before dispatch"
+                            .to_string(),
+                        relevant_files: Vec::new(),
+                        findings: Vec::new(),
+                        turns_used: 0,
+                        tool_calls_used: 0,
+                        tokens_used: 0,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        merge_result: None,
+                        worktree_cleaned_up: true,
+                    });
+                    continue;
+                }
+            };
+            let child_ledger = Arc::new(TokenBudget::new(Some(allocation)));
+            child_ledgers.push(Arc::clone(&child_ledger));
+            child_reservations.push(reservation);
+
+            // Capability gap #4 (`v1.5.2`): create the child's cancel channel here (not inside the
+            // spawned task) so the durable-task host can bind it before the child runs; a
+            // `tasks.control { cancel }` then actually stops the live subagent.
+            let (child_cancel_tx, child_cancel_rx) = watch::channel(*parent_cancel.borrow());
+            let durable_task_id = match self.config.durable_tasks.as_ref() {
+                Some(host) => {
+                    let child = crate::task_host::ChildTaskSpec {
+                        task_id: req_id.clone(),
+                        spec: spec.clone(),
+                        allocation,
+                        turn: absolute_turn as u32,
+                        parent_policy_mode,
+                        parent_policy_hooks: parent_policy_hooks.clone(),
+                    };
+                    match host.register_child(&child, child_cancel_tx.clone()) {
+                        // The host may derive a distinct durable id when the requested one is already
+                        // taken by a finished record, so settle under the id it actually admitted.
+                        Ok(durable_id) => Some(durable_id),
+                        Err(e) => {
+                            // A capacity/duplicate failure must not stop the child from running;
+                            // the record is best-effort and the error is surfaced to the log.
+                            eprintln!(
+                                "[kroma] durable task registration failed for {}: {}",
+                                req_id, e
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+
+            let child_parent_policy_hooks = parent_policy_hooks.clone();
             let handle = tokio::spawn(async move {
                 let started_sub = std::time::Instant::now();
-                let (child_cancel_tx, child_cancel_rx) = watch::channel(*parent_cancel.borrow());
                 let cancel_tx_for_signal = child_cancel_tx.clone();
                 let mut parent_cancel_for_watcher = parent_cancel.clone();
                 let watcher = tokio::spawn(async move {
@@ -3132,7 +3771,9 @@ impl AgentRunner {
                     state_dir: child_state_dir,
                     workspace_skills: skills,
                     parent_policy_mode,
+                    parent_policy_hooks: child_parent_policy_hooks,
                     parent_budget: budget_clone,
+                    token_budget: Some(child_ledger),
                     predictive_check,
                     cancel_rx: child_cancel_rx,
                 };
@@ -3189,19 +3830,23 @@ impl AgentRunner {
                     }
                 };
                 watcher.abort();
+                // Budget reservations are settled separately against the shared ledger below
+                // (keeping unknown-consumption fail-closed without double charging). Factual
+                // observed usage in `outcome` must reflect only measured provider tokens and
+                // never mislabel withheld reserves as measured tokens.
                 res
             });
 
             join_handles.push(handle);
-            worktree_slots.push((subagent_id, spec, worktree));
+            worktree_slots.push((subagent_id, spec, worktree, durable_task_id));
         }
 
-        let mut results: Vec<SubagentResult> = Vec::with_capacity(worktree_slots.len());
+        let mut results: Vec<SubagentResult> = budget_rejections;
         let mut batch_worker_spans = Vec::new();
         let mut first_modified_path: Option<String> = None;
         let mut in_batch_parent_rev = self.current_revision_id.clone();
 
-        for (handle, (subagent_id, spec, mut worktree)) in
+        for (handle, (subagent_id, spec, mut worktree, durable_task_id)) in
             join_handles.into_iter().zip(worktree_slots.into_iter())
         {
             let outcome = match handle.await {
@@ -3447,6 +4092,43 @@ impl AgentRunner {
                 }
             }
 
+            // Capability gap #4 (`v1.5.2`): settle the durable record with the child's real outcome,
+            // spend, report artifact and notification. A `worker` whose delta conflicted on merge is
+            // recorded as failed, so the durable state never claims an unmerged result.
+            if let (Some(host), Some(task_id)) = (
+                self.config.durable_tasks.as_ref(),
+                durable_task_id.as_deref(),
+            ) {
+                let merged_conflict = merge_result
+                    .as_ref()
+                    .map(|merge| merge.is_conflict())
+                    .unwrap_or(false);
+                let state = match outcome.status {
+                    RunStatus::Completed if !merged_conflict => {
+                        crate::async_tasks::TaskState::Completed
+                    }
+                    RunStatus::Cancelled => crate::async_tasks::TaskState::Cancelled,
+                    _ => crate::async_tasks::TaskState::Failed,
+                };
+                let summary = outcome.summary.clone();
+                // The host persists the report bytes and builds the matching artifact reference
+                // before committing the finish metadata, so no caller invents a `task:` reference
+                // that has no durable bytes behind it.
+                let finish = crate::task_host::ChildFinish {
+                    state,
+                    spent: outcome.tokens_used,
+                    summary,
+                    keep_pending_merge: false,
+                    verification: None,
+                };
+                if let Err(e) = host.finish_child(task_id, &finish) {
+                    eprintln!(
+                        "[kroma] durable task settlement failed for {}: {}",
+                        task_id, e
+                    );
+                }
+            }
+
             results.push(SubagentResult {
                 subagent_id,
                 role: spec.role,
@@ -3466,6 +4148,12 @@ impl AgentRunner {
 
         if self.snapshot_store.is_none() {
             self.current_revision_id = in_batch_parent_rev;
+        }
+
+        // F05 (`v1.5.1`): settle every child allocation against what the child actually consumed;
+        // the unused remainder returns to the shared ledger so a later batch can reuse it.
+        for (reservation, ledger) in child_reservations.into_iter().zip(child_ledgers.iter()) {
+            reservation.settle(ledger.spent());
         }
 
         let report_text = render_subagent_batch_report(&results);
@@ -3570,6 +4258,172 @@ impl AgentRunner {
                 .and_then(|c| c.revision_before.as_ref())
                 .map(|rev| rev.as_str().to_string()),
         });
+    }
+
+    /// Capability gap #2 (`v1.5.2`): optionally probe the top-ranked candidate attributions by
+    /// reverting each inside a throwaway isolated worktree and re-running the completion gate.
+    ///
+    /// Safety properties this method preserves, matching the review's requirements:
+    /// * the probe is disabled unless `counterfactual_probe.is_enabled()`, and it is capped per run;
+    /// * each probe must be authorized by the approval seam ([`ProbeApproval`]);
+    /// * the *live* workspace is never reverted — the throwaway worktree is discarded, so a wrong
+    ///   heuristic can never roll back the user's code;
+    /// * the whole phase is bounded by the run's remaining deadline.
+    async fn run_counterfactual_probes(
+        &mut self,
+        report: &AttributionReport,
+        absolute_turn: usize,
+        current_revision: &RevisionId,
+        logger: &mut EventLogger,
+    ) -> Vec<CounterfactualProbeOutcome> {
+        if !self.counterfactual_probe.is_enabled() {
+            return Vec::new();
+        }
+        let Some(store) = self.snapshot_store.clone() else {
+            return Vec::new();
+        };
+        // Do not start a probe when the run is nearly out of time.
+        if let Some(deadline) = self.run_deadline {
+            if deadline.remaining() < std::time::Duration::from_millis(250) {
+                return Vec::new();
+            }
+        }
+        let workspace = self.tool_runtime.env().workspace().clone();
+        let worktrees_base = self.tool_runtime.env().state_dir().join("worktrees");
+        let mut outcomes = Vec::new();
+
+        let candidates: Vec<AttributionCandidate> = report
+            .candidates
+            .iter()
+            .take(self.counterfactual_probe.top_k.max(1))
+            .cloned()
+            .collect();
+        for candidate in candidates {
+            if self.counterfactual_probes_run >= self.counterfactual_probe.max_probes_per_run {
+                break;
+            }
+            let Some(rev_before) = candidate.revision_before.clone() else {
+                continue;
+            };
+            if &rev_before == current_revision {
+                continue;
+            }
+            let request = ProbeRequest {
+                mutation_id: candidate.mutation_id.clone(),
+                turn: candidate.turn,
+                relative_path: candidate.relative_path.clone(),
+            };
+            if !self.probe_approval.approve(&request) {
+                if logger.live_stderr() {
+                    eprintln!(
+                        "[counterfactual] probe of {} not approved; skipping",
+                        candidate.mutation_id
+                    );
+                }
+                continue;
+            }
+            self.counterfactual_probes_run += 1;
+
+            // Each probe gets its own throwaway directory so it can never clobber a concurrent
+            // tournament worktree, and so the isolation is visible in the path for telemetry.
+            let probe_dir_name = format!(
+                "counterfactual-{}",
+                candidate
+                    .mutation_id
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    })
+                    .collect::<String>()
+            );
+            let materialized = crate::subagents::IsolatedWorktree::materialize(
+                probe_dir_name.clone(),
+                &workspace,
+                &store,
+                Some(current_revision),
+                worktrees_base.join(&probe_dir_name),
+            );
+            let Ok(mut worktree) = materialized else {
+                outcomes.push(CounterfactualProbeOutcome {
+                    mutation_id: candidate.mutation_id.clone(),
+                    revision_before: rev_before,
+                    failure_resolved_on_revert: false,
+                    worktree_cleaned_up: false,
+                    note: format!(
+                        "probe of {} could not materialize an isolated worktree",
+                        candidate.mutation_id
+                    ),
+                });
+                continue;
+            };
+            let isolated = worktree.workspace().clone();
+
+            let applied = matches!(
+                store.restore_revision(&isolated, &rev_before, Some(current_revision), false),
+                Ok(crate::revision::RestoreResult::Applied { .. })
+            );
+            let resolved = if applied {
+                let ctx = CompletionGateContext {
+                    run_id: self.config.run_id,
+                    workspace_root: isolated.root().to_path_buf(),
+                    modified_files: candidate.relative_path.clone().into_iter().collect(),
+                    turns_used: absolute_turn,
+                    deadline: self.run_deadline,
+                };
+                let outcome = match self.run_deadline {
+                    Some(deadline) => tokio::time::timeout_at(
+                        deadline.tokio_instant(),
+                        self.completion_gate.check(&ctx),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err("probe deadline exceeded".to_string())),
+                    None => self.completion_gate.check(&ctx).await,
+                };
+                matches!(outcome, Ok(GateOutcome::Approved))
+            } else {
+                false
+            };
+            let cleaned = worktree.cleanup().is_ok();
+            if resolved {
+                self.counterfactual_probes_resolved += 1;
+            }
+            let note = if !applied {
+                format!(
+                    "probe of {}: isolated revert to {} did not apply",
+                    candidate.mutation_id, rev_before
+                )
+            } else if resolved {
+                format!(
+                    "probe of {}: reverting to {} resolved the failure (isolated; parent workspace untouched)",
+                    candidate.mutation_id, rev_before
+                )
+            } else {
+                format!(
+                    "probe of {}: failure persisted at {} (candidate is not the sole cause; isolated; parent untouched)",
+                    candidate.mutation_id, rev_before
+                )
+            };
+            outcomes.push(CounterfactualProbeOutcome {
+                mutation_id: candidate.mutation_id.clone(),
+                revision_before: rev_before,
+                failure_resolved_on_revert: resolved,
+                worktree_cleaned_up: cleaned,
+                note,
+            });
+        }
+        if !outcomes.is_empty() && logger.live_stderr() {
+            eprintln!(
+                "[counterfactual] ran {} probe(s), {} resolved the failure",
+                outcomes.len(),
+                outcomes
+                    .iter()
+                    .filter(|o| o.failure_resolved_on_revert)
+                    .count()
+            );
+        }
+        outcomes
     }
 
     /// Gate 3: append not-yet-loaded ancestor `AGENTS.md`/`CLAUDE.md` guidance to a tool result.
@@ -3678,6 +4532,8 @@ impl AgentRunner {
             total_cached_input_tokens: budget_tracker.total_cached_input_tokens(),
             total_output_tokens: budget_tracker.total_output_tokens(),
             children_input_tokens: budget_tracker.children_input_tokens(),
+            children_cached_input_tokens: budget_tracker.children_cached_input_tokens(),
+            usage_basis: budget_tracker.usage_basis().to_string(),
             children_output_tokens: budget_tracker.children_output_tokens(),
             cache_hit_ratio: budget_tracker.overall_cache_hit_ratio(),
             compaction_reread_count: projector.compaction_reread_count(),

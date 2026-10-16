@@ -82,6 +82,7 @@ where
                 latency_ms: 1,
                 ttft_ms: Some(1),
                 attempts_used: 1,
+                reported_model: None,
             })
         })
     }
@@ -363,7 +364,7 @@ fn short_rev_and_header_reject_control_characters() {
     let hostile = "#\u{1b}[31mred\u{202e}";
     let plain = ThemeRenderer::plain(Theme::Zen);
     let header = plain.header("m", "high", "responses", 1.0, hostile, "/ws");
-    let footer = plain.telemetry_footer(1, 0, 1.0, hostile, 0);
+    let footer = plain.telemetry_footer(1, 0, 1.0, hostile);
     assert!(!header.contains('\u{1b}'), "header leaked ESC: {header:?}");
     assert!(!footer.contains('\u{1b}'), "footer leaked ESC: {footer:?}");
     assert!(
@@ -460,7 +461,11 @@ fn live_events_render_design_d_status_lines() {
             json!({ "status": "completed", "turns": 2, "total_tool_calls": 3 }),
         ))
         .unwrap();
-    assert!(terminated.contains("● gate"), "got: {terminated}");
+    assert!(terminated.contains("● run"), "got: {terminated}");
+    assert!(
+        !terminated.contains("● gate"),
+        "a run-termination line must not be labelled as the completion gate: {terminated}"
+    );
 
     // Events from another session are ignored, as are non-event notifications.
     let other = JsonRpcNotification::new(
@@ -486,7 +491,11 @@ async fn streaming_turn_emits_live_status_lines_before_summary() {
     let (repl, _ws, root) = repl_with_provider("zen-stream", provider);
 
     let mut out = Vec::new();
-    let step = repl.run_turn_streaming("Say done", &mut out).await.unwrap();
+    let mut input = BufReader::new(std::io::Cursor::new(Vec::<u8>::new()));
+    let step = repl
+        .run_turn_streaming("Say done", &mut input, &mut out)
+        .await
+        .unwrap();
     let rendered = String::from_utf8(out).unwrap();
     assert!(
         rendered.contains("●"),

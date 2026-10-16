@@ -31,6 +31,7 @@ pub struct SseStreamAssembler {
     tool_calls_by_index: BTreeMap<usize, PartialToolCall>,
     finish_reason: Option<FinishReason>,
     usage: Option<TokenUsage>,
+    pub(crate) reported_model: Option<String>,
     done_received: bool,
     saw_any_business_chunk: bool,
 }
@@ -55,6 +56,7 @@ impl SseStreamAssembler {
             tool_calls_by_index: BTreeMap::new(),
             finish_reason: None,
             usage: None,
+            reported_model: None,
             done_received: false,
             saw_any_business_chunk: false,
         }
@@ -163,6 +165,7 @@ impl SseStreamAssembler {
             )));
         }
 
+        super::capture_reported_model(&mut self.reported_model, &val)?;
         self.saw_any_business_chunk = true;
 
         // Parse optional usage object (including trailing chunk with `choices: []`)

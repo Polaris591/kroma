@@ -447,7 +447,11 @@ impl ModelProvider for ChatCompletionsClient {
                 if *cancel_rx.borrow() {
                     return Err(ProviderError::Cancelled);
                 }
+                let retry_reservation = super::reserve_retry(&req, attempts_used)?;
                 attempts_used += 1;
+                if let Some(wire) = &req.wire_attempts {
+                    wire.record();
+                }
 
                 let attempt_start = Instant::now();
                 let outcome = tokio::select! {
@@ -465,13 +469,15 @@ impl ModelProvider for ChatCompletionsClient {
                 };
 
                 match outcome {
-                    Ok((turn, latency_ms, ttft_ms)) => {
+                    Ok((turn, latency_ms, ttft_ms, reported_model)) => {
+                        super::settle_retry(retry_reservation, &turn);
                         return Ok(ProviderCompletion {
                             turn,
                             request_body_bytes,
                             latency_ms,
                             ttft_ms,
                             attempts_used,
+                            reported_model,
                         });
                     }
                     Err(AttemptFailure::Fatal(err)) => {
@@ -519,7 +525,7 @@ impl ChatCompletionsClient {
         stream: bool,
         budget: &BudgetConfig,
         attempt_start: Instant,
-    ) -> Result<(AssistantTurn, u64, Option<u64>), AttemptFailure> {
+    ) -> Result<(AssistantTurn, u64, Option<u64>, Option<String>), AttemptFailure> {
         let request_deadline = attempt_start + budget.request_timeout;
         let accept_hdr = if stream {
             "text/event-stream"
@@ -591,7 +597,8 @@ impl ChatCompletionsClient {
                 .map_err(|e| AttemptFailure::Fatal(ProviderError::Transport(e.to_string())))?;
             let turn = parse_non_streaming_response(body_str).map_err(AttemptFailure::Fatal)?;
             let latency_ms = attempt_start.elapsed().as_millis() as u64;
-            return Ok((turn, latency_ms, Some(latency_ms)));
+            let reported_model = super::model_from_json(body_str).map_err(AttemptFailure::Fatal)?;
+            return Ok((turn, latency_ms, Some(latency_ms), reported_model));
         }
 
         // Streaming SSE mode: once any business chunk is observed, mid-stream failure is NEVER retried (§4.3).
@@ -632,10 +639,11 @@ impl ChatCompletionsClient {
         })?;
 
         let saw_business = assembler.saw_any_business_chunk();
+        let reported_model = assembler.reported_model.clone();
         let turn = assembler
             .finalize()
             .map_err(|e| classify_sse_err(saw_business, e))?;
         let latency_ms = attempt_start.elapsed().as_millis() as u64;
-        Ok((turn, latency_ms, ttft_ms))
+        Ok((turn, latency_ms, ttft_ms, reported_model))
     }
 }

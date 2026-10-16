@@ -10,7 +10,7 @@
 
 use crate::prompt::sha256_hex64;
 use crate::sensitive_paths::SensitivePathGuard;
-use crate::session::SessionJournal;
+use crate::session::{SessionError, SessionJournal};
 use crate::workspace::{WorkspaceCap, WorkspaceError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,6 +40,12 @@ const RESTORE_INTENT_VERSION: u32 = 1;
 /// `--undo` path.
 const MERGE_INTENT_FILE: &str = "merge-in-progress.json";
 const MERGE_INTENT_VERSION: u32 = 1;
+/// F03 follow-up (`v1.5.2`): durable intent journal for a workspace-bound fork. A fork restores the
+/// workspace to the turn's revision and only then re-points the session leaf; a crash between the
+/// two phases would otherwise leave the files at the target revision while the WAL still described
+/// the old branch. The intent records the target so the next entry point can finish phase 2.
+const FORK_INTENT_FILE: &str = "fork-in-progress.json";
+const FORK_INTENT_VERSION: u32 = 1;
 
 /// Largest single file that may be tracked. Larger files are recorded in `skipped_paths` so a
 /// vendored binary or dataset can never make a snapshot unbounded.
@@ -209,6 +215,18 @@ pub enum RestoreFault {
     AfterIntentWritten,
     /// Crash after `n` planned operations have been applied.
     AfterAppliedFiles(usize),
+    /// Test-only: make the first directory `fsync` performed while applying the operations fail, so
+    /// the restore must report [`RestoreResult::RecoveryRequired`] and keep its intent for replay.
+    #[cfg(test)]
+    DirectorySyncFails,
+}
+
+/// Deterministic fault points for the workspace-bound fork crash-recovery tests (P1-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkFault {
+    /// Crash after the restore applied and cleared its own journal, but before the session leaf
+    /// moved. This is exactly the window the durable fork intent closes.
+    AfterRestoreBeforeLeafMove,
 }
 
 /// Serde default for a per-operation `force` flag that a journal written before the field existed
@@ -286,6 +304,44 @@ pub struct MergeIntent {
     pub removed_files: Vec<String>,
 }
 
+/// F03 follow-up (`v1.5.2`): the durable intent journal for a workspace-bound fork. It is written
+/// and fsynced *before* the workspace is restored and removed only after the session leaf has been
+/// re-pointed, so a crash between the two phases is detectable and its phase 2 can be completed
+/// idempotently. It is bound to the session and workspace it was written for, because one snapshot
+/// store can be shared by several sessions in the same state directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkIntent {
+    pub version: u32,
+    /// The session WAL whose leaf the fork moves.
+    pub session_id: String,
+    /// Workspace the fork restores, so a stale intent written for another workspace is ignored.
+    pub workspace_root: String,
+    pub forked_at_turn: usize,
+    pub target_revision: RevisionId,
+    /// The leaf's revision at the moment the fork began, used to re-bind the restored revision.
+    pub expected_revision: Option<RevisionId>,
+    pub created_at_ms: u64,
+}
+
+/// F03 follow-up (`v1.5.2`): outcome of the startup pre-check for an interrupted workspace-bound
+/// fork.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkRecoveryOutcome {
+    /// No fork intent journal was present (or it belonged to another session/workspace).
+    NothingPending,
+    /// The interrupted fork's phase 2 was completed: the leaf now names the target and the restored
+    /// revision is recorded, matching the files already on disk.
+    Completed(WorkspaceBoundForkOutcome),
+    /// The workspace could not be brought to the target revision (live edits conflicted), so the
+    /// fork was abandoned before the leaf moved. The workspace and leaf are untouched and the
+    /// journal was cleared.
+    Abandoned {
+        forked_at_turn: usize,
+        target_revision: RevisionId,
+        conflicting_paths: Vec<RevisionConflict>,
+    },
+}
+
 /// F08 (`v1.5.1`): outcome of the startup pre-check for an interrupted worktree→parent merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeRecoveryOutcome {
@@ -301,6 +357,52 @@ pub enum MergeRecoveryOutcome {
         restored_files: Vec<String>,
         removed_files: Vec<String>,
     },
+}
+
+/// F03: a workspace-bound fork completed both phases — the workspace was restored to the revision
+/// that was current at `forked_at_turn`, and only then was the session leaf re-pointed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceBoundForkOutcome {
+    pub leaf_id: String,
+    pub forked_at_turn: usize,
+    pub target_revision: RevisionId,
+    pub restored_files: Vec<String>,
+    pub removed_files: Vec<String>,
+    pub turn_count: usize,
+    pub latest_revision_id: Option<String>,
+}
+
+/// Why a workspace-bound fork did not happen. Every variant leaves the workspace and the session
+/// leaf untouched: the restore is attempted first and only a successful [`RestoreResult::Applied`]
+/// moves the leaf.
+#[derive(Debug, Error)]
+pub enum WorkspaceBoundForkError {
+    #[error("no active transcript entry at or before turn {0}")]
+    NoEntryAtTurn(usize),
+    #[error(
+        "no workspace revision recorded at or before turn {0}; fork with mode 'conversation' to branch without restoring files"
+    )]
+    NoRevisionAtTurn(usize),
+    #[error(
+        "refusing to fork to turn {turn}: {count} path(s) were modified since the expected revision",
+        count = conflicting_paths.len()
+    )]
+    Conflict {
+        turn: usize,
+        target_revision: RevisionId,
+        conflicting_paths: Vec<RevisionConflict>,
+    },
+    #[error("fork to turn {turn} requires recovery of {target_revision}: {reason}")]
+    RecoveryRequired {
+        turn: usize,
+        target_revision: RevisionId,
+        journal_path: PathBuf,
+        reason: String,
+    },
+    #[error(transparent)]
+    Revision(#[from] RevisionError),
+    #[error(transparent)]
+    Session(#[from] SessionError),
 }
 
 impl SnapshotStore {
@@ -361,6 +463,143 @@ impl SnapshotStore {
             Err(e) => return Err(e.into()),
         }
         sync_dir(&self.root)
+    }
+
+    /// F03 follow-up (`v1.5.2`): path of the durable fork intent journal.
+    pub fn fork_intent_path(&self) -> PathBuf {
+        self.root.join(FORK_INTENT_FILE)
+    }
+
+    /// F03 follow-up (`v1.5.2`): durably record that a workspace-bound fork is about to start,
+    /// before the restore touches any file and before the leaf moves.
+    pub fn write_fork_intent(&self, intent: &ForkIntent) -> Result<(), RevisionError> {
+        self.ensure_layout()?;
+        write_atomic_bytes(
+            &self.fork_intent_path(),
+            &serde_json::to_vec(intent)?,
+            0o600,
+        )
+    }
+
+    /// F03 follow-up (`v1.5.2`): read the pending fork intent journal, if one is present.
+    pub fn pending_fork_intent(&self) -> Result<Option<ForkIntent>, RevisionError> {
+        let path = self.fork_intent_path();
+        let mut file = match crate::secure_fs::open_existing_no_symlink(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let intent: ForkIntent = serde_json::from_slice(&bytes)?;
+        if intent.version != FORK_INTENT_VERSION {
+            return Err(RevisionError::InvalidStore(format!(
+                "unsupported fork intent journal version {}",
+                intent.version
+            )));
+        }
+        Ok(Some(intent))
+    }
+
+    /// F03 follow-up (`v1.5.2`): clear the fork intent journal after the fork fully finished (or was
+    /// abandoned before the leaf moved).
+    pub fn clear_fork_intent(&self) -> Result<(), RevisionError> {
+        match fs::remove_file(self.fork_intent_path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        sync_dir(&self.root)
+    }
+
+    /// F03 follow-up (`v1.5.2`): complete or abandon a workspace-bound fork that crashed between
+    /// its two phases.
+    ///
+    /// The restore is re-derived from the durable intent (its own [`RestoreIntent`] still wins if it
+    /// is present), then phase 2 is applied idempotently: the leaf is moved to the forked turn and
+    /// the restored revision is re-bound in the WAL only if it is not already the current one. A
+    /// live edit that prevents reaching the target abandons the fork *before* the leaf moves, so a
+    /// half-fork never survives. Intents written for another session or workspace are ignored.
+    pub fn recover_pending_fork(
+        &self,
+        workspace: &WorkspaceCap,
+        journal: &mut SessionJournal,
+    ) -> Result<ForkRecoveryOutcome, RevisionError> {
+        let Some(intent) = self.pending_fork_intent()? else {
+            return Ok(ForkRecoveryOutcome::NothingPending);
+        };
+        if intent.session_id != journal.session_id()
+            || intent.workspace_root != workspace.root().to_string_lossy().into_owned()
+        {
+            return Ok(ForkRecoveryOutcome::NothingPending);
+        }
+
+        // Phase 1: finish the restore if it is still mid-flight, or re-apply it when the crash
+        // happened before the restore intent was even written (the workspace was then untouched).
+        if let Some(restore) = self.pending_restore()? {
+            if restore.target_revision != intent.target_revision {
+                self.clear_fork_intent()?;
+                return Ok(ForkRecoveryOutcome::NothingPending);
+            }
+            self.recover_pending_restore(workspace)?;
+        } else {
+            match self.restore_revision(workspace, &intent.target_revision, None, false)? {
+                RestoreResult::Applied { .. } => {}
+                RestoreResult::Conflict {
+                    conflicting_paths, ..
+                } => {
+                    // External edits make the fork unsafe. Abandon it before the leaf moves so the
+                    // WAL never describes files that were not restored.
+                    self.clear_fork_intent()?;
+                    return Ok(ForkRecoveryOutcome::Abandoned {
+                        forked_at_turn: intent.forked_at_turn,
+                        target_revision: intent.target_revision,
+                        conflicting_paths,
+                    });
+                }
+                RestoreResult::RecoveryRequired { reason, .. } => {
+                    return Err(RevisionError::InvalidStore(format!(
+                        "cannot complete an interrupted fork: {}",
+                        reason
+                    )));
+                }
+            }
+        }
+
+        // Phase 2 (idempotent): move the leaf, then re-bind the restored revision only if the fork
+        // had not already recorded it before the crash.
+        let leaf_id = journal.fork_at_turn(intent.forked_at_turn).map_err(|e| {
+            RevisionError::InvalidStore(format!(
+                "cannot complete an interrupted fork: failed to move the session leaf: {}",
+                e
+            ))
+        })?;
+        if journal.latest_revision_id().as_deref() != Some(intent.target_revision.as_str()) {
+            record_restored_revision(
+                journal,
+                self,
+                &intent.target_revision,
+                &[],
+                &[],
+                intent.expected_revision.as_ref(),
+            )
+            .map_err(|e| {
+                RevisionError::InvalidStore(format!(
+                    "cannot complete an interrupted fork: failed to record the restored revision: {}",
+                    e
+                ))
+            })?;
+        }
+        self.clear_fork_intent()?;
+        Ok(ForkRecoveryOutcome::Completed(WorkspaceBoundForkOutcome {
+            leaf_id,
+            forked_at_turn: intent.forked_at_turn,
+            target_revision: intent.target_revision,
+            restored_files: Vec::new(),
+            removed_files: Vec::new(),
+            turn_count: journal.max_active_turn(),
+            latest_revision_id: journal.latest_revision_id(),
+        }))
     }
 
     /// F08 (`v1.5.1`): the startup counterpart of [`write_merge_intent`].
@@ -791,6 +1030,42 @@ impl SnapshotStore {
         Ok(revisions)
     }
 
+    /// Verify that every revision manifest in the store is readable.
+    ///
+    /// [`Self::list_revisions`] deliberately skips a manifest it cannot read so one bad file cannot
+    /// make read-only listing unusable. Reconciliation gates a state *mutation*, so it must not
+    /// inherit that leniency: an unreadable manifest means the WAL can no longer be proven
+    /// consistent with the recorded workspace history, and the caller has to surface that instead
+    /// of proceeding as if recovery succeeded.
+    pub fn check_integrity(&self) -> Result<(), RevisionError> {
+        let dir = self.root.join(REVISION_DIR);
+        if !dir.exists() {
+            return Ok(());
+        }
+        let mut ids: Vec<RevisionId> = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if let Ok(id) = RevisionId::parse(stem) {
+                ids.push(id);
+            }
+        }
+        ids.sort();
+        for id in ids {
+            self.load_revision(&id).map_err(|e| {
+                RevisionError::InvalidStore(format!(
+                    "revision manifest {} is unreadable: {}",
+                    id.as_str(),
+                    e
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Read the unrecovered restore intent journal, if one is present.
     pub fn pending_restore(&self) -> Result<Option<RestoreIntent>, RevisionError> {
         let path = self.intent_path();
@@ -865,6 +1140,205 @@ impl SnapshotStore {
             restored_revision: intent.target_revision,
             restored_files,
             removed_files,
+        })
+    }
+
+    /// Transactional, workspace-bound fork: move the session's active leaf to `turn` **and** restore
+    /// the workspace to the revision that was current at that turn.
+    ///
+    /// The leaf is only re-pointed after the restore has fully applied, so a refused or interrupted
+    /// fork never leaves the WAL describing a workspace that was not actually restored. Live edits
+    /// that differ from the expected revision are reported as [`WorkspaceBoundForkError::Conflict`]
+    /// and nothing is mutated unless `force` is set. The pre-fork revision stays in the
+    /// content-addressed store as the backup of the abandoned branch, and the WAL keeps every
+    /// abandoned transcript entry, so a fork is non-destructive in both directions.
+    pub fn fork_workspace_at_turn(
+        &self,
+        workspace: &WorkspaceCap,
+        journal: &mut SessionJournal,
+        turn: usize,
+        force: bool,
+    ) -> Result<WorkspaceBoundForkOutcome, WorkspaceBoundForkError> {
+        self.fork_workspace_at_turn_inner(workspace, journal, turn, force, None)
+    }
+
+    /// `fork_workspace_at_turn` with a deterministic crash point injected, for fault-injection
+    /// tests of the durable fork intent (P1-2).
+    pub fn fork_workspace_at_turn_with_fault(
+        &self,
+        workspace: &WorkspaceCap,
+        journal: &mut SessionJournal,
+        turn: usize,
+        force: bool,
+        fault: Option<ForkFault>,
+    ) -> Result<WorkspaceBoundForkOutcome, WorkspaceBoundForkError> {
+        self.fork_workspace_at_turn_inner(workspace, journal, turn, force, fault)
+    }
+
+    fn fork_workspace_at_turn_inner(
+        &self,
+        workspace: &WorkspaceCap,
+        journal: &mut SessionJournal,
+        turn: usize,
+        force: bool,
+        fault: Option<ForkFault>,
+    ) -> Result<WorkspaceBoundForkOutcome, WorkspaceBoundForkError> {
+        // Validate the transcript target before touching a single file: a fork that cannot move the
+        // leaf must not restore the workspace on its way to failing.
+        if journal.entry_id_at_or_before_turn(turn).is_none() {
+            return Err(WorkspaceBoundForkError::NoEntryAtTurn(turn));
+        }
+        let target_record = journal
+            .revision_at_or_before_turn(turn)
+            .ok_or(WorkspaceBoundForkError::NoRevisionAtTurn(turn))?;
+        let target = RevisionId::parse(&target_record.revision_id)?;
+        self.rewind_workspace_to_revision(workspace, journal, &target, turn, force, fault)
+    }
+
+    /// Restore the workspace to `target` **and** move the active leaf to `turn` as one
+    /// crash-atomic operation, for `--undo`.
+    ///
+    /// `--undo` needs exactly the guarantee [`Self::fork_workspace_at_turn`] gives `--fork`: the
+    /// durable [`ForkIntent`] is written before the restore touches a file and cleared only after
+    /// the leaf moved and the restored revision was recorded, so a crash between the restore
+    /// clearing its own journal and the leaf move is completed by [`Self::recover_pending_fork`] on
+    /// the next start. Without it the WAL keeps naming a revision the workspace is no longer on and
+    /// the default retry refuses with a misleading "changed outside the kroma" conflict.
+    pub fn restore_and_rewind_workspace(
+        &self,
+        workspace: &WorkspaceCap,
+        journal: &mut SessionJournal,
+        target: &RevisionId,
+        turn: usize,
+        force: bool,
+    ) -> Result<WorkspaceBoundForkOutcome, WorkspaceBoundForkError> {
+        self.restore_and_rewind_workspace_with_fault(workspace, journal, target, turn, force, None)
+    }
+
+    /// `restore_and_rewind_workspace` with a deterministic crash point injected, for
+    /// fault-injection tests of the durable rewind intent.
+    pub fn restore_and_rewind_workspace_with_fault(
+        &self,
+        workspace: &WorkspaceCap,
+        journal: &mut SessionJournal,
+        target: &RevisionId,
+        turn: usize,
+        force: bool,
+        fault: Option<ForkFault>,
+    ) -> Result<WorkspaceBoundForkOutcome, WorkspaceBoundForkError> {
+        if journal.entry_id_at_or_before_turn(turn).is_none() {
+            return Err(WorkspaceBoundForkError::NoEntryAtTurn(turn));
+        }
+        self.rewind_workspace_to_revision(workspace, journal, target, turn, force, fault)
+    }
+
+    /// The shared body of a workspace-bound fork and an `--undo` rewind: restore `target`, then
+    /// move the leaf to `turn`, guarded by one durable [`ForkIntent`].
+    fn rewind_workspace_to_revision(
+        &self,
+        workspace: &WorkspaceCap,
+        journal: &mut SessionJournal,
+        target: &RevisionId,
+        turn: usize,
+        force: bool,
+        fault: Option<ForkFault>,
+    ) -> Result<WorkspaceBoundForkOutcome, WorkspaceBoundForkError> {
+        let expected = journal
+            .latest_revision_id()
+            .and_then(|id| RevisionId::parse(&id).ok());
+
+        // Refuse *before* writing a fork intent when a restore is already pending: its target may be
+        // a different revision, and recovering the wrong restore would corrupt the workspace. This
+        // also guarantees that a live fork intent always belongs to this fork's restore.
+        if let Some(intent) = self.pending_restore()? {
+            return Err(WorkspaceBoundForkError::RecoveryRequired {
+                turn,
+                target_revision: intent.target_revision,
+                journal_path: self.intent_path(),
+                reason: "an unrecovered restore intent journal is present; run recover_pending_restore before forking".to_string(),
+            });
+        }
+
+        // F03 follow-up (P1-2): a durable fork intent written before the restore touches any file.
+        // A crash after the restore cleared its own journal but before the leaf moved is then
+        // completed by [`Self::recover_pending_fork`] instead of being silently lost.
+        self.write_fork_intent(&ForkIntent {
+            version: FORK_INTENT_VERSION,
+            session_id: journal.session_id().to_string(),
+            workspace_root: workspace.root().to_string_lossy().to_string(),
+            forked_at_turn: turn,
+            target_revision: target.clone(),
+            expected_revision: expected.clone(),
+            created_at_ms: now_ms(),
+        })?;
+
+        // Phase 1: restore the workspace. `restore_revision` journals its own intent, so a crash
+        // here is recoverable by `recover_pending_restore`, and refuses external modifications
+        // unless `force` is set.
+        let (restored_revision, restored_files, removed_files) =
+            match self.restore_revision(workspace, target, expected.as_ref(), force)? {
+                RestoreResult::Applied {
+                    restored_revision,
+                    restored_files,
+                    removed_files,
+                } => (restored_revision, restored_files, removed_files),
+                RestoreResult::Conflict {
+                    target_revision,
+                    conflicting_paths,
+                } => {
+                    self.clear_fork_intent()?;
+                    return Err(WorkspaceBoundForkError::Conflict {
+                        turn,
+                        target_revision,
+                        conflicting_paths,
+                    });
+                }
+                RestoreResult::RecoveryRequired {
+                    target_revision,
+                    journal_path,
+                    reason,
+                } => {
+                    self.clear_fork_intent()?;
+                    return Err(WorkspaceBoundForkError::RecoveryRequired {
+                        turn,
+                        target_revision,
+                        journal_path,
+                        reason,
+                    });
+                }
+            };
+
+        // Phase 2: only now move the session leaf onto the forked branch.
+        if matches!(fault, Some(ForkFault::AfterRestoreBeforeLeafMove)) {
+            return Err(WorkspaceBoundForkError::Revision(
+                RevisionError::InvalidStore(
+                    "fault injection: crashed after the restore applied, before the leaf moved"
+                        .to_string(),
+                ),
+            ));
+        }
+        let leaf_id = journal.fork_at_turn(turn)?;
+        if journal.latest_revision_id().as_deref() != Some(restored_revision.as_str()) {
+            record_restored_revision(
+                journal,
+                self,
+                &restored_revision,
+                &restored_files,
+                &removed_files,
+                expected.as_ref(),
+            )?;
+        }
+        // The fork is durably complete; drop the intent so the next entry point treats the session
+        // as consistently forked.
+        self.clear_fork_intent()?;
+        Ok(WorkspaceBoundForkOutcome {
+            leaf_id,
+            forked_at_turn: turn,
+            target_revision: restored_revision,
+            restored_files,
+            removed_files,
+            turn_count: journal.max_active_turn(),
+            latest_revision_id: journal.latest_revision_id(),
         })
     }
 
@@ -981,35 +1455,46 @@ impl SnapshotStore {
 
         let mut restored_files = Vec::new();
         let mut removed_files = Vec::new();
-        for (index, op) in intent.operations.iter().enumerate() {
-            if let Err(e) = self.apply_op(workspace, op, force) {
-                return Ok(RestoreResult::RecoveryRequired {
-                    target_revision: intent.target_revision.clone(),
-                    journal_path: self.intent_path(),
-                    reason: format!(
-                        "restore failed while applying '{}' (operation {} of {}): {}",
-                        op.path(),
-                        index + 1,
-                        intent.operations.len(),
-                        e
-                    ),
-                });
-            }
-            match op {
-                RestoreOp::Write { path, .. } => restored_files.push(path.clone()),
-                RestoreOp::Remove { path, .. } => removed_files.push(path.clone()),
-            }
-            if let Some(RestoreFault::AfterAppliedFiles(n)) = fault {
-                if index + 1 >= n {
+        {
+            // Test-only: arm the directory-sync fault for the mutation loop only (the intent above
+            // is already durable), so a failed mutation sync must retain the intent while the
+            // final intent clear is never perturbed. The guard disarms when the loop exits.
+            #[cfg(all(test, unix))]
+            let _dir_sync_fault = if matches!(fault, Some(RestoreFault::DirectorySyncFails)) {
+                Some(crate::secure_fs::DirSyncFaultGuard::arm())
+            } else {
+                None
+            };
+            for (index, op) in intent.operations.iter().enumerate() {
+                if let Err(e) = self.apply_op(workspace, op, force) {
                     return Ok(RestoreResult::RecoveryRequired {
                         target_revision: intent.target_revision.clone(),
                         journal_path: self.intent_path(),
                         reason: format!(
-                            "fault injection: crashed after applying {} of {} operations",
+                            "restore failed while applying '{}' (operation {} of {}): {}",
+                            op.path(),
                             index + 1,
-                            intent.operations.len()
+                            intent.operations.len(),
+                            e
                         ),
                     });
+                }
+                match op {
+                    RestoreOp::Write { path, .. } => restored_files.push(path.clone()),
+                    RestoreOp::Remove { path, .. } => removed_files.push(path.clone()),
+                }
+                if let Some(RestoreFault::AfterAppliedFiles(n)) = fault {
+                    if index + 1 >= n {
+                        return Ok(RestoreResult::RecoveryRequired {
+                            target_revision: intent.target_revision.clone(),
+                            journal_path: self.intent_path(),
+                            reason: format!(
+                                "fault injection: crashed after applying {} of {} operations",
+                                index + 1,
+                                intent.operations.len()
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -1149,6 +1634,9 @@ impl SnapshotStore {
         &self,
         journal: &mut SessionJournal,
     ) -> Result<Option<String>, RevisionError> {
+        // F10: a corrupt manifest must fail reconciliation (and therefore block the next mutation)
+        // instead of being silently skipped as an unrecorded capture.
+        self.check_integrity()?;
         let Some(leaf) = journal.leaf_id().map(|id| id.to_string()) else {
             return Ok(None);
         };
@@ -1318,6 +1806,42 @@ impl SnapshotStore {
     }
 }
 
+/// Re-bind `restored_revision` as the active branch's current workspace revision in the session
+/// WAL, so `latest_revision_id()` keeps naming the bytes actually on disk after a fork/restore.
+///
+/// Shared by the RPC fork, the CLI `--fork` path and the RPC `revision.restore`/`undo` handlers so
+/// every entry point stamps the restored revision the same way.
+pub fn record_restored_revision(
+    journal: &mut SessionJournal,
+    store: &SnapshotStore,
+    restored_revision: &RevisionId,
+    restored_files: &[String],
+    removed_files: &[String],
+    expected: Option<&RevisionId>,
+) -> Result<(), SessionError> {
+    let (changed_paths, tracked_file_count) = match store.load_revision(restored_revision) {
+        Ok(manifest) => (manifest.changed_paths.clone(), manifest.tracked_files.len()),
+        Err(_) => {
+            let mut paths: Vec<String> = restored_files
+                .iter()
+                .chain(removed_files.iter())
+                .cloned()
+                .collect();
+            paths.sort();
+            paths.dedup();
+            (paths, restored_files.len())
+        }
+    };
+    let turn = journal.max_active_turn();
+    journal.record_revision_capture(
+        turn,
+        restored_revision.as_str(),
+        expected.map(|e| e.as_str()),
+        changed_paths,
+        tracked_file_count,
+    )
+}
+
 /// Reject any content hash that is not exactly 64 ASCII hex characters.
 ///
 /// [`SnapshotStore::blob_path`] slices this string (`&sha256[..2]`) and joins it into a filesystem
@@ -1392,17 +1916,7 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Revisi
 }
 
 fn sync_dir(dir: &Path) -> Result<(), RevisionError> {
-    #[cfg(unix)]
-    {
-        let handle = File::open(dir)?;
-        handle.sync_all()?;
-        Ok(())
-    }
-    #[cfg(windows)]
-    {
-        let _ = dir;
-        Ok(())
-    }
+    crate::secure_fs::sync_dir(dir).map_err(RevisionError::from)
 }
 
 fn compute_revision_id(tracked: &BTreeMap<String, TrackedFile>) -> RevisionId {
@@ -1583,7 +2097,9 @@ pub(crate) fn stat_live_entry(
 fn stat_kind(stat: &libc::stat) -> LiveEntryStat {
     match stat.st_mode & libc::S_IFMT {
         libc::S_IFREG => LiveEntryStat::Regular {
-            mode: (stat.st_mode & 0o7777),
+            // macOS `st_mode` is `u16` while Linux' is `u32`; the cast is a no-op on Linux.
+            #[allow(clippy::unnecessary_cast)]
+            mode: (stat.st_mode & 0o7777) as u32,
             size: stat.st_size.max(0) as u64,
         },
         libc::S_IFDIR => LiveEntryStat::Directory,
@@ -1814,7 +2330,36 @@ pub(crate) fn write_tracked_file(
     let (parent_dir, leaf) = workspace.open_parent_dir_no_symlink(&norm, true)?;
     crate::tools::write::atomic_write_at(&parent_dir, &leaf, bytes, mode, false).map_err(
         |(code, message)| RevisionError::InvalidStore(format!("{}: {}", code.as_str(), message)),
-    )
+    )?;
+    // `open_parent_dir_no_symlink(create = true)` may have created missing ancestors with
+    // `mkdirat`; each new directory entry is only durable once the directory that received it is
+    // synced, so a crash cannot leave a freshly created ancestor tree unreachable.
+    #[cfg(unix)]
+    sync_written_ancestors(workspace, &norm)?;
+    Ok(())
+}
+
+/// `fsync` every directory whose entry table a restore write changed: the workspace root and each
+/// ancestor of the written path. Syncing an unchanged directory is harmless, and syncing only the
+/// leaf's parent would leave an ancestor that `open_parent_dir_no_symlink` just created
+/// unpersisted.
+#[cfg(unix)]
+fn sync_written_ancestors(workspace: &WorkspaceCap, norm: &Path) -> Result<(), RevisionError> {
+    crate::secure_fs::sync_dir_handle(workspace.root_dir_fd())?;
+    let mut rel = PathBuf::new();
+    if let Some(parent) = norm.parent() {
+        for comp in parent.components() {
+            if let Component::Normal(part) = comp {
+                if part.is_empty() {
+                    continue;
+                }
+                rel.push(part);
+                let (_, dir) = workspace.open_dir_no_symlink(&rel.to_string_lossy())?;
+                crate::secure_fs::sync_dir_handle(&dir)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Unlink a tracked file through its parent directory FD. Without `force` only a plain regular file
@@ -1875,7 +2420,9 @@ pub(crate) fn remove_tracked_file(
             }
             return Err(err.into());
         }
-        let _ = parent_dir.sync_all();
+        // The unlink changed the parent directory's entry table: confirm it durably before the
+        // recovery intent can be cleared, so a crash cannot resurrect the removed file.
+        crate::secure_fs::sync_dir_handle(&parent_dir)?;
         drop(parent_dir);
         prune_empty_ancestors(workspace, &norm)?;
         Ok(true)
@@ -1988,6 +2535,9 @@ fn prune_empty_ancestors(workspace: &WorkspaceCap, norm: &Path) -> Result<(), Re
         if rc != 0 {
             break;
         }
+        // Removing `child` changed the parent directory's entry table; confirm the prune durably
+        // before the recovery intent can be cleared.
+        crate::secure_fs::sync_dir_handle(&dir)?;
     }
     #[cfg(windows)]
     while !dirs.is_empty() {
@@ -2018,7 +2568,11 @@ fn remove_path_force(workspace: &WorkspaceCap, rel: &str) -> Result<(), Revision
             Err(WorkspaceError::NotFound { .. }) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        remove_entry_at(parent_dir.as_raw_fd(), &leaf)
+        remove_entry_at(parent_dir.as_raw_fd(), &leaf)?;
+        // A forced recursive delete changed the containing directory's entry table; the top-level
+        // removal is what makes the whole subtree unreachable after a crash.
+        crate::secure_fs::sync_dir_handle(&parent_dir)?;
+        Ok(())
     }
     #[cfg(windows)]
     {
@@ -2224,5 +2778,68 @@ mod tests {
         );
         assert!(diff_paths(Some(&after), &after).is_empty());
         assert_eq!(diff_paths(None, &after).len(), 2);
+    }
+
+    /// A directory `fsync` that fails while a restore is applying its operations must surface as
+    /// [`RestoreResult::RecoveryRequired`] and leave the intent journal in place, so the next
+    /// startup replays the restore instead of trusting a workspace whose directory operations are
+    /// not provably durable.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_sync_failure_keeps_the_intent_and_replays() {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-revision-dir-sync-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let ws_dir = root.join("ws");
+        fs::create_dir_all(ws_dir.join("src")).unwrap();
+        fs::write(ws_dir.join("src").join("a.rs"), "v1\n").unwrap();
+
+        let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+        let store = SnapshotStore::new(root.join("snapshots"));
+        let baseline = store.capture_revision(&workspace, None, None, 0).unwrap();
+        fs::write(ws_dir.join("src").join("a.rs"), "v2\n").unwrap();
+        let mutated = store
+            .capture_revision(&workspace, Some(&baseline.revision_id), None, 1)
+            .unwrap();
+
+        let result = store
+            .restore_revision_with_fault(
+                &workspace,
+                &baseline.revision_id,
+                Some(&mutated.revision_id),
+                true,
+                Some(RestoreFault::DirectorySyncFails),
+            )
+            .unwrap();
+        match result {
+            RestoreResult::RecoveryRequired { journal_path, .. } => {
+                assert!(
+                    journal_path.exists(),
+                    "a directory-sync failure must retain the intent journal"
+                );
+            }
+            other => panic!("expected RecoveryRequired, got {:?}", other),
+        }
+        assert!(
+            store.pending_restore().unwrap().is_some(),
+            "the intent must survive a directory-sync failure so replay can finish the restore"
+        );
+
+        // The fault is disarmed once the restore returns; replaying the retained intent succeeds.
+        let recovered = store.recover_pending_restore(&workspace).unwrap();
+        assert!(
+            matches!(recovered, RestoreResult::Applied { .. }),
+            "expected Applied on replay, got {:?}",
+            recovered
+        );
+        assert!(store.pending_restore().unwrap().is_none());
+        assert_eq!(
+            fs::read_to_string(ws_dir.join("src").join("a.rs")).unwrap(),
+            "v1\n",
+            "replay must finish the interrupted restore"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

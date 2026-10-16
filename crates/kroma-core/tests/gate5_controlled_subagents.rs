@@ -118,6 +118,7 @@ where
                 latency_ms: 2,
                 ttft_ms: Some(1),
                 attempts_used: 1,
+                reported_model: None,
             })
         })
     }
@@ -251,6 +252,7 @@ async fn test_scout_subagent_is_strictly_read_only_and_cannot_spawn_recursively(
         vec![
             "activate_skill",
             "code_graph",
+            "discover_tools",
             "find",
             "grep",
             "ls",

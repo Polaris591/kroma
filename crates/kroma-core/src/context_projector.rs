@@ -8,6 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 pub const MIN_COMPACTABLE_TOOL_BYTES: usize = 1024; // > 1 KiB
+/// Capability gap #3 (`v1.5.2`): largest latest read that a causal citation may pin. The size cap
+/// keeps the heuristic from ever pushing a projection past its high watermark.
+pub const CAUSAL_PIN_MAX_BYTES: usize = 4096;
 pub const WORKING_SET_PIN_TURNS: usize = 8;
 pub const MAX_OUTLINE_SYMBOLS: usize = 12;
 pub const MAX_OUTLINE_STUB_BYTES: usize = 400;
@@ -27,6 +30,8 @@ pub enum CompactionReason {
     StepDownArchive,
     /// A later `read` of the same path superseded this output.
     SupersededRead,
+    /// Capability gap #3 (`v1.5.2`): a failed attempt collapsed into a one-line negative lesson.
+    DeadEnd,
 }
 
 /// Deterministic, replay-stable identifier for the raw evidence behind an Outline Stub.
@@ -42,9 +47,7 @@ pub fn source_entry_id(canonical_index: usize, call_id: &str) -> String {
 pub fn extract_source_entry_id(content: &str) -> Option<String> {
     let start = content.find("source_entry_id=")? + "source_entry_id=".len();
     let rest = &content[start..];
-    let end = rest
-        .find([' ', '|', ']', ')', ','])
-        .unwrap_or(rest.len());
+    let end = rest.find([' ', '|', ']', ')', ',']).unwrap_or(rest.len());
     let id = rest[..end].trim();
     if id.is_empty() {
         None
@@ -192,6 +195,10 @@ pub struct ProjectionStats {
     pub evidence_link_count: usize,
     pub recall_hit_count: u64,
     pub recall_miss_count: u64,
+    /// Capability gap #3 (`v1.5.2`): failed tool results collapsed into a negative-lesson stub.
+    pub dead_end_compactions: u64,
+    /// Capability gap #3: files pinned because a later assistant turn cited them (causal value).
+    pub causal_pins: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +248,13 @@ pub struct ContextProjector {
     recall_hit_count: u64,
     /// Failed `recall_evidence` calls.
     recall_miss_count: u64,
+    /// Capability gap #3 (`v1.5.2`): opt-in causal citation pinning + dead-end negative-sample
+    /// compression. Off by default so the experimental mechanism is measured by its own A/B run.
+    causal_pruning: bool,
+    /// Capability gap #3: count of dead-end tool results collapsed into a negative-lesson stub.
+    dead_end_compactions: u64,
+    /// Capability gap #3: files pinned because a later assistant turn explicitly cited them.
+    causal_pins: u64,
     profile: ProjectionProfile,
 }
 
@@ -268,8 +282,23 @@ impl ContextProjector {
             prefix_tool_schema_bytes: 0,
             recall_hit_count: 0,
             recall_miss_count: 0,
+            causal_pruning: false,
+            dead_end_compactions: 0,
+            causal_pins: 0,
             profile: ProjectionProfile::default(),
         }
+    }
+
+    /// Capability gap #3 (`v1.5.2`): enable causal citation pinning and dead-end negative-sample
+    /// compression. Off by default; the ablation switch for the paired benchmark.
+    pub fn with_causal_pruning(mut self, enabled: bool) -> Self {
+        self.causal_pruning = enabled;
+        self
+    }
+
+    /// Capability gap #3: whether the experimental causal-pruning path is active.
+    pub fn causal_pruning(&self) -> bool {
+        self.causal_pruning
     }
 
     /// Select the Gate 2 projection profile (default `P2`).
@@ -321,6 +350,8 @@ impl ContextProjector {
             evidence_link_count: self.evidence_links.len(),
             recall_hit_count: self.recall_hit_count,
             recall_miss_count: self.recall_miss_count,
+            dead_end_compactions: self.dead_end_compactions,
+            causal_pins: self.causal_pins,
         }
     }
 
@@ -713,8 +744,15 @@ impl ContextProjector {
         // exactly one bucket, so the breakdown is reproducible across fresh runs, `--resume`, and
         // `--fork` for the same canonical transcript and budget.
         let durable_last_touched = self.last_touched_turns.clone();
-        let (pinned_indices, _) =
-            compute_working_set_pins(&self.projected_items, current_turn, &durable_last_touched);
+        let (pinned_indices, _) = {
+            let (pins, files, _causal) = compute_working_set_pins(
+                &self.projected_items,
+                current_turn,
+                &durable_last_touched,
+                None,
+            );
+            (pins, files)
+        };
         let (system_prefix_bytes, tool_schema_bytes) =
             if self.prefix_system_bytes == 0 && self.prefix_tool_schema_bytes == 0 {
                 // No explicit split was supplied (unit tests / direct projector use): report the
@@ -819,8 +857,20 @@ impl ContextProjector {
         // The persisted pinned baseline must never extend into (or past) the protected tail window.
         self.last_pinned_baseline_end = self.last_pinned_baseline_end.min(tail_start);
         let durable_last_touched = self.last_touched_turns.clone();
-        let (pinned_item_indices, pinned_files) =
-            compute_working_set_pins(&self.projected_items, current_turn, &durable_last_touched);
+        // Capability gap #3 (`v1.5.2`): only compute the causal citation graph when the optional
+        // pruning path is enabled, so the default projection is byte-for-byte unchanged.
+        let causal_citations = if self.causal_pruning {
+            Some(compute_causal_citations(&self.projected_items))
+        } else {
+            None
+        };
+        let (pinned_item_indices, pinned_files, causal_pins) = compute_working_set_pins(
+            &self.projected_items,
+            current_turn,
+            &durable_last_touched,
+            causal_citations.as_ref(),
+        );
+        self.causal_pins = self.causal_pins.saturating_add(causal_pins as u64);
 
         let mut current_bytes: usize = self
             .projected_items
@@ -920,11 +970,19 @@ impl ContextProjector {
                     let sid = source_entry_id(idx, &tr.call_id.0);
                     let reason = if superseded {
                         CompactionReason::SupersededRead
+                    } else if self.causal_pruning && !tr.outcome.is_success() {
+                        // Capability gap #3: a failed attempt is a dead end; collapse it into a
+                        // negative lesson instead of an outline of a file that was never read.
+                        CompactionReason::DeadEnd
                     } else {
                         CompactionReason::StepDownArchive
                     };
                     let records_evidence = self.profile.records_evidence();
-                    let stub = build_outline_stub_for_profile(tr, idx, &sid, records_evidence);
+                    let stub = if reason == CompactionReason::DeadEnd {
+                        build_dead_end_stub(tr, idx, &sid, records_evidence)
+                    } else {
+                        build_outline_stub_for_profile(tr, idx, &sid, records_evidence)
+                    };
                     let new_bytes = stub.len();
                     if new_bytes < old_bytes {
                         let stub_arc: Arc<str> = Arc::from(stub);
@@ -962,6 +1020,9 @@ impl ContextProjector {
                             raw_evidence = Some(raw);
                         }
                         compacted_now = true;
+                        if reason == CompactionReason::DeadEnd {
+                            self.dead_end_compactions = self.dead_end_compactions.saturating_add(1);
+                        }
                         current_bytes = current_bytes.saturating_sub(old_bytes - new_bytes);
                     }
                 }
@@ -986,14 +1047,64 @@ impl ContextProjector {
     }
 }
 
+/// Collect the assistant `content` + tool-call arguments as one searchable string, so a path that
+/// appears only in a tool call (for example `edit {"path":"src/a.rs"}`) still counts as a citation.
+fn assistant_reference_text(item: &TranscriptItem) -> Option<String> {
+    let TranscriptItem::Assistant(turn) = item else {
+        return None;
+    };
+    let mut text = String::new();
+    if let Some(content) = &turn.content {
+        text.push_str(content);
+    }
+    for call in &turn.tool_calls {
+        text.push_str(&call.raw_arguments);
+        text.push(' ');
+    }
+    Some(text)
+}
+
+/// Capability gap #3 (`v1.5.2`): map each workspace-relative path to the last assistant turn that
+/// actually *cited* it (mentioned it in prose or referenced it in a tool call). This is the causal
+/// value signal that separates "a file the model keeps reasoning about" from "a file that happens
+/// to have been touched recently".
+fn compute_causal_citations(items: &[TranscriptItem]) -> HashMap<String, usize> {
+    let known_paths: HashSet<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::ToolResult(tr) => tr.meta.relative_path.clone(),
+            _ => None,
+        })
+        .collect();
+    let mut citations: HashMap<String, usize> = HashMap::new();
+    let mut turn = 0usize;
+    for item in items {
+        let Some(text) = assistant_reference_text(item) else {
+            continue;
+        };
+        turn += 1;
+        for path in &known_paths {
+            if text.contains(path.as_str()) {
+                citations.insert(path.clone(), turn);
+            }
+        }
+    }
+    citations
+}
+
 /// Compute Working-Set Pinning (§7.1 V6-03):
 /// Files modified by a successful `edit` or `write` within the last 8 turns have their
 /// latest successful `read` result and corresponding `edit` diff exempted from compaction.
+///
+/// Capability gap #3 (`v1.5.2`): when `causal_citations` is `Some`, a file that a later assistant
+/// turn explicitly cited is pinned as well, even if it was not modified recently. The return value
+/// includes how many files were pinned *only* by causal citation, for telemetry.
 fn compute_working_set_pins(
     items: &[TranscriptItem],
     current_turn: usize,
     durable_last_touched: &HashMap<String, usize>,
-) -> (HashSet<usize>, Vec<String>) {
+    causal_citations: Option<&HashMap<String, usize>>,
+) -> (HashSet<usize>, Vec<String>, usize) {
     let mut turn_counter = 0usize;
     // Seed from the checkpoint, then reconcile against active transcript entries below.
     let mut file_last_modified_turn: HashMap<String, usize> = durable_last_touched.clone();
@@ -1038,21 +1149,58 @@ fn compute_working_set_pins(
     let mut pinned_indices = HashSet::new();
     let mut pinned_files: Vec<String> = Vec::new();
 
-    for (path, mod_turn) in file_last_modified_turn {
-        if effective_current_turn >= mod_turn
+    for (path, mod_turn) in &file_last_modified_turn {
+        if effective_current_turn >= *mod_turn
             && effective_current_turn - mod_turn < WORKING_SET_PIN_TURNS
         {
             pinned_files.push(path.clone());
-            if let Some(&read_idx) = file_latest_read_idx.get(&path) {
+            if let Some(&read_idx) = file_latest_read_idx.get(path) {
                 pinned_indices.insert(read_idx);
             }
-            if let Some(&edit_idx) = file_latest_edit_idx.get(&path) {
+            if let Some(&edit_idx) = file_latest_edit_idx.get(path) {
                 pinned_indices.insert(edit_idx);
             }
         }
     }
+
+    // Capability gap #3: a file the assistant cited after touching it stays pinned even once its
+    // modification is older than the working-set window, because the model is still reasoning about
+    // it. Count only the files the working-set rule did not already pin. A citation pin is capped by
+    // size so a huge cited file can never push the projection over its high watermark — the budget
+    // invariant outranks the heuristic.
+    let mut causal_pins = 0usize;
+    if let Some(citations) = causal_citations {
+        for (path, cite_turn) in citations {
+            if effective_current_turn.saturating_sub(*cite_turn) >= WORKING_SET_PIN_TURNS {
+                continue;
+            }
+            let latest_read = file_latest_read_idx.get(path).copied();
+            let read_small_enough = match latest_read {
+                Some(idx) => match &items[idx] {
+                    TranscriptItem::ToolResult(tr) => tr.content.len() <= CAUSAL_PIN_MAX_BYTES,
+                    _ => false,
+                },
+                None => false,
+            };
+            if !read_small_enough {
+                continue;
+            }
+            if !file_last_modified_turn.contains_key(path) {
+                causal_pins += 1;
+            }
+            if let Some(idx) = latest_read {
+                pinned_indices.insert(idx);
+            }
+            if let Some(&edit_idx) = file_latest_edit_idx.get(path) {
+                pinned_indices.insert(edit_idx);
+            }
+            if !pinned_files.iter().any(|existing| existing == path) {
+                pinned_files.push(path.clone());
+            }
+        }
+    }
     pinned_files.sort();
-    (pinned_indices, pinned_files)
+    (pinned_indices, pinned_files, causal_pins)
 }
 
 /// Compute the start message index of the protected tail window:
@@ -1146,6 +1294,44 @@ pub fn build_outline_stub_for_profile(
         tr.tool_name, path, start_l, end_l, size_kib, sha, seq_idx, evidence
     );
     append_bounded_tail(head, &outline_str)
+}
+
+/// Capability gap #3 (`v1.5.2`): build the bounded one-line "negative lesson" stub that replaces a
+/// failed tool result under causal pruning. It keeps the `source_entry_id` pointer so the raw
+/// failure output stays recoverable through `recall_evidence`, and it never claims the attempt
+/// succeeded — the code and path are carried explicitly.
+pub fn build_dead_end_stub(
+    tr: &ToolResultMessage,
+    seq_idx: usize,
+    source_entry_id: &str,
+    include_evidence: bool,
+) -> String {
+    let path = tr.meta.relative_path.as_deref().unwrap_or(".");
+    let status = tr
+        .meta
+        .exit_code
+        .map(|code| format!("exit={}", code))
+        .unwrap_or_else(|| "failed".to_string());
+    let first_error = tr
+        .content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(no output)");
+    let lesson = crate::prompt::escape_control_chars(first_error);
+    let evidence = if include_evidence {
+        format!(
+            " | source_entry_id={} | call recall_evidence(source_entry_id={})",
+            source_entry_id, source_entry_id
+        )
+    } else {
+        String::new()
+    };
+    let head = format!(
+        "[Dead-end: {}({}, {}, seq={}){} | negative lesson (this attempt failed; do not repeat): ",
+        tr.tool_name, path, status, seq_idx, evidence
+    );
+    append_bounded_tail(head, &lesson)
 }
 
 /// Append the variable-length payload (symbol outline / bash tail) after a fixed header, truncating
@@ -1383,7 +1569,7 @@ mod tests {
         ledger.insert("src/old.rs".to_string(), 1usize);
         ledger.insert("src/recent.rs".to_string(), 10usize);
 
-        let (_, pinned) = compute_working_set_pins(&items, 13, &ledger);
+        let (_, pinned, _) = compute_working_set_pins(&items, 13, &ledger, None);
         assert!(
             pinned.contains(&"src/recent.rs".to_string()),
             "recent.rs (3 turns old) must stay pinned"

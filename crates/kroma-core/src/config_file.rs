@@ -45,6 +45,7 @@ pub const WORKSPACE_ALLOWED_KEYS: &[&str] = &[
     "protocol",
     "reasoning_effort",
     "max_subagents",
+    "max_tokens",
     "projection_profile",
     "adaptive_tournament",
 ];
@@ -70,6 +71,8 @@ const ENV_PROTOCOL: &str = "KROMA_PROTOCOL";
 const ENV_REASONING_EFFORT: &str = "KROMA_REASONING_EFFORT";
 const ENV_VERIFY_COMMAND: &str = "KROMA_VERIFY_COMMAND";
 const ENV_MAX_SUBAGENTS: &str = "KROMA_MAX_SUBAGENTS";
+/// F05 (`v1.5.1`): unified run-tree token cap (`--max-tokens` / `max_tokens`).
+const ENV_MAX_TOKENS: &str = "KROMA_MAX_TOKENS";
 const ENV_PROFILE: &str = "KROMA_PROFILE";
 /// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`).
 const ENV_PROJECTION_PROFILE: &str = "KROMA_PROJECTION_PROFILE";
@@ -104,6 +107,35 @@ impl ConfigProfile {
     }
 }
 
+/// A trusted MCP server definition (capability gap #6, `v1.5.2`). Loaded only from the user global
+/// config (`~/.kroma/config.toml`) or an explicit `--mcp-server` CLI flag; a workspace `.kroma.toml`
+/// can never declare one, so an untrusted workspace cannot cause a process to be spawned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    /// Extra environment variables (never logged) as `KEY=VALUE` pairs.
+    pub env: Vec<(String, String)>,
+    /// When `true`, the server's tools are classified `ReadOnly` (they skip the mutating-tool
+    /// approval gate). Defaults to `false` (fail-safe: `Mutating`).
+    pub read_only: bool,
+}
+
+/// Parse a `KEY=VALUE,KEY2=VALUE2` string into env pairs, dropping empty entries.
+fn parse_env_pairs(raw: &str) -> Vec<(String, String)> {
+    raw.split(',')
+        .filter_map(|pair| {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                return None;
+            }
+            pair.split_once('=')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
 /// A single parsed configuration file. Missing optional fields stay `None` so layer merging can
 /// distinguish "unset" from "explicitly set".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -117,11 +149,16 @@ pub struct KromaConfigFile {
     pub policy: Option<String>,
     pub verify_command: Option<String>,
     pub max_subagents: Option<usize>,
+    /// F05 (`v1.5.1`): optional total token cap (input + output) for a run tree. The same value is
+    /// settable via `--max-tokens` and `KROMA_MAX_TOKENS`.
+    pub max_tokens: Option<u64>,
     /// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`). A safe key that a
     /// workspace `.kroma.toml` may set.
     pub projection_profile: Option<String>,
     /// Item #3 (`v1.4.0`): number of candidates to race when the single agent stalls (`0` = off).
     pub adaptive_tournament: Option<usize>,
+    /// Capability gap #6 (`v1.5.2`): trusted MCP servers declared under `[mcp.<name>]`.
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
     pub profiles: BTreeMap<String, ConfigProfile>,
     /// Every top-level key name present in the file (typed or not), sorted and deduplicated.
     pub raw_keys: Vec<String>,
@@ -163,6 +200,9 @@ impl KromaConfigFile {
                     "max_subagents" => {
                         file.max_subagents = Some(value.as_positive_usize(&key)?);
                     }
+                    "max_tokens" => {
+                        file.max_tokens = Some(value.as_positive_usize(&key)? as u64);
+                    }
                     "adaptive_tournament" => {
                         file.adaptive_tournament = Some(value.as_positive_usize(&key)?);
                     }
@@ -174,6 +214,35 @@ impl KromaConfigFile {
                         file.projection_profile = Some(raw);
                     }
                     // Unknown top-level keys are ignored but remembered for the trust guard.
+                    _ => {}
+                }
+                continue;
+            }
+
+            if table.len() == 2 && table[0] == "mcp" {
+                let name = table[1].clone();
+                sections.insert(table.join("."));
+                let server = file
+                    .mcp_servers
+                    .entry(name.clone())
+                    .or_insert(McpServerConfig {
+                        name: name.clone(),
+                        command: String::new(),
+                        args: Vec::new(),
+                        env: Vec::new(),
+                        read_only: false,
+                    });
+                match key.as_str() {
+                    "command" => server.command = value.as_string()?,
+                    "args" => {
+                        server.args = value
+                            .as_string()?
+                            .split_whitespace()
+                            .map(str::to_string)
+                            .collect()
+                    }
+                    "env" => server.env = parse_env_pairs(&value.as_string()?),
+                    "read_only" => server.read_only = value.as_bool(&key)?,
                     _ => {}
                 }
                 continue;
@@ -313,6 +382,9 @@ impl KromaConfigFile {
         if let Some(n) = self.max_subagents {
             out.push_str(&format!("max_subagents = {}\n", n));
         }
+        if let Some(n) = self.max_tokens {
+            out.push_str(&format!("max_tokens = {}\n", n));
+        }
         if let Some(n) = self.adaptive_tournament {
             out.push_str(&format!("adaptive_tournament = {}\n", n));
         }
@@ -374,6 +446,16 @@ impl KromaConfigFile {
                     .map_err(|_| format!("'{}' is not a valid max_subagents value", value))?;
                 file.max_subagents = Some(parsed);
             }
+            "max_tokens" => {
+                let parsed = value
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| format!("'{}' is not a valid max_tokens value", value))?;
+                if parsed == 0 {
+                    return Err("'max_tokens' must be > 0".to_string());
+                }
+                file.max_tokens = Some(parsed);
+            }
             "projection_profile" => file.projection_profile = Some(value.to_string()),
             "adaptive_tournament" => {
                 let parsed = value
@@ -384,7 +466,7 @@ impl KromaConfigFile {
             }
             other => {
                 return Err(format!(
-                    "unknown configuration key '{}'; expected one of: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents, projection_profile, adaptive_tournament",
+                    "unknown configuration key '{}'; expected one of: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents, max_tokens, projection_profile, adaptive_tournament",
                     other
                 ));
             }
@@ -404,10 +486,14 @@ pub struct ConfigOverrides {
     pub reasoning_effort: Option<String>,
     pub verify_command: Option<String>,
     pub max_subagents: Option<usize>,
+    /// F05 (`v1.5.1`): CLI `--max-tokens` override for the run-tree token cap.
+    pub max_tokens: Option<u64>,
     /// B2 (`v1.4.0`): context projection profile override.
     pub projection_profile: Option<String>,
     /// Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
     pub adaptive_tournament: Option<usize>,
+    /// Capability gap #6 (`v1.5.2`): trusted MCP servers (CLI `--mcp-server` overrides user config).
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 /// Fully merged configuration plus the provenance needed to explain it.
@@ -421,10 +507,14 @@ pub struct ResolvedConfig {
     pub policy: Option<String>,
     pub verify_command: Option<String>,
     pub max_subagents: Option<usize>,
+    /// F05 (`v1.5.1`): resolved run-tree token cap.
+    pub max_tokens: Option<u64>,
     /// B2 (`v1.4.0`): resolved context projection profile.
     pub projection_profile: Option<String>,
     /// Item #3 (`v1.4.0`): resolved adaptive tournament escalation candidate count.
     pub adaptive_tournament: Option<usize>,
+    /// Capability gap #6 (`v1.5.2`): trusted MCP servers to spawn at startup.
+    pub mcp_servers: Vec<McpServerConfig>,
     pub active_profile: Option<String>,
     /// Keys a workspace `.kroma.toml` tried to set outside [`WORKSPACE_ALLOWED_KEYS`].
     pub rejected_workspace_keys: Vec<String>,
@@ -473,6 +563,14 @@ impl ResolvedConfig {
             .any(|section| section == "profiles" || section.starts_with("profiles."))
         {
             rejected_workspace_keys.push("profiles".to_string());
+        }
+        // MCP servers spawn processes, so a workspace file may never declare them either.
+        if workspace
+            .raw_sections
+            .iter()
+            .any(|section| section == "mcp" || section.starts_with("mcp."))
+        {
+            rejected_workspace_keys.push("mcp".to_string());
         }
         rejected_workspace_keys.sort();
         rejected_workspace_keys.dedup();
@@ -538,6 +636,13 @@ impl ResolvedConfig {
                 .or_else(|| env_string(ENV_MAX_SUBAGENTS).and_then(|v| v.parse::<usize>().ok()))
                 .or(workspace.max_subagents)
                 .or(user.max_subagents),
+            // F05 (`v1.5.1`): a safe, non-security key — the workspace file may set it. The cap only
+            // limits spend, so a workspace-controlled value cannot escalate authority.
+            max_tokens: overrides
+                .max_tokens
+                .or_else(|| env_string(ENV_MAX_TOKENS).and_then(|v| v.parse::<u64>().ok()))
+                .or(workspace.max_tokens)
+                .or(user.max_tokens),
             // B2: a safe, non-security key — the workspace file may set it.
             projection_profile: overrides
                 .projection_profile
@@ -553,6 +658,13 @@ impl ResolvedConfig {
                 })
                 .or(workspace.adaptive_tournament)
                 .or(user.adaptive_tournament),
+            // Capability gap #6: MCP servers spawn processes, so only the explicit CLI flag and the
+            // trusted user global config may contribute them — never the workspace file.
+            mcp_servers: if overrides.mcp_servers.is_empty() {
+                user.mcp_servers.values().cloned().collect()
+            } else {
+                overrides.mcp_servers.clone()
+            },
             active_profile,
             rejected_workspace_keys,
             user_config_path,
@@ -596,6 +708,12 @@ impl ResolvedConfig {
         out.push_str(&format!(
             "max_subagents:    {}\n",
             self.max_subagents
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "<unset>".to_string())
+        ));
+        out.push_str(&format!(
+            "max_tokens:       {}\n",
+            self.max_tokens
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "<unset>".to_string())
         ));
@@ -653,6 +771,7 @@ pub fn collect_env() -> BTreeMap<String, String> {
         ENV_REASONING_EFFORT,
         ENV_VERIFY_COMMAND,
         ENV_MAX_SUBAGENTS,
+        ENV_MAX_TOKENS,
         ENV_PROFILE,
         "KROMA_POLICY",
         ENV_PROJECTION_PROFILE,
@@ -872,6 +991,13 @@ impl TomlValue {
             TomlValue::Int(n) if *n >= 0 => Ok(*n as usize),
             TomlValue::Int(n) => Err(format!("key '{}' must not be negative (got {})", key, n)),
             _ => Err(format!("key '{}' must be a non-negative integer", key)),
+        }
+    }
+
+    fn as_bool(&self, key: &str) -> Result<bool, String> {
+        match self {
+            TomlValue::Bool(b) => Ok(*b),
+            _ => Err(format!("key '{}' must be a boolean", key)),
         }
     }
 }

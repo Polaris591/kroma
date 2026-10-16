@@ -46,7 +46,7 @@ kroma upgrade
 
 ## 💎 Key Architectural Highlights
 
-1. **Prismatic Microkernel (~3.2ms Cold Start)**: Written in Rust with zero heavy Electron/browser runtime. TLS goes through the platform stack via `native-tls` (OpenSSL on Linux/Android, Schannel on Windows, Security.framework on macOS), so a system TLS library is a runtime requirement.
+1. **Prismatic Microkernel (~3.2ms Cold Start)**: Written in Rust with zero heavy Electron/browser runtime. TLS uses the platform stack: Schannel on Windows, Security.framework on macOS, and a hand-written OpenSSL binding everywhere else. The `linux-arm64` (musl) and `android-arm64` release binaries link OpenSSL **statically** and therefore carry no runtime TLS dependency; `linux-x64` links the system OpenSSL dynamically, and the macOS build uses the OS framework.
 2. **Kroma Zen Borderless TUI**: Pure obsidian dark theme, 4-color status spectrum dots (`●`), borderless code blocks that never pollute your clipboard with ASCII box characters, and live parent/child token accounting.
 3. **Best-of-N Worktree Tournament (`/race`)**: Spawns isolated Git worktrees in parallel, pits candidates against each other, disqualifies zero-change patches and test-tampering attempts via `ProtectedPaths`, and atomially merges the winner with `MergeIntent` rollback guarantees.
 4. **Adaptive Escalation**: Automatically escalates to a multi-candidate tournament when a single agent stalls on verification failures (`/config set adaptive_tournament 3`).

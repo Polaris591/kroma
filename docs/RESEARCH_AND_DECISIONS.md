@@ -55,9 +55,10 @@
 - **Harness Engineering: Anatomy, Architecture, and Evolution of Coding Agents — A Source-Code Study of Eleven Systems**（2026-07, arXiv:2609.00006）  
   https://arxiv.org/abs/2609.00006  
   对 **Claude Code、Codex CLI、Gemini CLI、Mistral Vibe、OpenHands、Aider、Mini-SWE-Agent、Hermes、Pi、OpenCode、OpenClaw** 共约 400 万行 Python/TS/Rust 源码进行解剖，归纳出 7 大标准子系统（Loop、Tools、Context、Safety、Orchestration、Observability、Interface）、29 个设计模式与 18 条建议：所有生产系统均采用自有轻量异步循环与确定性文件检索（ripgrep/fd/glob），无一依赖重型通用 Agent 框架或向量数据库作为基础检索层。
-- **Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses (AHE)**（2026-05, arXiv:2604.25850v4）  
+- **Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses (AHE)**（2026-05, arXiv:2604.25850v4，预印本）  
   https://arxiv.org/abs/2604.25850  
-  消融实验证明：跨模型家族可迁移的成功率提升（+5.1 至 +10.1 个百分点，且减少 12% Token）全部来自 **工具接口（Tools）、中间件护栏（Middleware）与分层可观测诊断（Observability）**，而单纯改写长篇 System Prompt 散文策略无法跨模型迁移。
+  消融实验报告：跨模型家族可迁移的成功率提升（+5.1 至 +10.1 个百分点，且减少 12% Token）来自 **工具接口（Tools）、中间件护栏（Middleware）与分层可观测诊断（Observability）**，而单纯改写长篇 System Prompt 散文策略无法跨模型迁移。
+  **范围限定**：AHE 研究的是 agent 自动修改 harness 组件并在下一轮任务结果验证其自声明预测；它是预印本。它**不是**“每次用户源码 edit 跑括号检查、再猜哪次 edit 导致错误”的实证依据，也不证明自动回滚。Kroma 的写入即检与候选归因是独立工程设计，需要本项目自己的消融证据。
 - **SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering**（NeurIPS 2024 / arXiv:2405.15793）  
   https://arxiv.org/abs/2405.15793  
   轨迹分析显示 **Failed Edit Recovery 占全部失败模式的 23.4%**；良好的 ACI 必须在工具返回与错误诊断中提供精确定位上下文，帮助模型在下一轮立即恢复。

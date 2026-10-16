@@ -4,11 +4,17 @@ use super::*;
 
 impl RpcDispatcher {
     pub(crate) async fn rpc_revision_list(&self) -> Result<Value, JsonRpcError> {
+        // F10: read-only surface — a failed reconciliation is reported as degraded, not fatal.
+        let mut recovery_error: Option<String> = None;
         if let Ok(_guard) = self.inner.op_lock.try_lock() {
             let path = self.session_path();
-            if let Ok(mut journal) = SessionJournal::open(&path) {
-                let _ = self.inner.snapshot_store.reconcile_with_wal(&mut journal);
-                self.update_snapshot_from_journal(&journal);
+            match SessionJournal::open(&path) {
+                Ok(mut journal) => match self.inner.snapshot_store.reconcile_with_wal(&mut journal)
+                {
+                    Ok(_) => self.update_snapshot_from_journal(&journal),
+                    Err(e) => recovery_error = Some(format!("{}", e)),
+                },
+                Err(e) => recovery_error = Some(format!("failed to open session WAL: {}", e)),
             }
         }
         let snap = self.inner.status.lock().unwrap().clone();
@@ -43,6 +49,10 @@ impl RpcDispatcher {
             "latest_revision_id": snap.latest_revision_id,
             "revisions": revisions,
             "store_revision_count": store_revisions.len(),
+            "recovery": {
+                "degraded": recovery_error.is_some(),
+                "reason": recovery_error.unwrap_or_default(),
+            },
         }))
     }
     pub(crate) async fn rpc_revision_undo(&self, params: &Value) -> Result<Value, JsonRpcError> {
@@ -62,6 +72,8 @@ impl RpcDispatcher {
                 "cannot undo workspace revision while another session operation is in progress",
             ));
         };
+        self.validate_session_param(params)?;
+        let _writer_lease = self.acquire_writer_lease()?;
         let path = self.session_path();
         let mut journal = SessionJournal::open(&path).map_err(|e| {
             JsonRpcError::new(
@@ -69,7 +81,7 @@ impl RpcDispatcher {
                 format!("failed to open session WAL: {}", e),
             )
         })?;
-        let _ = self.inner.snapshot_store.reconcile_with_wal(&mut journal);
+        self.reconcile_journal(&mut journal)?;
         let records = journal.revision_records();
         let Some(current) = records.last().cloned() else {
             return Err(JsonRpcError::new(
@@ -135,6 +147,8 @@ impl RpcDispatcher {
                 "cannot restore workspace revision while another session operation is in progress",
             ));
         };
+        self.validate_session_param(params)?;
+        let _writer_lease = self.acquire_writer_lease()?;
         let path = self.session_path();
         let mut journal = SessionJournal::open(&path).map_err(|e| {
             JsonRpcError::new(
@@ -142,7 +156,7 @@ impl RpcDispatcher {
                 format!("failed to open session WAL: {}", e),
             )
         })?;
-        let _ = self.inner.snapshot_store.reconcile_with_wal(&mut journal);
+        self.reconcile_journal(&mut journal)?;
         let expected = journal
             .latest_revision_id()
             .and_then(|id| RevisionId::parse(&id).ok());
@@ -309,29 +323,15 @@ impl RpcDispatcher {
         removed_files: &[String],
         expected: Option<&RevisionId>,
     ) -> Result<(), String> {
-        let (changed_paths, tracked_file_count) = match store.load_revision(restored_revision) {
-            Ok(manifest) => (manifest.changed_paths.clone(), manifest.tracked_files.len()),
-            Err(_) => {
-                let mut paths: Vec<String> = restored_files
-                    .iter()
-                    .chain(removed_files.iter())
-                    .cloned()
-                    .collect();
-                paths.sort();
-                paths.dedup();
-                (paths, restored_files.len())
-            }
-        };
-        let turn = journal.max_active_turn();
-        journal
-            .record_revision_capture(
-                turn,
-                restored_revision.as_str(),
-                expected.map(|e| e.as_str()),
-                changed_paths,
-                tracked_file_count,
-            )
-            .map_err(|e| e.to_string())
+        crate::revision::record_restored_revision(
+            journal,
+            store,
+            restored_revision,
+            restored_files,
+            removed_files,
+            expected,
+        )
+        .map_err(|e| e.to_string())
     }
     /// P1 (`v1.5.0`): carry the cumulative `subagents_spawned` count (and the merged revision, when
     /// one was produced) forward in a checkpoint on the active branch.

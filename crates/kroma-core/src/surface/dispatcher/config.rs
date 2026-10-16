@@ -46,6 +46,7 @@ impl RpcDispatcher {
             "active_model": active_model,
             "active_protocol": active_protocol,
             "ui_theme": self.active_theme().as_str(),
+            "max_tokens": self.active_max_tokens(),
             "hot_swap_available": hot_swap_available,
             "summary": summary,
             "rejected_workspace_keys": rejected,
@@ -116,6 +117,31 @@ impl RpcDispatcher {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        // F05 (`v1.5.1`): `max_tokens` is the fourth entry point of the unified run-tree token cap
+        // (with `--max-tokens`, the `max_tokens` config key and `session.prompt.max_tokens`). It is
+        // safe to hot-swap because it only feeds a budget, never the provider. Accept a number or a
+        // numeric string (the REPL forwards raw text) and reject zero, matching the config-file
+        // validation.
+        let max_tokens_raw = match params.get("max_tokens") {
+            Some(value) => {
+                let parsed = value.as_u64().or_else(|| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .and_then(|s| s.parse::<u64>().ok())
+                });
+                match parsed {
+                    Some(n) if n > 0 => Some(n),
+                    _ => {
+                        return Err(JsonRpcError::new(
+                            JSONRPC_INVALID_PARAMS,
+                            "'max_tokens' must be a positive integer".to_string(),
+                        ));
+                    }
+                }
+            }
+            None => None,
+        };
         let save = params.get("save").and_then(Value::as_bool).unwrap_or(false);
 
         if model.is_none()
@@ -125,10 +151,11 @@ impl RpcDispatcher {
             && projection_profile_raw.is_none()
             && adaptive_tournament_raw.is_none()
             && ui_theme_raw.is_none()
+            && max_tokens_raw.is_none()
         {
             return Err(JsonRpcError::new(
                 JSONRPC_INVALID_PARAMS,
-                "config.set requires at least one of 'model', 'protocol', 'reasoning_effort', 'profile', 'projection_profile', 'adaptive_tournament' or 'ui_theme'"
+                "config.set requires at least one of 'model', 'protocol', 'reasoning_effort', 'profile', 'projection_profile', 'adaptive_tournament', 'max_tokens' or 'ui_theme'"
                     .to_string(),
             ));
         }
@@ -217,6 +244,13 @@ impl RpcDispatcher {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = theme;
             }
+            if let Some(n) = max_tokens_raw {
+                *self
+                    .inner
+                    .active_max_tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(n);
+            }
             {
                 let mut guard = self
                     .inner
@@ -230,6 +264,9 @@ impl RpcDispatcher {
                     if let Some(n) = adaptive_tournament_raw {
                         cfg.adaptive_tournament = Some(n);
                     }
+                    if let Some(n) = max_tokens_raw {
+                        cfg.max_tokens = Some(n);
+                    }
                 }
             }
             let mut persisted_to = None;
@@ -242,6 +279,9 @@ impl RpcDispatcher {
                 if let Some(n) = adaptive_tournament_raw {
                     file.adaptive_tournament = Some(n);
                 }
+                if let Some(n) = max_tokens_raw {
+                    file.max_tokens = Some(n);
+                }
                 let path = file
                     .save_user_global()
                     .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
@@ -251,6 +291,7 @@ impl RpcDispatcher {
                 "projection_profile": new_projection_profile.map(|p| p.as_str()),
                 "adaptive_tournament": adaptive_tournament_raw,
                 "ui_theme": self.active_theme().as_str(),
+                "max_tokens": self.active_max_tokens(),
                 "persisted_to": persisted_to,
             }));
         }
@@ -324,6 +365,13 @@ impl RpcDispatcher {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = theme;
         }
+        if let Some(n) = max_tokens_raw {
+            *self
+                .inner
+                .active_max_tokens
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(n);
+        }
         {
             let mut guard = self
                 .inner
@@ -336,6 +384,9 @@ impl RpcDispatcher {
                 cfg.reasoning_effort = new_reasoning.clone();
                 if let Some(name) = &profile {
                     cfg.active_profile = Some(name.clone());
+                }
+                if let Some(n) = max_tokens_raw {
+                    cfg.max_tokens = Some(n);
                 }
             }
         }
@@ -362,6 +413,9 @@ impl RpcDispatcher {
             if let Some(n) = adaptive_tournament_raw {
                 file.adaptive_tournament = Some(n);
             }
+            if let Some(n) = max_tokens_raw {
+                file.max_tokens = Some(n);
+            }
             let path = file
                 .save_user_global()
                 .map_err(|e| JsonRpcError::new(JSONRPC_INTERNAL_ERROR, e))?;
@@ -386,6 +440,7 @@ impl RpcDispatcher {
             "protocol": resolved_protocol,
             "reasoning_effort": new_reasoning,
             "profile": profile,
+            "max_tokens": self.active_max_tokens(),
             "persisted_to": persisted_to,
         }))
     }

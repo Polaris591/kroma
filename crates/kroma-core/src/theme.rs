@@ -225,13 +225,233 @@ fn effective_no_color(primary: Option<String>, kroma: Option<String>) -> Option<
         .or_else(|| kroma.filter(|v| !v.is_empty()))
 }
 
-/// Terminal width from `COLUMNS`, clamped to a sane range; defaults to 80.
+/// Smallest width the chrome will lay itself out for.
+const MIN_TERMINAL_WIDTH: usize = 20;
+/// Largest width the chrome will use, so a bogus tty size cannot produce absurd chrome.
+const MAX_TERMINAL_WIDTH: usize = 240;
+/// Portable fallback when neither the tty nor `COLUMNS` reports a size.
+const DEFAULT_TERMINAL_WIDTH: usize = 80;
+
+/// Terminal width in columns, clamped to a readable range.
+///
+/// P4 (`v1.5.0`): the real tty size is authoritative. The previous implementation only read the
+/// `COLUMNS` environment variable, so a terminal that does not export it (many PTYs, `sudo`, some
+/// multiplexers) silently rendered chrome for an 80-column terminal and wrapped. Resolution order:
+/// `TIOCGWINSZ` on stdout, then stderr, then `COLUMNS`, then the portable 80-column default.
 pub fn terminal_width() -> usize {
+    terminal_width_from(tty_width(), columns_env())
+}
+
+/// Pure width resolution, split out so the precedence is unit-testable without a real tty.
+pub fn terminal_width_from(tty_columns: Option<usize>, columns_env: Option<usize>) -> usize {
+    tty_columns
+        .or(columns_env)
+        .map(|w| w.clamp(MIN_TERMINAL_WIDTH, MAX_TERMINAL_WIDTH))
+        .unwrap_or(DEFAULT_TERMINAL_WIDTH)
+}
+
+fn columns_env() -> Option<usize> {
     std::env::var("COLUMNS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .map(|w| w.clamp(20, 240))
-        .unwrap_or(80)
+}
+
+#[cfg(unix)]
+fn tty_width() -> Option<usize> {
+    fn winsize(fd: libc::c_int) -> Option<usize> {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: `ws` is a valid, writable `winsize`; `TIOCGWINSZ` only writes it.
+        let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+        if rc == 0 && ws.ws_col > 0 {
+            Some(ws.ws_col as usize)
+        } else {
+            None
+        }
+    }
+    winsize(libc::STDOUT_FILENO).or_else(|| winsize(libc::STDERR_FILENO))
+}
+
+#[cfg(not(unix))]
+fn tty_width() -> Option<usize> {
+    None
+}
+
+/// Approximate terminal display width of one char in cells: 0 for control/zero-width, 2 for
+/// East-Asian wide / fullwidth / emoji code points, 1 otherwise.
+fn char_cells(c: char) -> usize {
+    let cp = c as u32;
+    if c == '\t' {
+        return 1;
+    }
+    if cp < 0x20 || cp == 0x7f || (0x80..=0x9f).contains(&cp) {
+        return 0;
+    }
+    // Zero-width combining marks, variation selectors and word joiners.
+    if (0x0300..=0x036f).contains(&cp)
+        || (0x200b..=0x200f).contains(&cp)
+        || (0xfe00..=0xfe0f).contains(&cp)
+    {
+        return 0;
+    }
+    if is_wide_code_point(cp) {
+        2
+    } else {
+        1
+    }
+}
+
+fn is_wide_code_point(cp: u32) -> bool {
+    matches!(cp,
+        0x1100..=0x115f
+        | 0x2e80..=0x303e
+        | 0x3041..=0x33ff
+        | 0x3400..=0x4dbf
+        | 0x4e00..=0x9fff
+        | 0xa000..=0xa4cf
+        | 0xac00..=0xd7a3
+        | 0xf900..=0xfaff
+        | 0xfe10..=0xfe19
+        | 0xfe30..=0xfe6f
+        | 0xff00..=0xff60
+        | 0xffe0..=0xffe6
+        | 0x1f300..=0x1f64f
+        | 0x1f900..=0x1f9ff
+        | 0x20000..=0x3fffd
+    )
+}
+
+/// Consume one ANSI escape sequence (the introducer has already been seen) and return its text.
+fn escape_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut seq = String::new();
+    match chars.peek() {
+        Some('[') => {
+            seq.push(chars.next().unwrap());
+            for c in chars.by_ref() {
+                seq.push(c);
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+        Some(']') => {
+            seq.push(chars.next().unwrap());
+            while let Some(c) = chars.next() {
+                seq.push(c);
+                if c == '\x07' {
+                    break;
+                }
+                if c == '\x1b' && chars.peek() == Some(&'\\') {
+                    seq.push(chars.next().unwrap());
+                    break;
+                }
+            }
+        }
+        _ => {
+            if let Some(c) = chars.next() {
+                seq.push(c);
+            }
+        }
+    }
+    seq
+}
+
+/// Display width of `text` in terminal cells, ignoring ANSI escape sequences.
+pub fn display_width(text: &str) -> usize {
+    let mut width = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            let _ = escape_sequence(&mut chars);
+            continue;
+        }
+        if c == '\n' || c == '\r' {
+            continue;
+        }
+        width += char_cells(c);
+    }
+    width
+}
+
+/// Truncate `text` to at most `max` display cells without splitting a character or an ANSI escape
+/// sequence. A trailing `…` marks elision. Returns `text` unchanged when it already fits.
+pub fn truncate_display(text: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if display_width(text) <= max {
+        return text.to_string();
+    }
+    let budget = max - 1; // reserve one cell for the ellipsis
+    let mut out = String::with_capacity(text.len());
+    let mut width = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            out.push_str(&escape_sequence(&mut chars));
+            continue;
+        }
+        if c == '\n' || c == '\r' {
+            continue;
+        }
+        let cells = char_cells(c);
+        if width + cells > budget {
+            break;
+        }
+        width += cells;
+        out.push(c);
+    }
+    out.push('…');
+    if out.contains('\x1b') {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+
+/// Fit every line of `text` to at most `width` display cells, eliding any line that is too long.
+/// ANSI escapes are preserved and never counted, so coloured chrome is not corrupted.
+pub fn fit_lines(text: &str, width: usize) -> String {
+    let width = width.max(1);
+    let mut out = String::with_capacity(text.len());
+    for (idx, line) in text.split('\n').enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        if display_width(line) > width {
+            out.push_str(&truncate_display(line, width));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Pack `segments` into lines of at most `width` display cells joined by `" | "`. A single segment
+/// longer than `width` is truncated. Keeps the session-facts line readable on a narrow tty.
+pub fn wrap_segments(segments: &[String], width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for seg in segments {
+        let seg = if display_width(seg) > width {
+            truncate_display(seg, width)
+        } else {
+            seg.clone()
+        };
+        if current.is_empty() {
+            current = seg;
+        } else if display_width(&current) + 3 + display_width(&seg) <= width {
+            current.push_str(" | ");
+            current.push_str(&seg);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = seg;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 /// Renders Design D ("Kroma Zen") chrome for the terminal surfaces.
@@ -424,13 +644,16 @@ impl ThemeRenderer {
     }
 
     /// A compact telemetry footer for the end of a turn.
+    ///
+    /// P3 (`v1.5.0`): the footer no longer prints a `0 warnings` claim. No predictive-warning count
+    /// reaches the terminal surface, so the line stated a number the operator could not rely on;
+    /// omitting it is honest and leaves the sourced fields (tokens, cache, revision) intact.
     pub fn telemetry_footer(
         &self,
         self_tokens: u64,
         child_tokens: u64,
         cache_hit_pct: f64,
         rev: &str,
-        warnings: usize,
     ) -> String {
         let sep = self.paint(sgr::DIM, "·");
         let self_seg = format!(
@@ -443,15 +666,10 @@ impl ThemeRenderer {
         );
         let cache_seg = self.paint(sgr::EMERALD, &format!("cache {:.1}%", cache_hit_pct));
         let rev_seg = self.paint(sgr::AMBER, &format!("rev {}", rev_label(rev)));
-        let warn_seg = if warnings == 0 {
-            self.paint(sgr::EMERALD, "0 warnings")
-        } else {
-            self.paint(sgr::AMBER, &format!("{} warnings", warnings))
-        };
         format!(
             "  {} + {}  {}  {}  {}  {}",
             self_seg, child_seg, sep, cache_seg, sep, rev_seg
-        ) + &format!("  {}  {}", sep, warn_seg)
+        )
     }
 
     /// The one-line truecolour spectrum hairline; ASCII `-` when colour is disabled.
@@ -487,23 +705,30 @@ impl ThemeRenderer {
         turns: u64,
     ) -> String {
         let header = self.header(model, thinking, protocol, cache_hit_pct, rev, workspace);
-        let facts = format!(
-            "model: {} | thinking: {} | protocol: {} | session: {} | policy: {}",
-            sanitize_terminal_text(model),
-            sanitize_terminal_text(thinking),
-            sanitize_terminal_text(protocol),
-            sanitize_terminal_text(session_id),
-            sanitize_terminal_text(policy),
-        );
+        // P4 (`v1.5.0`): wrap the session facts at the real terminal width instead of emitting one
+        // fixed-format line that wraps (and corrupts the layout) on a narrow tty. Wrapping rather
+        // than truncating keeps the stable `model: / thinking: / protocol: / session: / policy:`
+        // labels that scripts and the surface-parity tests key on.
+        let facts_segments = vec![
+            format!("model: {}", sanitize_terminal_text(model)),
+            format!("thinking: {}", sanitize_terminal_text(thinking)),
+            format!("protocol: {}", sanitize_terminal_text(protocol)),
+            format!("session: {}", sanitize_terminal_text(session_id)),
+            format!("policy: {}", sanitize_terminal_text(policy)),
+        ];
+        let mut facts = String::new();
+        for line in wrap_segments(&facts_segments, terminal_width().saturating_sub(2).max(1)) {
+            let _ = writeln!(facts, "  {}", self.paint(sgr::SLATE, &line));
+        }
         let hint = format!(
             "Kroma v{} Interactive REPL · turns: {} · Type a task prompt, or /help for all commands. /theme zen|classic",
             crate::version(),
             turns
         );
         format!(
-            "{header}\n  {facts}\n  {hint}\n",
+            "{header}\n{facts}  {hint}\n",
             header = header,
-            facts = self.paint(sgr::SLATE, &facts),
+            facts = facts,
             hint = self.paint(sgr::DIM, &hint),
         )
     }
@@ -564,7 +789,7 @@ mod tests {
         let r = ThemeRenderer::plain(Theme::Zen);
         let header = r.header("m", "high", "responses", 99.6, "0b92f1ab", "/ws");
         let line = r.status_line(StatusDot::Thinking, "thinking", "checking");
-        let footer = r.telemetry_footer(3100, 0, 99.6, "0b92f1ab", 0);
+        let footer = r.telemetry_footer(3100, 0, 99.6, "0b92f1ab");
         let hair = r.hairline(8);
         for text in [&header, &line, &footer, &hair] {
             assert!(

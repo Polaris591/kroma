@@ -27,6 +27,7 @@ pub struct RegisteredTool {
 pub fn builtin_tool_registrations() -> Vec<RegisteredTool> {
     vec![
         crate::extensions::activate_skill_registration(),
+        crate::extensions::discover_tools_registration(),
         crate::subagents::spawn_subagent_registration(),
         RegisteredTool {
             definition: ToolDefinition {

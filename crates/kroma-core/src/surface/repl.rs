@@ -1,6 +1,113 @@
 //! repl surface of the multi-surface runtime (split from `surface.rs`).
 
 use super::*;
+use std::collections::VecDeque;
+
+/// Bracketed-paste markers a terminal wraps around a paste burst (`ESC[200~` / `ESC[201~`).
+const BRACKETED_PASTE_START: &str = "\x1b[200~";
+const BRACKETED_PASTE_END: &str = "\x1b[201~";
+/// Maximum number of submitted prompts kept in the in-memory REPL history.
+const REPL_HISTORY_LIMIT: usize = 100;
+/// Number of `/history` entries listed when no count is given.
+const REPL_HISTORY_DEFAULT_SHOWN: usize = 20;
+/// Prompt shown while the REPL is still accumulating a multi-line submission.
+const CONTINUATION_PROMPT: &str = "... ";
+
+/// One complete user submission assembled by the REPL input loop.
+///
+/// `literal_prompt` is set for a bracketed paste, a `"""` block, or a backslash-continued
+/// submission: that text is dispatched as a single prompt even when it begins with `/`.
+struct Submission {
+    text: String,
+    literal_prompt: bool,
+}
+
+/// Outcome of resolving a `!N` / `!!` history recall.
+enum HistoryRecall {
+    /// The input was not a history recall and must be dispatched unchanged.
+    NotRecall,
+    /// The input named a history entry; dispatch this text instead.
+    Text(String),
+    /// The input named an out-of-range entry; print this error and execute nothing.
+    Error(String),
+}
+
+/// P6 (`v1.5.2`): what the run is currently waiting on, rendered as one bounded status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitingState {
+    /// Waiting on the provider to return a model response.
+    Provider,
+    /// A tool is running; carries the tool name.
+    Tool(String),
+    /// An operator approval is pending; carries the tool name.
+    Approval(String),
+}
+
+/// True when `line` ends with an unescaped trailing backslash (an odd-length run of `\`).
+fn ends_with_unescaped_backslash(line: &str) -> bool {
+    line.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1
+}
+
+/// Remove the single trailing continuation backslash from `line`.
+fn strip_continuation_backslash(line: &str) -> &str {
+    line.strip_suffix('\\').unwrap_or(line)
+}
+
+/// Split the bracketed-paste markers out of one input line.
+///
+/// Returns the line with any marker removed, whether a start marker was present, and whether an
+/// end marker was present. A stray end marker is removed rather than forwarded to the model.
+fn split_paste_markers(line: &str) -> (String, bool, bool) {
+    let has_start = line.contains(BRACKETED_PASTE_START);
+    let has_end = line.contains(BRACKETED_PASTE_END);
+    if !has_start && !has_end {
+        return (line.to_string(), false, false);
+    }
+    let cleaned = line
+        .replace(BRACKETED_PASTE_START, "")
+        .replace(BRACKETED_PASTE_END, "");
+    (cleaned, has_start, has_end)
+}
+
+/// The waiting state implied by a live `kroma/event`, if any.
+///
+/// Only events that change what the run is *blocked on* map to a state; the streaming loop renders
+/// a line only when the state actually changes, so nothing is printed per event type.
+fn waiting_state_for_event(note: &JsonRpcNotification) -> Option<WaitingState> {
+    if note.method != "kroma/event" {
+        return None;
+    }
+    let event_type = note.params.get("event_type").and_then(Value::as_str)?;
+    let key = event_type.to_ascii_lowercase().replace('_', "");
+    let payload = note.params.get("payload")?;
+    let tool_name = || {
+        payload
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    match key.as_str() {
+        "modelrequeststarted" => Some(WaitingState::Provider),
+        "toolstarted" => Some(WaitingState::Tool(tool_name())),
+        "approvalrequested" => Some(WaitingState::Approval(tool_name())),
+        _ => None,
+    }
+}
+
+/// Render the waiting line only when `state` differs from `last`, updating `last` in place.
+fn waiting_line_if_changed(
+    state: WaitingState,
+    last: &mut Option<WaitingState>,
+    render: impl FnOnce(&WaitingState) -> String,
+) -> Option<String> {
+    if last.as_ref() == Some(&state) {
+        return None;
+    }
+    let line = render(&state);
+    *last = Some(state);
+    Some(line)
+}
 
 /// Output of a single interactive REPL input line (`InteractiveRepl::handle_line`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,21 +116,69 @@ pub struct ReplStepOutcome {
     pub should_exit: bool,
 }
 
+/// FLAGS cell of one `/tasks` row: `challenge(<reason>)`, `pending_merge`, both, or `-`.
+///
+/// `pending_merge` is tri-state on the wire: a JSON `true`/`false` is taken literally (a `false`
+/// must not read as "the field is present"), any other non-null value counts as set, and a missing
+/// or `null` field means unset.
+pub fn format_task_flags(task: &Value) -> String {
+    let challenge = task.get("challenge").and_then(Value::as_str);
+    let pending_merge = match task.get("pending_merge") {
+        Some(Value::Bool(b)) => *b,
+        Some(v) => !v.is_null(),
+        None => false,
+    };
+    match (challenge, pending_merge) {
+        (Some(c), true) => format!("challenge({}) + merge", sanitize_terminal_text(c)),
+        (Some(c), false) => format!("challenge({})", sanitize_terminal_text(c)),
+        (None, true) => "pending_merge".to_string(),
+        (None, false) => "-".to_string(),
+    }
+}
+
 /// Stateless interactive REPL / TUI consumer (`kroma repl` / `kroma tui` / `--interactive`).
 ///
 /// Per Blueprint v2.0 Gate 6 Invariant #3, `InteractiveRepl` holds zero private session state:
 /// every slash command and prompt turn is dispatched as a JSON-RPC 2.0 request to [`RpcDispatcher`].
 pub struct InteractiveRepl {
     dispatcher: RpcDispatcher,
+    /// P6 (`v1.5.2`): in-memory prompt history (last [`REPL_HISTORY_LIMIT`] entries).
+    ///
+    /// Deliberately never persisted: prompt text stays in this process only.
+    history: Mutex<VecDeque<String>>,
 }
 
 impl InteractiveRepl {
     pub fn new(dispatcher: RpcDispatcher) -> Self {
-        Self { dispatcher }
+        Self {
+            dispatcher,
+            history: Mutex::new(VecDeque::new()),
+        }
     }
 
     pub fn dispatcher(&self) -> &RpcDispatcher {
         &self.dispatcher
+    }
+
+    /// P6 (`v1.5.2`): render a [`WaitingState`] as a single bounded, sanitized status line.
+    pub fn render_waiting_state(&self, state: &WaitingState) -> String {
+        let renderer = self.dispatcher.theme_renderer();
+        let line = match state {
+            WaitingState::Provider => {
+                renderer.status_line(StatusDot::Thinking, "waiting", "provider")
+            }
+            WaitingState::Tool(tool) => renderer.status_line(
+                StatusDot::Tool,
+                "waiting",
+                &format!("tool {}", sanitize_terminal_text(tool)),
+            ),
+            WaitingState::Approval(tool) => renderer.status_line(
+                StatusDot::Alert,
+                "waiting",
+                &format!("approval {}", sanitize_terminal_text(tool)),
+            ),
+        };
+        crate::theme::truncate_display(&line, crate::theme::terminal_width())
     }
 
     /// Render the top status banner by querying `session.status` via [`RpcDispatcher`].
@@ -66,6 +221,37 @@ impl InteractiveRepl {
             .and_then(Value::as_f64)
             .unwrap_or(0.0)
             * 100.0;
+
+        // P3 (`v1.5.0`): the gate line reflects the resolved completion gate reported by
+        // `session.status`, instead of always claiming verification is armed.
+        let gate = result.get("completion_gate");
+        let gate_armed = gate
+            .and_then(|g| g.get("armed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let gate_command = gate
+            .and_then(|g| g.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let (gate_dot, gate_detail) = if !gate_armed {
+            (
+                StatusDot::Tool,
+                "completion verification disabled".to_string(),
+            )
+        } else if !gate_command.is_empty() {
+            (
+                StatusDot::Success,
+                format!(
+                    "completion verification armed: {}",
+                    sanitize_terminal_text(gate_command)
+                ),
+            )
+        } else {
+            (
+                StatusDot::Success,
+                "completion verification armed (auto-detect)".to_string(),
+            )
+        };
 
         let active_model = self
             .dispatcher
@@ -114,11 +300,7 @@ impl InteractiveRepl {
             ));
             banner.push_str(&format!(
                 "{}\n",
-                renderer.status_line(
-                    StatusDot::Success,
-                    "gate",
-                    "workspace completion gate armed"
-                )
+                renderer.status_line(gate_dot, "gate", &gate_detail)
             ));
             banner.push_str(&format!(
                 "{}\n",
@@ -132,16 +314,17 @@ impl InteractiveRepl {
                 "{}\n",
                 renderer.hairline(terminal_hairline_width())
             ));
-            return banner;
+            // P4 (`v1.5.0`): fit every chrome line to the real terminal width so nothing wraps.
+            return crate::theme::fit_lines(&banner, crate::theme::terminal_width());
         }
 
-        format!(
+        let classic = format!(
             "=== Kroma v{} Interactive REPL ===\n\
              workspace: {} | policy: {} | session: {}\n\
              model: {} | thinking: {} | protocol: {}\n\
              turns: {} | revision: {} | tokens: in={} (cached={}, hit={:.1}%)\n\
              Type a task prompt, or /help for all commands.\n\
-             Key commands: /model  /thinking  /resume  /sessions  /new  /undo  /revisions  /graph  /race  /config  /theme  /status  /help  /quit\n",
+             Key commands: /model  /thinking  /tasks  /accept  /reconcile  /cancel  /resume  /sessions  /new  /undo  /revisions  /graph  /race  /config  /theme  /status  /help  /quit\n",
             crate::version(),
             sanitize_terminal_text(ws),
             sanitize_terminal_text(policy),
@@ -154,7 +337,9 @@ impl InteractiveRepl {
             in_tok,
             cached_tok,
             hit_pct,
-        )
+        );
+        // P4 (`v1.5.0`): the classic layout is fixed-width too; fit it to the real terminal width.
+        crate::theme::fit_lines(&classic, crate::theme::terminal_width())
     }
 
     /// Shared handler for `/model`, `/thinking`, `/protocol` and `/config`.
@@ -365,7 +550,7 @@ impl InteractiveRepl {
                     "set" => {
                         if args.len() < 3 {
                             return out(
-                                "usage: /config set <key> <value>\n  keys: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents, projection_profile, adaptive_tournament\n"
+                                "usage: /config set <key> <value>\n  keys: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents, projection_profile, adaptive_tournament, max_tokens\n"
                                     .to_string(),
                             );
                         }
@@ -505,9 +690,79 @@ impl InteractiveRepl {
         })
     }
 
-    /// `/resume [<latest|id>]`: attach an existing session WAL.
+    /// `/resume [<task_id|id|latest>]`: resume a durable task, or attach an existing session WAL.
     async fn repl_resume_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
-        let target = rest.first().copied().unwrap_or("latest");
+        let (is_task_keyword, raw_target) =
+            if rest.first().copied() == Some("task") && rest.len() > 1 {
+                (true, rest.get(1).copied())
+            } else {
+                (false, rest.first().copied())
+            };
+
+        let target = raw_target
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("latest");
+
+        if target != "latest" {
+            let is_explicit_task_prefix =
+                target.starts_with("sub-") || target.starts_with("task-");
+            let in_tasks = if is_task_keyword || is_explicit_task_prefix {
+                true
+            } else {
+                let list_resp = self
+                    .dispatcher
+                    .handle_request(JsonRpcRequest::new(1, "tasks.list", json!({})))
+                    .await;
+                list_resp
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.get("tasks"))
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter().any(|t| {
+                            t.get("task_id").and_then(Value::as_str) == Some(target)
+                        })
+                    })
+                    .unwrap_or(false)
+            };
+
+            if in_tasks {
+                let resp = self
+                    .dispatcher
+                    .handle_request(JsonRpcRequest::new(
+                        1,
+                        "tasks.control",
+                        json!({ "action": "resume", "task_id": target }),
+                    ))
+                    .await;
+                return match resp.result {
+                    Some(val) => {
+                        let tid = val.get("task_id").and_then(Value::as_str).unwrap_or(target);
+                        let state = val.get("state").and_then(Value::as_str).unwrap_or("running");
+                        Ok(ReplStepOutcome {
+                            output: format!(
+                                "resumed task {} (state: {})\n",
+                                sanitize_terminal_text(tid),
+                                sanitize_terminal_text(state),
+                            ),
+                            should_exit: false,
+                        })
+                    }
+                    None => {
+                        let msg = resp
+                            .error
+                            .map(|e| e.message)
+                            .unwrap_or_else(|| "tasks.control resume failed".to_string());
+                        Ok(ReplStepOutcome {
+                            output: format!("error: {}\n", sanitize_terminal_text(&msg)),
+                            should_exit: false,
+                        })
+                    }
+                };
+            }
+        }
+
         let resp = self
             .dispatcher
             .handle_request(JsonRpcRequest::new(
@@ -541,6 +796,312 @@ impl InteractiveRepl {
                 ),
                 should_exit: false,
             }),
+        }
+    }
+
+    /// `/tasks`: list durable async subagent tasks for the active session.
+    async fn repl_tasks_command(&self) -> Result<ReplStepOutcome, String> {
+        let sid = self.dispatcher.session_id();
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "tasks.list",
+                json!({ "session_id": sid }),
+            ))
+            .await;
+
+        let val = match resp.result {
+            Some(v) => v,
+            None => {
+                let msg = resp
+                    .error
+                    .map(|e| e.message)
+                    .unwrap_or_else(|| "tasks.list failed".to_string());
+                return Ok(ReplStepOutcome {
+                    output: format!("error: {}\n", sanitize_terminal_text(&msg)),
+                    should_exit: false,
+                });
+            }
+        };
+
+        let tasks = val
+            .get("tasks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        if tasks.is_empty() {
+            return Ok(ReplStepOutcome {
+                output: "no tasks\n".to_string(),
+                should_exit: false,
+            });
+        }
+
+        let width = crate::theme::terminal_width();
+        let mut out = format!("tasks ({}):\n", tasks.len());
+        let hdr = format!(
+            "  {:<12}  {:<8}  {:<10}  {:<16}  {:<6}  {}",
+            "TASK ID", "ROLE", "STATE", "TOKENS", "TURN", "FLAGS"
+        );
+        out.push_str(&hdr);
+        out.push('\n');
+
+        for task in tasks.iter().take(crate::async_tasks::MAX_TASKS) {
+            let task_id = task
+                .get("task_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let role = task.get("role").and_then(Value::as_str).unwrap_or("-");
+            let state = task.get("state").and_then(Value::as_str).unwrap_or("-");
+            let spent = task.get("token_spent").and_then(Value::as_u64).unwrap_or(0);
+            let alloc = task
+                .get("token_allocation")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let tokens_str = format!("{}/{}", spent, alloc);
+            let turn_str = task
+                .get("updated_turn")
+                .and_then(Value::as_u64)
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string());
+
+            let flags_str = format_task_flags(task);
+
+            let row = format!(
+                "  {:<12}  {:<8}  {:<10}  {:<16}  {:<6}  {}",
+                sanitize_terminal_text(task_id),
+                sanitize_terminal_text(role),
+                sanitize_terminal_text(state),
+                sanitize_terminal_text(&tokens_str),
+                sanitize_terminal_text(&turn_str),
+                flags_str,
+            );
+            out.push_str(&row);
+            out.push('\n');
+        }
+
+        let fitted = crate::theme::fit_lines(&out, width);
+        let final_out = if !fitted.ends_with('\n') {
+            format!("{}\n", fitted)
+        } else {
+            fitted
+        };
+
+        Ok(ReplStepOutcome {
+            output: final_out,
+            should_exit: false,
+        })
+    }
+
+    /// `/accept <task_id> [verified_revision]`: mint an explicit local acceptance for a completed,
+    /// gate-verified task. The accepting principal is filled by the host entry point, never by this
+    /// text; a revision, when given, must be exactly the revision the gate verified.
+    async fn repl_accept_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let Some(task_id) = rest.first().map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return Ok(ReplStepOutcome {
+                output: "usage: /accept <task_id> [verified_revision]\n".to_string(),
+                should_exit: false,
+            });
+        };
+        let mut params = json!({ "action": "accept", "task_id": task_id });
+        if let Some(revision) = rest.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            params["evidence_revision"] = json!(revision);
+        }
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(1, "tasks.control", params))
+            .await;
+        Ok(match resp.result {
+            Some(val) => {
+                let rev = val
+                    .get("evidence_revision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                let artifacts = val
+                    .get("artifact_digests")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                ReplStepOutcome {
+                    output: format!(
+                        "accepted task {} at revision {} ({} artifact digests)\n",
+                        sanitize_terminal_text(task_id),
+                        sanitize_terminal_text(rev),
+                        artifacts,
+                    ),
+                    should_exit: false,
+                }
+            }
+            None => ReplStepOutcome {
+                output: format!(
+                    "error: {}\n",
+                    sanitize_terminal_text(
+                        &resp
+                            .error
+                            .map(|e| e.message)
+                            .unwrap_or_else(|| "tasks.control accept failed".to_string())
+                    )
+                ),
+                should_exit: false,
+            },
+        })
+    }
+
+    /// `/reconcile <task_id> unknown <reason...>`, `... verified <evidence...>`, or
+    /// `... retry <new_task_id> <reason...>`: record an explicit disposition of a task whose outcome
+    /// is unknown after a crash. Reconciling never clears the block on re-running that record.
+    async fn repl_reconcile_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        const USAGE: &str = "usage: /reconcile <task_id> unknown <reason...> | /reconcile <task_id> verified <evidence...> | /reconcile <task_id> retry <new_task_id> <reason...>\n";
+        let Some(task_id) = rest.first().map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return Ok(ReplStepOutcome {
+                output: USAGE.to_string(),
+                should_exit: false,
+            });
+        };
+        let Some(kind) = rest.get(1).map(|s| s.trim()) else {
+            return Ok(ReplStepOutcome {
+                output: USAGE.to_string(),
+                should_exit: false,
+            });
+        };
+        let (decision, reason_start) = match kind {
+            "unknown" => (json!({ "kind": "acknowledged_unknown" }), 2),
+            "verified" => {
+                // The remaining text is both the external evidence and the audit reason.
+                let evidence = rest.get(2..).map(|parts| parts.join(" ")).unwrap_or_default();
+                let evidence = evidence.trim();
+                if evidence.is_empty() {
+                    return Ok(ReplStepOutcome {
+                        output: USAGE.to_string(),
+                        should_exit: false,
+                    });
+                }
+                (
+                    json!({ "kind": "externally_verified", "evidence": evidence }),
+                    2,
+                )
+            }
+            "retry" => {
+                let Some(new_task_id) = rest.get(2).map(|s| s.trim()).filter(|s| !s.is_empty())
+                else {
+                    return Ok(ReplStepOutcome {
+                        output: USAGE.to_string(),
+                        should_exit: false,
+                    });
+                };
+                (
+                    json!({ "kind": "retry_as_new_attempt", "new_task_id": new_task_id }),
+                    3,
+                )
+            }
+            _ => {
+                return Ok(ReplStepOutcome {
+                    output: USAGE.to_string(),
+                    should_exit: false,
+                })
+            }
+        };
+        let reason = rest
+            .get(reason_start..)
+            .map(|parts| parts.join(" "))
+            .unwrap_or_default();
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Ok(ReplStepOutcome {
+                output: USAGE.to_string(),
+                should_exit: false,
+            });
+        }
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "tasks.control",
+                json!({
+                    "action": "reconcile",
+                    "task_id": task_id,
+                    "decision": decision,
+                    "reason": reason,
+                }),
+            ))
+            .await;
+        Ok(match resp.result {
+            Some(val) => {
+                let decision = val.get("decision").and_then(Value::as_str).unwrap_or("-");
+                let superseded = val
+                    .get("superseded_by")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                ReplStepOutcome {
+                    output: format!(
+                        "reconciled task {} ({}); superseded_by: {}\n",
+                        sanitize_terminal_text(task_id),
+                        sanitize_terminal_text(decision),
+                        sanitize_terminal_text(superseded),
+                    ),
+                    should_exit: false,
+                }
+            }
+            None => ReplStepOutcome {
+                output: format!(
+                    "error: {}\n",
+                    sanitize_terminal_text(
+                        &resp
+                            .error
+                            .map(|e| e.message)
+                            .unwrap_or_else(|| "tasks.control reconcile failed".to_string())
+                    )
+                ),
+                should_exit: false,
+            },
+        })
+    }
+
+    /// `/cancel <task_id>`: cancel a durable async task.
+    async fn repl_cancel_task_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let task_id = match rest.first().copied().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(id) => id,
+            None => {
+                return Ok(ReplStepOutcome {
+                    output: "usage: /cancel <task_id>\n".to_string(),
+                    should_exit: false,
+                })
+            }
+        };
+
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "tasks.control",
+                json!({ "action": "cancel", "task_id": task_id }),
+            ))
+            .await;
+
+        match resp.result {
+            Some(val) => {
+                let tid = val.get("task_id").and_then(Value::as_str).unwrap_or(task_id);
+                let state = val.get("state").and_then(Value::as_str).unwrap_or("unknown");
+                Ok(ReplStepOutcome {
+                    output: format!(
+                        "task {} state: {}\n",
+                        sanitize_terminal_text(tid),
+                        sanitize_terminal_text(state),
+                    ),
+                    should_exit: false,
+                })
+            }
+            None => {
+                let msg = resp
+                    .error
+                    .map(|e| e.message)
+                    .unwrap_or_else(|| "tasks.control cancel failed".to_string());
+                Ok(ReplStepOutcome {
+                    output: format!("error: {}\n", sanitize_terminal_text(&msg)),
+                    should_exit: false,
+                })
+            }
         }
     }
 
@@ -690,10 +1251,15 @@ impl InteractiveRepl {
                 "/protocol" => self.repl_config_command("protocol", &rest).await,
                 "/config" => self.repl_config_command("config", &rest).await,
                 "/sessions" => self.repl_sessions_command().await,
+                "/tasks" => self.repl_tasks_command().await,
+                "/accept" => self.repl_accept_command(&rest).await,
+                "/reconcile" => self.repl_reconcile_command(&rest).await,
+                "/cancel" => self.repl_cancel_task_command(&rest).await,
                 "/resume" => self.repl_resume_command(&rest).await,
                 "/new" => self.repl_new_session_command().await,
                 "/race" => self.repl_race_command(&rest).await,
                 "/clear" => self.repl_clear_command().await,
+                "/history" => self.repl_history_command(&rest).await,
                 other => Ok(ReplStepOutcome {
                     output: format!(
                         "unknown command '{}'; type /help for available commands.\n",
@@ -704,12 +1270,21 @@ impl InteractiveRepl {
             };
         }
 
+        self.handle_prompt_line(line).await
+    }
+
+    /// Dispatch a prompt turn to `session.prompt`, bypassing slash-command interpretation.
+    ///
+    /// `prompt` must already be trimmed. Used for ordinary prompts and for literal multi-line
+    /// submissions (bracketed paste / `"""` block / backslash continuation), which must never be
+    /// read as a slash command even when they begin with `/`.
+    async fn handle_prompt_line(&self, prompt: &str) -> Result<ReplStepOutcome, String> {
         let resp = self
             .dispatcher
             .handle_request(JsonRpcRequest::new(
                 1,
                 "session.prompt",
-                json!({ "prompt": line }),
+                json!({ "prompt": prompt }),
             ))
             .await;
         match (resp.result, resp.error) {
@@ -771,9 +1346,14 @@ impl InteractiveRepl {
                         out.push_str(&format!("error: {}\n", sanitize_terminal_text(reason)));
                     }
                 }
+                let terminal_reason = val
+                    .get("terminal_reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or(status);
                 out.push_str(&format!(
-                    "[status={} turns={} tools={} rev={}]\n",
+                    "[status={} terminal_reason={} turns={} tools={} rev={}]\n",
                     sanitize_terminal_text(status),
+                    sanitize_terminal_text(terminal_reason),
                     turns,
                     tools,
                     sanitize_terminal_text(rev),
@@ -790,7 +1370,13 @@ impl InteractiveRepl {
                     out.push_str(&renderer.status_line(
                         dot,
                         "run",
-                        &format!("status={} turns={} tools={}", status, turns, tools),
+                        &format!(
+                            "status={} terminal_reason={} turns={} tools={}",
+                            sanitize_terminal_text(status),
+                            sanitize_terminal_text(terminal_reason),
+                            turns,
+                            tools
+                        ),
                     ));
                     out.push('\n');
                     if !modified.is_empty() {
@@ -810,7 +1396,6 @@ impl InteractiveRepl {
                         child_in_tok.saturating_add(child_out_tok),
                         hit_pct,
                         rev,
-                        0,
                     ));
                     out.push('\n');
                 }
@@ -840,7 +1425,9 @@ impl InteractiveRepl {
                 "  /config [show|set <k> <v>|profile <name>]  Inspect or persist layered configuration\n",
                 "  /theme [zen|classic]        Show or switch the terminal theme (zen = Design D, default)\n",
                 "  /sessions                   List recent sessions in the state directory\n",
-                "  /resume [<latest|id>]       Attach an existing session WAL as the active session\n",
+                "  /tasks                      List durable async tasks for the active session\n",
+                "  /cancel <task_id>           Cancel a durable async task\n",
+                "  /resume [<task_id|id>]      Resume a durable task, or attach an existing session WAL\n",
                 "  /new | /clear               Start a fresh session in this workspace\n",
                 "  /revisions                  List captured workspace revisions for this session\n",
                 "  /undo [--force]             Restore workspace & session leaf to previous revision\n",
@@ -851,11 +1438,109 @@ impl InteractiveRepl {
                 "  /race <N> <task>            Best-of-N worktree tournament: race N workers, merge the best\n",
                 "  /fork <turn>                Rewind/branch active session at <turn>\n",
                 "  /inspect <id>               Recall raw tool evidence by source_entry_id\n",
+                "  /history [N]                List the most recent N prompts (default 20); !N / !! re-run one\n",
                 "  /quit | /exit               Shut down the interactive session\n"
             )
             .to_string(),
             should_exit: false,
         })
+    }
+
+    /// `/history [N]`: list the most recent `N` submitted prompts (default 20, capped at
+    /// [`REPL_HISTORY_LIMIT`]), newest first. Entries are sanitized and width-fitted.
+    async fn repl_history_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
+        let requested = match rest.first() {
+            None => REPL_HISTORY_DEFAULT_SHOWN,
+            Some(raw) => match raw.parse::<usize>() {
+                Ok(n) if n >= 1 => n,
+                _ => {
+                    return Ok(ReplStepOutcome {
+                        output: format!(
+                            "usage: /history [N] (N >= 1; default {})\n",
+                            REPL_HISTORY_DEFAULT_SHOWN
+                        ),
+                        should_exit: false,
+                    });
+                }
+            },
+        };
+        let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        let total = history.len();
+        if total == 0 {
+            return Ok(ReplStepOutcome {
+                output: "history: no prompts recorded yet.\n".to_string(),
+                should_exit: false,
+            });
+        }
+        let shown = requested.min(total).min(REPL_HISTORY_LIMIT);
+        let width = crate::theme::terminal_width();
+        let mut out = format!(
+            "history ({} of {} entr{}):\n",
+            shown,
+            total,
+            if total == 1 { "y" } else { "ies" }
+        );
+        for (offset, entry) in history.iter().rev().take(shown).enumerate() {
+            // `sanitize_diagnostic_label` keeps a multi-line entry on one bounded row.
+            let row = format!("  {:>3}  {}", offset + 1, sanitize_diagnostic_label(entry));
+            out.push_str(&crate::theme::truncate_display(&row, width));
+            out.push('\n');
+        }
+        Ok(ReplStepOutcome {
+            output: out,
+            should_exit: false,
+        })
+    }
+
+    /// Append one submitted prompt to the in-memory history, keeping the last
+    /// [`REPL_HISTORY_LIMIT`] entries. Prompt text is never written to disk.
+    fn record_history(&self, text: &str) {
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        if history.len() >= REPL_HISTORY_LIMIT {
+            history.pop_front();
+        }
+        history.push_back(text.to_string());
+    }
+
+    /// Resolve `!N` (1-based, most recent first) or `!!` (the most recent prompt) against the
+    /// in-memory history. Any other input is returned as [`HistoryRecall::NotRecall`].
+    fn expand_history_recall(&self, input: &str) -> HistoryRecall {
+        let trimmed = input.trim();
+        if trimmed == "!!" {
+            let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            return match history.back() {
+                Some(entry) => HistoryRecall::Text(entry.clone()),
+                None => {
+                    HistoryRecall::Error("error: no previous prompt to re-run.\n".to_string())
+                }
+            };
+        }
+        let Some(rest) = trimmed.strip_prefix('!') else {
+            return HistoryRecall::NotRecall;
+        };
+        let Ok(index) = rest.parse::<usize>() else {
+            return HistoryRecall::NotRecall;
+        };
+        let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        if index == 0 {
+            return HistoryRecall::Error(
+                "error: history index must be >= 1 (1 = most recent).\n".to_string(),
+            );
+        }
+        if index > history.len() {
+            return HistoryRecall::Error(format!(
+                "error: history index {} out of range ({} entr{} recorded).\n",
+                index,
+                history.len(),
+                if history.len() == 1 { "y" } else { "ies" }
+            ));
+        }
+        match history.iter().rev().nth(index - 1) {
+            Some(entry) => HistoryRecall::Text(entry.clone()),
+            None => HistoryRecall::Error(
+                "error: history index out of range; nothing was executed.\n".to_string(),
+            ),
+        }
     }
 
     async fn repl_quit_command(&self) -> Result<ReplStepOutcome, String> {
@@ -1501,11 +2186,12 @@ impl InteractiveRepl {
                     ),
                 )
             }
+            // P6 (`v1.5.2`): name the child task id, its role, and that it is running.
             "subagentspawned" => renderer.status_line(
                 StatusDot::Thinking,
                 "subagent",
                 &format!(
-                    "{} ({}) · worktree={}",
+                    "{} ({}) running · worktree={}",
                     str_of("subagent_id"),
                     str_of("role"),
                     payload
@@ -1514,6 +2200,7 @@ impl InteractiveRepl {
                         .unwrap_or(false)
                 ),
             ),
+            // P6 (`v1.5.2`): name the same child id, its terminal state and tokens used.
             "subagentcompleted" => {
                 let status = str_of("status");
                 let dot = if status == "completed" {
@@ -1525,11 +2212,48 @@ impl InteractiveRepl {
                     dot,
                     "subagent",
                     &format!(
-                        "{} · {} turn(s) · {} tok · {}ms",
+                        "{} {} · {} turn(s) · {} tok · {}ms",
+                        str_of("subagent_id"),
                         status,
                         num_of("turns_used"),
                         num_of("tokens_used"),
                         num_of("duration_ms")
+                    ),
+                )
+            }
+            // P6 (`v1.5.2`): name the child id, its merge status and whether the delta was merged.
+            "worktreemerged" => {
+                let status = str_of("status");
+                let merged = status == "applied";
+                let dot = if merged {
+                    StatusDot::Success
+                } else {
+                    StatusDot::Alert
+                };
+                let written = payload
+                    .get("written_files")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let conflicts = payload
+                    .get("conflict_paths")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let conflict_suffix = if conflicts > 0 {
+                    format!(" · {} conflict(s)", conflicts)
+                } else {
+                    String::new()
+                };
+                renderer.status_line(
+                    dot,
+                    "subagent",
+                    &format!(
+                        "{} merged={} · {} file(s){}",
+                        str_of("subagent_id"),
+                        if merged { "yes".to_string() } else { status },
+                        written,
+                        conflict_suffix
                     ),
                 )
             }
@@ -1556,7 +2280,7 @@ impl InteractiveRepl {
                 };
                 renderer.status_line(
                     dot,
-                    "gate",
+                    "run",
                     &format!(
                         "run {} · {} turn(s) · {} tool call(s)",
                         status,
@@ -1567,7 +2291,12 @@ impl InteractiveRepl {
             }
             _ => return None,
         };
-        Some(format!("{}\n", line))
+        // Every live line is bounded to the detected terminal width (`status_line` already
+        // sanitizes its label and detail).
+        Some(format!(
+            "{}\n",
+            crate::theme::truncate_display(&line, crate::theme::terminal_width())
+        ))
     }
 
     /// `v1.5.0`: run one prompt turn while streaming Design D status lines for its live events.
@@ -1575,19 +2304,55 @@ impl InteractiveRepl {
     /// The turn executes on a worker task so this task can drain `kroma/event` notifications and
     /// print them as they happen; the final [`ReplStepOutcome`] is returned to the caller, which
     /// owns the summary and telemetry footer.
-    pub async fn run_turn_streaming<W>(
+    ///
+    /// P1 (`v1.5.0`): this task also owns the *only* stdin reader while the turn is in flight. When
+    /// the policy engine raises `approval/requested` (emitted live, before the synchronous policy
+    /// wait) the prompt is rendered immediately, one line is read from the same reader, and the
+    /// decision is delivered through `approval.respond`. The operator's `y`/`n` therefore answers
+    /// the approval instead of being re-read as the next task.
+    pub async fn run_turn_streaming<R, W>(
         &self,
         prompt: &str,
+        reader: &mut R,
         writer: &mut W,
     ) -> Result<ReplStepOutcome, String>
     where
+        R: AsyncBufRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        self.run_turn_streaming_inner(prompt, reader, writer, false)
+            .await
+    }
+
+    /// Shared streaming-turn implementation.
+    ///
+    /// `force_prompt` dispatches `prompt` through [`InteractiveRepl::handle_prompt_line`] even when
+    /// it begins with `/`, so a bracketed paste or `"""` block is never read as a slash command.
+    async fn run_turn_streaming_inner<R, W>(
+        &self,
+        prompt: &str,
+        reader: &mut R,
+        writer: &mut W,
+        force_prompt: bool,
+    ) -> Result<ReplStepOutcome, String>
+    where
+        R: AsyncBufRead + Unpin,
         W: AsyncWrite + Unpin,
     {
         let mut rx = self.dispatcher.subscribe_notifications();
         let turn_repl = InteractiveRepl::new(self.dispatcher.clone());
         let prompt_owned = prompt.to_string();
-        let mut handle = tokio::spawn(async move { turn_repl.handle_line(&prompt_owned).await });
+        let mut handle = tokio::spawn(async move {
+            if force_prompt {
+                turn_repl.handle_prompt_line(prompt_owned.trim()).await
+            } else {
+                turn_repl.handle_line(&prompt_owned).await
+            }
+        });
 
+        // P6 (`v1.5.2`): the last waiting state rendered this turn. A waiting line is emitted only
+        // when the state changes, so no line is printed per event type when nothing changed.
+        let mut last_waiting: Option<WaitingState> = None;
         let step = loop {
             tokio::select! {
                 biased;
@@ -1595,10 +2360,44 @@ impl InteractiveRepl {
                     break res.map_err(|e| format!("REPL turn task failed: {}", e))??;
                 }
                 maybe = rx.recv() => {
-                    if let Some(note) = maybe {
-                        if let Some(line) = self.render_live_event(&note) {
-                            writer.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
-                            writer.flush().await.map_err(|e| e.to_string())?;
+                    match maybe {
+                        Some(note) if note.method == "approval/requested" => {
+                            // The run is now blocked on the operator's decision.
+                            let state = WaitingState::Approval(
+                                note.params
+                                    .get("tool_name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                            );
+                            if let Some(line) = waiting_line_if_changed(state, &mut last_waiting, |s| {
+                                self.render_waiting_state(s)
+                            }) {
+                                writer.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+                                writer.write_all(b"\n").await.map_err(|e| e.to_string())?;
+                                writer.flush().await.map_err(|e| e.to_string())?;
+                            }
+                            self.answer_approval_request(&note, reader, writer, &mut rx).await?;
+                        }
+                        Some(note) => {
+                            if let Some(state) = waiting_state_for_event(&note) {
+                                if let Some(line) = waiting_line_if_changed(state, &mut last_waiting, |s| {
+                                    self.render_waiting_state(s)
+                                }) {
+                                    writer.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+                                    writer.write_all(b"\n").await.map_err(|e| e.to_string())?;
+                                    writer.flush().await.map_err(|e| e.to_string())?;
+                                }
+                            }
+                            if let Some(line) = self.render_live_event(&note) {
+                                writer.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+                                writer.flush().await.map_err(|e| e.to_string())?;
+                            }
+                        }
+                        // The dispatcher holds the subscriber sender for the runtime's lifetime, so
+                        // a closed channel cannot happen mid-turn; yield rather than busy-loop.
+                        None => {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         }
                     }
                 }
@@ -1615,6 +2414,119 @@ impl InteractiveRepl {
         }
         writer.flush().await.map_err(|e| e.to_string())?;
         Ok(step)
+    }
+
+    /// P1 (`v1.5.0`): render a live approval request and read the operator's decision from the same
+    /// reader the input loop owns, then deliver it through `approval.respond`.
+    ///
+    /// The wait is interruptible: if the broker resolves the request out of band (timeout, `^C`
+    /// cancel, disconnect) an `approval/resolved` notification aborts the read so the turn can
+    /// finish and the prompt returns.
+    async fn answer_approval_request<R, W>(
+        &self,
+        note: &JsonRpcNotification,
+        reader: &mut R,
+        writer: &mut W,
+        rx: &mut mpsc::UnboundedReceiver<JsonRpcNotification>,
+    ) -> Result<(), String>
+    where
+        R: AsyncBufRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        let info: ApprovalPendingInfo = match serde_json::from_value(note.params.clone()) {
+            Ok(info) => info,
+            Err(_) => ApprovalPendingInfo {
+                request_id: note
+                    .params
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                tool_name: note
+                    .params
+                    .get("tool_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                effect_class: String::new(),
+                is_sensitive_path: false,
+                target_path: None,
+                arguments_summary: String::new(),
+                risk_reason: String::new(),
+                surface: String::new(),
+            },
+        };
+        let request_id = info.request_id.clone();
+        let banner = format_approval_prompt(&info);
+        writer
+            .write_all(banner.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        writer.flush().await.map_err(|e| e.to_string())?;
+
+        let decision = loop {
+            tokio::select! {
+                line = read_bounded_jsonrpc_line(reader, MAX_RPC_FRAME_BYTES) => {
+                    match line? {
+                        Some(line) => break approval_decision_from_answer(&line).to_string(),
+                        // EOF while an approval is pending: fail closed rather than hang.
+                        None => break "deny".to_string(),
+                    }
+                }
+                resolved = rx.recv() => {
+                    match resolved {
+                        Some(note) => {
+                            let is_this = note.method == "approval/resolved"
+                                && note.params.get("request_id").and_then(Value::as_str)
+                                    == Some(request_id.as_str());
+                            if is_this {
+                                let why = note
+                                    .params
+                                    .get("decision")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("deny");
+                                writer
+                                    .write_all(
+                                        format!(
+                                            "\n● approval  resolved without an answer: {}\n",
+                                            sanitize_terminal_text(why)
+                                        )
+                                        .as_bytes(),
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                                writer.flush().await.map_err(|e| e.to_string())?;
+                                return Ok(());
+                            }
+                        }
+                        // The dispatcher holds the subscriber sender for the runtime's lifetime, so
+                        // a closed channel cannot happen mid-turn; yield rather than busy-loop.
+                        None => {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    }
+                }
+            }
+        };
+
+        let resp = self
+            .dispatcher
+            .handle_request(JsonRpcRequest::new(
+                0,
+                "approval.respond",
+                json!({ "request_id": request_id, "decision": decision }),
+            ))
+            .await;
+        let summary = match resp.error {
+            Some(err) => sanitize_terminal_text(&err.message),
+            None => decision.clone(),
+        };
+        writer
+            .write_all(format!("● approval  {}\n", summary).as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        writer.flush().await.map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Drive the interactive REPL loop over arbitrary async buffered reader and writer streams.
@@ -1646,11 +2558,15 @@ impl InteractiveRepl {
         writer.flush().await.map_err(|e| e.to_string())?;
 
         if let Some(prompt) = initial_prompt.map(str::trim).filter(|s| !s.is_empty()) {
+            if !prompt.starts_with('/') {
+                self.record_history(prompt);
+            }
             let step = if prompt.starts_with('/') {
                 self.handle_line(prompt).await?
             } else {
                 // `v1.5.0`: stream Design D status lines for the live events of this turn.
-                self.run_turn_streaming(prompt, &mut writer).await?
+                self.run_turn_streaming(prompt, &mut reader, &mut writer)
+                    .await?
             };
             if !step.output.is_empty() {
                 writer
@@ -1679,14 +2595,55 @@ impl InteractiveRepl {
                 .map_err(|e| e.to_string())?;
             writer.flush().await.map_err(|e| e.to_string())?;
 
-            let Some(line) = read_bounded_jsonrpc_line(&mut reader, MAX_RPC_FRAME_BYTES).await?
-            else {
+            let Some(submission) = read_submission(&mut reader, &mut writer).await? else {
                 break;
             };
-            let step = if line.trim_start().starts_with('/') {
-                self.handle_line(&line).await?
+            if submission.text.trim().is_empty() {
+                continue;
+            }
+
+            // P6 (`v1.5.2`): `!N` (1-based, most recent first) / `!!` re-run a history entry. A
+            // paste / block is always submitted literally and is never treated as a recall.
+            let effective = if submission.literal_prompt {
+                submission.text.clone()
             } else {
-                self.run_turn_streaming(&line, &mut writer).await?
+                match self.expand_history_recall(&submission.text) {
+                    HistoryRecall::NotRecall => submission.text.clone(),
+                    HistoryRecall::Text(text) => text,
+                    HistoryRecall::Error(message) => {
+                        writer
+                            .write_all(message.as_bytes())
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        writer.flush().await.map_err(|e| e.to_string())?;
+                        continue;
+                    }
+                }
+            };
+            if effective.trim().is_empty() {
+                continue;
+            }
+            // Only task prompts are remembered; slash commands are not history entries. A *literal*
+            // prompt (bracketed paste, `"""` block, backslash continuation) is also skipped when it
+            // looks like a slash command: recalling it later via `!N`/`!!` would expand to text that
+            // the recall path treats as a command, which would silently defeat the paste protection
+            // that exists precisely so a pasted `/quit` is never executed.
+            let is_command = !submission.literal_prompt && effective.trim_start().starts_with('/');
+            let recallable = !effective.trim_start().starts_with('/');
+            if !is_command && recallable {
+                self.record_history(&effective);
+            }
+
+            let step = if is_command {
+                self.handle_line(&effective).await?
+            } else {
+                self.run_turn_streaming_inner(
+                    &effective,
+                    &mut reader,
+                    &mut writer,
+                    submission.literal_prompt,
+                )
+                .await?
             };
             if !step.output.is_empty() {
                 writer
@@ -1700,5 +2657,180 @@ impl InteractiveRepl {
             }
         }
         Ok(())
+    }
+}
+
+/// Read one complete user submission, honoring backslash continuation, `"""` heredoc blocks and
+/// bracketed-paste bursts.
+///
+/// Returns `None` only when the stream ends with nothing collected. EOF while a submission is
+/// still open submits whatever was collected: it never hangs and never drops the operator's text.
+async fn read_submission<R, W>(reader: &mut R, writer: &mut W) -> Result<Option<Submission>, String>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let Some(first) = read_bounded_jsonrpc_line(reader, MAX_RPC_FRAME_BYTES).await? else {
+        return Ok(None);
+    };
+
+    // Bracketed paste: `ESC[200~ ... ESC[201~` is one literal input. The burst may span several
+    // lines; no inner line is interpreted as a slash command.
+    let (first, paste_start, paste_end) = split_paste_markers(&first);
+    if paste_start {
+        let mut collected = vec![first];
+        if !paste_end {
+            loop {
+                let Some(next) = read_bounded_jsonrpc_line(reader, MAX_RPC_FRAME_BYTES).await?
+                else {
+                    break;
+                };
+                let (next, _, end) = split_paste_markers(&next);
+                collected.push(next);
+                if end {
+                    break;
+                }
+            }
+        }
+        return Ok(Some(Submission {
+            text: collected.join("\n"),
+            literal_prompt: true,
+        }));
+    }
+
+    // `"""` block: read until a line that is exactly `"""`, then strip the terminator.
+    if first == "\"\"\"" {
+        let mut collected: Vec<String> = Vec::new();
+        loop {
+            write_continuation_prompt(writer).await?;
+            let Some(next) = read_bounded_jsonrpc_line(reader, MAX_RPC_FRAME_BYTES).await? else {
+                if collected.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            };
+            if next == "\"\"\"" {
+                break;
+            }
+            collected.push(next);
+        }
+        return Ok(Some(Submission {
+            text: collected.join("\n"),
+            literal_prompt: true,
+        }));
+    }
+
+    // Backslash continuation: read until the first line not ending in an unescaped backslash.
+    if ends_with_unescaped_backslash(&first) {
+        let mut collected: Vec<String> = Vec::new();
+        let mut line = first;
+        loop {
+            collected.push(strip_continuation_backslash(&line).to_string());
+            write_continuation_prompt(writer).await?;
+            let Some(next) = read_bounded_jsonrpc_line(reader, MAX_RPC_FRAME_BYTES).await? else {
+                break;
+            };
+            line = next;
+            if !ends_with_unescaped_backslash(&line) {
+                collected.push(line);
+                break;
+            }
+        }
+        return Ok(Some(Submission {
+            text: collected.join("\n"),
+            literal_prompt: true,
+        }));
+    }
+
+    Ok(Some(Submission {
+        text: first,
+        literal_prompt: false,
+    }))
+}
+
+/// Write the short continuation prompt shown while a submission is being accumulated.
+async fn write_continuation_prompt<W>(writer: &mut W) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer
+        .write_all(CONTINUATION_PROMPT.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    writer.flush().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod input_assembly_tests {
+    use super::*;
+
+    #[test]
+    fn trailing_backslash_detection_honors_escaping() {
+        assert!(ends_with_unescaped_backslash("line \\"));
+        assert!(ends_with_unescaped_backslash("line\\\\\\"));
+        assert!(!ends_with_unescaped_backslash("line"));
+        assert!(!ends_with_unescaped_backslash("line\\\\"));
+        assert_eq!(strip_continuation_backslash("line \\"), "line ");
+    }
+
+    #[test]
+    fn paste_markers_are_split_and_stripped() {
+        let (cleaned, start, end) = split_paste_markers("\x1b[200~hello\x1b[201~");
+        assert_eq!(cleaned, "hello");
+        assert!(start && end);
+
+        // A stray end marker is removed, not forwarded.
+        let (cleaned, start, end) = split_paste_markers("plain\x1b[201~");
+        assert_eq!(cleaned, "plain");
+        assert!(!start && end);
+
+        let (cleaned, start, end) = split_paste_markers("untouched");
+        assert_eq!(cleaned, "untouched");
+        assert!(!start && !end);
+    }
+
+    #[test]
+    fn waiting_line_is_emitted_only_on_state_change() {
+        let render = |state: &WaitingState| format!("{state:?}");
+        let mut last: Option<WaitingState> = None;
+
+        assert!(waiting_line_if_changed(WaitingState::Provider, &mut last, render).is_some());
+        assert!(waiting_line_if_changed(WaitingState::Provider, &mut last, render).is_none());
+        assert!(
+            waiting_line_if_changed(WaitingState::Tool("read".to_string()), &mut last, render)
+                .is_some()
+        );
+        assert!(
+            waiting_line_if_changed(WaitingState::Tool("read".to_string()), &mut last, render)
+                .is_none()
+        );
+        assert!(waiting_line_if_changed(WaitingState::Provider, &mut last, render).is_some());
+    }
+
+    #[test]
+    fn waiting_state_maps_from_live_events() {
+        let note = |event_type: &str, payload: Value| {
+            JsonRpcNotification::new(
+                "kroma/event",
+                json!({ "event_type": event_type, "payload": payload }),
+            )
+        };
+        assert_eq!(
+            waiting_state_for_event(&note("model_request_started", json!({}))),
+            Some(WaitingState::Provider)
+        );
+        assert_eq!(
+            waiting_state_for_event(&note("tool_started", json!({ "tool_name": "read" }))),
+            Some(WaitingState::Tool("read".to_string()))
+        );
+        assert_eq!(
+            waiting_state_for_event(&note("approval_requested", json!({ "tool_name": "bash" }))),
+            Some(WaitingState::Approval("bash".to_string()))
+        );
+        // A non-blocking event does not change the waiting state.
+        assert_eq!(
+            waiting_state_for_event(&note("model_request_completed", json!({}))),
+            None
+        );
     }
 }

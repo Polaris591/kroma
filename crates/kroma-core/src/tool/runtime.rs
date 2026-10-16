@@ -2,20 +2,24 @@ use crate::attribution::{
     added_symbols_for_call, language_name, mutation_summary, removed_symbols_for_call,
     MutatedFileSpan, MutationTelemetry, PredictiveReport, PredictiveValidator,
 };
-use crate::budget::BudgetConfig;
-use crate::env::SharedExecutionEnv;
+use crate::budget::{BudgetConfig, RunDeadline};
+use crate::env::{ExecutionContext, SharedExecutionEnv};
 use crate::extensions::{
-    execute_activate_skill, CustomToolContext, ExtensionDispatch, HookContext, HookEvaluation,
+    execute_activate_skill, execute_discover_tools, AdmissionError, CustomToolContext,
+    ExtensionDispatch, HookContext, HookEvaluation,
 };
 use crate::loop_guard::MAX_EDIT_FAILURE_STREAK;
 use crate::messages::{ToolCall, ToolResultMessage, ToolResultMeta};
 use crate::prompt::sha256_hex16;
 use crate::sensitive_paths::SensitivePathGuard;
-use crate::tool::policy::{ApprovalDecision, ApprovalRequest, PolicyCheckResult, PolicyEngine};
+use crate::tool::policy::{
+    canonical_arguments_digest, ApprovalDecision, ApprovalRequest, AuthEntry, AuthScope,
+    GrantRejection, PolicyCheckResult, PolicyEngine,
+};
 use crate::tool::registry::{ToolLookupError, ToolRegistry};
 use crate::tools::{
-    bash::execute_bash, edit::execute_edit, find::execute_find, grep::execute_grep, ls::execute_ls,
-    read::execute_read, write::execute_write, ToolExecutionOutput,
+    bash::execute_bash_with_deadline, edit::execute_edit, find::execute_find, grep::execute_grep,
+    ls::execute_ls, read::execute_read, write::execute_write, ToolExecutionOutput,
 };
 use crate::types::{EffectClass, ErrorCode};
 use crate::workspace::{SensitivePathApproval, WorkspaceCap};
@@ -24,6 +28,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+
+/// F01 (`v1.5.1`): whether a policy decision label means the tool implementation was actually
+/// dispatched. A dispatched call may have written to the workspace even when it *failed* (non-zero
+/// `bash` exit, timeout, cancellation, output flood, extension error), so callers that decide
+/// whether a mutation snapshot is required must branch on dispatch, not on `ToolOutcome`.
+///
+/// Refusals that happen *before* dispatch (`deny_*`, approval denial/cancellation, TOCTOU stale,
+/// deadline abort) return `false` and must never fabricate a mutation.
+pub fn decision_dispatched(decision: &str) -> bool {
+    if decision.starts_with("deny")
+        || matches!(
+            decision,
+            "ask_denied" | "ask_cancelled" | "toctou_stale" | "deadline_exceeded"
+        )
+    {
+        return false;
+    }
+    true
+}
 
 #[derive(Clone)]
 pub struct ToolRuntime {
@@ -34,6 +57,12 @@ pub struct ToolRuntime {
     bash_grace_period: Duration,
     /// Gate 4: run the post-mutation structural check on `edit`/`write` results.
     predictive_check: bool,
+    /// F04 (`v1.5.1`): absolute deadline of the enclosing run. `execute_bash` clamps its process
+    /// timeout to the remaining time and the approval prompt aborts when it passes, so a tool can
+    /// never outlive the run it belongs to.
+    run_deadline: Option<RunDeadline>,
+    /// F05: Unified execution context of the enclosing run.
+    exec_context: Option<ExecutionContext>,
 }
 
 impl ToolRuntime {
@@ -50,7 +79,27 @@ impl ToolRuntime {
             budget,
             bash_grace_period: Duration::from_secs(2),
             predictive_check: true,
+            run_deadline: None,
+            exec_context: None,
         }
+    }
+
+    /// Attach the enclosing run's execution context.
+    pub fn set_execution_context(&mut self, ctx: ExecutionContext) {
+        if self.run_deadline.is_none() && ctx.deadline.is_some() {
+            self.run_deadline = ctx.deadline;
+        }
+        self.exec_context = Some(ctx);
+    }
+
+    pub fn execution_context(&self) -> Option<&ExecutionContext> {
+        self.exec_context.as_ref()
+    }
+
+    /// F04 (`v1.5.1`): attach the enclosing run's absolute deadline. The agent loop sets this once
+    /// before the first turn; tools cloned into concurrent sub-batches inherit it.
+    pub fn set_run_deadline(&mut self, deadline: Option<RunDeadline>) {
+        self.run_deadline = deadline;
     }
 
     pub fn with_bash_grace_period(mut self, grace: Duration) -> Self {
@@ -120,6 +169,20 @@ impl ToolRuntime {
         self.registry.hook_engine()
     }
 
+    /// Execute a single tool call through the full security, policy, approval, TOCTOU, and ACI pipeline,
+    /// explicitly carrying the enclosing run's unified [`ExecutionContext`].
+    pub async fn execute_call_with_context(
+        &self,
+        call: &ToolCall,
+        turn: usize,
+        exec_ctx: &ExecutionContext,
+    ) -> (ToolResultMessage, String, Vec<HookEvaluation>) {
+        let (message, decision, mut evaluations) =
+            self.execute_call_inner(call, turn, exec_ctx).await;
+        evaluations.extend(self.post_tool_hooks(call, turn, &message).await);
+        (message, decision, evaluations)
+    }
+
     /// Execute a single tool call through the full security, policy, approval, TOCTOU, and ACI pipeline.
     ///
     /// Returns the tool result, the policy decision label, and every Gate 3 hook evaluation that
@@ -132,10 +195,18 @@ impl ToolRuntime {
         turn: usize,
         cancel_rx: watch::Receiver<bool>,
     ) -> (ToolResultMessage, String, Vec<HookEvaluation>) {
-        let (message, decision, mut evaluations) =
-            self.execute_call_inner(call, turn, cancel_rx).await;
-        evaluations.extend(self.post_tool_hooks(call, turn, &message).await);
-        (message, decision, evaluations)
+        let mut exec_ctx = self
+            .exec_context
+            .clone()
+            .unwrap_or_else(ExecutionContext::empty);
+        if exec_ctx.deadline.is_none() {
+            exec_ctx.deadline = self.run_deadline;
+        }
+        if exec_ctx.policy.is_none() {
+            exec_ctx.policy = Some(Arc::new(self.policy_engine.clone()));
+        }
+        exec_ctx.cancel = Some(cancel_rx);
+        self.execute_call_with_context(call, turn, &exec_ctx).await
     }
 
     /// Fail-closed `PreToolUse` policy-hook gate.
@@ -208,39 +279,173 @@ impl ToolRuntime {
             .await
     }
 
-    /// Run one extension tool call, gated against a concurrent `unregister_extension`.
-    fn run_extension_tool(
+    /// Run one extension tool call, gated against a concurrent `unregister_extension` and bound to
+    /// the enclosing run's unified [`ExecutionContext`].
+    ///
+    /// The handler may block (an MCP tool waits on the host worker thread), so it runs on the
+    /// blocking pool instead of stalling an async worker. The in-flight guard moves with it, so the
+    /// call stays counted in [`crate::extensions::InFlightTracker`] until the handler actually
+    /// returns. If cancelled or timed out, the async caller returns promptly without waiting for the
+    /// background thread, and marks the lingering thread as a residual execution.
+    /// [`crate::extensions::InFlightTracker`] enforces bounded admission across runs and refuses new
+    /// overlapping calls while a residual background execution is still active, preventing
+    /// overlapping side-effects from uncooperative handlers.
+    async fn run_extension_tool(
         &self,
         dispatch: &ExtensionDispatch,
         raw_arguments: &str,
+        exec_ctx: &ExecutionContext,
     ) -> ToolExecutionOutput {
-        let Some(_guard) = dispatch.in_flight.begin() else {
+        if dispatch.in_flight.is_cancelled() || exec_ctx.is_cancelled() {
             return ToolExecutionOutput::error(
                 ErrorCode::NotExecutedCancelled,
                 format!(
-                    "NOT_EXECUTED_CANCELLED: extension '{}' was unmounted before '{}' could start",
-                    dispatch.extension_id, dispatch.tool_name
-                ),
-                ToolResultMeta::default(),
-            );
-        };
-        if dispatch.in_flight.is_cancelled() {
-            return ToolExecutionOutput::error(
-                ErrorCode::NotExecutedCancelled,
-                format!(
-                    "NOT_EXECUTED_CANCELLED: extension '{}' was unmounted; '{}' was cancelled",
-                    dispatch.extension_id, dispatch.tool_name
+                    "NOT_EXECUTED_CANCELLED: call '{}' was cancelled before it could start",
+                    dispatch.tool_name
                 ),
                 ToolResultMeta::default(),
             );
         }
-        let out = dispatch.handler.execute(
-            raw_arguments,
-            &CustomToolContext {
-                workspace: self.env.workspace(),
-                in_flight: Some(Arc::clone(&dispatch.in_flight)),
-            },
-        );
+        if exec_ctx.is_deadline_exceeded() {
+            return ToolExecutionOutput::error(
+                ErrorCode::NotExecutedBudgetExhausted,
+                format!(
+                    "NOT_EXECUTED_BUDGET_EXHAUSTED: run deadline exceeded before '{}' could start",
+                    dispatch.tool_name
+                ),
+                ToolResultMeta::default(),
+            );
+        }
+
+        let guard = match dispatch.in_flight.begin_admission() {
+            Ok(g) => g,
+            Err(AdmissionError::Unmounted) => {
+                return ToolExecutionOutput::error(
+                    ErrorCode::NotExecutedCancelled,
+                    format!(
+                        "NOT_EXECUTED_CANCELLED: extension '{}' was unmounted before '{}' could start",
+                        dispatch.extension_id, dispatch.tool_name
+                    ),
+                    ToolResultMeta::default(),
+                );
+            }
+            Err(AdmissionError::OverlappingResidual { residual }) => {
+                return ToolExecutionOutput::error(
+                    ErrorCode::IoError,
+                    format!(
+                        "call '{}' refused: {} residual background execution(s) from a cancelled/timed-out call are still running",
+                        dispatch.tool_name, residual
+                    ),
+                    ToolResultMeta::default(),
+                );
+            }
+            Err(AdmissionError::CapacityExceeded { active, limit }) => {
+                return ToolExecutionOutput::error(
+                    ErrorCode::IoError,
+                    format!(
+                        "call '{}' refused: active in-flight calls ({}) reached admission limit ({})",
+                        dispatch.tool_name, active, limit
+                    ),
+                    ToolResultMeta::default(),
+                );
+            }
+        };
+
+        if dispatch.in_flight.is_cancelled() || exec_ctx.is_cancelled() {
+            return ToolExecutionOutput::error(
+                ErrorCode::NotExecutedCancelled,
+                format!(
+                    "NOT_EXECUTED_CANCELLED: call '{}' was cancelled before it could start",
+                    dispatch.tool_name
+                ),
+                ToolResultMeta::default(),
+            );
+        }
+        let workspace = self.env.workspace().clone();
+        let in_flight = Arc::clone(&dispatch.in_flight);
+        let handler = Arc::clone(&dispatch.handler);
+        let raw = raw_arguments.to_string();
+        let owned_exec_ctx = exec_ctx.clone();
+        let residual_handle = guard.residual_handle();
+
+        let mut join_handle = tokio::task::spawn_blocking(move || {
+            // Keep the in-flight accounting alive for exactly as long as the handler runs, even if
+            // the awaiting task is dropped before the handler returns.
+            let _guard = guard;
+            let ctx = CustomToolContext {
+                workspace: &workspace,
+                in_flight: Some(in_flight),
+                exec_context: Some(&owned_exec_ctx),
+            };
+            handler.execute(&raw, &ctx)
+        });
+
+        let mut cancel_watch = exec_ctx.cancel.clone();
+        let deadline_instant = exec_ctx.deadline.map(|d| d.tokio_instant());
+
+        let out = tokio::select! {
+            biased;
+            _ = async {
+                match cancel_watch.as_mut() {
+                    Some(rx) => {
+                        if *rx.borrow() { return; }
+                        let _ = rx.changed().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                residual_handle.mark_residual();
+                join_handle.abort();
+                ToolExecutionOutput::error(
+                    ErrorCode::IoError,
+                    format!(
+                        "extension tool '{}' was cancelled while executing; execution status unknown and side-effects may have occurred",
+                        dispatch.tool_name
+                    ),
+                    ToolResultMeta::default(),
+                )
+            }
+            _ = async {
+                match deadline_instant {
+                    Some(inst) => tokio::time::sleep_until(inst).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                residual_handle.mark_residual();
+                join_handle.abort();
+                ToolExecutionOutput::error(
+                    ErrorCode::ToolTimeout,
+                    format!(
+                        "extension tool '{}' exceeded run deadline; execution status unknown and side-effects may have occurred",
+                        dispatch.tool_name
+                    ),
+                    ToolResultMeta::default(),
+                )
+            }
+            res = &mut join_handle => {
+                match res {
+                    Ok(out) => out,
+                    Err(e) if e.is_cancelled() => {
+                        ToolExecutionOutput::error(
+                            ErrorCode::IoError,
+                            format!(
+                                "extension tool '{}' was aborted; execution status unknown and side-effects may have occurred",
+                                dispatch.tool_name
+                            ),
+                            ToolResultMeta::default(),
+                        )
+                    }
+                    Err(e) => {
+                        ToolExecutionOutput::error(
+                            ErrorCode::IoError,
+                            format!("extension tool '{}' panicked: {}", dispatch.tool_name, e),
+                            ToolResultMeta::default(),
+                        )
+                    }
+                }
+            }
+        };
+
         if out.outcome.is_success()
             && matches!(
                 dispatch.effect_class,
@@ -256,7 +461,7 @@ impl ToolRuntime {
         &self,
         call: &ToolCall,
         turn: usize,
-        cancel_rx: watch::Receiver<bool>,
+        exec_ctx: &ExecutionContext,
     ) -> (ToolResultMessage, String, Vec<HookEvaluation>) {
         let policy_mode = self.policy_engine.mode();
         let registered = match self.registry.lookup_for_dispatch(&call.name, policy_mode) {
@@ -360,10 +565,24 @@ impl ToolRuntime {
             }
         }
 
+        // B11a: bind the policy decision to the exact authorization scope (entry point, tool, run,
+        // workspace) and the canonical argument digest, so a grant can never be reused by another
+        // run, another entry point, or a rewritten argument set.
+        let auth_scope = AuthScope {
+            entry: AuthEntry::Tool,
+            tool_name: call.name.clone(),
+            run_id: exec_ctx.run_id,
+            workspace_root: self.env.workspace().root().to_path_buf(),
+            revision: exec_ctx.revision.clone(),
+        };
+        let args_digest = canonical_arguments_digest(&call.raw_arguments);
+
         // Evaluate Policy & SensitivePathGuard
-        let check =
-            self.policy_engine
-                .evaluate(&call.name, registered.metadata.effect_class, is_sensitive);
+        let check = self.policy_engine.evaluate_with_context(
+            &auth_scope,
+            registered.metadata.effect_class,
+            is_sensitive,
+        );
 
         let mut effective_raw_args = call.raw_arguments.clone();
         // BUG-08: a user approval for a sensitive path is scoped to exactly this call. The token
@@ -372,7 +591,12 @@ impl ToolRuntime {
         let mut sensitive_approval: Option<SensitivePathApproval> = None;
 
         let decision_label = match check {
-            PolicyCheckResult::Allow => "allow".to_string(),
+            PolicyCheckResult::Allow => {
+                // B11a: a live category grant reaches this arm and `evaluate_with_context` has
+                // already consumed exactly one use under its lock. A base-policy allow carries no
+                // grant, so there is nothing to consume here.
+                "allow".to_string()
+            }
             PolicyCheckResult::Deny(reason) => {
                 let code = if is_sensitive {
                     ErrorCode::SensitivePathBlocked
@@ -429,6 +653,7 @@ impl ToolRuntime {
 
                 let req = ApprovalRequest {
                     tool_name: call.name.clone(),
+                    call_id: Some(call.call_id.clone()),
                     effect_class: registered.metadata.effect_class,
                     is_sensitive_path: is_sensitive,
                     target_path: rel_path_opt.as_ref().map(PathBuf::from),
@@ -437,8 +662,8 @@ impl ToolRuntime {
                     workspace_root: self.env.workspace().root().to_path_buf(),
                 };
 
-                let mut approval_cancel_rx = cancel_rx.clone();
-                if *approval_cancel_rx.borrow() {
+                let approval_cancel_rx = exec_ctx.cancel.clone();
+                if approval_cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
                     let out = ToolExecutionOutput::error(
                         ErrorCode::NotExecutedCancelled,
                         "NOT_EXECUTED_CANCELLED: cancelled before approval prompt".to_string(),
@@ -454,19 +679,78 @@ impl ToolRuntime {
                     );
                 }
 
-                let pe = self.policy_engine.clone();
-                let mut prompt_task = tokio::task::spawn_blocking(move || pe.prompt_approval(&req));
+                // F04 (`v1.5.1`): the approval prompt is bounded by the run deadline as well as by
+                // cancellation, so a run cannot block forever waiting for a human.
+                let approval_deadline = exec_ctx.deadline.or(self.run_deadline);
+                let budget_remaining = approval_deadline.map(|d| d.remaining());
+                if approval_deadline.is_some_and(|d| d.is_exceeded()) {
+                    let out = ToolExecutionOutput::error(
+                        ErrorCode::NotExecutedBudgetExhausted,
+                        "NOT_EXECUTED_BUDGET_EXHAUSTED: run deadline exceeded before approval prompt"
+                            .to_string(),
+                        ToolResultMeta {
+                            relative_path: rel_path_opt,
+                            ..Default::default()
+                        },
+                    );
+                    return (
+                        Self::into_message(call, out),
+                        "deadline_exceeded".to_string(),
+                        hook_evaluations,
+                    );
+                }
 
+                let pe = self.policy_engine.clone();
+                let scope_for_prompt = auth_scope.clone();
+                let digest_for_prompt = args_digest.clone();
+                let mut prompt_task = tokio::task::spawn_blocking(move || {
+                    pe.prompt_approval_scoped(
+                        &scope_for_prompt,
+                        &req,
+                        digest_for_prompt.as_deref(),
+                        budget_remaining,
+                    )
+                });
                 let decision = tokio::select! {
                     res = &mut prompt_task => res.unwrap_or(ApprovalDecision::Deny),
                     _ = async {
-                        loop {
-                            if approval_cancel_rx.changed().await.is_err() {
-                                std::future::pending::<()>().await;
+                        match approval_deadline {
+                            Some(d) => tokio::time::sleep_until(d.tokio_instant()).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            &mut prompt_task,
+                        )
+                        .await;
+                        let out = ToolExecutionOutput::error(
+                            ErrorCode::NotExecutedBudgetExhausted,
+                            "NOT_EXECUTED_BUDGET_EXHAUSTED: run deadline exceeded during approval prompt"
+                                .to_string(),
+                            ToolResultMeta {
+                                relative_path: rel_path_opt,
+                                ..Default::default()
+                            },
+                        );
+                        return (Self::into_message(call, out), "deadline_exceeded".to_string(), hook_evaluations);
+                    }
+                    _ = async {
+                        match approval_cancel_rx {
+                            Some(mut rx) => {
+                                loop {
+                                    if *rx.borrow() {
+                                        break;
+                                    }
+                                    if rx.changed().await.is_err() {
+                                        std::future::pending::<()>().await;
+                                    }
+                                    if *rx.borrow() {
+                                        break;
+                                    }
+                                }
                             }
-                            if *approval_cancel_rx.borrow() {
-                                break;
-                            }
+                            None => std::future::pending::<()>().await,
                         }
                     } => {
                         let _ = tokio::time::timeout(
@@ -508,6 +792,38 @@ impl ToolRuntime {
                         );
                     }
                     ApprovalDecision::AllowOnce | ApprovalDecision::AllowCategoryForRun => {
+                        // B11a: the approval minted a grant bound to this exact scope (and, for
+                        // `AllowOnce` / sensitive paths, this exact argument digest). Consume it
+                        // before dispatch; any rejection — including `Missing` when no digest could
+                        // be bound — fails closed rather than treating an unbound approval as an
+                        // allow. `evaluate_with_context` did not consume this path (it returned
+                        // `Ask`), so this is the single consumption for an approved call.
+                        let rejection = match args_digest.as_deref() {
+                            Some(digest) => match self.policy_engine.consume_grant(&auth_scope, digest)
+                            {
+                                Ok(()) => None,
+                                Err(GrantRejection::Missing) => {
+                                    Some("no grant was minted for this approval".to_string())
+                                }
+                                Err(rejection) => Some(format!("{:?}", rejection)),
+                            },
+                            None => Some("no argument digest to bind the approval".to_string()),
+                        };
+                        if let Some(detail) = rejection {
+                            let out = ToolExecutionOutput::error(
+                                ErrorCode::PolicyDenied,
+                                format!("approval grant rejected for '{}': {}", call.name, detail),
+                                ToolResultMeta {
+                                    relative_path: rel_path_opt,
+                                    ..Default::default()
+                                },
+                            );
+                            return (
+                                Self::into_message(call, out),
+                                "deny_grant_rejected".to_string(),
+                                hook_evaluations,
+                            );
+                        }
                         // Secondary SHA-256 TOCTOU check after user approval wait
                         if matches!(call.name.as_str(), "edit" | "write") {
                             if let Some(ref rel) = rel_path_opt {
@@ -600,14 +916,20 @@ impl ToolRuntime {
                 .await
             }
             "bash" => {
-                execute_bash(
+                let bash_cancel_rx = exec_ctx.cancel.clone().unwrap_or_else(|| {
+                    let (_, rx) = watch::channel(false);
+                    rx
+                });
+                let bash_deadline = exec_ctx.deadline.or(self.run_deadline);
+                execute_bash_with_deadline(
                     self.env.workspace().root(),
                     self.env.state_dir(),
                     &call.call_id,
                     &effective_raw_args,
                     &self.budget,
-                    cancel_rx,
+                    bash_cancel_rx,
                     self.bash_grace_period,
+                    bash_deadline,
                 )
                 .await
             }
@@ -621,6 +943,18 @@ impl ToolRuntime {
             // Gate 3: on-demand skill activation, read-only and visible under every policy mode.
             "activate_skill" => {
                 execute_activate_skill(&self.registry.skills(), &effective_raw_args)
+            }
+            // Capability gap #6 (`v1.5.2`): on-demand tool discovery. Only tools the active policy
+            // permits are listed, so discovery can never widen the model's authority.
+            "discover_tools" => {
+                let policy = self.policy_engine().mode();
+                let catalog: Vec<_> = self
+                    .registry
+                    .all_registered()
+                    .into_iter()
+                    .filter(|tool| self.registry.is_tool_enabled_for_policy(tool, policy))
+                    .collect();
+                execute_discover_tools(&catalog, &effective_raw_args)
             }
             // `recall_evidence` is dispatched by the agent loop, which owns the live transcript and
             // the evidence store. Reaching the runtime directly means no transcript was available.
@@ -639,7 +973,10 @@ impl ToolRuntime {
             // Gate 3: an extension-provided tool. It already passed the same registry lookup,
             // `--tool-filter`, kernel `PolicyEngine` and approval pipeline as every kernel tool.
             other => match self.registry.extension_dispatch(other) {
-                Some(dispatch) => self.run_extension_tool(&dispatch, &effective_raw_args),
+                Some(dispatch) => {
+                    self.run_extension_tool(&dispatch, &effective_raw_args, exec_ctx)
+                        .await
+                }
                 None => ToolExecutionOutput::error(
                     ErrorCode::UnknownTool,
                     format!("unknown tool '{}'", other),

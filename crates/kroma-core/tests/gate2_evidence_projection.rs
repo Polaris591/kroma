@@ -403,7 +403,9 @@ async fn test_agent_loop_recalls_evidence_from_an_outline_stub() {
     // Drive compaction deterministically off the raw tool-output watermark: it trips as soon as a
     // second tool result exists, but the Working-Set/Tail window only lets the big read be archived
     // once it is two assistant turns old (the 4th request).
-    let filler_len = "     1\tpub fn filler_0() -> usize { 0 }\n".to_string().len();
+    let filler_len = "     1\tpub fn filler_0() -> usize { 0 }\n"
+        .to_string()
+        .len();
     let budget = BudgetConfig {
         max_model_turns: 16,
         max_tool_calls: 32,
@@ -543,7 +545,9 @@ async fn test_recall_evidence_survives_resume() {
         .unwrap();
     }
 
-    let filler_len = "     1\tpub fn filler_0() -> usize { 0 }\n".to_string().len();
+    let filler_len = "     1\tpub fn filler_0() -> usize { 0 }\n"
+        .to_string()
+        .len();
     let budget = BudgetConfig {
         max_model_turns: 16,
         max_tool_calls: 32,

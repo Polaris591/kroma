@@ -71,6 +71,7 @@
 - https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md
 - 重点：服务、类型化事件、可撤销注册效果、Profile/Bundle；Agent Loop、模型适配、工具注册和会话日志可配置组合。
 - 采纳：PluginHandle、mount/unmount cleanup、依赖解析、失败时逆序清理。
+- 不支持：Cordis 不证明磁盘文件与对话的原子同步穿越（world-state），也不证明“每个并发会话 +2MB”或任何内存数字；其文档没有这样的性能结论。这些是 Kroma 自己的待测目标，必须用本项目 benchmark 测量。
 
 ### 12. Gemini CLI — Checkpointing / Hooks / Extensions
 - https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/checkpointing.md

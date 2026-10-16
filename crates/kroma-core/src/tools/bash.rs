@@ -1,5 +1,6 @@
 use crate::budget::BudgetConfig;
 use crate::messages::ToolResultMeta;
+use crate::process_launch::{EnvironmentPolicy, ProcessLaunch};
 use crate::tool::output_buffer::{HeadTailBuffer, StreamLineCollector};
 use crate::tools::ToolExecutionOutput;
 use crate::types::{ErrorCode, ToolCallId};
@@ -9,7 +10,6 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::{watch, Notify};
 
 pub const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
@@ -139,8 +139,38 @@ pub async fn execute_bash(
     call_id: &ToolCallId,
     raw_args: &str,
     budget: &BudgetConfig,
+    cancel_rx: watch::Receiver<bool>,
+    grace_period: Duration,
+) -> ToolExecutionOutput {
+    execute_bash_with_deadline(
+        workspace_root,
+        state_dir,
+        call_id,
+        raw_args,
+        budget,
+        cancel_rx,
+        grace_period,
+        None,
+    )
+    .await
+}
+
+/// F04 (`v1.5.1`): `bash` clamped to the enclosing run's absolute deadline.
+///
+/// The command's own `timeout_sec` (and `budget.max_run_duration`) are still honoured, but the
+/// process group is also terminated at `deadline`, so a long command cannot outlive the run. The
+/// termination path is the same graceful-then-`SIGKILL` sweep used for the other stop triggers —
+/// the future is never simply dropped, which would leave the process group and its pipes alive.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_bash_with_deadline(
+    workspace_root: &Path,
+    state_dir: &Path,
+    call_id: &ToolCallId,
+    raw_args: &str,
+    budget: &BudgetConfig,
     mut cancel_rx: watch::Receiver<bool>,
     grace_period: Duration,
+    deadline: Option<crate::budget::RunDeadline>,
 ) -> ToolExecutionOutput {
     let started = Instant::now();
     let args: BashArgs = match serde_json::from_str(raw_args) {
@@ -172,21 +202,32 @@ pub async fn execute_bash(
     }
     let timeout_duration = Duration::from_secs(timeout_sec).min(budget.max_run_duration);
 
+    // F04: if the run deadline has already passed, refuse to spawn a process at all rather than
+    // start one only to kill it immediately.
+    if deadline.is_some_and(|d| d.is_exceeded()) {
+        return ToolExecutionOutput::error(
+            ErrorCode::ToolTimeout,
+            "run deadline exceeded before the command could start".to_string(),
+            ToolResultMeta::default(),
+        );
+    }
+
     let (shell_bin, shell_args) = crate::process_group::resolve_shell_invocation(&args.command);
 
-    let mut cmd = Command::new(&shell_bin);
-    crate::process_group::apply_shell_args_tokio(&mut cmd, &shell_bin, &shell_args, &args.command);
-    cmd.current_dir(workspace_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear()
-        .envs(collect_sanitized_env());
-
-    crate::process_group::ChildProcessGroup::configure_tokio_command(&mut cmd);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    // F04: the shared launch seam owns the credential scrub, the process group / Windows Job
+    // Object, and the fail-closed containment attach, so `bash` cannot drift from the other
+    // supervised spawns. `SanitizedWithCustomNoBaseline` keeps `bash`'s original environment
+    // exactly: the scrub only, with no `CI` / `NO_COLOR` baseline injected. `shell_invocation`
+    // preserves the Windows `cmd.exe` verbatim `/D /S /C "<raw>"` argv contract. Stdio is spelled
+    // out because `bash` depends on null stdin and piped stdout/stderr.
+    let (mut child, proc_group) = match ProcessLaunch::new(shell_bin, shell_args)
+        .shell_invocation(&args.command)
+        .cwd(workspace_root)
+        .stdio(Stdio::null(), Stdio::piped(), Stdio::piped())
+        .env_policy(EnvironmentPolicy::SanitizedWithCustomNoBaseline(Vec::new()))
+        .spawn_tokio()
+    {
+        Ok(pair) => pair,
         Err(e) => {
             return ToolExecutionOutput::error(
                 ErrorCode::IoError,
@@ -195,8 +236,6 @@ pub async fn execute_bash(
             );
         }
     };
-
-    let proc_group = crate::process_group::ChildProcessGroup::from_tokio_child(&child);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -233,6 +272,7 @@ pub async fn execute_bash(
     enum StopTrigger {
         NormalExit(Option<i32>),
         Timeout,
+        Deadline,
         Cancelled,
         OutputFloodCap,
     }
@@ -247,6 +287,14 @@ pub async fn execute_bash(
             }
             _ = tokio::time::sleep(timeout_duration) => {
                 StopTrigger::Timeout
+            }
+            _ = async {
+                match deadline {
+                    Some(d) => tokio::time::sleep_until(d.tokio_instant()).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                StopTrigger::Deadline
             }
             _ = flood_notify.notified() => {
                 StopTrigger::OutputFloodCap
@@ -273,19 +321,28 @@ pub async fn execute_bash(
         StopTrigger::NormalExit(code) => {
             exit_code = code;
         }
-        StopTrigger::Timeout | StopTrigger::Cancelled | StopTrigger::OutputFloodCap => {
+        StopTrigger::Timeout
+        | StopTrigger::Deadline
+        | StopTrigger::Cancelled
+        | StopTrigger::OutputFloodCap => {
             terminated_by = Some(
                 match trigger {
                     StopTrigger::Timeout => "Timeout",
+                    StopTrigger::Deadline => "RunDeadlineExceeded",
                     StopTrigger::Cancelled => "Cancelled",
                     StopTrigger::OutputFloodCap => "OutputFloodCap",
                     StopTrigger::NormalExit(_) => unreachable!(),
                 }
                 .to_string(),
             );
-            proc_group
-                .terminate_gracefully(&mut child, grace_period)
-                .await;
+            // A deadline stop must not be delayed by the full graceful grace period; the group is
+            // still swept with SIGTERM-then-SIGKILL, just with a shorter grace.
+            let grace = if trigger == StopTrigger::Deadline {
+                grace_period.min(Duration::from_millis(200))
+            } else {
+                grace_period
+            };
+            proc_group.terminate_gracefully(&mut child, grace).await;
         }
     }
 
@@ -339,6 +396,14 @@ pub async fn execute_bash(
             format!(
                 "Command timed out after {}s ({}ms) and process group was terminated.\n{}",
                 timeout_sec, duration_ms, body_output
+            ),
+            meta,
+        ),
+        StopTrigger::Deadline => ToolExecutionOutput::error(
+            ErrorCode::ToolTimeout,
+            format!(
+                "Run deadline reached ({}ms); command process group was terminated.\n{}",
+                duration_ms, body_output
             ),
             meta,
         ),

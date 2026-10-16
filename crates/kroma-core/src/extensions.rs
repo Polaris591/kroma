@@ -12,19 +12,22 @@
 //!    appended to *new* tool results or the initial prefix — never to an already-sent turn — so the
 //!    frozen prefix KV cache of earlier turns stays intact.
 
+use crate::budget::{RunDeadline, TokenBudget};
+use crate::env::ExecutionContext;
 use crate::messages::ToolResultMeta;
 use crate::prompt::{escape_fence_attribute, fence_untrusted};
 use crate::tool::definition::{RegisteredTool, ToolDefinition, ToolMetadata};
 use crate::tool::output_buffer::floor_char_boundary;
+use crate::tool::policy::PolicyEngine;
 use crate::tools::ToolExecutionOutput;
-use crate::types::{EffectClass, ErrorCode};
+use crate::types::{EffectClass, ErrorCode, RunId};
 use crate::workspace::{WorkspaceCap, WorkspaceError};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,6 +37,7 @@ pub const RESERVED_KERNEL_TOOLS: &[&str] = &[
     "activate_skill",
     "bash",
     "code_graph",
+    "discover_tools",
     "edit",
     "find",
     "grep",
@@ -48,6 +52,13 @@ pub const RESERVED_KERNEL_TOOLS: &[&str] = &[
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_millis(5_000);
 /// Directory holding on-demand skill definitions, relative to the workspace root.
 pub const SKILL_DIR: &str = ".agents/skills";
+/// Additional compatibility skill directory (the Claude Code layout), scanned after
+/// [`SKILL_DIR`]. A name collision is resolved in favour of `.agents/skills`.
+pub const CLAUDE_SKILL_DIR: &str = ".claude/skills";
+/// Skill directories scanned by [`discover_skills`], in precedence order.
+pub const SKILL_DIRS: &[&str] = &[SKILL_DIR, CLAUDE_SKILL_DIR];
+/// Hard cap on the number of activation `paths` globs retained from one `SKILL.md`.
+pub const MAX_SKILL_PATHS: usize = 32;
 /// Hard cap on a single `SKILL.md` read from disk.
 pub const SKILL_FILE_MAX_BYTES: usize = 32 * 1024;
 /// Hard cap on the skill body rendered into the model context.
@@ -193,6 +204,8 @@ pub struct CustomToolContext<'a> {
     /// Set when the call was dispatched by a mounted extension. A long-running handler may poll
     /// [`CustomToolContext::is_cancelled`] to stop early when the extension is unmounted mid-call.
     pub in_flight: Option<Arc<InFlightTracker>>,
+    /// F05: Unified execution context of the enclosing run.
+    pub exec_context: Option<&'a ExecutionContext>,
 }
 
 impl<'a> CustomToolContext<'a> {
@@ -200,15 +213,79 @@ impl<'a> CustomToolContext<'a> {
         Self {
             workspace,
             in_flight: None,
+            exec_context: None,
         }
     }
 
-    /// True once the owning extension was unmounted; the handler should return promptly.
+    pub fn with_exec_context(
+        workspace: &'a WorkspaceCap,
+        exec_context: Option<&'a ExecutionContext>,
+    ) -> Self {
+        Self {
+            workspace,
+            in_flight: None,
+            exec_context,
+        }
+    }
+
+    /// True once the owning extension was unmounted OR the enclosing run was cancelled;
+    /// the handler should return promptly.
     pub fn is_cancelled(&self) -> bool {
-        self.in_flight
+        if self
+            .in_flight
             .as_ref()
             .is_some_and(|tracker| tracker.is_cancelled())
+        {
+            return true;
+        }
+        if self.exec_context.is_some_and(|ec| ec.is_cancelled()) {
+            return true;
+        }
+        false
     }
+
+    pub fn deadline(&self) -> Option<RunDeadline> {
+        self.exec_context.and_then(|ec| ec.deadline)
+    }
+
+    pub fn run_id(&self) -> Option<RunId> {
+        self.exec_context.and_then(|ec| ec.run_id)
+    }
+
+    pub fn budget(&self) -> Option<&Arc<TokenBudget>> {
+        self.exec_context.and_then(|ec| ec.budget.as_ref())
+    }
+
+    pub fn policy(&self) -> Option<&Arc<PolicyEngine>> {
+        self.exec_context.and_then(|ec| ec.policy.as_ref())
+    }
+}
+
+/// Lifecycle state of one extension tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallLifecycle {
+    Active,
+    Residual,
+    Dropped,
+}
+
+#[derive(Debug)]
+struct TrackerState {
+    active: usize,
+    residual: usize,
+    calls: HashMap<u64, CallLifecycle>,
+    next_call_id: u64,
+}
+
+/// Default concurrent call limit per mounted extension tool.
+pub const DEFAULT_MAX_CONCURRENT_CALLS_PER_EXTENSION: usize = 8;
+
+/// Errors when admitting a call into an extension's in-flight execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionError {
+    Unmounted,
+    OverlappingResidual { residual: usize },
+    CapacityExceeded { active: usize, limit: usize },
 }
 
 /// Per-extension in-flight call accounting.
@@ -216,9 +293,13 @@ impl<'a> CustomToolContext<'a> {
 /// Shared between the registry (which owns the mount lifecycle) and every dispatch of an extension
 /// tool, so `unregister_extension` can stop new calls, signal cancellation to the calls already
 /// running, and report exactly what it could not wait for or undo.
+///
+/// Also enforces bounded admission and refuses new overlapping calls while a residual background
+/// execution from a cancelled/timed-out blocking call is still active.
 pub struct InFlightTracker {
     extension_id: ExtensionId,
-    active: AtomicUsize,
+    state: Mutex<TrackerState>,
+    max_concurrent: usize,
     cancelled: AtomicBool,
     unmounted: AtomicBool,
     side_effects: Mutex<Vec<String>>,
@@ -226,9 +307,15 @@ pub struct InFlightTracker {
 
 impl fmt::Debug for InFlightTracker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (active, residual) = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (s.active, s.residual)
+        };
         f.debug_struct("InFlightTracker")
             .field("extension_id", &self.extension_id)
-            .field("active", &self.active.load(Ordering::SeqCst))
+            .field("active", &active)
+            .field("residual", &residual)
+            .field("max_concurrent", &self.max_concurrent)
             .field("cancelled", &self.cancelled.load(Ordering::SeqCst))
             .finish()
     }
@@ -238,7 +325,13 @@ impl InFlightTracker {
     fn new(extension_id: ExtensionId) -> Self {
         Self {
             extension_id,
-            active: AtomicUsize::new(0),
+            state: Mutex::new(TrackerState {
+                active: 0,
+                residual: 0,
+                calls: HashMap::new(),
+                next_call_id: 1,
+            }),
+            max_concurrent: DEFAULT_MAX_CONCURRENT_CALLS_PER_EXTENSION,
             cancelled: AtomicBool::new(false),
             unmounted: AtomicBool::new(false),
             side_effects: Mutex::new(Vec::new()),
@@ -249,20 +342,52 @@ impl InFlightTracker {
         &self.extension_id
     }
 
-    /// Register a new in-flight call. Returns `None` once the extension has been unmounted, so an
-    /// unmount strictly stops new dispatches even when one raced with the lookup.
-    pub fn begin(self: &Arc<Self>) -> Option<InFlightCall> {
+    /// Attempt to admit a new call subject to mount lifecycle, residual blocking exclusion,
+    /// and concurrent capacity limits.
+    ///
+    /// Atomic admission: checks unmounted, residual, and capacity, and transitions new call
+    /// to `Active` under the tracker's internal lock.
+    pub fn begin_admission(self: &Arc<Self>) -> Result<InFlightCall, AdmissionError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if self.unmounted.load(Ordering::SeqCst) {
-            return None;
+            return Err(AdmissionError::Unmounted);
         }
-        self.active.fetch_add(1, Ordering::SeqCst);
-        if self.unmounted.load(Ordering::SeqCst) {
-            self.active.fetch_sub(1, Ordering::SeqCst);
-            return None;
+        if state.residual > 0 {
+            return Err(AdmissionError::OverlappingResidual { residual: state.residual });
         }
-        Some(InFlightCall {
+        if state.active >= self.max_concurrent {
+            return Err(AdmissionError::CapacityExceeded {
+                active: state.active,
+                limit: self.max_concurrent,
+            });
+        }
+        let call_id = state.next_call_id;
+        state.next_call_id = state.next_call_id.wrapping_add(1).max(1);
+        state.active += 1;
+        state.calls.insert(call_id, CallLifecycle::Active);
+        drop(state);
+
+        Ok(InFlightCall {
             tracker: Arc::clone(self),
+            call_id,
         })
+    }
+
+    /// Register a new in-flight call (legacy compatibility).
+    pub fn begin(self: &Arc<Self>) -> Option<InFlightCall> {
+        self.begin_admission().ok()
+    }
+
+    /// Mark an active call as residual under the tracker's internal lock.
+    /// If the call was already dropped, this is a no-op and never increments residual.
+    pub fn mark_call_residual(&self, call_id: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(lifecycle) = state.calls.get_mut(&call_id) {
+            if *lifecycle == CallLifecycle::Active {
+                *lifecycle = CallLifecycle::Residual;
+                state.residual += 1;
+            }
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -281,8 +406,12 @@ impl InFlightTracker {
         }
     }
 
-    fn active(&self) -> usize {
-        self.active.load(Ordering::SeqCst)
+    pub fn active(&self) -> usize {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).active
+    }
+
+    pub fn residual_active(&self) -> usize {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).residual
     }
 
     fn side_effects_snapshot(&self) -> Vec<String> {
@@ -293,14 +422,62 @@ impl InFlightTracker {
     }
 }
 
+/// Handle held by the caller to mark an in-flight blocking call as residual upon cancel/deadline.
+#[derive(Clone, Debug)]
+pub struct ResidualHandle {
+    tracker: Arc<InFlightTracker>,
+    call_id: u64,
+}
+
+impl ResidualHandle {
+    pub fn mark_residual(&self) {
+        self.tracker.mark_call_residual(self.call_id);
+    }
+
+    pub fn call_id(&self) -> u64 {
+        self.call_id
+    }
+}
+
 /// RAII guard for one in-flight extension call; dropping it ends the call's accounting.
+#[derive(Debug)]
 pub struct InFlightCall {
     tracker: Arc<InFlightTracker>,
+    call_id: u64,
+}
+
+impl InFlightCall {
+    pub fn call_id(&self) -> u64 {
+        self.call_id
+    }
+
+    pub fn residual_handle(&self) -> ResidualHandle {
+        ResidualHandle {
+            tracker: Arc::clone(&self.tracker),
+            call_id: self.call_id,
+        }
+    }
+
+    pub fn mark_residual(&self) {
+        self.tracker.mark_call_residual(self.call_id);
+    }
 }
 
 impl Drop for InFlightCall {
     fn drop(&mut self) {
-        self.tracker.active.fetch_sub(1, Ordering::SeqCst);
+        let mut state = self.tracker.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(lifecycle) = state.calls.remove(&self.call_id) {
+            match lifecycle {
+                CallLifecycle::Active => {
+                    state.active = state.active.saturating_sub(1);
+                }
+                CallLifecycle::Residual => {
+                    state.active = state.active.saturating_sub(1);
+                    state.residual = state.residual.saturating_sub(1);
+                }
+                CallLifecycle::Dropped => {}
+            }
+        }
     }
 }
 
@@ -1004,7 +1181,7 @@ impl CommandHookRunner {
         event: HookEvent,
         ctx: &HookContext,
     ) -> Result<CommandHookOutcome, HookError> {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         let hook_name = self
             .argv
@@ -1018,21 +1195,22 @@ impl CommandHookRunner {
             ));
         }
 
-        let mut cmd = Command::new(&self.argv[0]);
-        cmd.args(&self.argv[1..])
-            .current_dir(&ctx.workspace_root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear()
-            .envs(crate::env::build_sanitized_env())
-            .env("KROMA_HOOK_EVENT", event.as_str());
-        crate::process_group::ChildProcessGroup::configure_std_command(&mut cmd);
-
-        let mut child = cmd.spawn().map_err(|e| {
-            HookError::Failed(hook_name.clone(), format!("failed to spawn hook: {}", e))
-        })?;
-        let proc_group = crate::process_group::ChildProcessGroup::from_std_child(&child);
+        // The shared launch seam owns the credential scrub, the process group / Windows Job Object,
+        // and the fail-closed containment attach. `SanitizedWithCustomNoBaseline` keeps the hook's
+        // original environment exactly (scrub plus the event variable, no `CI` / `NO_COLOR`), and
+        // all three pipes stay piped because `run` writes the context to stdin and drains both
+        // output pipes on helper threads.
+        let (mut child, proc_group) = crate::process_launch::ProcessLaunch::new(
+            self.argv[0].clone(),
+            self.argv[1..].to_vec(),
+        )
+        .cwd(&ctx.workspace_root)
+        .stdio(Stdio::piped(), Stdio::piped(), Stdio::piped())
+        .env_policy(crate::process_launch::EnvironmentPolicy::SanitizedWithCustomNoBaseline(
+            vec![("KROMA_HOOK_EVENT".to_string(), event.as_str().to_string())],
+        ))
+        .spawn_std()
+        .map_err(|e| HookError::Failed(hook_name.clone(), format!("failed to spawn hook: {}", e)))?;
 
         // Hard stop shared by every helper thread (the stdin writer and the stdout/stderr
         // readers). A hook may `setsid()`/double-fork a grandchild that escapes the process-group
@@ -1889,6 +2067,11 @@ pub struct SkillEntry {
     /// Owning extension, when the skill was contributed by a mounted extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<ExtensionId>,
+    /// Capability gap #6 (`v1.5.2`): workspace-relative path globs this skill applies to. Empty
+    /// means "always offered". A `paths` restricted skill is only listed and activatable for a
+    /// matching file, so a Rust-specific playbook does not pollute a Python task's catalog.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 impl SkillEntry {
@@ -1902,14 +2085,101 @@ impl SkillEntry {
             SKILL_BODY_MAX_BYTES,
         )
     }
+
+    /// Capability gap #6: `true` when this skill applies to `rel_path` (an unrestricted skill
+    /// always applies).
+    pub fn applies_to(&self, rel_path: &str) -> bool {
+        if self.paths.is_empty() {
+            return true;
+        }
+        let path = normalize_skill_path(rel_path);
+        self.paths
+            .iter()
+            .any(|pattern| skill_path_matches(pattern, &path))
+    }
+
+    /// A compact `[paths: a, b]` annotation for the listing, or `None` when unrestricted.
+    pub fn paths_annotation(&self) -> Option<String> {
+        if self.paths.is_empty() {
+            None
+        } else {
+            Some(format!("[paths: {}]", self.paths.join(", ")))
+        }
+    }
 }
 
-/// Discover `.agents/skills/<name>/SKILL.md` inside the workspace.
+/// Normalize a workspace-relative path for skill `paths` matching.
+fn normalize_skill_path(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_string()
+}
+
+/// Match a skill `paths` entry against a normalized relative path.
+///
+/// A plain entry matches the exact path, a directory prefix (`src/`), or any descendant; an entry
+/// containing `*` is treated as a glob where `**` crosses directory separators.
+fn skill_path_matches(pattern: &str, path: &str) -> bool {
+    let pattern = normalize_skill_path(pattern);
+    if pattern.is_empty() {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return path == pattern
+            || path.starts_with(&format!("{}/", pattern))
+            || pattern.starts_with(&format!("{}/", path));
+    }
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    // A `**/` segment may match zero directories (`src/**/*.rs` matches
+                    // `src/lib.rs`), so consume the following slash into an optional group.
+                    if chars.peek() == Some(&'/') {
+                        chars.next();
+                        regex.push_str("(?:.*/)?");
+                    } else {
+                        regex.push_str(".*");
+                    }
+                } else {
+                    regex.push_str("[^/]*");
+                }
+            }
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '[' | ']' | '{' | '}' | '?' | '\\' => {
+                regex.push('\\');
+                regex.push(c);
+            }
+            other => regex.push(other),
+        }
+    }
+    regex.push('$');
+    regex::Regex::new(&regex)
+        .map(|re| re.is_match(path))
+        .unwrap_or(false)
+}
+
+/// Discover skills under every directory in [`SKILL_DIRS`] inside the workspace.
 ///
 /// Symlinks and sensitive paths are refused by `WorkspaceCap`; a malformed skill is skipped rather
-/// than aborting discovery, and the result is sorted by skill name for deterministic schemas.
+/// than aborting discovery, and the result is sorted by skill name for deterministic schemas. A
+/// name collision is resolved by scan order (`.agents/skills` before `.claude/skills`).
 pub fn discover_skills(workspace: &WorkspaceCap) -> Vec<SkillEntry> {
-    let Ok((_, entries)) = workspace.read_dir_no_symlink(SKILL_DIR) else {
+    let mut by_name: BTreeMap<String, SkillEntry> = BTreeMap::new();
+    for dir in SKILL_DIRS {
+        for skill in discover_skills_in(workspace, dir) {
+            by_name.entry(skill.name.clone()).or_insert(skill);
+        }
+    }
+    by_name.into_values().collect()
+}
+
+fn discover_skills_in(workspace: &WorkspaceCap, skill_dir: &str) -> Vec<SkillEntry> {
+    let Ok((_, entries)) = workspace.read_dir_no_symlink(skill_dir) else {
         return Vec::new();
     };
     let mut names: Vec<String> = entries
@@ -1921,7 +2191,7 @@ pub fn discover_skills(workspace: &WorkspaceCap) -> Vec<SkillEntry> {
 
     let mut skills = Vec::new();
     for dir_name in names {
-        let rel = format!("{}/{}/SKILL.md", SKILL_DIR, dir_name);
+        let rel = format!("{}/{}/SKILL.md", skill_dir, dir_name);
         let Ok((_, file)) = workspace.open_existing_no_symlink(&rel) else {
             continue;
         };
@@ -1946,12 +2216,64 @@ pub fn discover_skills(workspace: &WorkspaceCap) -> Vec<SkillEntry> {
     skills
 }
 
-/// Parse a `SKILL.md`: optional YAML frontmatter (`name`, `description`), otherwise the first
-/// markdown heading and first paragraph are used.
+/// Parse the `paths:` frontmatter value, accepting either an inline list (`paths: [a, b]` /
+/// `paths: a, b`) or a YAML block sequence of `- item` lines.
+fn parse_frontmatter_paths(frontmatter: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_block = false;
+    for line in frontmatter.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("paths:") {
+            in_block = true;
+            out.extend(split_inline_list(rest));
+            continue;
+        }
+        if in_block {
+            if let Some(item) = trimmed.strip_prefix("- ") {
+                let item = item.trim().trim_matches('"').trim_matches('\'');
+                if !item.is_empty() {
+                    out.push(item.to_string());
+                }
+                continue;
+            }
+            if !trimmed.is_empty() {
+                in_block = false;
+            }
+        }
+    }
+    out.into_iter()
+        .map(|p| {
+            p.trim()
+                .replace('\\', "/")
+                .trim_start_matches("./")
+                .trim_matches('/')
+                .to_string()
+        })
+        .filter(|p| !p.is_empty() && !p.split('/').any(|c| c == ".."))
+        .take(MAX_SKILL_PATHS)
+        .collect()
+}
+
+fn split_inline_list(value: &str) -> Vec<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(value);
+    value
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Parse a `SKILL.md`: optional YAML frontmatter (`name`, `description`, `paths`), otherwise the
+/// first markdown heading and first paragraph are used.
 fn parse_skill(dir_name: &str, path: &str, raw: &str) -> SkillEntry {
     let mut name = dir_name.to_string();
     let mut description = String::new();
     let mut body = raw.to_string();
+    let mut paths: Vec<String> = Vec::new();
 
     if let Some(rest) = raw
         .strip_prefix("---\n")
@@ -1960,6 +2282,7 @@ fn parse_skill(dir_name: &str, path: &str, raw: &str) -> SkillEntry {
         if let Some(end) = rest.find("\n---") {
             let frontmatter = &rest[..end];
             body = rest[end + 4..].trim_start_matches(['\r', '\n']).to_string();
+            paths = parse_frontmatter_paths(frontmatter);
             for line in frontmatter.lines() {
                 let Some((key, value)) = line.split_once(':') else {
                     continue;
@@ -1999,6 +2322,7 @@ fn parse_skill(dir_name: &str, path: &str, raw: &str) -> SkillEntry {
         body,
         path: path.to_string(),
         extension_id: None,
+        paths,
     }
 }
 
@@ -2007,12 +2331,16 @@ fn parse_skill(dir_name: &str, path: &str, raw: &str) -> SkillEntry {
 struct ActivateSkillArgs {
     name: Option<String>,
     action: Option<String>,
+    /// Capability gap #6 (`v1.5.2`): the file the model is currently working on. When supplied, a
+    /// `paths`-restricted skill is only listed/activatable if it applies to this path.
+    path: Option<String>,
 }
 
 /// Execute the built-in read-only `activate_skill` kernel tool.
 ///
 /// `{ "action": "list" }` (or no argument) lists the discovered skills; `{ "name": "..." }`
-/// returns the escaped, bounded skill body.
+/// returns the escaped, bounded skill body. An optional `path` scopes `paths`-restricted skills to
+/// the file under work.
 pub fn execute_activate_skill(catalog: &[SkillEntry], raw_args: &str) -> ToolExecutionOutput {
     let args: ActivateSkillArgs = match serde_json::from_str(raw_args) {
         Ok(a) => a,
@@ -2025,19 +2353,41 @@ pub fn execute_activate_skill(catalog: &[SkillEntry], raw_args: &str) -> ToolExe
         }
     };
 
+    let focus = args
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+
     let listing = |catalog: &[SkillEntry]| -> String {
-        if catalog.is_empty() {
-            format!(
-                "No skills found. Add a definition at {}/<name>/SKILL.md.",
-                SKILL_DIR
-            )
+        let visible: Vec<&SkillEntry> = catalog
+            .iter()
+            .filter(|skill| focus.map(|p| skill.applies_to(p)).unwrap_or(true))
+            .collect();
+        if visible.is_empty() {
+            match focus {
+                Some(path) => format!(
+                    "No skills apply to '{}'. Add a definition at {}/<name>/SKILL.md.",
+                    escape_fence_attribute(path),
+                    SKILL_DIR
+                ),
+                None => format!(
+                    "No skills found. Add a definition at {}/<name>/SKILL.md (or the compatible {}/).",
+                    SKILL_DIR, CLAUDE_SKILL_DIR
+                ),
+            }
         } else {
-            let mut out = format!("Available skills ({}):\n", catalog.len());
-            for skill in catalog {
+            let mut out = format!("Available skills ({}):\n", visible.len());
+            for skill in visible {
+                let paths = skill
+                    .paths_annotation()
+                    .map(|a| format!("  {}", escape_fence_attribute(&a)))
+                    .unwrap_or_default();
                 out.push_str(&format!(
-                    "  {}  —  {}\n",
+                    "  {}  —  {}{}\n",
                     escape_fence_attribute(&skill.name),
-                    escape_fence_attribute(&skill.description)
+                    escape_fence_attribute(&skill.description),
+                    paths
                 ));
             }
             out
@@ -2057,6 +2407,20 @@ pub fn execute_activate_skill(catalog: &[SkillEntry], raw_args: &str) -> ToolExe
     let name = name.unwrap();
     match catalog.iter().find(|skill| skill.name == name) {
         Some(skill) => {
+            if let Some(path) = focus {
+                if !skill.applies_to(path) {
+                    return ToolExecutionOutput::error(
+                        ErrorCode::InvalidArguments,
+                        format!(
+                            "skill '{}' is restricted to paths [{}] and does not apply to '{}'",
+                            escape_fence_attribute(&skill.name),
+                            escape_fence_attribute(&skill.paths.join(", ")),
+                            escape_fence_attribute(path),
+                        ),
+                        ToolResultMeta::default(),
+                    );
+                }
+            }
             // The header sits outside the fence, so it uses the same attribute escaping as the
             // fence itself: a hostile `SKILL.md` cannot inject prompt text or fake fence tags.
             let header = format!(
@@ -2084,7 +2448,7 @@ pub fn activate_skill_registration() -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "activate_skill".to_string(),
-            description: "List the on-demand skills discovered under .agents/skills, or activate one by name so its instructions are loaded for this turn.".to_string(),
+            description: "List the on-demand skills discovered under .agents/skills (and the compatible .claude/skills), or activate one by name so its instructions are loaded for this turn. Pass `path` to scope skills that declare `paths:`.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2095,6 +2459,10 @@ pub fn activate_skill_registration() -> RegisteredTool {
                     "action": {
                         "type": "string",
                         "description": "Set to \"list\" to list the discovered skills without activating one."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative file you are working on; only skills whose `paths:` match it are listed/activatable."
                     }
                 },
                 "additionalProperties": false
@@ -2104,6 +2472,107 @@ pub fn activate_skill_registration() -> RegisteredTool {
             effect_class: EffectClass::ReadOnly,
             default_timeout_sec: 30,
             inline_output_cap_bytes: SKILL_BODY_MAX_BYTES,
+        },
+    }
+}
+
+/// Hard cap on the number of tool schemas one `discover_tools` call may return.
+pub const MAX_DISCOVERED_TOOLS: usize = 24;
+/// Hard cap on the rendered schema payload so a discovery call cannot flood the context.
+pub const DISCOVER_TOOLS_MAX_BYTES: usize = 12 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoverToolsArgs {
+    query: Option<String>,
+    #[serde(default)]
+    include_schema: bool,
+}
+
+/// Execute the built-in read-only `discover_tools` kernel tool.
+///
+/// Capability gap #6 (`v1.5.2`): tool schemas can be fetched on demand instead of being pinned in
+/// every request, while the caller still honours the active policy — `catalog` must already be the
+/// policy-enabled set, so discovery can never widen what the model may call.
+pub fn execute_discover_tools(catalog: &[RegisteredTool], raw_args: &str) -> ToolExecutionOutput {
+    let args: DiscoverToolsArgs = match serde_json::from_str(raw_args) {
+        Ok(a) => a,
+        Err(e) => {
+            return ToolExecutionOutput::error(
+                ErrorCode::InvalidArguments,
+                format!("invalid JSON arguments for `discover_tools`: {}", e),
+                ToolResultMeta::default(),
+            );
+        }
+    };
+    let query = args
+        .query
+        .as_deref()
+        .map(|q| q.trim().to_ascii_lowercase())
+        .filter(|q| !q.is_empty());
+
+    let mut matched: Vec<&RegisteredTool> = catalog
+        .iter()
+        .filter(|tool| match &query {
+            Some(q) => {
+                tool.definition.name.to_ascii_lowercase().contains(q)
+                    || tool.definition.description.to_ascii_lowercase().contains(q)
+            }
+            None => true,
+        })
+        .collect();
+    matched.sort_by(|a, b| a.definition.name.cmp(&b.definition.name));
+    let total = matched.len();
+    matched.truncate(MAX_DISCOVERED_TOOLS);
+
+    let mut body = if total == 0 {
+        "No matching tools.".to_string()
+    } else {
+        format!("Discovered tools ({} shown of {}):\n", matched.len(), total)
+    };
+    for tool in &matched {
+        body.push_str(&format!(
+            "- {}: {}\n",
+            escape_fence_attribute(&tool.definition.name),
+            escape_fence_attribute(&tool.definition.description),
+        ));
+        if args.include_schema {
+            let schema = serde_json::to_string(&tool.definition.parameters)
+                .unwrap_or_else(|_| "{}".to_string());
+            body.push_str(&format!("  schema: {}\n", schema));
+        }
+    }
+    ToolExecutionOutput::success(
+        crate::prompt::fence_untrusted("tool_catalog", "", &body, DISCOVER_TOOLS_MAX_BYTES),
+        ToolResultMeta::default(),
+    )
+}
+
+/// Built-in read-only kernel tool schema for on-demand tool discovery.
+pub fn discover_tools_registration() -> RegisteredTool {
+    RegisteredTool {
+        definition: ToolDefinition {
+            name: "discover_tools".to_string(),
+            description: "List the tools the active policy currently permits, optionally with their JSON schemas, so a schema need not be pinned in every request. Optional `query` filters by name/description substring.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Case-insensitive substring matched against tool name and description."
+                    },
+                    "include_schema": {
+                        "type": "boolean",
+                        "description": "When true, include each tool's JSON parameter schema."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        metadata: ToolMetadata {
+            effect_class: EffectClass::ReadOnly,
+            default_timeout_sec: 30,
+            inline_output_cap_bytes: DISCOVER_TOOLS_MAX_BYTES,
         },
     }
 }

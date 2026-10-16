@@ -39,6 +39,13 @@ pub enum EventPayload {
     },
     ModelRequestCompleted {
         turn: usize,
+        /// None for historical records; never infer measured usage from an old missing label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage_basis: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reported_model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_accounting: Option<crate::budget::TokenAccountingSnapshot>,
         input_tokens: u64,
         cached_input_tokens: Option<u64>,
         uncached_input_tokens: u64,

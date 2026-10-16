@@ -76,6 +76,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
             "activate_skill",
             "bash",
             "code_graph",
+            "discover_tools",
             "edit",
             "find",
             "grep",
@@ -95,6 +96,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         vec![
             "activate_skill",
             "code_graph",
+            "discover_tools",
             "find",
             "grep",
             "ls",
@@ -131,10 +133,10 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         .is_err());
 
     // Non-interactive PolicyEngine hides tools that would be automatically denied:
-    // - Non-interactive Ask: hides bash, edit, write -> activate_skill, code_graph, find, grep, ls, read, recall_evidence, spawn_subagent
-    // - Non-interactive AllowWrite: hides bash -> activate_skill, code_graph, edit, find, grep, ls, read, recall_evidence, spawn_subagent, write
-    // - Non-interactive AllowShell: hides edit, write -> activate_skill, bash, code_graph, find, grep, ls, read, recall_evidence, spawn_subagent
-    // - Non-interactive FullAutonomous: exposes all 11 tools
+    // - Non-interactive Ask: hides bash, edit, write -> activate_skill, code_graph, discover_tools, find, grep, ls, read, recall_evidence, spawn_subagent
+    // - Non-interactive AllowWrite: hides bash -> activate_skill, code_graph, discover_tools, edit, find, grep, ls, read, recall_evidence, spawn_subagent, write
+    // - Non-interactive AllowShell: hides edit, write -> activate_skill, bash, code_graph, discover_tools, find, grep, ls, read, recall_evidence, spawn_subagent
+    // - Non-interactive FullAutonomous: exposes all 12 tools
     use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine};
     use std::sync::Arc;
 
@@ -149,6 +151,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         vec![
             "activate_skill",
             "code_graph",
+            "discover_tools",
             "find",
             "grep",
             "ls",
@@ -172,6 +175,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
         vec![
             "activate_skill",
             "code_graph",
+            "discover_tools",
             "edit",
             "find",
             "grep",
@@ -198,6 +202,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
             "activate_skill",
             "bash",
             "code_graph",
+            "discover_tools",
             "find",
             "grep",
             "ls",
@@ -222,6 +227,7 @@ fn test_tool_registry_ascii_order_and_policy_visibility() {
             "activate_skill",
             "bash",
             "code_graph",
+            "discover_tools",
             "edit",
             "find",
             "grep",

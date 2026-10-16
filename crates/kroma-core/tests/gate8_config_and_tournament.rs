@@ -237,13 +237,18 @@ fn tournament_spec(root: &Path, candidates: usize) -> TournamentSpec {
         state_base: root.join("subagents"),
         allowed_write_globs: None,
         budget: BudgetConfig::default(),
+        token_budget: None,
         policy_mode: PolicyMode::FullAutonomous,
+        parent_policy_hooks: kroma_core::subagents::ParentPolicyHooks::KnownEmpty,
         workspace_skills: Vec::new(),
         predictive_check: false,
         cancel_rx: watch::channel(false).1,
         timeout_ms: 5_000,
         disallow_test_tampering: false,
         protected_paths: Vec::new(),
+        // Legacy behaviour for the shared test helper; strict-policy behaviour is covered by its
+        // own contract test which sets this to `true`.
+        require_verified: false,
     }
 }
 
@@ -1117,7 +1122,9 @@ fn test_f01_worker_backend_never_escalates_readonly_parent() {
         state_dir: root.join("state"),
         workspace_skills: Vec::new(),
         parent_policy_mode: PolicyMode::ReadOnly,
+        parent_policy_hooks: kroma_core::subagents::ParentPolicyHooks::KnownEmpty,
         parent_budget: BudgetConfig::default(),
+        token_budget: None,
         predictive_check: false,
         cancel_rx: rx,
     };
@@ -1519,10 +1526,11 @@ fn test_item3_protected_test_path_disqualifies_candidate() {
 
 // ---- Item #3.3: paired budget-locked benchmark ------------------------------------------------
 
-#[test]
-fn test_item3_bench_paired_budget_locked_report() {
+#[tokio::test]
+async fn test_item3_bench_paired_budget_locked_report() {
     use kroma_core::bench::{
-        builtin_smoke_suite, default_strategy_pair, run_paired_benchmark, SyntheticBenchExecutor,
+        builtin_smoke_suite, default_strategy_pair, run_paired_benchmark, BenchRunOptions,
+        SyntheticBenchExecutor,
     };
     let root = temp_root("item3-bench");
     let report = run_paired_benchmark(
@@ -1532,7 +1540,9 @@ fn test_item3_bench_paired_budget_locked_report() {
         8_000,
         &root,
         &SyntheticBenchExecutor,
-    );
+        &BenchRunOptions::default(),
+    )
+    .await;
     assert_eq!(report.arms.len(), 2);
     for r in &report.results {
         assert!(r.total_tokens <= 8_000, "arm exceeded its budget: {:?}", r);
@@ -1635,6 +1645,7 @@ impl ModelProvider for EscalationProvider {
                 latency_ms: 0,
                 ttft_ms: Some(0),
                 attempts_used: 1,
+                reported_model: None,
             })
         })
     }
@@ -2062,6 +2073,7 @@ impl ModelProvider for WalRecordingProvider {
                 latency_ms: 0,
                 ttft_ms: Some(0),
                 attempts_used: 1,
+                reported_model: None,
             })
         })
     }

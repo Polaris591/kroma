@@ -593,6 +593,8 @@ async fn test_anthropic_stream_assembles_redacted_thinking_and_concatenates_spli
         stream: true,
         cache_breakpoints: Vec::new(),
         max_output_tokens: None,
+                retry_budget: None,
+                wire_attempts: None,
     };
     let (_tx, cancel_rx) = watch::channel(false);
     let completion = client
@@ -682,6 +684,8 @@ async fn test_anthropic_messages_protocol_cache_control_breakpoints_and_sse_stre
             message_index: 0,
         }],
         max_output_tokens: None,
+                retry_budget: None,
+                wire_attempts: None,
     };
 
     let (_tx, cancel_rx) = watch::channel(false);
@@ -864,6 +868,8 @@ async fn test_openai_responses_protocol_roundtrip_and_function_call() {
         stream: true,
         cache_breakpoints: Vec::new(),
         max_output_tokens: None,
+                retry_budget: None,
+                wire_attempts: None,
     };
 
     let (_tx, cancel_rx) = watch::channel(false);
@@ -1022,6 +1028,8 @@ fn single_user_request() -> ProviderRequest {
         stream: true,
         cache_breakpoints: Vec::new(),
         max_output_tokens: None,
+                retry_budget: None,
+                wire_attempts: None,
     }
 }
 
@@ -1740,6 +1748,8 @@ async fn test_f09_responses_sse_captures_encrypted_reasoning_item() {
         stream: true,
         cache_breakpoints: Vec::new(),
         max_output_tokens: None,
+                retry_budget: None,
+                wire_attempts: None,
     };
     let (_tx, cancel_rx) = watch::channel(false);
     let completion = client

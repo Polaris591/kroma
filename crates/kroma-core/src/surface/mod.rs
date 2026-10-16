@@ -16,21 +16,31 @@
 //!
 //! Physical module split: one file per responsibility (no behaviour change).
 
+mod acp;
 mod approval;
 mod daemon;
 mod dispatcher;
 mod repl;
 mod rpc_types;
 mod runtime;
+mod session_manager;
 mod terminal;
+pub(crate) mod transport;
 
+pub use acp::*;
 pub use approval::*;
 pub use daemon::*;
 pub use dispatcher::*;
 pub use repl::*;
 pub use rpc_types::*;
 pub use runtime::*;
+pub use session_manager::*;
 pub use terminal::*;
+pub use transport::{TransportConfig, TransportState};
+pub(crate) use transport::{
+    bounded_outbound_channel, normalize_request_params, run_bounded_writer,
+    BoundedOutboundSender, FrameReader, MAX_AUTH_FAILURES,
+};
 
 pub(crate) use crate::agent_loop::{build_runtime_with_registry, AgentRunConfig, AgentRunner};
 pub(crate) use crate::attribution::{MutationLedger, MutationRecord};
@@ -49,7 +59,8 @@ pub(crate) use crate::messages::{ToolCall, TranscriptItem};
 pub(crate) use crate::prompt::{sha256_hex64, PromptBuilder};
 pub(crate) use crate::provider::ModelProvider;
 pub(crate) use crate::revision::{
-    MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore, WorkspaceRevision,
+    ForkRecoveryOutcome, MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore,
+    WorkspaceRevision,
 };
 pub(crate) use crate::session::{RevisionRecord, SessionJournal};
 pub(crate) use crate::theme::{StatusDot, Theme, ThemeRenderer};
@@ -74,6 +85,7 @@ pub(crate) use tokio::io::{
 };
 pub(crate) use tokio::net::{TcpListener, TcpStream};
 pub(crate) use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Semaphore};
+pub(crate) use uuid::Uuid;
 
 /// JSON-RPC 2.0 wire version string.
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -94,3 +106,9 @@ pub const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 pub const JSONRPC_UNAUTHORIZED: i64 = -32001;
 pub const JSONRPC_RESTORE_CONFLICT: i64 = -32003;
 pub const JSONRPC_RECOVERY_REQUIRED: i64 = -32004;
+/// A mutation was refused because another runtime already owns the workspace's write side.
+pub const JSONRPC_WORKSPACE_BUSY: i64 = -32005;
+/// A request named a session id this runtime does not own (misrouted request).
+pub const JSONRPC_SESSION_NOT_OWNED: i64 = -32006;
+/// F03 follow-up (`v1.5.2`): the daemon's bounded multi-session control plane is at capacity.
+pub const JSONRPC_SESSION_LIMIT: i64 = -32007;

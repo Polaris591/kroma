@@ -95,6 +95,7 @@ fn skill(name: &str) -> SkillEntry {
         body: format!("{} body", name),
         path: format!("<extension>{}", name),
         extension_id: None,
+        paths: Vec::new(),
     }
 }
 
@@ -345,6 +346,7 @@ async fn test_extension_register_dispatch_and_byte_identical_unregister() {
             "activate_skill",
             "bash",
             "code_graph",
+            "discover_tools",
             "echo_note",
             "edit",
             "find",
@@ -1459,6 +1461,7 @@ fn test_skills_discovery_activate_skill_tool_and_tag_sanitization() {
         body: "extension body".to_string(),
         path: "<extension>".to_string(),
         extension_id: None,
+        paths: Vec::new(),
     };
     let ext = ScopedExtension::new(manifest("skills-ext")).with_skill(contributed);
     let id = registry.register_extension(ext).unwrap();

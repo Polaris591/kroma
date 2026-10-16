@@ -100,6 +100,26 @@ impl Drop for WindowsJobObject {
     }
 }
 
+/// Platform containment handle attached to a spawned child: a Windows Job Object, or `()` on Unix
+/// where containment is the process group set at spawn time.
+#[cfg(windows)]
+pub(crate) type PlatformContainment = WindowsJobObject;
+#[cfg(not(windows))]
+pub(crate) type PlatformContainment = ();
+
+/// How a launch attaches platform process-tree containment to an already-spawned child.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Containment {
+    /// Real platform containment: Unix process group (`setpgid`); Windows Job Object
+    /// (`CreateJobObject` + `AssignProcessToJobObject`).
+    #[default]
+    Platform,
+    /// Test-only seam: force the containment attach to fail so the fail-closed stop+reap contract
+    /// can be exercised on every platform. Never set in production.
+    #[doc(hidden)]
+    ForceAttachFailure,
+}
+
 /// Cross-platform handle representing a spawned child's process group (Unix) or Job Object (Windows).
 #[derive(Debug)]
 pub struct ChildProcessGroup {
@@ -133,6 +153,13 @@ impl ChildProcessGroup {
         }
     }
 
+    /// Best-effort containment for a spawned child.
+    ///
+    /// On Windows this is **fail-open**: if the Job Object cannot be created or the child cannot be
+    /// assigned to it, the returned handle carries no containment and every sweep/terminate call
+    /// becomes a silent no-op. Every production spawn (the shared launch seam, `bash`, the
+    /// completion gate, command hooks) uses [`Self::try_from_tokio_child`] /
+    /// [`Self::try_from_std_child`] instead; only tests still build a handle this way.
     pub fn from_tokio_child(child: &tokio::process::Child) -> Self {
         let pgid = child.id().unwrap_or(0) as i32;
         #[cfg(windows)]
@@ -147,6 +174,8 @@ impl ChildProcessGroup {
         Self { pgid }
     }
 
+    /// Best-effort containment for a synchronously spawned child. Fail-open on Windows; see
+    /// [`Self::from_tokio_child`].
     pub fn from_std_child(child: &std::process::Child) -> Self {
         let pgid = child.id() as i32;
         #[cfg(windows)]
@@ -162,8 +191,90 @@ impl ChildProcessGroup {
         Self { pgid }
     }
 
+    /// Attach containment to a spawned child, failing closed.
+    ///
+    /// On Windows, if the Job Object cannot be created or the child cannot be assigned to it, the
+    /// child is stopped and reaped before the error is returned, so a caller never receives an
+    /// uncontained process. On Unix containment is the process group already set at spawn time and
+    /// this always succeeds.
+    ///
+    /// Window race (recorded, not solved here): a child can execute and spawn descendants between
+    /// `spawn` and the job assignment, and those descendants are not retroactively contained. Fully
+    /// closing that window needs a suspended spawn / job-constrained creation, tracked as B15.
+    pub fn try_from_tokio_child(
+        child: &mut tokio::process::Child,
+        containment: Containment,
+    ) -> std::io::Result<Self> {
+        let pgid = child.id().unwrap_or(0) as i32;
+        match Self::try_attach(pgid, containment, || attach_job_tokio(child)) {
+            Ok(group) => Ok(group),
+            Err(err) => {
+                // Fail closed: a child we could not contain must not keep running unsupervised.
+                let _ = child.start_kill();
+                reap_tokio_child(child);
+                Err(err)
+            }
+        }
+    }
+
+    /// Attach containment to a synchronously spawned child, failing closed (stop + reap on
+    /// Windows failure). See [`Self::try_from_tokio_child`].
+    pub fn try_from_std_child(
+        child: &mut std::process::Child,
+        containment: Containment,
+    ) -> std::io::Result<Self> {
+        let pgid = child.id() as i32;
+        match Self::try_attach(pgid, containment, || attach_job_std(child)) {
+            Ok(group) => Ok(group),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(err)
+            }
+        }
+    }
+
+    /// Shared attach core: run `attach` unless the caller asked to force a failure.
+    fn try_attach<F>(pgid: i32, containment: Containment, attach: F) -> std::io::Result<Self>
+    where
+        F: FnOnce() -> std::io::Result<PlatformContainment>,
+    {
+        if containment == Containment::ForceAttachFailure {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "forced containment failure (test seam)",
+            ));
+        }
+        #[cfg(windows)]
+        {
+            let job = attach()?;
+            Ok(Self { pgid, job: Some(job) })
+        }
+        #[cfg(not(windows))]
+        {
+            attach()?;
+            Ok(Self { pgid })
+        }
+    }
+
     pub fn pgid(&self) -> i32 {
         self.pgid
+    }
+
+    /// Check whether a specific PID is currently alive.
+    pub fn is_process_alive(pid: i32) -> bool {
+        #[cfg(unix)]
+        {
+            pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows liveness is not a POSIX `kill(0)` probe, and this layer owns no process
+            // handle for an arbitrary pid; report only "not provably alive" and leave containment
+            // to the Job Object above.
+            let _ = pid;
+            false
+        }
     }
 
     /// Immediately terminate the entire process group / Job Object.
@@ -260,6 +371,50 @@ impl ChildProcessGroup {
             job.terminate(0);
         }
     }
+}
+
+/// Bounded synchronous reap of a tokio child after `start_kill` on the fail-closed path. Only runs
+/// when containment could not be attached, so it never blocks the steady state.
+fn reap_tokio_child(child: &mut tokio::process::Child) {
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    while std::time::Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Attach a Windows Job Object to an already-spawned tokio child. Unix is a no-op.
+#[cfg(windows)]
+fn attach_job_tokio(child: &tokio::process::Child) -> std::io::Result<PlatformContainment> {
+    let job = WindowsJobObject::new()?;
+    let raw = child.raw_handle().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "child handle unavailable for job assignment",
+        )
+    })?;
+    job.assign_raw_process(raw as HANDLE)?;
+    Ok(job)
+}
+
+#[cfg(not(windows))]
+fn attach_job_tokio(_child: &tokio::process::Child) -> std::io::Result<PlatformContainment> {
+    Ok(())
+}
+
+/// Attach a Windows Job Object to an already-spawned synchronous child. Unix is a no-op.
+#[cfg(windows)]
+fn attach_job_std(child: &std::process::Child) -> std::io::Result<PlatformContainment> {
+    let job = WindowsJobObject::new()?;
+    job.assign_raw_process(child.as_raw_handle() as HANDLE)?;
+    Ok(job)
+}
+
+#[cfg(not(windows))]
+fn attach_job_std(_child: &std::process::Child) -> std::io::Result<PlatformContainment> {
+    Ok(())
 }
 
 /// Resolve the shell binary and argument vector used by `bash` on the current host.
@@ -435,6 +590,28 @@ pub fn is_cmd_exe(shell_bin: &str) -> bool {
     matches!(leaf.as_str(), "cmd" | "cmd.exe")
 }
 
+/// Attach a resolved shell invocation to a synchronous command.
+///
+/// On Windows with `cmd.exe`, the whole raw command must be passed as one verbatim
+/// `/D /S /C "<raw_command>"` argument so inner double quotes are never mangled by MSVCRT `\"`
+/// escaping. Every other shell and every other platform uses the pre-split `shell_args` unchanged;
+/// no additional quoting is added here.
+pub(crate) fn apply_shell_args(
+    cmd: &mut std::process::Command,
+    shell_bin: &str,
+    shell_args: &[String],
+    raw_command: &str,
+) {
+    #[cfg(windows)]
+    if is_cmd_exe(shell_bin) {
+        use std::os::windows::process::CommandExt;
+        cmd.raw_arg(format!("/D /S /C \"{}\"", raw_command));
+        return;
+    }
+    let _ = (shell_bin, raw_command);
+    cmd.args(shell_args);
+}
+
 /// Attach `shell_args` (or on Windows with `cmd.exe`, a verbatim `/D /S /C "<raw_command>"` raw
 /// argument) so inner double quotes are never mangled by MSVCRT `\"` escaping.
 pub fn apply_shell_args_tokio(
@@ -443,13 +620,5 @@ pub fn apply_shell_args_tokio(
     shell_args: &[String],
     raw_command: &str,
 ) {
-    #[cfg(windows)]
-    if is_cmd_exe(shell_bin) {
-        use std::os::windows::process::CommandExt;
-        cmd.as_std_mut()
-            .raw_arg(format!("/D /S /C \"{}\"", raw_command));
-        return;
-    }
-    let _ = (shell_bin, raw_command);
-    cmd.args(shell_args);
+    apply_shell_args(cmd.as_std_mut(), shell_bin, shell_args, raw_command);
 }

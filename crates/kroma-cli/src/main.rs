@@ -15,7 +15,9 @@ use kroma_core::extensions::{
 };
 use kroma_core::prompt::PromptBuilder;
 use kroma_core::provider::{build_provider, ProviderProtocol, ProviderSettings};
-use kroma_core::revision::{MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore};
+use kroma_core::revision::{
+    MergeRecoveryOutcome, RestoreResult, RevisionId, SnapshotStore, WorkspaceBoundForkError,
+};
 use kroma_core::session::SessionJournal;
 use kroma_core::surface::{
     validate_daemon_listen_addr, InteractiveRepl, KromaDaemon, KromaRuntimeConfig, RpcDispatcher,
@@ -44,7 +46,34 @@ pub enum CliSurface {
         suite: Option<PathBuf>,
         budget_tokens: u64,
         json: bool,
+        executor: BenchExecutorKind,
+        repetitions: usize,
+        seed: u64,
     },
+}
+
+/// Which [`kroma_core::bench::BenchExecutor`] a `kroma bench` run uses.
+///
+/// `Synthetic` is the default: it validates the report plumbing without a model endpoint and is
+/// labelled `synthetic`. `Provider` is the real measurement — it drives `AgentRunner` against the
+/// configured model in an isolated per-task workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchExecutorKind {
+    Synthetic,
+    Provider,
+}
+
+impl BenchExecutorKind {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "synthetic" => Ok(BenchExecutorKind::Synthetic),
+            "provider" | "real" => Ok(BenchExecutorKind::Provider),
+            other => Err(format!(
+                "unknown --executor '{}'; expected 'synthetic' or 'provider'",
+                other
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +115,22 @@ pub struct CliArgs {
     pub predict_cmd: Option<String>,
     /// Gate 5: maximum number of subagent spawns per session (`0` disables `spawn_subagent`).
     pub max_subagents: usize,
+    /// Capability gap #2 (`v1.5.2`): opt-in isolated counterfactual probe on repeated failures.
+    pub counterfactual_probe: bool,
+    /// Capability gap #5 (`v1.5.2`): when false, a repair race may merge a candidate whose
+    /// verification was skipped (legacy behaviour). Strict by default.
+    pub tournament_require_verified: bool,
+    /// Capability gap #6 (`v1.5.2`): pin only core tool schemas and discover the rest on demand.
+    pub on_demand_tools: bool,
+    /// Capability gap #3 (`v1.5.2`): causal pruning of dead-end context in production runs.
+    pub causal_pruning: bool,
+    /// P1-4: `kroma serve` hosts a bounded multi-session control plane, routing each request to the
+    /// runtime that owns the session named in it.
+    pub multi_session: bool,
+    /// Capability gap #6 (`v1.5.2`): trusted MCP servers from `--mcp-server NAME=COMMAND ARGS`.
+    pub mcp_servers: Vec<kroma_core::config_file::McpServerConfig>,
+    /// F05 (`v1.5.1`): explicit `--max-tokens` run-tree token cap (input + output).
+    pub max_tokens: Option<u64>,
     /// Gate 6: headless output format (`text` or `jsonl`).
     pub output_format: String,
     /// Gate 6: optional authentication token for `kroma serve`.
@@ -153,6 +198,9 @@ where
                     suite: None,
                     budget_tokens: kroma_core::bench::default_bench_budget_tokens(),
                     json: false,
+                    executor: BenchExecutorKind::Synthetic,
+                    repetitions: 1,
+                    seed: kroma_core::bench::DEFAULT_BENCH_SEED,
                 };
                 explicit_surface = Some("bench");
             }
@@ -188,7 +236,18 @@ where
     let mut predict_cmd: Option<String> = None;
     let mut max_subagents: usize = kroma_core::subagents::DEFAULT_MAX_SUBAGENT_SPAWNS;
     let mut max_subagents_explicit = false;
+    // F05 (`v1.5.1`): `--max-tokens` override for the run-tree token cap.
+    let mut max_tokens: Option<u64> = None;
     let mut no_subagents = false;
+    let mut counterfactual_probe = false;
+    let mut tournament_require_verified = true;
+    let mut on_demand_tools = false;
+    // Capability gap #3 (`v1.5.2`): opt-in causal pruning of dead-end context.
+    let mut causal_pruning = false;
+    // P1-4: bounded multi-session `kroma serve` daemon.
+    let mut multi_session = false;
+    // Capability gap #6 (`v1.5.2`): explicit trusted MCP servers.
+    let mut mcp_servers: Vec<kroma_core::config_file::McpServerConfig> = Vec::new();
     let mut profile: Option<String> = None;
     let mut protocol_explicit = false;
     let mut output_format = "text".to_string();
@@ -338,6 +397,48 @@ where
                     return Err("--json is only valid for `kroma bench`".to_string());
                 }
             }
+            "--executor" => {
+                let val = iter.next().ok_or_else(|| {
+                    "missing value for --executor <synthetic|provider>".to_string()
+                })?;
+                let parsed = BenchExecutorKind::parse(&val)?;
+                if let CliSurface::Bench { executor, .. } = &mut surface {
+                    *executor = parsed;
+                } else {
+                    return Err("--executor is only valid for `kroma bench`".to_string());
+                }
+            }
+            "--repetitions" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --repetitions <N>".to_string())?;
+                let parsed: usize = val
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid --repetitions '{}'", val))?;
+                if parsed == 0 {
+                    return Err("--repetitions must be > 0".to_string());
+                }
+                if let CliSurface::Bench { repetitions, .. } = &mut surface {
+                    *repetitions = parsed;
+                } else {
+                    return Err("--repetitions is only valid for `kroma bench`".to_string());
+                }
+            }
+            "--seed" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --seed <N>".to_string())?;
+                let parsed: u64 = val
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid --seed '{}'", val))?;
+                if let CliSurface::Bench { seed, .. } = &mut surface {
+                    *seed = parsed;
+                } else {
+                    return Err("--seed is only valid for `kroma bench`".to_string());
+                }
+            }
             "--policy" => {
                 let val = iter
                     .next()
@@ -468,6 +569,48 @@ where
             "--no-predictive-check" => {
                 no_predictive_check = true;
             }
+            // Capability gap #2 (`v1.5.2`): explicit operator consent for the isolated probe.
+            "--counterfactual-probe" => {
+                counterfactual_probe = true;
+            }
+            // Capability gap #5 (`v1.5.2`): relax the strict repair-race winner policy.
+            "--allow-unverified-tournament" => {
+                tournament_require_verified = false;
+            }
+            // Capability gap #6 (`v1.5.2`): expose only core tool schemas up front.
+            "--on-demand-tools" => {
+                on_demand_tools = true;
+            }
+            // Capability gap #3 (`v1.5.2`): prune dead-end context on failed branches.
+            "--causal-pruning" => {
+                causal_pruning = true;
+            }
+            // P1-4: host several sessions in one daemon and route by session id.
+            "--multi-session" => {
+                multi_session = true;
+            }
+            // Capability gap #6 (`v1.5.2`): an explicit, trusted MCP server definition.
+            "--mcp-server" => {
+                let val = iter.next().ok_or_else(|| {
+                    "missing value for --mcp-server <NAME=COMMAND ARGS...>".to_string()
+                })?;
+                let (name, rest) = val
+                    .split_once('=')
+                    .ok_or_else(|| "--mcp-server expects NAME=COMMAND ARGS...".to_string())?;
+                let name = name.trim();
+                let mut parts = rest.split_whitespace();
+                let command = parts.next().unwrap_or("").trim();
+                if name.is_empty() || command.is_empty() {
+                    return Err("--mcp-server expects NAME=COMMAND ARGS...".to_string());
+                }
+                mcp_servers.push(kroma_core::config_file::McpServerConfig {
+                    name: name.to_string(),
+                    command: command.to_string(),
+                    args: parts.map(str::to_string).collect(),
+                    env: Vec::new(),
+                    read_only: false,
+                });
+            }
             "--predict-cmd" => {
                 let val = iter
                     .next()
@@ -485,6 +628,19 @@ where
                     .parse::<usize>()
                     .map_err(|_| "--max-subagents expects a non-negative integer".to_string())?;
                 max_subagents_explicit = true;
+            }
+            "--max-tokens" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --max-tokens <N>".to_string())?;
+                let parsed: u64 = val
+                    .trim()
+                    .parse()
+                    .map_err(|_| "--max-tokens expects a positive integer".to_string())?;
+                if parsed == 0 {
+                    return Err("--max-tokens must be > 0".to_string());
+                }
+                max_tokens = Some(parsed);
             }
             "--no-subagents" => {
                 no_subagents = true;
@@ -635,6 +791,13 @@ where
         no_predictive_check,
         predict_cmd,
         max_subagents,
+        counterfactual_probe,
+        tournament_require_verified,
+        on_demand_tools,
+        causal_pruning,
+        multi_session,
+        mcp_servers,
+        max_tokens,
         output_format,
         auth_token,
         protocol,
@@ -668,11 +831,15 @@ fn config_overrides_for(cli: &CliArgs) -> ConfigOverrides {
         } else {
             None
         },
+        // F05 (`v1.5.1`): `--max-tokens` is the CLI layer of the unified token cap.
+        max_tokens: cli.max_tokens,
         // B2 (`v1.4.0`): a `--projection-profile` CLI flag is not exposed yet; the value comes from
         // `config.toml` / `.kroma.toml` / `KROMA_PROJECTION_PROFILE` / `/config set`.
         projection_profile: None,
         // Item #3 (`v1.4.0`): adaptive tournament escalation comes from config, not a CLI flag.
         adaptive_tournament: None,
+        // Capability gap #6 (`v1.5.2`): explicit trusted MCP servers.
+        mcp_servers: cli.mcp_servers.clone(),
     }
 }
 
@@ -854,6 +1021,96 @@ fn build_completion_gate(choice: CompletionGateChoice) -> SharedCompletionGate {
     }
 }
 
+/// Build the runtime configuration shared by every session a surface hosts.
+///
+/// The initial dispatcher and each additional session opened by the multi-session daemon go through
+/// this one function, so a session can never get a different policy, budget, gate or tool filter
+/// than the daemon's startup session.
+#[allow(clippy::too_many_arguments)]
+fn build_surface_runtime_config(
+    cli: &CliArgs,
+    resolved_config: &ResolvedConfig,
+    budget: BudgetConfig,
+    gate: SharedCompletionGate,
+    max_gate_retries: usize,
+    surface_name: &str,
+    transport_name: &str,
+    workspace_root: PathBuf,
+    state_dir: PathBuf,
+    resume_session_path: Option<PathBuf>,
+    provider_factory: Arc<dyn kroma_core::surface::ProviderFactory>,
+) -> Result<KromaRuntimeConfig, String> {
+    let mut rt_cfg = KromaRuntimeConfig::new(workspace_root, state_dir, cli.policy_mode)
+        .with_surface(surface_name, transport_name)
+        // F06: the `acp` stdio surface speaks the official Agent Client Protocol v1.
+        .with_acp_protocol(matches!(cli.surface, CliSurface::Acp))
+        .with_auth_token(cli.auth_token.clone())
+        .with_provider_factory(provider_factory)
+        .with_resolved_config(resolved_config.clone())
+        .with_completion_gate(gate);
+    rt_cfg.budget = budget;
+    rt_cfg.stream = !cli.no_stream;
+    rt_cfg.strict_log = cli.strict_log;
+    rt_cfg.quiet = cli.quiet;
+    rt_cfg.tool_filter = cli.tool_filter.clone();
+    rt_cfg.resume_session_path = resume_session_path;
+    rt_cfg.fork_turn = cli.fork_turn;
+    rt_cfg.completion_gate_max_retries = max_gate_retries;
+    rt_cfg.predictive_check = !cli.no_predictive_check;
+    rt_cfg.subtree_context_enabled = !cli.no_subtree_context;
+    rt_cfg.max_subagents = resolved_config.max_subagents.unwrap_or(cli.max_subagents);
+    // Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
+    rt_cfg.adaptive_tournament_candidates = resolved_config.adaptive_tournament.unwrap_or(0);
+    // Capability gaps #2/#3/#5/#6 (`v1.5.2`): frontier opt-ins.
+    rt_cfg.counterfactual_probe = cli.counterfactual_probe;
+    rt_cfg.tournament_require_verified = cli.tournament_require_verified;
+    rt_cfg.on_demand_tools = cli.on_demand_tools;
+    rt_cfg.causal_pruning = cli.causal_pruning;
+    rt_cfg.initial_skill = cli.skill.clone();
+    if let Some(raw_pred) = cli.predict_cmd.as_deref() {
+        if cli.policy_mode != PolicyMode::ReadOnly && !cli.no_predictive_check {
+            let argv = parse_command_argv(raw_pred)?;
+            if argv.is_empty() {
+                return Err("empty value for --predict-cmd".to_string());
+            }
+            rt_cfg.predict_cmd = Some(Arc::new(WorkspaceCompletionGate::with_auto_detection(
+                Some(argv),
+                configured_timeout(),
+                false,
+            )));
+        }
+    }
+    Ok(rt_cfg)
+}
+
+/// Capability gap #6 (`v1.5.2`): mount trusted MCP servers into a headless tool registry.
+///
+/// Uses the exact same core loader as the `RpcDispatcher`, so the headless `kroma run` path and the
+/// REPL/ACP/serve surfaces cannot disagree about whether `--mcp-server` / `[mcp.<name>]` is loaded.
+fn mount_trusted_mcp(
+    registry: &mut ToolRegistry,
+    servers: &[kroma_core::config_file::McpServerConfig],
+    quiet: bool,
+) -> Result<Option<usize>, String> {
+    match kroma_core::mcp::trusted_mcp_extension(servers) {
+        Ok(Some((ext, tool_count))) => {
+            registry
+                .register_extension(ext)
+                .map_err(|e| format!("failed to mount MCP tools: {}", e))?;
+            if !quiet {
+                eprintln!(
+                    "[kroma] mounted {} MCP tool(s) from {} trusted server(s)",
+                    tool_count,
+                    servers.len()
+                );
+            }
+            Ok(Some(tool_count))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("failed to start a configured MCP server: {}", e)),
+    }
+}
+
 /// Exit code returned when a restore would overwrite work done outside the kroma.
 const EXIT_RESTORE_CONFLICT: u8 = 3;
 /// Exit code returned when an interrupted restore left the workspace needing recovery.
@@ -884,34 +1141,87 @@ fn emit_revision_restored(
 ///
 /// Delegates to [`SnapshotStore::reconcile_with_wal`] so the CLI and the kroma-core acceptance
 /// tests exercise exactly the same production reconciliation path.
-fn reconcile_store_with_wal(journal: &mut SessionJournal, store: &SnapshotStore) {
-    let _ = store.reconcile_with_wal(journal);
+///
+/// The error is returned, not swallowed: a failed reconciliation means the session WAL may not
+/// describe the recorded workspace history, so the caller must refuse to start a mutation on top
+/// of it (F10).
+fn reconcile_store_with_wal(
+    workspace: &WorkspaceCap,
+    journal: &mut SessionJournal,
+    store: &SnapshotStore,
+) -> Result<(), kroma_core::revision::RevisionError> {
+    use kroma_core::revision::ForkRecoveryOutcome;
+    store.reconcile_with_wal(journal).map(|_| ())?;
+    // F03 follow-up (P1-2): an interrupted workspace-bound fork must be finished (or safely
+    // abandoned) before a mutation runs on top of it, so the leaf and the restored files converge.
+    if let ForkRecoveryOutcome::Abandoned {
+        forked_at_turn,
+        target_revision,
+        conflicting_paths,
+    } = store.recover_pending_fork(workspace, journal)?
+    {
+        eprintln!(
+            "[kroma] abandoned an interrupted fork to turn {} (revision {}): {} path(s) changed on disk since the fork began",
+            forked_at_turn,
+            target_revision,
+            conflicting_paths.len()
+        );
+    }
+    Ok(())
 }
 
 fn snapshot_store_for(state_dir: &Path) -> SnapshotStore {
     SnapshotStore::new(state_dir.join("snapshots"))
 }
 
+/// F03: apply `--fork <TURN>` to a resumed session the same way `session.fork` does over RPC —
+/// restore the workspace to the revision current at that turn, then move the session leaf. Returns
+/// a descriptive error instead of touching the workspace when an external edit or an interrupted
+/// restore makes the fork unsafe.
+fn fork_resumed_session(
+    store: &SnapshotStore,
+    workspace: &WorkspaceCap,
+    journal: &mut SessionJournal,
+    turn: usize,
+) -> Result<kroma_core::revision::WorkspaceBoundForkOutcome, String> {
+    store
+        .fork_workspace_at_turn(workspace, journal, turn, false)
+        .map_err(|e| e.to_string())
+}
+
 /// Gate 3: `--list-skills` discovers the workspace skill catalog and exits without a provider call.
-/// Item #3 (`v1.4.0`): `kroma bench [--suite <PATH>] [--budget-tokens <N>] [--json]`.
+/// Item #3 (`v1.4.0`) / gap-1 (`v1.5.2`): `kroma bench [--suite <PATH>] [--executor <synthetic|provider>]
+/// [--budget-tokens <N>] [--repetitions <N>] [--seed <N>] [--json]`.
 ///
 /// Runs a paired, budget-locked A/B comparison. With no `--suite`, the built-in smoke suite and the
 /// deterministic synthetic executor are used so the command works out of the box; the report marks
-/// those numbers as `synthetic`.
-fn run_bench(
-    suite_path: Option<&Path>,
-    budget_tokens: u64,
-    json: bool,
-    workspace: &Path,
-    quiet: bool,
-) -> ExitCode {
+/// those numbers as `synthetic`. `--executor provider` runs the real `AgentRunner` against the
+/// resolved provider configuration; it prints the model/protocol/endpoint origin but never the
+/// API key, and every arm runs in its own isolated scratch directory under the system temp dir.
+async fn run_bench(cli: &CliArgs) -> ExitCode {
     use kroma_core::bench::{
-        default_strategy_pair, load_suite, run_paired_benchmark, SyntheticBenchExecutor,
-        SYNTHETIC_EXECUTOR_LABEL,
+        default_strategy_pair, load_held_out_suite, run_paired_benchmark, BenchExecutor,
+        BenchRunOptions,
+        SyntheticBenchExecutor, SYNTHETIC_EXECUTOR_LABEL,
     };
 
-    let (suite_name, tasks) = match suite_path {
-        Some(path) => match load_suite(path) {
+    let CliSurface::Bench {
+        suite,
+        budget_tokens,
+        json,
+        executor,
+        repetitions,
+        seed,
+    } = &cli.surface
+    else {
+        eprintln!("error: internal: run_bench called for a non-bench surface");
+        return ExitCode::from(2);
+    };
+
+    let (suite_name, tasks) = match suite {
+        // A suite inside the workspace under test would be editable by the graded agent, so the
+        // held-out loader refuses that location instead of silently grading a rewritten oracle.
+        Some(path) => match load_held_out_suite(path, &cli.workspace) {
             Ok(tasks) => (
                 path.file_stem()
                     .and_then(|s| s.to_str())
@@ -934,21 +1244,49 @@ fn run_bench(
         return ExitCode::from(2);
     }
 
-    let scratch = workspace
-        .join(".kroma-bench")
-        .join(format!("run-{}", std::process::id()));
-    let executor = SyntheticBenchExecutor;
+    let options = BenchRunOptions::new(*repetitions, *seed, true);
+    let executor_impl: Box<dyn BenchExecutor> = match executor {
+        BenchExecutorKind::Synthetic => Box::new(SyntheticBenchExecutor),
+        BenchExecutorKind::Provider => match build_provider_bench_executor(cli).await {
+            Ok(executor) => Box::new(executor),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    // The real executor drives an agent that can read and write its whole workspace, so its scratch
+    // tree lives outside the operator's repository. The synthetic executor only writes the files a
+    // task declared, and keeps the historical in-workspace location.
+    let scratch = match executor {
+        BenchExecutorKind::Synthetic => cli
+            .workspace
+            .join(".kroma-bench")
+            .join(format!("run-{}", std::process::id())),
+        BenchExecutorKind::Provider => std::env::temp_dir().join(format!(
+            "kroma-bench-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        )),
+    };
+
     let report = run_paired_benchmark(
         &suite_name,
         &tasks,
         &default_strategy_pair(),
-        budget_tokens,
+        *budget_tokens,
         &scratch,
-        &executor,
-    );
+        executor_impl.as_ref(),
+        &options,
+    )
+    .await;
     let _ = std::fs::remove_dir_all(&scratch);
 
-    if json {
+    if *json {
         match serde_json::to_string_pretty(&report) {
             Ok(s) => println!("{}", s),
             Err(e) => {
@@ -959,12 +1297,98 @@ fn run_bench(
     } else {
         print!("{}", report.render());
     }
-    if !quiet && report.executor == SYNTHETIC_EXECUTOR_LABEL {
+    if !cli.quiet && report.executor == SYNTHETIC_EXECUTOR_LABEL {
         eprintln!(
             "[kroma] note: built-in smoke suite uses the synthetic executor (plumbing check only)"
         );
     }
     ExitCode::SUCCESS
+}
+
+/// Build the real, provider-backed bench executor from the same resolved configuration a normal
+/// run uses. Returns an operator-facing error (exit 2) when no credential is configured; the API
+/// key itself is never printed, serialized or attached to the report.
+///
+/// The provenance commit is read through the bounded one-shot supervisor, so this is `async`.
+async fn build_provider_bench_executor(
+    cli: &CliArgs,
+) -> Result<kroma_core::bench::ProviderBenchExecutor, String> {
+    use kroma_core::bench::{
+        detect_git_commit, provider_origin_of, ProviderBenchExecutor, ProviderBenchSettings,
+    };
+
+    let overrides = config_overrides_for(cli);
+    let resolved = ResolvedConfig::load(&cli.workspace, &overrides)?;
+    let api_key = resolved
+        .api_key
+        .clone()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| {
+            "`kroma bench --executor provider` requires an API key; set KROMA_API_KEY, add api_key \
+             to ~/.kroma/config.toml, or pass --profile"
+                .to_string()
+        })?;
+    let base_url = resolved
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "https://api.openai.com".to_string());
+    let model = resolved
+        .model
+        .clone()
+        .unwrap_or_else(|| "gpt-4o".to_string());
+    let protocol = match resolved.protocol.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => ProviderProtocol::parse(raw)
+            .map_err(|e| format!("invalid protocol '{}': {}", raw, e))?,
+        _ => ProviderProtocol::Auto,
+    };
+
+    let provider_settings = ProviderSettings {
+        base_url: base_url.clone(),
+        api_key,
+        model: model.clone(),
+        max_retries: 2,
+        reasoning_effort: resolved.reasoning_effort.clone(),
+        protocol,
+        max_tokens: 0,
+    };
+    let (resolved_protocol, provider) = build_provider(&provider_settings)
+        .map_err(|e| format!("invalid provider configuration: {}", e))?;
+
+    if !cli.quiet {
+        eprintln!(
+            "[kroma] bench executor: provider model={} protocol={}",
+            model,
+            resolved_protocol.as_str()
+        );
+        if let Some(origin) = provider_origin_of(&base_url) {
+            eprintln!("[kroma] bench endpoint: {}", origin);
+        }
+        if cli.policy_mode == PolicyMode::Ask {
+            eprintln!(
+                "[kroma] note: policy 'ask' is non-interactive during `kroma bench`; file writes \
+                 will be denied. Pass --allow-write (or --policy allow-write) to let the agent edit \
+                 the isolated task workspace."
+            );
+        }
+        if !cli.policy_mode.allows_shell_auto() {
+            eprintln!(
+                "[kroma] note: bash is not enabled for this bench run (policy '{}'); every arm \
+                 keeps the same file tools, so a task only resolvable with a shell needs \
+                 --allow-shell.",
+                cli.policy_mode.as_str()
+            );
+        }
+    }
+
+    let bench_settings = ProviderBenchSettings::new(model, resolved_protocol.as_str().to_string())
+        .with_provider_origin(provider_origin_of(&base_url))
+        .with_commit(
+            detect_git_commit(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))).await,
+        )
+        .with_policy_mode(cli.policy_mode)
+        .with_max_subagents(resolved.max_subagents.unwrap_or(cli.max_subagents));
+    Ok(ProviderBenchExecutor::new(provider, bench_settings))
 }
 
 fn run_list_skills(cli: &CliArgs) -> ExitCode {
@@ -1089,8 +1513,16 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
     };
     let store = snapshot_store_for(state_dir);
     // O6: a crash between the snapshot write and the WAL append leaves the store one revision ahead
-    // of the WAL; reconcile before reading `latest_revision_id()` so the two agree.
-    reconcile_store_with_wal(&mut journal, &store);
+    // of the WAL; reconcile before reading `latest_revision_id()` so the two agree. F10: a failed
+    // reconciliation aborts the management operation instead of acting on a possibly inconsistent
+    // WAL/snapshot pair.
+    if let Err(e) = reconcile_store_with_wal(&workspace, &mut journal, &store) {
+        eprintln!(
+            "error: failed to reconcile session WAL with the snapshot store: {}",
+            e
+        );
+        return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
+    }
 
     if cli.list_revisions {
         let records = journal.revision_records();
@@ -1207,6 +1639,13 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
 
     // An interrupted restore leaves its intent journal behind. Finishing that restore is the only
     // safe action: applying a *different* target on top of a half-applied tree would compound it.
+    //
+    // `--undo` restores the workspace *and* rewinds the session leaf. That pair is made
+    // crash-atomic by the same durable fork intent `--fork` uses: a crash between the restore and
+    // the leaf move is completed by `recover_pending_fork` on the next start instead of leaving the
+    // WAL naming a revision the workspace is no longer on (which would make the retry refuse with a
+    // misleading "changed outside the kroma" conflict).
+    let mut rewound_in_store = false;
     let result = match store.pending_restore() {
         Ok(Some(intent)) if intent.target_revision == target => {
             println!(
@@ -1228,9 +1667,49 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
             );
             return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
         }
-        Ok(None) => {
-            store.restore_revision(&workspace, &target, expected.as_ref(), cli.force_restore)
-        }
+        Ok(None) => match rewind_turn {
+            Some(turn) => match store.restore_and_rewind_workspace(
+                &workspace,
+                &mut journal,
+                &target,
+                turn,
+                cli.force_restore,
+            ) {
+                Ok(outcome) => {
+                    rewound_in_store = true;
+                    Ok(RestoreResult::Applied {
+                        restored_revision: outcome.target_revision,
+                        restored_files: outcome.restored_files,
+                        removed_files: outcome.removed_files,
+                    })
+                }
+                Err(WorkspaceBoundForkError::Conflict {
+                    target_revision,
+                    conflicting_paths,
+                    ..
+                }) => Ok(RestoreResult::Conflict {
+                    target_revision,
+                    conflicting_paths,
+                }),
+                Err(WorkspaceBoundForkError::RecoveryRequired {
+                    target_revision,
+                    journal_path,
+                    reason,
+                    ..
+                }) => Ok(RestoreResult::RecoveryRequired {
+                    target_revision,
+                    journal_path,
+                    reason,
+                }),
+                Err(e) => Err(kroma_core::revision::RevisionError::InvalidStore(format!(
+                    "failed to restore and rewind the session: {}",
+                    e
+                ))),
+            },
+            None => {
+                store.restore_revision(&workspace, &target, expected.as_ref(), cli.force_restore)
+            }
+        },
         Err(e) => Err(e),
     };
 
@@ -1267,7 +1746,7 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
                 restored_files.len(),
                 removed_files.len(),
             );
-            if let Some(turn) = rewind_turn {
+            if let Some(turn) = rewind_turn.filter(|_| !rewound_in_store) {
                 match journal.fork_at_turn(turn) {
                     Ok(leaf) => println!(
                         "rewound session transcript to turn {} (leaf {})",
@@ -1304,19 +1783,21 @@ fn run_revision_management(cli: &CliArgs, state_dir: &Path) -> ExitCode {
                         return ExitCode::from(1);
                     }
                 }
-            } else if let Err(e) = record_restored_revision(
-                &mut journal,
-                &store,
-                &restored_revision,
-                &restored_files,
-                &removed_files,
-                expected.as_ref(),
-            ) {
-                eprintln!(
-                    "error: workspace restored to {} but the session WAL could not record it: {}",
-                    restored_revision, e
-                );
-                return ExitCode::from(1);
+            } else if rewind_turn.is_none() {
+                if let Err(e) = record_restored_revision(
+                    &mut journal,
+                    &store,
+                    &restored_revision,
+                    &restored_files,
+                    &removed_files,
+                    expected.as_ref(),
+                ) {
+                    eprintln!(
+                        "error: workspace restored to {} but the session WAL could not record it: {}",
+                        restored_revision, e
+                    );
+                    return ExitCode::from(1);
+                }
             }
             ExitCode::SUCCESS
         }
@@ -1361,7 +1842,8 @@ pub fn usage_text() -> String {
        kroma repl [--workspace <DIR>] [OPTIONS]\n\
        kroma acp [--workspace <DIR>] [OPTIONS]\n\
        kroma serve [--workspace <DIR>] [--listen 127.0.0.1:<PORT>] [--auth-token <TOKEN>] [OPTIONS]\n\
-       kroma bench [--suite <PATH>] [--budget-tokens <N>] [--json]\n\n\
+       kroma bench [--suite <PATH>] [--executor <synthetic|provider>] [--budget-tokens <N>]\n\
+         [--repetitions <N>] [--seed <N>] [--json]\n\n\
 Surfaces (Gate 6):\n\
   (default with no args)    Interactive multi-turn terminal REPL/TUI in current directory\n\
   run                       Headless single-run CLI mode\n\
@@ -1369,12 +1851,17 @@ Surfaces (Gate 6):\n\
   acp | --acp               JSON-RPC 2.0 Agent Client Protocol server over stdio\n\
   serve | --serve <ADDR>    JSON-RPC 2.0 daemon over loopback TCP / Unix socket (or authenticated TCP)\n\
   --listen <ADDR>           Listen endpoint for `kroma serve` (default: 127.0.0.1:7878)\n\
-  --auth-token <TOKEN>      Required when binding `kroma serve` to a non-loopback address\n\
+  --auth-token <TOKEN>      Required when binding `kroma serve` to a non-loopback address.\n\
+                            Connection is plaintext (no TLS) and auth token travels in\n\
+                            JSON-RPC parameters, so it must only be used on a trusted network\n\
   --output-format <FMT>     Headless output format: text | jsonl (default: text)\n\
   --jsonl                   Shorthand for --output-format jsonl\n\
   bench                     Paired, budget-locked A/B benchmark (built-in smoke suite by default)\n\
   --suite <PATH>            Benchmark suite JSON for `kroma bench`\n\
-  --budget-tokens <N>       Shared per-arm token budget for `kroma bench`\n\
+  --executor <KIND>         `synthetic` (default, plumbing only) | `provider` (real AgentRunner run)\n\
+  --budget-tokens <N>       Shared per-arm run-tree token budget for `kroma bench`\n\
+  --repetitions <N>         Repeat each paired comparison N times (default: 1)\n\
+  --seed <N>                Seed for the randomized arm order and the bootstrap intervals\n\
   --json                    Emit the `kroma bench` report as JSON\n\n\
 Options:\n\
   --workspace <DIR>         Target repository workspace directory (default: current directory `.`)\n\
@@ -1409,7 +1896,22 @@ Predictive Validation / Attribution (Gate 4):
 
 Controlled Subagents / Isolated Worktrees (Gate 5):
   --max-subagents <N>       Maximum subagent spawns per session (default: 8, 0 disables)
+  --max-tokens <N>          Shared run-tree token cap (input + output) for the run and its subagents
   --no-subagents            Disable subagent spawning (max_subagents = 0)
+
+Frontier mechanisms (v1.5.2, all opt-in):
+  --counterfactual-probe    On repeated verification failure, probe top candidate(s) in an isolated
+                            worktree (bounded, approved; never rolls back your workspace)
+  --allow-unverified-tournament
+                            Let a repair race merge a candidate whose verification was skipped
+                            (strict verification is the default)
+  --on-demand-tools         Pin only core tool schemas; fetch the rest via `discover_tools`
+  --causal-pruning          Replace abandoned-branch tool output with evidence-linked dead-end
+                            stubs so it does not crowd the context window
+  --multi-session           `kroma serve`: host several sessions in one daemon and route each
+                            request to the runtime owning the session named in it
+  --mcp-server NAME=CMD ARGS
+                            Spawn a trusted MCP stdio server and expose its tools (repeatable)
 
 Workspace Revision Management (requires --resume):
   --undo                    Restore the workspace and session leaf to the previous turn's revision
@@ -1486,6 +1988,49 @@ impl kroma_core::surface::ProviderFactory for CliProviderFactory {
     }
 }
 
+/// P1-4: builds an independent runtime for each session the multi-session `kroma serve` daemon
+/// hosts. It reuses [`build_surface_runtime_config`] so every session gets the same policy, budget,
+/// gate and tool filter as the daemon's startup session, and rebuilds the CLI extension (hooks,
+/// skills, MCP stanzas) per runtime.
+struct CliSessionRuntimeFactory {
+    cli: CliArgs,
+    resolved_config: ResolvedConfig,
+    budget: BudgetConfig,
+    gate: SharedCompletionGate,
+    max_gate_retries: usize,
+    surface_name: String,
+    transport_name: String,
+    state_dir: PathBuf,
+    provider_factory: Arc<dyn kroma_core::surface::ProviderFactory>,
+}
+
+impl kroma_core::surface::SessionRuntimeFactory for CliSessionRuntimeFactory {
+    fn build(
+        &self,
+        workspace_root: &Path,
+        resume_session_path: Option<&Path>,
+    ) -> Result<RpcDispatcher, String> {
+        let (_, provider) = self.provider_factory.build("", "auto", None)?;
+        let mut cfg = build_surface_runtime_config(
+            &self.cli,
+            &self.resolved_config,
+            self.budget.clone(),
+            self.gate.clone(),
+            self.max_gate_retries,
+            &self.surface_name,
+            &self.transport_name,
+            workspace_root.to_path_buf(),
+            self.state_dir.clone(),
+            resume_session_path.map(Path::to_path_buf),
+            self.provider_factory.clone(),
+        )?;
+        if let Some(ext) = build_cli_extension(&self.cli)? {
+            cfg.extensions.push(ext);
+        }
+        RpcDispatcher::new(cfg, provider)
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = match parse_cli_args(std::env::args()) {
@@ -1502,21 +2047,11 @@ async fn main() -> ExitCode {
 
     let state_dir = resolve_default_state_dir();
 
-    // Item #3 (`v1.4.0`): `kroma bench` is a self-contained measurement command; it never contacts
-    // a provider for the built-in smoke suite.
-    if let CliSurface::Bench {
-        ref suite,
-        budget_tokens,
-        json,
-    } = cli.surface
-    {
-        return run_bench(
-            suite.as_deref(),
-            budget_tokens,
-            json,
-            &cli.workspace,
-            cli.quiet,
-        );
+    // Item #3 (`v1.4.0`): `kroma bench` is a self-contained measurement command. With the default
+    // `--executor synthetic` it never contacts a provider; `--executor provider` loads the same
+    // resolved provider configuration as a normal run (and fails with exit 2 when no key is set).
+    if matches!(cli.surface, CliSurface::Bench { .. }) {
+        return run_bench(&cli).await;
     }
 
     // Gate 1: revision management actions never contact a provider and never need an API key.
@@ -1571,14 +2106,24 @@ async fn main() -> ExitCode {
         }
     };
     if resolved_config.workspace_guard_triggered() && !cli.quiet {
+        // P5 (`v1.5.0`): the path and rejected key names come from an untrusted workspace file, so
+        // they are escaped before reaching stderr. `sanitize_diagnostic_label` also escapes tabs
+        // and newlines, which `sanitize_terminal_text` deliberately preserves for banner content.
+        let path = resolved_config
+            .workspace_config_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".kroma.toml".to_string());
+        let keys = resolved_config
+            .rejected_workspace_keys
+            .iter()
+            .map(|k| kroma_core::surface::sanitize_diagnostic_label(k))
+            .collect::<Vec<_>>()
+            .join(", ");
         eprintln!(
             "[kroma] ignoring untrusted workspace keys in {}: {}",
-            resolved_config
-                .workspace_config_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| ".kroma.toml".to_string()),
-            resolved_config.rejected_workspace_keys.join(", ")
+            kroma_core::surface::sanitize_diagnostic_label(&path),
+            keys
         );
     }
 
@@ -1638,7 +2183,12 @@ async fn main() -> ExitCode {
         eprintln!("[kroma] provider protocol: {}", resolved_protocol.as_str());
     }
 
-    let budget = BudgetConfig::default();
+    let budget = BudgetConfig {
+        // F05 (`v1.5.1`): the resolved `--max-tokens` / `KROMA_MAX_TOKENS` / `max_tokens` value is
+        // the single run-tree token cap shared by the parent run and every child subagent.
+        max_total_tokens: resolved_config.max_tokens,
+        ..BudgetConfig::default()
+    };
     // The resolved config already encodes the documented precedence (CLI `--verify-cmd` >
     // `KROMA_VERIFY_COMMAND` > `~/.kroma/config.toml`), so passing it here is what makes a
     // `verify_command` written to the config file actually take effect in headless mode.
@@ -1677,49 +2227,26 @@ async fn main() -> ExitCode {
                 default_model: model.clone(),
                 reasoning_effort: reasoning_effort.clone(),
             });
-        let mut rt_cfg =
-            KromaRuntimeConfig::new(cli.workspace.clone(), state_dir.clone(), cli.policy_mode)
-                .with_surface(surface_name, transport_name)
-                .with_auth_token(cli.auth_token.clone())
-                .with_provider_factory(provider_factory)
-                .with_resolved_config(resolved_config.clone())
-                .with_completion_gate(build_completion_gate(gate_choice));
-        rt_cfg.budget = budget;
-        rt_cfg.stream = !cli.no_stream;
-        rt_cfg.strict_log = cli.strict_log;
-        rt_cfg.quiet = cli.quiet;
-        rt_cfg.tool_filter = cli.tool_filter.clone();
-        rt_cfg.resume_session_path = cli.resume.clone();
-        rt_cfg.fork_turn = cli.fork_turn;
-        rt_cfg.completion_gate_max_retries = max_gate_retries;
-        rt_cfg.predictive_check = !cli.no_predictive_check;
-        rt_cfg.subtree_context_enabled = !cli.no_subtree_context;
-        rt_cfg.max_subagents = resolved_config.max_subagents.unwrap_or(cli.max_subagents);
-        // Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
-        rt_cfg.adaptive_tournament_candidates = resolved_config.adaptive_tournament.unwrap_or(0);
-        rt_cfg.initial_skill = cli.skill.clone();
-        if let Some(raw_pred) = cli.predict_cmd.as_deref() {
-            if cli.policy_mode != PolicyMode::ReadOnly && !cli.no_predictive_check {
-                match parse_command_argv(raw_pred) {
-                    Ok(argv) if !argv.is_empty() => {
-                        rt_cfg.predict_cmd =
-                            Some(Arc::new(WorkspaceCompletionGate::with_auto_detection(
-                                Some(argv),
-                                configured_timeout(),
-                                false,
-                            )));
-                    }
-                    Ok(_) => {
-                        eprintln!("error: empty value for --predict-cmd");
-                        return ExitCode::from(2);
-                    }
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                        return ExitCode::from(2);
-                    }
-                }
+        let gate = build_completion_gate(gate_choice);
+        let mut rt_cfg = match build_surface_runtime_config(
+            &cli,
+            &resolved_config,
+            budget.clone(),
+            gate.clone(),
+            max_gate_retries,
+            surface_name,
+            transport_name,
+            cli.workspace.clone(),
+            state_dir.clone(),
+            cli.resume.clone(),
+            provider_factory.clone(),
+        ) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
             }
-        }
+        };
         match build_cli_extension(&cli) {
             Ok(Some(ext)) => rt_cfg.extensions.push(ext),
             Ok(None) => {}
@@ -1741,8 +2268,12 @@ async fn main() -> ExitCode {
         let disp_for_ctrlc = dispatcher.clone();
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
+                // P2 (`v1.5.0`): the first `^C` must cancel the run in flight, not just signal a
+                // watch channel the REPL branch never reads. `cancel_active_run` fires the
+                // dispatcher's real `active_cancel` watch (observed by provider/tool waits) and
+                // denies any pending approval; a second `^C` remains the hard exit.
                 let _ = cancel_tx.send(true);
-                disp_for_ctrlc.approval_broker().cancel_all_pending();
+                disp_for_ctrlc.cancel_active_run();
                 if tokio::signal::ctrl_c().await.is_ok() {
                     std::process::exit(130);
                 }
@@ -1767,14 +2298,74 @@ async fn main() -> ExitCode {
                     .to_string(),
             ),
             CliSurface::Serve { listen_addr } => {
-                match KromaDaemon::bind(listen_addr, dispatcher).await {
-                    Ok(daemon) => {
-                        if !cli.quiet {
-                            eprintln!("[kroma] daemon listening on {}", daemon.local_endpoint());
+                if cli.multi_session {
+                    // P1-4: bounded multi-session daemon. The startup dispatcher is the first
+                    // session; `session.new` opens additional runtimes and later requests route by
+                    // the session id they name. The cross-process workspace writer lock still
+                    // serializes sessions bound to the same workspace.
+                    let factory = Arc::new(CliSessionRuntimeFactory {
+                        cli: cli.clone(),
+                        resolved_config: resolved_config.clone(),
+                        budget: budget.clone(),
+                        gate: gate.clone(),
+                        max_gate_retries,
+                        surface_name: surface_name.to_string(),
+                        transport_name: transport_name.to_string(),
+                        state_dir: state_dir.clone(),
+                        provider_factory: provider_factory.clone(),
+                    });
+                    let manager = match kroma_core::surface::SessionManager::open(
+                        kroma_core::surface::SessionManagerConfig {
+                            factory,
+                            max_sessions: kroma_core::surface::DEFAULT_MAX_DAEMON_SESSIONS,
+                            index_path: state_dir.join("sessions").join("daemon-sessions.json"),
+                            default_workspace: cli.workspace.clone(),
+                        },
+                        dispatcher,
+                    ) {
+                        Ok(manager) => manager,
+                        Err(e) => {
+                            eprintln!("error: failed to open the session manager: {}", e);
+                            return ExitCode::from(2);
                         }
-                        daemon.serve(cancel_rx).await
+                    };
+                    if !cli.quiet {
+                        eprintln!(
+                            "[kroma] multi-session daemon hosting {} session(s)",
+                            manager.len()
+                        );
                     }
-                    Err(e) => Err(e),
+                    match KromaDaemon::bind_multi(listen_addr, manager).await {
+                        Ok(daemon) => {
+                            if !cli.quiet {
+                                eprintln!(
+                                    "[kroma] daemon listening on {}",
+                                    daemon.local_endpoint()
+                                );
+                            }
+                            if let Some(warning) = daemon.non_loopback_warning() {
+                                eprintln!("[kroma] WARNING: {}", warning);
+                            }
+                            daemon.serve(cancel_rx).await
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    match KromaDaemon::bind(listen_addr, dispatcher).await {
+                        Ok(daemon) => {
+                            if !cli.quiet {
+                                eprintln!(
+                                    "[kroma] daemon listening on {}",
+                                    daemon.local_endpoint()
+                                );
+                            }
+                            if let Some(warning) = daemon.non_loopback_warning() {
+                                eprintln!("[kroma] WARNING: {}", warning);
+                            }
+                            daemon.serve(cancel_rx).await
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
             }
             CliSurface::Headless => unreachable!(),
@@ -1864,11 +2455,34 @@ async fn main() -> ExitCode {
         // O6: a crash between the snapshot write and the WAL append leaves the store one revision
         // ahead of the WAL. Reconcile before `--fork` so a resumed run never starts from a stale
         // `latest_revision_id()`.
-        reconcile_store_with_wal(&mut journal, &snapshot_store_for(&state_dir));
+        let store_for_resume = snapshot_store_for(&state_dir);
+        if let Err(e) = reconcile_store_with_wal(env.workspace(), &mut journal, &store_for_resume) {
+            eprintln!(
+                "error: failed to reconcile session WAL with the snapshot store: {}",
+                e
+            );
+            return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
+        }
+        // F03: `--fork` is workspace-bound, exactly like `session.fork` over RPC: restore the
+        // workspace to the revision current at that turn, then move the session leaf. External
+        // edits make the fork fail closed instead of being overwritten.
         if let Some(turn) = cli.fork_turn {
-            if let Err(e) = journal.fork_at_turn(turn) {
-                eprintln!("error: failed to fork session at turn {}: {}", turn, e);
-                return ExitCode::from(2);
+            match fork_resumed_session(&store_for_resume, env.workspace(), &mut journal, turn) {
+                Ok(outcome) => {
+                    if !cli.quiet {
+                        eprintln!(
+                            "[kroma] forked workspace at turn {} (restored {} file(s), removed {} file(s), revision {})",
+                            outcome.forked_at_turn,
+                            outcome.restored_files.len(),
+                            outcome.removed_files.len(),
+                            outcome.target_revision
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: failed to fork workspace at turn {}: {}", turn, e);
+                    return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
+                }
             }
         }
         journal
@@ -1885,6 +2499,27 @@ async fn main() -> ExitCode {
         eprintln!("[kroma] session WAL: {}", session.path().display());
     }
 
+    // F10: an interrupted restore leaves the workspace half-applied. Mutating it now would layer a
+    // new run on top of that; refuse until the restore is recovered, exactly like the RPC surface.
+    {
+        let store = snapshot_store_for(&state_dir);
+        match store.pending_restore() {
+            Ok(Some(intent)) => {
+                eprintln!(
+                    "error: an interrupted restore of {} must be recovered before a new run (intent journal: {})",
+                    intent.target_revision,
+                    store.intent_path().display()
+                );
+                return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("error: failed to read the restore intent journal: {}", e);
+                return ExitCode::from(EXIT_RESTORE_RECOVERY_REQUIRED);
+            }
+        }
+    }
+
     let mut run_cfg = AgentRunConfig::new(cli.task.clone().unwrap_or_default(), budget.clone());
     run_cfg.stream = !cli.no_stream;
     run_cfg.strict_log = cli.strict_log;
@@ -1893,6 +2528,10 @@ async fn main() -> ExitCode {
         .projection_profile
         .as_deref()
         .and_then(|v| kroma_core::context_projector::ProjectionProfile::parse(v).ok());
+    // Capability gap #6 (`v1.5.2`): on-demand tool schema mode.
+    run_cfg.on_demand_tools = cli.on_demand_tools;
+    // Capability gap #3 (`v1.5.2`): causal pruning of dead-end context.
+    run_cfg.causal_pruning = cli.causal_pruning;
 
     let mut logger = match EventLogger::new(run_cfg.run_id, Some(state_dir.clone()), cli.strict_log)
     {
@@ -1954,6 +2593,24 @@ async fn main() -> ExitCode {
         }
     }
 
+    // Capability gap #6 (`v1.5.2`): the headless path must load trusted MCP servers through the
+    // exact same helper the dispatcher uses, so `--mcp-server` / `[mcp.<name>]` is never accepted
+    // here but silently ignored.
+    match mount_trusted_mcp(&mut registry, &resolved_config.mcp_servers, cli.quiet) {
+        Ok(Some(tool_count)) => {
+            let _ = logger.log(EventPayload::ExtensionChanged {
+                extension_id: "mcp".to_string(),
+                action: "registered".to_string(),
+            });
+            let _ = tool_count;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return ExitCode::from(2);
+        }
+    }
+
     // Gate 3: subtree JIT context. `--fork <TURN>` has already rewound the session leaf to a turn
     // `<= TURN`, so `latest_active_checkpoint()` returns the checkpoint on the *rewound* branch: the
     // directories whose guidance is still present in that branch's transcript must be restored for
@@ -1994,7 +2651,9 @@ async fn main() -> ExitCode {
         .with_completion_gate_max_retries(max_gate_retries)
         .with_max_subagents(max_subagents)
         // Item #3 (`v1.4.0`): adaptive tournament escalation on repeated verification failure.
-        .with_adaptive_tournament_candidates(resolved_config.adaptive_tournament.unwrap_or(0));
+        .with_adaptive_tournament_candidates(resolved_config.adaptive_tournament.unwrap_or(0))
+        // Capability gap #5 (`v1.5.2`): strict repair-race verification policy.
+        .with_tournament_require_verified(cli.tournament_require_verified);
     // Gate 4: `--predict-cmd` is an explicit operator authorization, exactly like `--verify-cmd`,
     // so it runs without needing `--allow-shell`. It is skipped when `--policy read-only` or
     // `--no-predictive-check` is active.
@@ -2023,6 +2682,19 @@ async fn main() -> ExitCode {
             }
         },
         None => runner,
+    };
+    // Capability gap #2 (`v1.5.2`): `--counterfactual-probe` is the operator's consent for the
+    // isolated probe; without it the default deny keeps the probe off.
+    let runner = if cli.counterfactual_probe {
+        if !cli.quiet {
+            eprintln!("[kroma] counterfactual probe: enabled (isolated worktree; bounded)");
+        }
+        runner.with_counterfactual_probe(
+            kroma_core::attribution::CounterfactualProbeConfig::enabled_with(2),
+            std::sync::Arc::new(kroma_core::attribution::AllowProbes),
+        )
+    } else {
+        runner
     };
     let (summary, _logger) = runner.run(logger).await;
 
@@ -2209,6 +2881,7 @@ mod tests {
         let ui = TtyApprovalUi::with_tty_override(false);
         let req = ApprovalRequest {
             tool_name: "bash".into(),
+            call_id: None,
             effect_class: EffectClass::SideEffect,
             is_sensitive_path: false,
             target_path: None,
@@ -2671,6 +3344,91 @@ mod tests {
     /// must re-bind the restored revision into the WAL. Otherwise `latest_revision_id()` keeps
     /// naming the undone revision and the next `--restore-rev` fails with a false
     /// `ModifiedExternally` conflict.
+    /// F03: the CLI `--fork` path is workspace-bound, exactly like `session.fork` over RPC. It only
+    /// moves the session leaf after the workspace restore succeeds, and refuses to overwrite an
+    /// external edit.
+    #[test]
+    fn test_cli_fork_restores_workspace_and_moves_the_leaf() {
+        use kroma_core::messages::{TranscriptItem, UserMessage};
+        use std::fs;
+
+        let root = std::env::temp_dir().join(format!("kroma-cli-fork-{}", uuid::Uuid::new_v4()));
+        let ws_dir = root.join("ws");
+        let state_dir = root.join("state");
+        fs::create_dir_all(&ws_dir).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(ws_dir.join("f.txt"), "v0\n").unwrap();
+
+        let workspace = WorkspaceCap::new(&ws_dir).unwrap();
+        let store = SnapshotStore::new(state_dir.join("snapshots"));
+        let mut journal = SessionJournal::create(state_dir.join("sessions"), &ws_dir).unwrap();
+        journal
+            .append_item(
+                0,
+                TranscriptItem::User(UserMessage {
+                    content: "task".into(),
+                }),
+            )
+            .unwrap();
+        let r0 = store.capture_revision(&workspace, None, None, 0).unwrap();
+        journal
+            .record_revision_capture(
+                0,
+                r0.revision_id.as_str(),
+                None,
+                r0.changed_paths.clone(),
+                r0.tracked_files.len(),
+            )
+            .unwrap();
+
+        fs::write(ws_dir.join("f.txt"), "v1\n").unwrap();
+        journal
+            .append_item(
+                1,
+                TranscriptItem::User(UserMessage {
+                    content: "turn 1".into(),
+                }),
+            )
+            .unwrap();
+        let r1 = store
+            .capture_revision(&workspace, Some(&r0.revision_id), None, 1)
+            .unwrap();
+        journal
+            .record_revision_capture(
+                1,
+                r1.revision_id.as_str(),
+                Some(r0.revision_id.as_str()),
+                r1.changed_paths.clone(),
+                r1.tracked_files.len(),
+            )
+            .unwrap();
+
+        let outcome = fork_resumed_session(&store, &workspace, &mut journal, 0).unwrap();
+        assert_eq!(outcome.forked_at_turn, 0);
+        assert_eq!(outcome.target_revision, r0.revision_id);
+        assert_eq!(fs::read_to_string(ws_dir.join("f.txt")).unwrap(), "v0\n");
+        assert_eq!(
+            journal.latest_revision_id().as_deref(),
+            Some(r0.revision_id.as_str())
+        );
+        assert_eq!(journal.max_active_turn(), 0);
+
+        // An external edit makes the CLI fork refuse instead of overwriting the user's work.
+        fs::write(ws_dir.join("f.txt"), "external\n").unwrap();
+        let err = fork_resumed_session(&store, &workspace, &mut journal, 0).unwrap_err();
+        assert!(
+            err.contains("refusing to fork"),
+            "unexpected fork error: {}",
+            err
+        );
+        assert_eq!(
+            fs::read_to_string(ws_dir.join("f.txt")).unwrap(),
+            "external\n"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn test_undo_rebinds_the_wal_when_the_undone_revision_shares_the_rewind_leaf() {
         use kroma_core::messages::{TranscriptItem, UserMessage};
@@ -2850,7 +3608,7 @@ mod tests {
             "the WAL still names the stale revision before reconciliation"
         );
 
-        reconcile_store_with_wal(&mut journal, &store);
+        reconcile_store_with_wal(&workspace, &mut journal, &store).unwrap();
         assert_eq!(
             journal.latest_revision_id().as_deref(),
             Some(orphan.revision_id.as_str()),
@@ -2862,7 +3620,7 @@ mod tests {
             "reconciliation must not append a duplicate"
         );
         // Reconciling twice is idempotent.
-        reconcile_store_with_wal(&mut journal, &store);
+        reconcile_store_with_wal(&workspace, &mut journal, &store).unwrap();
         assert_eq!(journal.revision_records().len(), 2);
 
         // A completed restore emits the Gate 1 audit event.
@@ -3170,6 +3928,205 @@ mod tests {
             parse_cli_args(vec!["kroma".into(), "--task".into(), "quick fix".into()]).unwrap();
         assert_eq!(task_only.surface, CliSurface::Headless);
         assert_eq!(task_only.task.as_deref(), Some("quick fix"));
+    }
+
+    #[test]
+    fn test_serve_help_text_and_non_loopback_warning() {
+        let help = usage_text();
+        assert!(help.contains("--auth-token <TOKEN>"));
+        assert!(help.contains("plaintext (no TLS)"));
+        assert!(help.contains("JSON-RPC parameters"));
+        assert!(help.contains("trusted network"));
+
+        let non_loopback_ep = kroma_core::surface::validate_daemon_listen_endpoint(
+            "0.0.0.0:9000",
+            Some("super-secret-auth-token"),
+        )
+        .expect("non-loopback with auth token should validate");
+        assert!(!non_loopback_ep.is_loopback());
+        let warning = non_loopback_ep.non_loopback_warning();
+        assert!(warning.is_some());
+        let text = warning.unwrap();
+        assert!(text.contains("plaintext (no TLS)"));
+        assert!(text.contains("JSON-RPC parameters"));
+        assert!(text.contains("trusted network"));
+        assert!(!text.contains("super-secret-auth-token"));
+
+        let loopback_ep = kroma_core::surface::validate_daemon_listen_endpoint("127.0.0.1:7878", None)
+            .expect("loopback without token should validate");
+        assert!(loopback_ep.is_loopback());
+        assert_eq!(loopback_ep.non_loopback_warning(), None);
+
+        let unix_ep = kroma_core::surface::validate_daemon_listen_endpoint(
+            "unix:///tmp/test.sock",
+            None,
+        )
+        .expect("unix endpoint should validate");
+        assert!(unix_ep.is_loopback());
+        assert_eq!(unix_ep.non_loopback_warning(), None);
+    }
+
+    #[test]
+    fn test_max_tokens_flag_feeds_the_unified_token_cap() {
+        let parsed = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--task".into(),
+            "fix".into(),
+            "--max-tokens".into(),
+            "12345".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.max_tokens, Some(12345));
+        assert_eq!(config_overrides_for(&parsed).max_tokens, Some(12345));
+
+        // A zero cap is rejected instead of silently disabling every request.
+        let err = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--task".into(),
+            "fix".into(),
+            "--max-tokens".into(),
+            "0".into(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("--max-tokens must be > 0"), "got: {}", err);
+
+        // Absent the flag, the override stays unset so config/env can supply the cap.
+        let no_flag = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--task".into(),
+            "fix".into(),
+        ])
+        .unwrap();
+        assert_eq!(no_flag.max_tokens, None);
+        assert_eq!(config_overrides_for(&no_flag).max_tokens, None);
+    }
+
+    #[test]
+    fn test_causal_pruning_flag_is_opt_in() {
+        // Capability gap #3 (`v1.5.2`): causal pruning has a production entry point (`--causal-pruning`
+        // on both the headless and `serve` paths) and stays off unless the operator asks for it.
+        let parsed = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--task".into(),
+            "fix".into(),
+            "--causal-pruning".into(),
+        ])
+        .unwrap();
+        assert!(parsed.causal_pruning, "the flag must enable causal pruning");
+
+        let default = parse_cli_args(vec![
+            "kroma".into(),
+            "run".into(),
+            "--task".into(),
+            "fix".into(),
+        ])
+        .unwrap();
+        assert!(
+            !default.causal_pruning,
+            "causal pruning must be opt-in, not a silent default"
+        );
+    }
+
+    #[test]
+    fn test_mcp_server_flag_parses_into_a_trusted_config() {
+        // Capability gap #6 (`v1.5.2`): `--mcp-server NAME=CMD ARGS` is the explicit, trusted way to
+        // add an MCP server; a malformed value is rejected instead of silently ignored.
+        let parsed = parse_cli_args(vec![
+            "kroma".into(),
+            "serve".into(),
+            "--mcp-server".into(),
+            "mock=python3 /tmp/server.py --flag".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.mcp_servers.len(), 1);
+        assert_eq!(parsed.mcp_servers[0].name, "mock");
+        assert_eq!(parsed.mcp_servers[0].command, "python3");
+        assert_eq!(
+            parsed.mcp_servers[0].args,
+            vec!["/tmp/server.py".to_string(), "--flag".to_string()]
+        );
+        assert!(!parsed.mcp_servers[0].read_only);
+        assert_eq!(config_overrides_for(&parsed).mcp_servers.len(), 1);
+
+        assert!(
+            parse_cli_args(vec![
+                "kroma".into(),
+                "serve".into(),
+                "--mcp-server".into(),
+                "no-equals".into(),
+            ])
+            .is_err(),
+            "a malformed --mcp-server value must be rejected"
+        );
+    }
+
+    /// Capability gap #6 (`v1.5.2`): the headless `kroma run` path must actually mount a trusted
+    /// MCP server (not merely accept the flag). This drives the same `mount_trusted_mcp` helper the
+    /// headless path calls, against a real MCP stdio server.
+    #[tokio::test]
+    async fn test_headless_mounts_a_trusted_mcp_server() {
+        const MOCK_SERVER: &str = r#"
+import sys, json
+
+def respond(msg_id, result):
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg_id, "result": result}) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        respond(msg["id"], {"protocolVersion": "2024-11-05", "capabilities": {},
+                            "serverInfo": {"name": "mock", "version": "1"}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        respond(msg["id"], {"tools": [{"name": "echo", "description": "echo",
+                                       "inputSchema": {"type": "object"}}]})
+    elif method == "tools/call":
+        respond(msg["id"], {"content": [{"type": "text", "text": "ok"}]})
+    elif "id" in msg:
+        respond(msg["id"], {})
+"#;
+        let dir = std::env::temp_dir().join(format!("kroma-cli-mcp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = dir.join("mock_mcp.py");
+        std::fs::write(&server, MOCK_SERVER).unwrap();
+
+        let servers = vec![kroma_core::config_file::McpServerConfig {
+            name: "mock".to_string(),
+            command: "python3".to_string(),
+            args: vec![server.display().to_string()],
+            env: Vec::new(),
+            read_only: false,
+        }];
+        let mut registry = ToolRegistry::new(None);
+        let mounted = mount_trusted_mcp(&mut registry, &servers, true).unwrap();
+        assert_eq!(mounted, Some(1), "the mock server exposes one tool");
+
+        let policy = PolicyEngine::new(
+            PolicyMode::FullAutonomous,
+            Arc::new(kroma_core::tool::policy::NonInteractiveApprovalHandler),
+        );
+        let names: Vec<String> = registry
+            .visible_definitions_for_engine(&policy)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "mcp__mock__echo"),
+            "the headless registry must expose the MCP tool, got {:?}",
+            names
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

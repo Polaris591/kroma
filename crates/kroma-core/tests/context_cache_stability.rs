@@ -124,8 +124,8 @@ async fn test_15_turns_append_only_prefix_byte_stability() {
 fn test_watermark_step_down_compaction_working_set_pinning_and_outline_stub() {
     let budget = BudgetConfig {
         context_high_watermark_bytes: 24 * 1024, // 24 KiB high watermark for test
-        context_low_watermark_bytes: 12 * 1024, // 12 KiB low watermark
-        context_tail_window_bytes: 2 * 1024, // 2 KiB tail window
+        context_low_watermark_bytes: 12 * 1024,  // 12 KiB low watermark
+        context_tail_window_bytes: 2 * 1024,     // 2 KiB tail window
         context_min_tail_turns: 1,
         ..Default::default()
     };

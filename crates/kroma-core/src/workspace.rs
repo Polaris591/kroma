@@ -1332,7 +1332,10 @@ impl InodeMutationLock {
             return Err(std::io::Error::last_os_error());
         }
         Ok(InodeLockKey {
-            parent_dev: st.st_dev,
+            // Darwin's dev_t is signed i32; preserve every bit pattern instead of collapsing
+            // negative values to 0 (which could alias distinct inode-lock identities).
+            #[allow(clippy::unnecessary_cast)]
+            parent_dev: st.st_dev as u64,
             parent_ino: st.st_ino,
             file_name: leaf_name.map(|s| s.to_os_string()).unwrap_or_default(),
         })

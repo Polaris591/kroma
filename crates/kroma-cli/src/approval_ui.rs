@@ -376,6 +376,7 @@ mod tests {
         let ui = TtyApprovalUi::with_tty_override(true);
         let req = ApprovalRequest {
             tool_name: "bash".into(),
+            call_id: None,
             effect_class: EffectClass::SideEffect,
             is_sensitive_path: false,
             target_path: None,

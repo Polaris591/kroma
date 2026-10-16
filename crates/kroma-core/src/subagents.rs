@@ -25,7 +25,7 @@
 
 use crate::agent_loop::{build_runtime_with_registry, AgentRunConfig, AgentRunner};
 use crate::attribution::{read_workspace_text, top_level_symbol_names, MutatedFileSpan};
-use crate::budget::BudgetConfig;
+use crate::budget::{BudgetConfig, TokenReservation};
 use crate::env::{
     CompletionGateContext, ExecutionEnv, GateOutcome, LocalHostEnv, SharedCompletionGate,
 };
@@ -87,6 +87,36 @@ pub fn subagent_spawn_preflight(
         ));
     }
     Ok(policy_engine.evaluate("spawn_subagent", effect, false))
+}
+
+/// B11b: the base-policy mode a child of `role` may run under, derived from its parent's mode by
+/// *decay only*.
+///
+/// A `scout` is always `ReadOnly`, no matter how permissive the parent is. A `worker` auto-applies
+/// mutations in an isolated worktree that is later merged into the parent workspace, so it is
+/// refused unless the parent mode itself auto-authorizes mutation (`AllowWrite` / `FullAutonomous`).
+/// An `Ask` or `AllowShell` parent must authorize automatic writes explicitly instead of having a
+/// single `spawn_subagent` approval upgraded into a blanket write grant. The returned mode never
+/// exceeds the parent along the mutating or side-effect dimension (see
+/// [`PolicyMode::decayed_auto_authority`]).
+///
+/// The two directions of the base-mode partial order are distinct: a `ReadOnly` parent has no child
+/// a worker may inherit, while an `AllowShell` parent auto-authorizes side effects but not writes —
+/// a worker needs writes, which that mode never granted, so the delegation is refused rather than
+/// rounded up.
+pub fn child_policy_mode_for(parent: PolicyMode, role: SubagentRole) -> Result<PolicyMode, String> {
+    match role {
+        SubagentRole::Scout => Ok(PolicyMode::ReadOnly),
+        SubagentRole::Worker => {
+            if !parent.auto_mutating() {
+                return Err(format!(
+                    "policy denied: cannot spawn a `worker` subagent while the parent policy is `{}`; a worker auto-applies mutations and would exceed the parent's automatic authority. Authorize automatic writes explicitly (e.g. `--allow-write`) instead of relying on a single spawn approval",
+                    parent.as_str()
+                ));
+            }
+            Ok(parent.decayed_auto_authority())
+        }
+    }
 }
 
 /// Default maximum number of subagents a parent session may spawn (`--max-subagents`).
@@ -176,6 +206,19 @@ pub fn spawn_subagent_registration() -> RegisteredTool {
                     "candidates": {
                         "type": "integer",
                         "description": "Number of racing candidates for a tournament (2-4, default 3)."
+                    },
+                    "require_verified": {
+                        "type": "boolean",
+                        "description": "Tournament only: when true (the default for a repair race), a candidate whose verification was skipped is NOT eligible to win; only a candidate whose completion gate actually passed can merge."
+                    },
+                    "disallow_test_tampering": {
+                        "type": "boolean",
+                        "description": "When true, a candidate that rewrites a default test/verification path is disqualified from winning."
+                    },
+                    "protected_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Extra protected path globs (union with the default test paths)."
                     },
                     "tasks": {
                         "type": "array",
@@ -300,6 +343,10 @@ impl SubagentBudget {
         cfg.max_tool_calls = clamped.max_tool_calls.min(parent.max_tool_calls.max(1));
         let sub_dur = Duration::from_millis(clamped.timeout_ms);
         cfg.max_run_duration = sub_dur.min(parent.max_run_duration.max(Duration::from_millis(1)));
+        // F05 (`v1.5.1`): the parent's token ceiling is not the child's. The child draws from the
+        // shared [`crate::budget::TokenBudget`] (its own allocation) which the backend attaches
+        // separately, so the inherited per-run cap must not leak into the child's `BudgetConfig`.
+        cfg.max_total_tokens = None;
         cfg
     }
 }
@@ -460,6 +507,10 @@ struct RawSpawnSubagentArgs {
     /// Item #3 (`v1.4.0`): explicit protected path globs.
     #[serde(default)]
     protected_paths: Option<Vec<String>>,
+    /// Capability gap #5 (`v1.5.2`): tournament winner policy override. When absent the caller's
+    /// configured default applies (strict for a repair race).
+    #[serde(default)]
+    require_verified: Option<bool>,
 }
 
 fn normalize_and_validate_globs(
@@ -509,6 +560,10 @@ pub struct TournamentRequest {
     pub disallow_test_tampering: bool,
     /// Item #3 (`v1.4.0`): explicit protected path globs.
     pub protected_paths: Vec<String>,
+    /// Capability gap #5 (`v1.5.2`): `None` inherits the caller's default (strict for a repair
+    /// race); `Some(true)` demands a real gate pass and `Some(false)` restores the legacy
+    /// "skipped verification still merges" behaviour.
+    pub require_verified: Option<bool>,
 }
 
 /// Detect a tournament request in `spawn_subagent` arguments.
@@ -563,6 +618,7 @@ pub fn parse_tournament_request(raw_args: &str) -> Result<Option<TournamentReque
         timeout_ms,
         disallow_test_tampering: parsed.disallow_test_tampering.unwrap_or(false),
         protected_paths: parsed.protected_paths.clone().unwrap_or_default(),
+        require_verified: parsed.require_verified,
     }))
 }
 
@@ -863,6 +919,11 @@ pub enum WorktreeMergeResult {
         merged_revision: RevisionId,
         written_files: Vec<String>,
         removed_files: Vec<String>,
+        /// B12: what the post-merge gate actually did. `Passed` only when the gate was armed,
+        /// actually ran, and approved; a skipped/disabled/absent gate is never `Passed`. Callers must
+        /// not infer verification from `Applied` alone.
+        #[serde(default = "GateVerificationStatus::not_run")]
+        gate: GateVerificationStatus,
     },
     /// Merge refused because the parent workspace modified one or more of the same paths since
     /// `base_revision`, or because a worker change violated `allowed_paths` / security boundaries.
@@ -1037,6 +1098,8 @@ impl IsolatedWorktree {
                 merged_revision: rev,
                 written_files: Vec::new(),
                 removed_files: Vec::new(),
+                // No delta means the post-merge gate never ran.
+                gate: GateVerificationStatus::NotRun,
             });
         }
 
@@ -1120,7 +1183,12 @@ impl IsolatedWorktree {
         // instead of rolling the successful merge back.
         snapshot_store.clear_merge_intent()?;
 
+        // B12: capture what the post-merge gate actually did, so a caller can record real
+        // verification evidence instead of inferring it from `Applied`. A gate that is not armed
+        // (`status()` disabled) is never a pass even if its `check` returns `Approved`.
+        let mut gate_status = GateVerificationStatus::NotRun;
         if let Some(gate) = post_merge_gate {
+            let armed = gate.status().armed();
             let mut mod_list: Vec<String> = delta_paths.into_iter().collect();
             mod_list.sort();
             let gate_ctx = CompletionGateContext {
@@ -1128,12 +1196,27 @@ impl IsolatedWorktree {
                 workspace_root: parent_workspace.root().to_path_buf(),
                 modified_files: mod_list,
                 turns_used: turn_index,
+                deadline: None,
             };
-            let failure_feedback = match gate.check(&gate_ctx).await {
-                Ok(GateOutcome::Approved) | Ok(GateOutcome::Skipped { .. }) => None,
-                Ok(GateOutcome::Rejected { feedback }) => Some(feedback),
-                Err(e) => Some(format!("post-merge verification gate error: {}", e)),
+            let (failure_feedback, status) = match gate.check(&gate_ctx).await {
+                Ok(GateOutcome::Approved) => (
+                    None,
+                    if armed {
+                        GateVerificationStatus::Passed
+                    } else {
+                        GateVerificationStatus::Skipped
+                    },
+                ),
+                Ok(GateOutcome::Skipped { .. }) => (None, GateVerificationStatus::Skipped),
+                Ok(GateOutcome::Rejected { feedback }) => {
+                    (Some(feedback), GateVerificationStatus::Failed)
+                }
+                Err(e) => (
+                    Some(format!("post-merge verification gate error: {}", e)),
+                    GateVerificationStatus::InfrastructureError,
+                ),
             };
+            gate_status = status;
             if let Some(gate_output) = failure_feedback {
                 let mut reverted = false;
                 if revert_on_verify_failure {
@@ -1172,6 +1255,7 @@ impl IsolatedWorktree {
             merged_revision,
             written_files,
             removed_files,
+            gate: gate_status,
         })
     }
 }
@@ -1480,10 +1564,15 @@ impl SubagentResult {
                     merged_revision,
                     written_files,
                     removed_files,
+                    gate,
                 } => {
                     body.push_str(&format!(
-                        "worktree_merge: applied (base_revision={}, merged_revision={}, written={:?}, removed={:?})\n",
-                        base_revision, merged_revision, written_files, removed_files
+                        "worktree_merge: applied (base_revision={}, merged_revision={}, written={:?}, removed={:?}, gate={})\n",
+                        base_revision,
+                        merged_revision,
+                        written_files,
+                        removed_files,
+                        gate.as_str()
                     ));
                 }
                 WorktreeMergeResult::Conflict {
@@ -1540,6 +1629,64 @@ pub fn render_subagent_batch_report(results: &[SubagentResult]) -> String {
         .join("\n\n")
 }
 
+/// B11b: the parent's fail-closed `PolicyHook` constraints a child run would have to honor.
+///
+/// A child runs in its own [`ToolRegistry`] and cannot execute the parent's policy hooks, so a
+/// parent that has any is a delegation the current backend cannot honor. The child is refused at
+/// the single [`ProviderSubagentBackend::run_subagent`] chokepoint instead of running without the
+/// parent's constraints.
+///
+/// The tri-state is deliberate: "the live parent registry was inspected and has no policy hooks"
+/// is a different fact from "this record predates the field and we have no provenance", and only
+/// the former may proceed. `hook_ids` are diagnostics only — a hook id is **not** authorization
+/// and **not** evidence that a trusted rule can be rebuilt, and the child never reconstructs a
+/// parent hook from one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ParentPolicyHooks {
+    /// The live parent registry was inspected and has no policy hooks.
+    KnownEmpty,
+    /// The parent registry had policy hooks (ids only, for diagnostics).
+    Required { hook_ids: Vec<String> },
+    /// No provenance: a legacy durable record written before this field existed, or a record whose
+    /// stored value could not be parsed. Never the same as "no constraints".
+    Unknown,
+}
+
+impl ParentPolicyHooks {
+    /// The `serde` default for a record written before this field existed: provenance is unknown,
+    /// which is *not* the same as "no constraints" and must never be treated as an empty set.
+    pub fn unknown() -> Self {
+        ParentPolicyHooks::Unknown
+    }
+
+    /// Inspect a live parent registry. This is the only production source of a `KnownEmpty` /
+    /// `Required` value: it is read from the real registry, never from model arguments or
+    /// workspace-writable content, so a child cannot override an empty list into existence.
+    pub fn from_registry(registry: &ToolRegistry) -> Self {
+        let hook_ids = registry.hook_engine().policy_hook_ids();
+        if hook_ids.is_empty() {
+            ParentPolicyHooks::KnownEmpty
+        } else {
+            ParentPolicyHooks::Required { hook_ids }
+        }
+    }
+
+    /// `Ok(())` only when a child run may proceed under these parent constraints.
+    pub fn ensure_delegatable(&self) -> Result<(), String> {
+        match self {
+            ParentPolicyHooks::KnownEmpty => Ok(()),
+            ParentPolicyHooks::Required { hook_ids } => Err(format!(
+                "unsupported delegation: the parent run has fail-closed policy hook(s) [{}] that a child subagent cannot execute; refusing to delegate rather than run the child without the parent's policy constraints",
+                hook_ids.join(", ")
+            )),
+            ParentPolicyHooks::Unknown => Err(
+                "unsupported delegation: the parent's policy-hook constraints are unknown (a legacy record with no recorded provenance); refusing to re-run this child without a fresh authorization".to_string(),
+            ),
+        }
+    }
+}
+
 /// Execution context handed to [`SubagentBackend::run_subagent`] for one child subagent.
 pub struct SubagentExecutionRequest {
     pub subagent_id: String,
@@ -1549,7 +1696,17 @@ pub struct SubagentExecutionRequest {
     pub state_dir: PathBuf,
     pub workspace_skills: Vec<SkillEntry>,
     pub parent_policy_mode: PolicyMode,
+    /// B11b: the parent's fail-closed policy-hook constraints. The child backend cannot execute the
+    /// parent's hooks, so any non-empty/unknown value is refused at the chokepoint. This field can
+    /// only *restrict* a child; it never grants the child a capability.
+    pub parent_policy_hooks: ParentPolicyHooks,
     pub parent_budget: BudgetConfig,
+    /// F05 (`v1.5.1`): the token ledger this child's requests must reserve from. The parent reserves
+    /// a per-child allocation out of the run tree's shared [`TokenBudget`] and passes a ledger
+    /// limited to that allocation, so concurrent children can never spend the same balance.
+    /// `None` means the caller did not attach a budget (legacy/direct use); the backend then falls
+    /// back to a private ledger bounded by `spec.budget.max_tokens`.
+    pub token_budget: Option<Arc<crate::budget::TokenBudget>>,
     pub predictive_check: bool,
     pub cancel_rx: watch::Receiver<bool>,
 }
@@ -1605,6 +1762,18 @@ impl SubagentBackend for ProviderSubagentBackend {
     ) -> Pin<Box<dyn Future<Output = Result<SubagentRunOutcome, String>> + Send + '_>> {
         let provider = Arc::clone(&self.provider);
         Box::pin(async move {
+            // B11b: the child runs in its own registry and cannot execute the parent's fail-closed
+            // policy hooks, so any parent hook (or unknown provenance) refuses the delegation here
+            // — before a worktree, state dir or environment exists, so a refusal has no side effect.
+            // This applies to both roles: a `scout` must not bypass a parent read-tool deny either.
+            req.parent_policy_hooks.ensure_delegatable()?;
+            // F01 (`v1.4.0`) / B11b: a `Worker` mutates an isolated worktree that is later merged
+            // into the parent workspace, so it must NEVER be granted more authority than its parent.
+            // The child mode is derived by decay only (see `child_policy_mode_for`), so a `ReadOnly`,
+            // `Ask` or `AllowShell` parent can no longer be silently promoted to automatic writes.
+            // Resolve the role's mode *before* the state dir or environment exists, so a refusal
+            // leaves no side effect at all.
+            let policy_mode = child_policy_mode_for(req.parent_policy_mode, req.spec.role)?;
             let started = Instant::now();
             fs::create_dir_all(&req.state_dir)
                 .map_err(|e| format!("failed to create subagent state dir: {}", e))?;
@@ -1618,27 +1787,6 @@ impl SubagentBackend for ProviderSubagentBackend {
                 .without_subagents()
                 .with_workspace_skills(req.workspace_skills.clone());
 
-            // F01 (`v1.4.0`): a `Worker` mutates an isolated worktree that is later merged into the
-            // parent workspace, so it must NEVER be granted more authority than its parent. The
-            // previous mapping silently promoted a `ReadOnly` parent to `AllowWrite`, letting a
-            // read-only session write (and merge) files through RPC/`/race`. A `ReadOnly` parent now
-            // rejects any `Worker` outright.
-            let policy_mode = match req.spec.role {
-                SubagentRole::Scout => PolicyMode::ReadOnly,
-                SubagentRole::Worker => {
-                    if req.parent_policy_mode == PolicyMode::ReadOnly {
-                        return Err(
-                            "policy denied: cannot spawn a `worker` subagent while the parent policy is read-only"
-                                .to_string(),
-                        );
-                    }
-                    if req.parent_policy_mode.allows_shell_auto() {
-                        PolicyMode::FullAutonomous
-                    } else {
-                        PolicyMode::AllowWrite
-                    }
-                }
-            };
             if req.spec.role == SubagentRole::Worker {
                 if let Some(ref globs) = req.spec.allowed_write_globs {
                     let mut manifest = ExtensionManifest::operator_trusted(
@@ -1729,7 +1877,14 @@ impl SubagentBackend for ProviderSubagentBackend {
                 .with_prompt_builder(prompt_builder)
                 .with_subtree_context(SubtreeContextTracker::new(true))
                 .with_max_subagents(0)
-                .with_max_total_tokens(Some(req.spec.budget.clamped().max_tokens));
+                // F05 (`v1.5.1`): draw from the per-child allocation the parent reserved out of the
+                // run tree's shared ledger. When no ledger was attached (direct/legacy callers),
+                // fall back to a private ledger bounded by the spec's own `max_tokens`.
+                .with_token_budget(req.token_budget.clone().unwrap_or_else(|| {
+                    Arc::new(crate::budget::TokenBudget::new(Some(
+                        req.spec.budget.clamped().max_tokens,
+                    )))
+                }));
 
             let (summary, _child_logger) = runner.run(child_logger).await;
             timer_watcher.abort();
@@ -1890,7 +2045,15 @@ pub struct TournamentSpec {
     pub state_base: PathBuf,
     pub allowed_write_globs: Option<Vec<String>>,
     pub budget: BudgetConfig,
+    /// F05 (`v1.5.1`): the shared token ledger every candidate reserves from. The tournament
+    /// reserves a per-candidate allocation before launching it, so a race cannot spend several
+    /// times the remaining run budget. `None` derives a private ledger from `budget.max_total_tokens`.
+    pub token_budget: Option<Arc<crate::budget::TokenBudget>>,
     pub policy_mode: PolicyMode,
+    /// B11b: the parent's fail-closed policy-hook constraints. The candidates run in their own
+    /// registries and cannot execute the parent's hooks, so a non-empty/unknown value refuses the
+    /// whole race at the chokepoint.
+    pub parent_policy_hooks: ParentPolicyHooks,
     pub workspace_skills: Vec<SkillEntry>,
     pub predictive_check: bool,
     pub cancel_rx: watch::Receiver<bool>,
@@ -1900,6 +2063,11 @@ pub struct TournamentSpec {
     /// Item #3 (`v1.4.0`): explicit protected path globs (union with the defaults when
     /// `disallow_test_tampering` is set).
     pub protected_paths: Vec<String>,
+    /// Capability gap #5 (`v1.5.2`): winner policy. When `true`, a candidate whose verification was
+    /// *skipped* is not eligible to win — only a real gate pass can merge. A repair race defaults to
+    /// `true`; set `false` to allow an unverified candidate (which the report then labels
+    /// `unverified`).
+    pub require_verified: bool,
 }
 
 /// F05 (`v1.4.0`): explicit verification status for a tournament candidate, so a *skipped*
@@ -1977,26 +2145,38 @@ pub struct TournamentScore {
 }
 
 impl TournamentScore {
-    /// `true` when the candidate's gate did not reject it: it actually passed verification, or
-    /// verification was intentionally skipped (no gate configured). A `Skipped` gate is a legitimate
-    /// "cannot verify" outcome the tournament accepts, but it is *not* a pass — read `gate_status`
-    /// when the distinction matters.
-    fn gate_accepted(&self) -> bool {
-        self.gate_passed || self.gate_status == GateVerificationStatus::Skipped
+    /// `true` when the candidate's gate did not reject it under the given winner policy.
+    ///
+    /// Under `require_verified` (the repair default) only a real pass counts. Otherwise a
+    /// `Skipped` gate — verification intentionally never ran — is accepted as "cannot verify" but
+    /// is *not* a pass; read `gate_status` when the distinction matters.
+    fn gate_accepted(&self, require_verified: bool) -> bool {
+        if require_verified {
+            self.gate_passed
+        } else {
+            self.gate_passed || self.gate_status == GateVerificationStatus::Skipped
+        }
     }
 
     /// F05 (`v1.4.0`): only a candidate that actually changed files *and* whose gate accepted it
-    /// (passed, or verification was skipped) is eligible to win and merge. A zero-change candidate
-    /// must never out-rank a real passing fix.
+    /// is eligible to win and merge. Legacy (non-strict) policy; prefer
+    /// [`Self::eligible_to_win_with`] so the caller's `require_verified` policy is explicit.
     pub fn eligible_to_win(&self) -> bool {
-        self.has_changes && self.gate_accepted()
+        self.eligible_to_win_with(false)
+    }
+
+    /// Capability gap #5 (`v1.5.2`): eligibility under an explicit verification policy. A repair
+    /// race passes `require_verified = true`, so a candidate that was never actually verified
+    /// cannot win.
+    pub fn eligible_to_win_with(&self, require_verified: bool) -> bool {
+        self.has_changes && self.gate_accepted(require_verified)
     }
 
     /// Lexicographic ranking key. Lower sorts better. Ineligible candidates sort last.
-    fn rank_key(&self) -> (u8, u8, usize, u8, usize, usize, usize, usize) {
+    fn rank_key(&self, require_verified: bool) -> (u8, u8, usize, u8, usize, usize, usize, usize) {
         (
-            u8::from(!self.eligible_to_win()),
-            u8::from(!self.gate_accepted()),
+            u8::from(!self.eligible_to_win_with(require_verified)),
+            u8::from(!self.gate_accepted(require_verified)),
             self.predictive_warnings,
             u8::from(!self.conflict_free_with_parent),
             self.total_changed_lines,
@@ -2048,9 +2228,20 @@ impl TournamentOutcome {
             self.all_worktrees_cleaned_up
         ));
         if self.winner.is_none() {
+            let unverified = self
+                .scores
+                .iter()
+                .filter(|s| s.gate_status == GateVerificationStatus::Skipped)
+                .count();
             out.push_str(
                 "outcome: no candidate passed verification; the parent workspace was not modified\n",
             );
+            if unverified > 0 {
+                out.push_str(&format!(
+                    "note: {} candidate(s) had skipped verification and were not treated as successes\n",
+                    unverified
+                ));
+            }
         }
         for score in &self.scores {
             out.push_str(&format!(
@@ -2141,6 +2332,13 @@ pub async fn run_worktree_tournament(
         }
     }
 
+    // B11b: refuse an unsupported delegation *before* any candidate worktree is materialized, so a
+    // rejection leaves no side effect (the backend repeats this check as the final gate).
+    spec.parent_policy_hooks.ensure_delegatable()?;
+    for candidate in &spec.candidates {
+        child_policy_mode_for(spec.policy_mode, candidate.spec.role)?;
+    }
+
     // Materialize every worktree from the same baseline before any candidate starts.
     let mut worktrees: Vec<(String, IsolatedWorktree)> = Vec::with_capacity(spec.candidates.len());
     for (index, candidate) in spec.candidates.iter().enumerate() {
@@ -2156,7 +2354,21 @@ pub async fn run_worktree_tournament(
         worktrees.push((candidate.label.clone(), wt));
     }
 
+    // F05 (`v1.5.1`): every candidate reserves a per-candidate allocation from the tournament's
+    // shared ledger *before* it starts, so a race can never spend several times the remaining run
+    // budget. A candidate that cannot get a non-zero allocation is reported as budget-exhausted
+    // without ever calling the backend.
+    let shared_budget = spec.token_budget.clone().unwrap_or_else(|| {
+        Arc::new(crate::budget::TokenBudget::new(
+            spec.budget.max_total_tokens,
+        ))
+    });
+
     let mut handles = Vec::with_capacity(spec.candidates.len());
+    let mut candidate_reservations: Vec<Option<TokenReservation>> =
+        Vec::with_capacity(spec.candidates.len());
+    let mut candidate_ledgers: Vec<Option<Arc<crate::budget::TokenBudget>>> =
+        Vec::with_capacity(spec.candidates.len());
     for (index, candidate) in spec.candidates.iter().enumerate() {
         let child_workspace = worktrees[index].1.workspace().clone();
         let backend = Arc::clone(&backend);
@@ -2170,6 +2382,39 @@ pub async fn run_worktree_tournament(
         let policy_mode = spec.policy_mode;
         let predictive_check = spec.predictive_check;
 
+        let allocation = match shared_budget.remaining() {
+            Some(remaining) => candidate.spec.budget.clamped().max_tokens.min(remaining),
+            None => candidate.spec.budget.clamped().max_tokens,
+        };
+        if allocation == 0 {
+            candidate_reservations.push(None);
+            candidate_ledgers.push(None);
+            handles.push(tokio::spawn(async move {
+                Ok(SubagentRunOutcome {
+                    status: RunStatus::BudgetExhausted,
+                    terminal_reason: TerminalReason::TokenBudgetExhausted,
+                    summary: "candidate skipped: no token budget remaining".to_string(),
+                    relevant_files: Vec::new(),
+                    findings: Vec::new(),
+                    turns_used: 0,
+                    tool_calls_used: 0,
+                    tokens_used: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    duration_ms: 0,
+                    visible_tools: Vec::new(),
+                })
+            }));
+            continue;
+        }
+        let reservation = shared_budget
+            .try_reserve(allocation)
+            .expect("allocation <= remaining");
+        let child_ledger = Arc::new(crate::budget::TokenBudget::new(Some(allocation)));
+        candidate_reservations.push(Some(reservation));
+        candidate_ledgers.push(Some(Arc::clone(&child_ledger)));
+
+        let parent_policy_hooks = spec.parent_policy_hooks.clone();
         handles.push(tokio::spawn(async move {
             let (child_cancel_tx, child_cancel_rx) = watch::channel(*parent_cancel.borrow());
             let cancel_tx_for_timer = child_cancel_tx.clone();
@@ -2200,7 +2445,9 @@ pub async fn run_worktree_tournament(
                 state_dir: child_state_dir,
                 workspace_skills: skills,
                 parent_policy_mode: policy_mode,
+                parent_policy_hooks,
                 parent_budget: budget,
+                token_budget: Some(child_ledger),
                 predictive_check,
                 cancel_rx: child_cancel_rx,
             };
@@ -2226,6 +2473,10 @@ pub async fn run_worktree_tournament(
                 }
             };
             timer.abort();
+            // Budget reservations are settled separately against the shared ledger below
+            // (keeping unknown-consumption fail-closed without double charging). Factual
+            // observed usage in `outcome` must reflect only measured provider tokens and
+            // never mislabel withheld reserves as measured tokens.
             outcome
         }));
     }
@@ -2371,6 +2622,7 @@ pub async fn run_worktree_tournament(
                     workspace_root: worktree.root().to_path_buf(),
                     modified_files: changed_paths.clone(),
                     turns_used: outcome.turns_used,
+                    deadline: None,
                 };
                 match completion_gate.check(&gate_ctx).await {
                     Ok(GateOutcome::Approved) => {
@@ -2418,6 +2670,17 @@ pub async fn run_worktree_tournament(
         });
     }
 
+    // F05 (`v1.5.1`): settle every candidate allocation against what the candidate actually
+    // consumed; the unused remainder returns to the shared ledger.
+    for (reservation, ledger) in candidate_reservations
+        .into_iter()
+        .zip(candidate_ledgers.iter())
+    {
+        if let (Some(reservation), Some(ledger)) = (reservation, ledger) {
+            reservation.settle(ledger.spent());
+        }
+    }
+
     // F10 (`v1.4.0`): aggregate the token spend of *every* candidate, including losers, failures
     // and cancellations, so the parent run can account for the whole tournament.
     let total_input_tokens = scores.iter().map(|s| s.input_tokens).sum::<u64>();
@@ -2441,9 +2704,10 @@ pub async fn run_worktree_tournament(
     }
 
     // Rank: eligible candidates first, then gate, then zero predictive warnings, then
-    // conflict-freedom, then minimal diff.
+    // conflict-freedom, then minimal diff. Under `require_verified` a skipped-verification
+    // candidate ranks ineligible, so it can never merge merely because it is the only diff.
     let mut order: Vec<usize> = (0..scores.len()).collect();
-    order.sort_by_key(|&i| scores[i].rank_key());
+    order.sort_by_key(|&i| scores[i].rank_key(spec.require_verified));
 
     let mut merged_revision: Option<RevisionId> = None;
     let mut merge_result: Option<WorktreeMergeResult> = None;
@@ -2453,7 +2717,7 @@ pub async fn run_worktree_tournament(
     // passes the post-merge gate on the *actual* merged parent workspace. A rank-#1 conflict or a
     // post-merge verification failure (with automatic rollback) falls back to the next candidate.
     for &index in &order {
-        if !scores[index].eligible_to_win() {
+        if !scores[index].eligible_to_win_with(spec.require_verified) {
             continue;
         }
         // F02 (`v1.4.0`): never merge after the run has been cancelled.

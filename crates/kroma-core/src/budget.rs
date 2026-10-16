@@ -1,6 +1,239 @@
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+
+/// F04 (`v1.5.1`): the absolute wall-clock deadline of a single run, shared by every phase that
+/// can block — provider requests, tool execution, approvals, verification gates and child
+/// subagents. Each phase clamps its own local timeout to `min(local, remaining)` instead of
+/// creating an independent budget, so the run cannot overshoot `max_run_duration` just because a
+/// request happened to start near the end.
+#[derive(Debug, Clone, Copy)]
+pub struct RunDeadline {
+    at: Instant,
+}
+
+impl RunDeadline {
+    pub fn at(at: Instant) -> Self {
+        Self { at }
+    }
+
+    /// Time left before the deadline; `Duration::ZERO` once it has passed.
+    pub fn remaining(&self) -> Duration {
+        self.at.saturating_duration_since(Instant::now())
+    }
+
+    pub fn is_exceeded(&self) -> bool {
+        Instant::now() >= self.at
+    }
+
+    /// `min(local, remaining)`, floored at 1ms so a derived timeout is never zero (a zero timeout
+    /// would make every request fail even when a sliver of the budget is left).
+    pub fn clamp(&self, local: Duration) -> Duration {
+        local.min(self.remaining()).max(Duration::from_millis(1))
+    }
+
+    /// The deadline as a [`tokio::time::Instant`] for `timeout_at` / `sleep_until`.
+    pub fn tokio_instant(&self) -> tokio::time::Instant {
+        tokio::time::Instant::from_std(self.at)
+    }
+}
+
+/// F05 (`v1.5.1`): one shared token ledger for a whole run *tree* (the parent run plus every
+/// parallel child subagent and tournament candidate it spawns).
+///
+/// A caller [`reserve`](Self::try_reserve)s tokens *before* it sends a request or launches a child,
+/// then [`settle`](TokenReservation::settle)s the reservation with the tokens the provider actually
+/// reported. Reservation and settlement are two halves of one transaction over the pair
+/// `(spent, reserved)`: [`TokenBudget`] guards both counters with a single mutex, so a settlement
+/// that frees a reservation and records its spend can never be observed half-applied. Two
+/// concurrent subagents therefore cannot both draw the same remaining balance — the loser's
+/// reservation fails and the caller must not dispatch.
+///
+/// **Exact vs estimated.** When a provider returns `usage`, settlement records the exact reported
+/// counts. When it does not, or the request is cancelled/timed out before a response arrives, the
+/// reservation is settled with the pre-dispatch *estimate* (a byte-based approximation, ~4 bytes
+/// per token). That keeps cancelled/timeout spend visible instead of silently refunding it, but it
+/// is not a measured token count. Without a tokenizer this ledger therefore enforces a bound on
+/// *estimated* spend and must not be advertised as an exact hard cap on real provider tokens.
+///
+/// The mutex serializes the (short, non-blocking) counter transaction. A poisoned mutex is
+/// recovered through `into_inner` because the guarded state is a pair of plain counters that a
+/// panicking caller cannot leave in a partially-updated state (each transaction writes both
+/// counters before releasing the lock).
+#[derive(Debug)]
+pub struct TokenBudget {
+    limit: Option<u64>,
+    state: Mutex<LedgerState>,
+}
+
+/// The two counters that together make up committed spend. Kept behind one mutex so a reservation
+/// and a settlement can never interleave at an intermediate point.
+#[derive(Debug, Default)]
+struct LedgerState {
+    spent: u64,
+    reserved: u64,
+    settled_tokens: u64,
+    unknown_tokens: u64,
+}
+
+/// Atomic accounting view. Settled tokens may include caller estimates when usage was absent;
+/// they are not automatically measured usage. Unknown tokens are conservative holds on dropped
+/// reservations, not a claim about what the provider actually billed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TokenAccountingSnapshot {
+    pub limit: Option<u64>,
+    pub spent: u64,
+    pub reserved: u64,
+    pub settled_tokens: u64,
+    pub unknown_tokens: u64,
+    pub overage_tokens: u64,
+}
+
+impl TokenBudget {
+    pub fn new(limit: Option<u64>) -> Self {
+        Self {
+            limit,
+            state: Mutex::new(LedgerState::default()),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, LedgerState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The configured ceiling, or `None` when the ledger is unbounded.
+    pub fn limit(&self) -> Option<u64> {
+        self.limit
+    }
+
+    /// Tokens already settled as spent (exact when the provider reported usage, otherwise the
+    /// pre-dispatch estimate).
+    pub fn spent(&self) -> u64 {
+        self.state().spent
+    }
+
+    /// Snapshot all accounting dimensions under the same lock, including actual ledger overage.
+    pub fn accounting_snapshot(&self) -> TokenAccountingSnapshot {
+        let state = self.state();
+        TokenAccountingSnapshot {
+            limit: self.limit,
+            spent: state.spent,
+            reserved: state.reserved,
+            settled_tokens: state.settled_tokens,
+            unknown_tokens: state.unknown_tokens,
+            overage_tokens: self.limit.map_or(0, |limit| state.spent.saturating_sub(limit)),
+        }
+    }
+
+    /// Tokens currently held by live reservations (a request or child in flight).
+    pub fn reserved(&self) -> u64 {
+        self.state().reserved
+    }
+
+    /// `spent + reserved` — the amount currently committed against the limit.
+    pub fn committed(&self) -> u64 {
+        let state = self.state();
+        state.spent.saturating_add(state.reserved)
+    }
+
+    /// Tokens that may still be reserved. `None` when the ledger is unbounded.
+    pub fn remaining(&self) -> Option<u64> {
+        self.limit.map(|l| l.saturating_sub(self.committed()))
+    }
+
+    /// Reserve `amount` tokens as one transaction over `(spent, reserved)`. Returns `None` (without
+    /// changing any counter) when the reservation would push `spent + reserved` past the limit, so a
+    /// caller can stop *before* it dispatches a request or launches a child.
+    pub fn try_reserve(self: &Arc<Self>, amount: u64) -> Option<TokenReservation> {
+        {
+            let mut state = self.state();
+            if let Some(limit) = self.limit {
+                let next = state.reserved.saturating_add(amount);
+                if state.spent.saturating_add(next) > limit {
+                    return None;
+                }
+            }
+            state.reserved = state.reserved.saturating_add(amount);
+        }
+        Some(TokenReservation {
+            budget: Arc::clone(self),
+            amount,
+            settled: false,
+        })
+    }
+
+    /// Release `reserved_amount` tokens and record `actual` as spent in one mutex-guarded
+    /// transaction. Both counters are updated before the guard is released, so no observer ever
+    /// sees the reservation freed while the corresponding spend is still missing (the P1-1 race).
+    fn settle_transaction(&self, reserved_amount: u64, actual: u64, unknown: bool) {
+        let mut state = self.state();
+        state.reserved = state.reserved.saturating_sub(reserved_amount);
+        state.spent = state.spent.saturating_add(actual);
+        if unknown {
+            state.unknown_tokens = state.unknown_tokens.saturating_add(actual);
+        } else {
+            state.settled_tokens = state.settled_tokens.saturating_add(actual);
+        }
+    }
+}
+
+/// A held [`TokenBudget`] reservation.
+///
+/// Call [`settle`](Self::settle) once the provider reports how many tokens the request actually
+/// used.
+///
+/// **Policy: Provably Pre-Dispatch Failures vs. Ambiguous Post-Dispatch / Unknown Consumption:**
+///
+/// * **Provably Pre-Dispatch Failures:** When a request fails before any network transmission
+///   takes place (such as [`crate::provider::ProviderError::InsecureUrl`] validation failure),
+///   provider consumption is guaranteed to be zero. Callers settle the reservation with `0` via
+///   [`settle(0)`](Self::settle) to immediately release the withheld allowance back to the ledger.
+///
+/// * **Ambiguous Post-Dispatch Failures & Unknown Consumption:** If a request encounters an HTTP
+///   error (500, 502, 503, 504, 4xx), times out, is cancelled mid-flight, or suffers an in-flight
+///   transport failure (or fails after earlier retried attempts), actual provider consumption
+///   cannot be proven to be zero. To keep shared parent+child ceilings fail-closed, un-settled
+///   reservations dropped via [`Drop`] are conservatively committed as spent (`self.amount`) to
+///   prevent concurrent or subsequent callers from spending beyond the configured limit.
+///
+/// Factual observed usage metrics (reported in events and run summaries) must always remain separate
+/// from conservative ledger reserves and record only measured tokens.
+#[derive(Debug)]
+pub struct TokenReservation {
+    budget: Arc<TokenBudget>,
+    amount: u64,
+    settled: bool,
+}
+
+impl TokenReservation {
+    /// The number of tokens reserved up front.
+    pub fn amount(&self) -> u64 {
+        self.amount
+    }
+
+    /// The ledger this reservation was drawn from.
+    pub fn budget(&self) -> &Arc<TokenBudget> {
+        &self.budget
+    }
+
+    /// Release the reservation and record `actual` tokens as spent in a single transaction, so a
+    /// concurrent [`TokenBudget::try_reserve`] can never observe the freed reservation without the
+    /// settled spend that replaces it. `actual` is the provider's reported usage when available;
+    /// otherwise the caller's pre-dispatch estimate.
+    pub fn settle(mut self, actual: u64) {
+        self.budget.settle_transaction(self.amount, actual, false);
+        self.settled = true;
+    }
+}
+
+impl Drop for TokenReservation {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.budget.settle_transaction(self.amount, self.amount, true);
+        }
+    }
+}
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ConfigError {
@@ -29,6 +262,16 @@ pub struct BudgetConfig {
     pub context_tail_window_bytes: usize,
     pub context_min_tail_turns: usize,
     pub model_context_window_tokens: Option<u64>,
+    /// F05 (`v1.5.1`): optional total token ceiling (input + output) for one run *tree* — the
+    /// parent run and every parallel child subagent it spawns draw from the same
+    /// [`TokenBudget`]. `None` means unbounded. This is the single entry the CLI (`--max-tokens`),
+    /// the config file (`max_tokens`), the RPC surface (`session.prompt.max_tokens`) and the
+    /// runtime all set, so no surface can enforce a different cap than the kernel.
+    ///
+    /// Honesty caveat: without a tokenizer the pre-dispatch estimate is byte-based, so the cap
+    /// bounds *estimated* spend, not a measured one. See [`TokenBudget`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_tokens: Option<u64>,
     pub max_total_tool_output_bytes: usize,
     pub max_tool_inline_output_bytes: usize,
     pub max_tool_inline_lines: usize,
@@ -59,6 +302,7 @@ impl Default for BudgetConfig {
             context_tail_window_bytes: 256 * 1024,     // 256 KiB
             context_min_tail_turns: 4,
             model_context_window_tokens: None,
+            max_total_tokens: None,
             max_total_tool_output_bytes: 4 * 1024 * 1024, // 4 MiB
             max_tool_inline_output_bytes: 64 * 1024,      // 64 KiB
             max_tool_inline_lines: 2000,
@@ -137,6 +381,14 @@ impl BudgetConfig {
             }
         }
 
+        // F05 (`v1.5.1`): a `max_total_tokens` of 0 would refuse every request, which is never a
+        // useful configuration — reject it instead of silently disabling the run.
+        if self.max_total_tokens == Some(0) {
+            return Err(ConfigError::ZeroValue {
+                field: "max_total_tokens",
+            });
+        }
+
         // Check duration ms conversion overflows
         if self.max_run_duration.as_millis() > u64::MAX as u128 {
             return Err(ConfigError::Overflow {
@@ -187,6 +439,24 @@ impl BudgetConfig {
         Ok(())
     }
 
+    /// F04 (`v1.5.1`): a per-request view of this budget with every timeout clamped to the
+    /// remaining run time and the request-attempt cap set to `max_request_attempts`. Passing this
+    /// to [`crate::provider::ModelProvider::complete`] means a provider's internal connect / idle /
+    /// request deadlines and its retry loop can never outlive the parent run.
+    pub fn clamped_to_deadline(
+        &self,
+        deadline: RunDeadline,
+        max_request_attempts: usize,
+    ) -> BudgetConfig {
+        let mut cfg = self.clone();
+        cfg.max_run_duration = deadline.clamp(cfg.max_run_duration);
+        cfg.connect_timeout = deadline.clamp(cfg.connect_timeout);
+        cfg.idle_timeout = deadline.clamp(cfg.idle_timeout);
+        cfg.request_timeout = deadline.clamp(cfg.request_timeout);
+        cfg.max_model_request_attempts = max_request_attempts.max(1);
+        cfg
+    }
+
     pub fn token_watermarks(&self) -> Option<(u64, u64)> {
         self.model_context_window_tokens.map(|w| {
             let high = ((w as f64) * 0.75) as u64;
@@ -211,6 +481,9 @@ pub struct BudgetTracker {
     // `self` vs `children` while still seeing a combined total.
     children_input_tokens: u64,
     children_cached_input_tokens: u64,
+    /// B16: turns whose numbers came from provider usage vs from the byte estimate.
+    measured_usage_turns: usize,
+    estimated_usage_turns: usize,
     children_output_tokens: u64,
 }
 
@@ -228,6 +501,8 @@ impl BudgetTracker {
             total_output_tokens: 0,
             children_input_tokens: 0,
             children_cached_input_tokens: 0,
+            measured_usage_turns: 0,
+            estimated_usage_turns: 0,
             children_output_tokens: 0,
         })
     }
@@ -246,6 +521,12 @@ impl BudgetTracker {
 
     pub fn is_deadline_exceeded(&self) -> bool {
         self.elapsed() >= self.config.max_run_duration
+    }
+
+    /// F04 (`v1.5.1`): the absolute deadline this tracker enforces, so phases that do not own the
+    /// tracker (tool runtime, verification gate, subagents) can clamp to the same instant.
+    pub fn deadline(&self) -> RunDeadline {
+        RunDeadline::at(self.started_at + self.config.max_run_duration)
     }
 
     pub fn try_begin_turn(&mut self) -> bool {
@@ -273,11 +554,38 @@ impl BudgetTracker {
     }
 
     pub fn record_token_usage(&mut self, input: u64, cached: Option<u64>, output: u64) {
+        self.add_tokens(input, cached, output);
+        self.measured_usage_turns = self.measured_usage_turns.saturating_add(1);
+    }
+
+    /// B16: record a *byte-based estimate* for a turn whose response carried no usage. The numbers
+    /// land in the same totals (so the cap still applies), but the origin is tracked separately:
+    /// a report must never present an estimate as measured usage.
+    pub fn record_estimated_token_usage(&mut self, input: u64, cached: Option<u64>, output: u64) {
+        self.add_tokens(input, cached, output);
+        self.estimated_usage_turns = self.estimated_usage_turns.saturating_add(1);
+    }
+
+    fn add_tokens(&mut self, input: u64, cached: Option<u64>, output: u64) {
         self.total_input_tokens = self.total_input_tokens.saturating_add(input);
         self.total_cached_input_tokens = self
             .total_cached_input_tokens
             .saturating_add(cached.unwrap_or(0));
         self.total_output_tokens = self.total_output_tokens.saturating_add(output);
+    }
+
+    /// Where this run's usage numbers came from.
+    ///
+    /// `provider_reported` means every recorded turn carried provider usage; `mixed` means some turns
+    /// were estimated; `byte_estimate_not_measured` means none reported usage; `unknown` means no
+    /// turn recorded anything at all (which is not the same as zero spend).
+    pub fn usage_basis(&self) -> &'static str {
+        match (self.measured_usage_turns, self.estimated_usage_turns) {
+            (0, 0) => "unknown",
+            (_, 0) => "provider_reported",
+            (0, _) => "byte_estimate_not_measured",
+            _ => "mixed",
+        }
     }
 
     /// F10 (`v1.4.0`): fold a child subagent's (or tournament candidate's) token spend into this
@@ -322,6 +630,12 @@ impl BudgetTracker {
     /// F10 (`v1.4.0`): output tokens spent by child subagents / tournament candidates.
     pub fn children_output_tokens(&self) -> u64 {
         self.children_output_tokens
+    }
+
+    /// B16: cached-input tokens reported by child subagents, so a cost estimate can split the
+    /// cached rate from the uncached one instead of pricing every input token the same.
+    pub fn children_cached_input_tokens(&self) -> u64 {
+        self.children_cached_input_tokens
     }
 
     /// F10 (`v1.4.0`): total (self + children) input tokens.

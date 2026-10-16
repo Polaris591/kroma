@@ -177,6 +177,19 @@ struct WalLine {
     payload: WalPayload,
 }
 
+/// Test-only fault-injection points in the WAL append sequence. Instance-scoped so a fault set by
+/// one test can never leak into another journal.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalFault {
+    /// Simulate a torn `write_all`: persist a prefix of the line, then report the failure. The
+    /// rollback truncates the fragment and succeeds, so the handle stays usable.
+    PartialWrite,
+    /// Same as [`WalFault::PartialWrite`], but the rollback `ftruncate`/`fsync` also fails, leaving
+    /// the tail in an unknown state.
+    PartialWriteAndRollbackFailure,
+}
+
 pub struct SessionJournal {
     path: PathBuf,
     session_id: String,
@@ -190,6 +203,13 @@ pub struct SessionJournal {
     revision_records: Vec<RevisionRecord>,
     completion_resolution_leaf_ids: Vec<String>,
     projection_updates: Vec<ProjectionOverlay>,
+    /// Set when an append failed and its rollback could not be confirmed. A poisoned handle refuses
+    /// every later append, because appending after a partially-truncated line would produce a
+    /// complete-but-corrupt hash-chain entry; the journal must be reopened instead.
+    poisoned: bool,
+    /// Test-only fault-injection point in the append sequence.
+    #[cfg(test)]
+    fault: Option<WalFault>,
 }
 
 impl SessionJournal {
@@ -251,6 +271,9 @@ impl SessionJournal {
             revision_records: Vec::new(),
             completion_resolution_leaf_ids: Vec::new(),
             projection_updates: Vec::new(),
+            poisoned: false,
+            #[cfg(test)]
+            fault: None,
         };
         journal.append_payload(WalPayload::Header {
             version: WAL_VERSION,
@@ -258,6 +281,10 @@ impl SessionJournal {
             workspace_root: journal.workspace_root.clone(),
             created_at_ms: now_ms(),
         })?;
+        // `append_payload` fsyncs the header's data, but the directory entry that names the new WAL
+        // is only durable once the containing directory is fsynced; without it a crash could drop an
+        // acknowledged session entirely.
+        crate::secure_fs::sync_dir(session_dir.as_ref())?;
         Ok(journal)
     }
 
@@ -561,6 +588,9 @@ impl SessionJournal {
             revision_records,
             completion_resolution_leaf_ids,
             projection_updates,
+            poisoned: false,
+            #[cfg(test)]
+            fault: None,
         })
     }
 
@@ -912,17 +942,35 @@ impl SessionJournal {
 
     /// Select the last event at or before a turn on the active path, then continue as a branch.
     pub fn fork_at_turn(&mut self, turn: usize) -> Result<String, SessionError> {
-        let selected = self
-            .active_entries()
+        let selected = self.entry_id_at_or_before_turn(turn).ok_or_else(|| {
+            SessionError::Invalid(format!("no active entry at or before turn {}", turn))
+        })?;
+        self.fork_at(&selected)?;
+        Ok(selected)
+    }
+
+    /// Entry id of the last active transcript event at or before `turn`, or `None` when the active
+    /// branch has no such event.
+    ///
+    /// A workspace-bound fork validates this *before* it restores any file, so a fork that cannot
+    /// move the leaf never mutates the workspace on its way to failing.
+    pub fn entry_id_at_or_before_turn(&self, turn: usize) -> Option<String> {
+        self.active_entries()
             .into_iter()
             .rev()
             .find(|entry| entry.turn <= turn)
             .map(|entry| entry.id.clone())
-            .ok_or_else(|| {
-                SessionError::Invalid(format!("no active entry at or before turn {}", turn))
-            })?;
-        self.fork_at(&selected)?;
-        Ok(selected)
+    }
+
+    /// Latest workspace revision recorded on the active branch at or before `turn`.
+    ///
+    /// This is the revision a workspace-bound fork at `turn` must restore: the pre-mutation
+    /// baseline for `turn == 0`, and the state captured at the end of that turn otherwise.
+    pub fn revision_at_or_before_turn(&self, turn: usize) -> Option<RevisionRecord> {
+        self.revision_records()
+            .into_iter()
+            .filter(|record| record.turn <= turn)
+            .next_back()
     }
 
     pub fn active_transcript(&self) -> Vec<TranscriptItem> {
@@ -1199,6 +1247,11 @@ impl SessionJournal {
     }
 
     fn append_payload(&mut self, payload: WalPayload) -> Result<(), SessionError> {
+        if self.poisoned {
+            return Err(SessionError::Invalid(
+                "session WAL handle is poisoned after an unrecoverable append rollback; reopen the journal to continue".into(),
+            ));
+        }
         let hash = calculate_hash(self.next_seq, &self.last_hash, &payload)?;
         let line = WalLine {
             seq: self.next_seq,
@@ -1209,21 +1262,69 @@ impl SessionJournal {
         let mut bytes = serde_json::to_vec(&line)?;
         bytes.push(b'\n');
         let pre_write_len = self.file.metadata()?.len();
+
+        #[cfg(test)]
+        if self.fault.is_some() {
+            // Persist only a prefix, then behave as if `write_all` had failed part-way.
+            let partial = bytes.len() / 2;
+            self.file.write_all(&bytes[..partial])?;
+            if self.fault == Some(WalFault::PartialWrite) {
+                // Let the rollback behave normally so the fragment is truncated and the handle
+                // stays usable.
+                self.fault = None;
+            }
+            let cause = SessionError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected partial write",
+            ));
+            return self.rollback_failed_append(pre_write_len, cause);
+        }
+
         if let Err(e) = self.file.write_all(&bytes) {
-            let _ = self.file.set_len(pre_write_len);
-            return Err(e.into());
+            return self.rollback_failed_append(pre_write_len, e.into());
         }
         if let Err(e) = self.file.flush() {
-            let _ = self.file.set_len(pre_write_len);
-            return Err(e.into());
+            return self.rollback_failed_append(pre_write_len, e.into());
         }
         if let Err(e) = self.file.sync_data() {
-            let _ = self.file.set_len(pre_write_len);
-            return Err(e.into());
+            return self.rollback_failed_append(pre_write_len, e.into());
         }
         self.last_hash = hash;
         self.next_seq += 1;
         Ok(())
+    }
+
+    /// Truncate a partially-written line back to `pre_write_len` and make the truncation durable.
+    fn rollback_append(&mut self, pre_write_len: u64) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.fault == Some(WalFault::PartialWriteAndRollbackFailure) {
+            self.fault = None;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected rollback failure",
+            ));
+        }
+        self.file.set_len(pre_write_len)?;
+        self.file.sync_data()
+    }
+
+    /// Roll back a failed append. A rollback that cannot be confirmed poisons the handle: a later
+    /// append could otherwise land after a partial line and create a complete-but-corrupt
+    /// hash-chain entry that `open` rejects.
+    fn rollback_failed_append(
+        &mut self,
+        pre_write_len: u64,
+        cause: SessionError,
+    ) -> Result<(), SessionError> {
+        match self.rollback_append(pre_write_len) {
+            Ok(()) => Err(cause),
+            Err(rollback_err) => {
+                self.poisoned = true;
+                Err(SessionError::Invalid(format!(
+                    "session WAL append failed ({cause}); the rollback could not be confirmed ({rollback_err}); the handle is poisoned and must be reopened"
+                )))
+            }
+        }
     }
 }
 
@@ -1712,6 +1813,97 @@ mod tests {
             before_len,
             "a rejected oversized WAL must not be truncated or resized"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A torn append whose rollback cannot be confirmed must poison the handle, so a retry cannot
+    /// append after the partial line and create a complete-but-corrupt hash-chain entry.
+    #[test]
+    fn a_failed_rollback_poisons_the_wal_and_no_later_append_corrupts_the_chain() {
+        let dir = tempdir();
+        let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "start".into(),
+            }),
+        )
+        .unwrap();
+        let path = wal.path().to_path_buf();
+        let len_before = fs::metadata(&path).unwrap().len();
+
+        // A torn write whose rollback also fails leaves the tail in an unknown state.
+        wal.fault = Some(WalFault::PartialWriteAndRollbackFailure);
+        let failed = wal.append_item(
+            1,
+            TranscriptItem::User(UserMessage {
+                content: "torn".into(),
+            }),
+        );
+        assert!(failed.is_err(), "the injected torn write must fail");
+        assert!(
+            failed.unwrap_err().to_string().contains("poisoned"),
+            "an unconfirmed rollback must poison the handle"
+        );
+
+        let len_after_torn = fs::metadata(&path).unwrap().len();
+        assert!(
+            len_after_torn > len_before,
+            "the injected torn write left a partial trailing fragment"
+        );
+
+        // A later append must be refused before it can land after the partial line, so no
+        // complete-but-corrupt hash-chain entry is ever written.
+        let blocked = wal.append_item(
+            1,
+            TranscriptItem::User(UserMessage {
+                content: "after".into(),
+            }),
+        );
+        assert!(blocked.is_err(), "a poisoned handle must refuse to append");
+        assert!(
+            blocked.unwrap_err().to_string().contains("poisoned"),
+            "the refusal must name the poisoned handle"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            len_after_torn,
+            "a refused append must not write anything"
+        );
+        drop(wal);
+
+        // Reopening repairs the incomplete trailing fragment and keeps the committed chain.
+        let reopened = SessionJournal::open(&path).unwrap();
+        assert_eq!(reopened.max_active_turn(), 0);
+        assert!(
+            reopened
+                .active_transcript()
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::User(u) if u.content == "start")),
+            "the pre-failure entry must survive"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `create` must not acknowledge a session whose WAL directory entry is not durable; a later
+    /// clean create in the same directory still reopens with its header intact.
+    #[cfg(unix)]
+    #[test]
+    fn a_create_that_cannot_sync_its_directory_is_not_acknowledged_and_a_clean_create_reopens() {
+        let dir = tempdir();
+        let guard = crate::secure_fs::DirSyncFaultGuard::arm();
+        let created = SessionJournal::create(&dir, "/tmp/workspace");
+        drop(guard);
+        assert!(
+            created.is_err(),
+            "create must not be acknowledged when the session directory cannot be synced"
+        );
+
+        let wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
+        let path = wal.path().to_path_buf();
+        drop(wal);
+        let reopened = SessionJournal::open(&path).unwrap();
+        assert_eq!(reopened.max_active_turn(), 0);
         let _ = fs::remove_dir_all(dir);
     }
 }

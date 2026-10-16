@@ -34,6 +34,102 @@ const ATTRIBUTION_ADJACENT_LINES: usize = 5;
 pub const CANDIDATE_ATTRIBUTION_FRAMING: &str = "candidate_attribution";
 
 // ---------------------------------------------------------------------------------------------
+// Capability gap #2: optional isolated counterfactual probe
+// ---------------------------------------------------------------------------------------------
+
+/// Configuration for the optional counterfactual probe (capability gap #2).
+///
+/// The probe is **off by default**, bounded per run, and only ever runs inside a throwaway isolated
+/// worktree, so it can neither change the user's workspace nor trigger an automatic rollback. Its
+/// output is evidence attached to the model-facing failure message — a heuristic candidate ranking
+/// is never allowed to revert code on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterfactualProbeConfig {
+    pub enabled: bool,
+    /// Hard cap on probes across the whole run. Extra failures stop probing instead of stacking cost.
+    pub max_probes_per_run: usize,
+    /// How many top-ranked candidates a single failure may probe (`1..=3`).
+    pub top_k: usize,
+}
+
+impl Default for CounterfactualProbeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_probes_per_run: 1,
+            top_k: 1,
+        }
+    }
+}
+
+impl CounterfactualProbeConfig {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Enable the probe with a hard per-run cap (`top_k` defaults to 1).
+    pub fn enabled_with(max_probes_per_run: usize) -> Self {
+        Self {
+            enabled: true,
+            max_probes_per_run: max_probes_per_run.max(1),
+            top_k: 1,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled && self.max_probes_per_run > 0
+    }
+}
+
+/// The information an approval seam sees before authorizing one probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeRequest {
+    pub mutation_id: String,
+    pub turn: u32,
+    pub relative_path: Option<String>,
+}
+
+/// Approval seam for the counterfactual probe.
+///
+/// The default ([`DenyProbes`]) refuses, so enabling the config alone is not enough: an operator (or
+/// a surface's approval handler) must also consent. This keeps the probe from spending budget or
+/// running verification commands unilaterally.
+pub trait ProbeApproval: Send + Sync {
+    fn approve(&self, request: &ProbeRequest) -> bool;
+}
+
+/// Default approval policy: never authorize a probe.
+pub struct DenyProbes;
+
+impl ProbeApproval for DenyProbes {
+    fn approve(&self, _request: &ProbeRequest) -> bool {
+        false
+    }
+}
+
+/// Operator consent (`--counterfactual-probe` at launch).
+pub struct AllowProbes;
+
+impl ProbeApproval for AllowProbes {
+    fn approve(&self, _request: &ProbeRequest) -> bool {
+        true
+    }
+}
+
+/// Evidence produced by one counterfactual probe, kept for telemetry (precision / false-positive
+/// and cost accounting).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterfactualProbeOutcome {
+    pub mutation_id: String,
+    pub revision_before: RevisionId,
+    /// `true` when the failure disappeared once the candidate was reverted inside the worktree.
+    pub failure_resolved_on_revert: bool,
+    /// `true` when the throwaway worktree was removed before returning.
+    pub worktree_cleaned_up: bool,
+    pub note: String,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Predictive structural validation
 // ---------------------------------------------------------------------------------------------
 
