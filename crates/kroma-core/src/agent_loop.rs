@@ -1319,9 +1319,21 @@ impl AgentRunner {
 
         // B16: track the attempts that are really transmitted, so a failed call can report them.
         let wire_attempts = crate::provider::WireAttempts::new();
+        // T12 (KR-09): activated discovered tools join the request, appended in activation order so
+        // the list is stable across turns. They are resolved from the live registry and policy, so a
+        // tool that was unmounted or denied after activation simply stops appearing.
+        let mut request_tools = state.visible_tools.clone();
+        for definition in self.tool_runtime.activated_tool_definitions() {
+            if !request_tools
+                .iter()
+                .any(|existing| existing.name == definition.name)
+            {
+                request_tools.push(definition);
+            }
+        }
         let req = ProviderRequest {
             system_prompt: state.static_prefix.system_prompt.clone(),
-            tools: state.visible_tools.clone(),
+            tools: request_tools,
             messages: projected.messages,
             stream: self.config.stream,
             // Gate 7: hand the projector's logical cache boundaries to the protocol client so

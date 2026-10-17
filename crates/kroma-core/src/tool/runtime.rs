@@ -49,6 +49,17 @@ pub fn decision_dispatched(decision: &str) -> bool {
 }
 
 #[derive(Clone)]
+/// T12 (KR-09): the activation half of a `discover_tools` call. `serde(default)` keeps a plain
+/// discovery call (`{"query": "..."}`) working exactly as before.
+#[derive(Debug, Default, serde::Deserialize)]
+struct ActivationRequest {
+    #[serde(default)]
+    activate: Vec<String>,
+    #[serde(default)]
+    deactivate: Vec<String>,
+}
+
+#[derive(Clone)]
 pub struct ToolRuntime {
     registry: ToolRegistry,
     policy_engine: PolicyEngine,
@@ -63,6 +74,10 @@ pub struct ToolRuntime {
     run_deadline: Option<RunDeadline>,
     /// F05: Unified execution context of the enclosing run.
     exec_context: Option<ExecutionContext>,
+    /// T12 (KR-09): discovered tools the model has activated for this run. Names plus the schema
+    /// hash observed at activation time; definitions are resolved live at request time, so an
+    /// unmounted extension or a narrowed policy drops the schema instead of leaving a stale one.
+    activation: std::sync::Arc<std::sync::Mutex<crate::tool::activation::ToolActivation>>,
     /// T09 (KR-18): the run's execution boundary. Every spawn the runtime performs asks this policy
     /// first, so "sandbox on" cannot mean "on for the scorer only".
     execution: crate::sandbox::ExecutionPolicy,
@@ -82,6 +97,9 @@ impl ToolRuntime {
             budget,
             bash_grace_period: Duration::from_secs(2),
             execution: crate::sandbox::ExecutionPolicy::host(),
+            activation: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::tool::activation::ToolActivation::new(),
+            )),
             predictive_check: true,
             run_deadline: None,
             exec_context: None,
@@ -120,6 +138,83 @@ impl ToolRuntime {
 
     pub fn execution_policy(&self) -> &crate::sandbox::ExecutionPolicy {
         &self.execution
+    }
+
+    /// T12 (KR-09): activate discovered tools by name. Every refusal is returned to the caller so the
+    /// model sees *why* a tool did not become callable instead of guessing.
+    pub fn activate_tools(
+        &self,
+        names: &[String],
+    ) -> Vec<(
+        String,
+        Result<crate::tool::activation::ActivationRecord, crate::tool::activation::ActivationError>,
+    )> {
+        let policy = self.policy_engine.mode();
+        let catalog = self.registry.all_registered();
+        let mut state = self.activation.lock().unwrap_or_else(|e| e.into_inner());
+        let mut results = Vec::new();
+        for name in names {
+            let outcome = match catalog.iter().find(|t| &t.definition.name == name) {
+                None => Err(crate::tool::activation::ActivationError::UnknownTool(
+                    name.clone(),
+                )),
+                Some(tool) => {
+                    let allowed = self.registry.is_tool_enabled_for_policy(tool, policy);
+                    state.activate(tool, allowed)
+                }
+            };
+            results.push((name.clone(), outcome));
+        }
+        results
+    }
+
+    /// Remove activations by name; returns the names that were actually active.
+    pub fn deactivate_tools(&self, names: &[String]) -> Vec<String> {
+        let mut state = self.activation.lock().unwrap_or_else(|e| e.into_inner());
+        names
+            .iter()
+            .filter(|name| state.deactivate(name))
+            .cloned()
+            .collect()
+    }
+
+    /// The definitions to append to the next request's `tools` array.
+    ///
+    /// Resolved from the live registry and the live policy, in activation order, with anything that
+    /// no longer exists (an unmounted extension) pruned. This is what makes unmount remove both the
+    /// schema and the dispatch: there is no second copy of the schema to go stale.
+    pub fn activated_tool_definitions(&self) -> Vec<crate::tool::definition::ToolDefinition> {
+        let policy = self.policy_engine.mode();
+        let catalog = self.registry.all_registered();
+        let registered: Vec<String> = catalog.iter().map(|t| t.definition.name.clone()).collect();
+        let mut state = self.activation.lock().unwrap_or_else(|e| e.into_inner());
+        state.prune_to(&registered);
+        state
+            .records()
+            .iter()
+            .filter_map(|record| {
+                catalog
+                    .iter()
+                    .find(|t| t.definition.name == record.name)
+                    .filter(|t| self.registry.is_tool_enabled_for_policy(t, policy))
+                    .map(|t| t.definition.clone())
+            })
+            .collect()
+    }
+
+    /// Stable digest of the active schema set (names + hashes, activation order).
+    pub fn activation_digest(&self) -> String {
+        self.activation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .digest()
+    }
+
+    pub fn active_tool_names(&self) -> Vec<String> {
+        self.activation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .names()
     }
 
     /// Enable/disable the Gate 4 post-mutation structural check (`--no-predictive-check`).
@@ -971,7 +1066,40 @@ impl ToolRuntime {
                     .into_iter()
                     .filter(|tool| self.registry.is_tool_enabled_for_policy(tool, policy))
                     .collect();
-                execute_discover_tools(&catalog, &effective_raw_args)
+                // T12 (KR-09): discovery is the entry point of the loop, so it is also where
+                // activation happens. Without this the model could learn a tool's schema and still be
+                // unable to call it on a provider that only permits declared tools.
+                let mut out = execute_discover_tools(&catalog, &effective_raw_args);
+                let request: ActivationRequest = serde_json::from_str(&effective_raw_args)
+                    .unwrap_or_default();
+                let mut report = String::new();
+                if !request.activate.is_empty() {
+                    for (name, outcome) in self.activate_tools(&request.activate) {
+                        match outcome {
+                            Ok(record) => report.push_str(&format!(
+                                "activated {} (schema {} bytes, hash {})\n",
+                                name,
+                                record.schema_bytes,
+                                &record.schema_hash[..12]
+                            )),
+                            Err(e) => report.push_str(&format!("not activated: {}\n", e)),
+                        }
+                    }
+                }
+                if !request.deactivate.is_empty() {
+                    for name in self.deactivate_tools(&request.deactivate) {
+                        report.push_str(&format!("deactivated {}\n", name));
+                    }
+                }
+                if !report.is_empty() {
+                    report.push_str(&format!(
+                        "active set: [{}] digest {}\n",
+                        self.active_tool_names().join(", "),
+                        &self.activation_digest()[..12]
+                    ));
+                    out.content = format!("{}\n--- activation ---\n{}", out.content, report);
+                }
+                out
             }
             // `recall_evidence` is dispatched by the agent loop, which owns the live transcript and
             // the evidence store. Reaching the runtime directly means no transcript was available.
