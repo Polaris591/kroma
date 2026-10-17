@@ -59,6 +59,7 @@ fn assistant_stop(text: &str) -> AssistantTurn {
         usage: Some(TokenUsage {
             input_tokens: 120,
             cached_input_tokens: Some(90),
+            cache_creation_input_tokens: None,
             output_tokens: 40,
             reasoning_tokens: None,
         }),
@@ -78,6 +79,7 @@ fn assistant_write(path: &str, content: &str) -> AssistantTurn {
         usage: Some(TokenUsage {
             input_tokens: 160,
             cached_input_tokens: Some(120),
+            cache_creation_input_tokens: None,
             output_tokens: 50,
             reasoning_tokens: None,
         }),
@@ -577,6 +579,7 @@ impl ModelProvider for SpawnSubagentProvider {
                     usage: Some(TokenUsage {
                         input_tokens: 100,
                         cached_input_tokens: None,
+                        cache_creation_input_tokens: None,
                         output_tokens: 50,
                         reasoning_tokens: None,
                     }),

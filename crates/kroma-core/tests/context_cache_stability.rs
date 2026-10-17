@@ -50,6 +50,7 @@ async fn test_15_turns_append_only_prefix_byte_stability() {
             usage: Some(TokenUsage {
                 input_tokens: 500 + (i as u64) * 100,
                 cached_input_tokens: Some(400 + (i as u64) * 100),
+                cache_creation_input_tokens: None,
                 output_tokens: 40,
                 reasoning_tokens: Some(15),
             }),
@@ -63,6 +64,7 @@ async fn test_15_turns_append_only_prefix_byte_stability() {
         usage: Some(TokenUsage {
             input_tokens: 2000,
             cached_input_tokens: Some(1900),
+            cache_creation_input_tokens: None,
             output_tokens: 20,
             reasoning_tokens: None,
         }),

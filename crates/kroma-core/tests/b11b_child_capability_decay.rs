@@ -80,6 +80,7 @@ impl ModelProvider for StopProvider {
                     usage: Some(TokenUsage {
                         input_tokens: 10,
                         cached_input_tokens: None,
+                        cache_creation_input_tokens: None,
                         output_tokens: 2,
                         reasoning_tokens: None,
                     }),
@@ -489,6 +490,7 @@ impl ModelProvider for SpawnThenStopProvider {
                     usage: Some(TokenUsage {
                         input_tokens: 10,
                         cached_input_tokens: None,
+                        cache_creation_input_tokens: None,
                         output_tokens: 2,
                         reasoning_tokens: None,
                     }),
@@ -502,6 +504,7 @@ impl ModelProvider for SpawnThenStopProvider {
                     usage: Some(TokenUsage {
                         input_tokens: 10,
                         cached_input_tokens: None,
+                        cache_creation_input_tokens: None,
                         output_tokens: 2,
                         reasoning_tokens: None,
                     }),

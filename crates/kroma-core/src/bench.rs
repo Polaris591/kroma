@@ -1915,6 +1915,7 @@ impl ProviderBenchExecutor {
             cached_input_tokens: Some(
                 self_cached_input_tokens.saturating_add(children_cached_input_tokens),
             ),
+            cache_creation_input_tokens: None,
             output_tokens: self_output_tokens.saturating_add(children_output_tokens),
             reasoning_tokens: None,
         });

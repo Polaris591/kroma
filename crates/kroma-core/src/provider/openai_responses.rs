@@ -298,6 +298,8 @@ fn parse_responses_usage(usage: &Value) -> TokenUsage {
             .get("input_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64),
+        // OpenAI does not report cache writes separately; claiming one would be inventing data.
+        cache_creation_input_tokens: None,
         output_tokens: usage
             .get("output_tokens")
             .and_then(Value::as_u64)

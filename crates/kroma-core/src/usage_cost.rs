@@ -96,6 +96,7 @@ mod tests {
         let result = table().estimate(Some("returned-model"), Some(TokenUsage {
             input_tokens: 100, cached_input_tokens: Some(40), output_tokens: 10,
             reasoning_tokens: Some(8),
+            cache_creation_input_tokens: None,
         }));
         assert_eq!(result.estimated_nano_usd, Some(94000));
         assert_eq!(result.table_version, "fixture-v1");

@@ -43,6 +43,7 @@ fn usage(input: u64, output: u64) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: input,
         cached_input_tokens: None,
+        cache_creation_input_tokens: None,
         output_tokens: output,
         reasoning_tokens: None,
     })
@@ -1190,6 +1191,7 @@ async fn arm_cost_uses_the_reported_identity_and_the_cached_split() {
         usage: TokenUsage {
             input_tokens: 1_000,
             cached_input_tokens: Some(400),
+            cache_creation_input_tokens: None,
             output_tokens: 200,
             reasoning_tokens: None,
         },
@@ -1244,6 +1246,7 @@ async fn arm_cost_stays_unknown_without_a_reported_identity() {
         usage: TokenUsage {
             input_tokens: 10,
             cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: 5,
             reasoning_tokens: None,
         },

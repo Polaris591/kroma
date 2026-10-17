@@ -58,6 +58,7 @@ fn assistant_stop(text: &str) -> AssistantTurn {
         usage: Some(TokenUsage {
             input_tokens: 120,
             cached_input_tokens: Some(80),
+            cache_creation_input_tokens: None,
             output_tokens: 40,
             reasoning_tokens: None,
         }),
@@ -80,6 +81,7 @@ fn assistant_tools(calls: Vec<(&str, &str, serde_json::Value)>) -> AssistantTurn
         usage: Some(TokenUsage {
             input_tokens: 150,
             cached_input_tokens: Some(100),
+            cache_creation_input_tokens: None,
             output_tokens: 50,
             reasoning_tokens: None,
         }),

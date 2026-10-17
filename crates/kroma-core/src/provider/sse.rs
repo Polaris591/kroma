@@ -478,9 +478,17 @@ pub fn parse_usage_json(usage_obj: &serde_json::Value) -> Option<TokenUsage> {
                 .and_then(|v| v.as_u64())
         });
 
+    // T14 (KR-10): some Anthropic-compatible proxies report the cache write separately. Record it
+    // when present; never infer it from the read count.
+    let cache_creation_input_tokens = usage_obj
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v > 0);
+
     Some(TokenUsage {
         input_tokens,
         cached_input_tokens,
+        cache_creation_input_tokens,
         output_tokens,
         reasoning_tokens,
     })

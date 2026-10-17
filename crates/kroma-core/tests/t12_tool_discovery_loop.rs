@@ -270,6 +270,7 @@ impl ModelProvider for StrictProvider {
 fn usage() -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: 100,
+        cache_creation_input_tokens: None,
         output_tokens: 10,
         reasoning_tokens: None,
         cached_input_tokens: None,

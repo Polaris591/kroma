@@ -44,6 +44,7 @@ impl ModelProvider for StallProvider {
             let usage = Some(TokenUsage {
                 input_tokens: if child { 13 } else { 11 },
                 cached_input_tokens: Some(if child { 7 } else { 4 }),
+                cache_creation_input_tokens: None,
                 output_tokens: if child { 3 } else { 2 }, reasoning_tokens: None,
             });
             let turn = if wrote {

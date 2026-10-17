@@ -1053,6 +1053,7 @@ fn write_turn(path: &str, content: &str, call_id: &str) -> AssistantTurn {
         usage: Some(TokenUsage {
             input_tokens: 100,
             cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: 50,
             reasoning_tokens: None,
         }),
@@ -1068,6 +1069,7 @@ fn stop_turn(text: &str) -> AssistantTurn {
         usage: Some(TokenUsage {
             input_tokens: 120,
             cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: 20,
             reasoning_tokens: None,
         }),

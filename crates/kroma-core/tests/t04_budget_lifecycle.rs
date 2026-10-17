@@ -380,6 +380,7 @@ async fn per_request_output_does_not_consume_entire_run_allowance() {
             finish_reason: FinishReason::Stop,
             usage: Some(kroma_core::messages::TokenUsage {
                 input_tokens: 900,
+                cache_creation_input_tokens: None,
                 output_tokens: 100,
                 reasoning_tokens: None,
                 cached_input_tokens: None,
@@ -392,6 +393,7 @@ async fn per_request_output_does_not_consume_entire_run_allowance() {
             finish_reason: FinishReason::Stop,
             usage: Some(kroma_core::messages::TokenUsage {
                 input_tokens: 900,
+                cache_creation_input_tokens: None,
                 output_tokens: 100,
                 reasoning_tokens: None,
                 cached_input_tokens: None,

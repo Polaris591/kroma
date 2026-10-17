@@ -62,17 +62,38 @@ impl FinishReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TokenUsage {
     pub input_tokens: u64,
+    /// Input tokens served from the provider's prefix cache (`cache_read_input_tokens`).
     pub cached_input_tokens: Option<u64>,
+    /// T14 (KR-10): input tokens written *into* the cache this turn
+    /// (`cache_creation_input_tokens`). Kept separate from reads: a write costs more than a read and
+    /// is not a hit, so folding the two together makes a cold cache look warm.
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u64>,
     pub output_tokens: u64,
     pub reasoning_tokens: Option<u64>,
 }
 
 impl TokenUsage {
+    /// Input tokens that were neither read from nor written to the cache.
+    ///
+    /// `input_tokens` is the whole input, so both cache components are subtracted. Counting cache
+    /// *creation* as uncached (as the earlier subtraction did) hides the fact that a turn paid the
+    /// write premium.
     pub fn uncached_input_tokens(&self) -> u64 {
         self.input_tokens
             .saturating_sub(self.cached_input_tokens.unwrap_or(0))
+            .saturating_sub(self.cache_creation_input_tokens.unwrap_or(0))
     }
 
+    /// Tokens written into the cache this turn.
+    pub fn cache_creation_tokens(&self) -> u64 {
+        self.cache_creation_input_tokens.unwrap_or(0)
+    }
+
+    /// Share of the input that was served from cache.
+    ///
+    /// Reads only. Cache *writes* are not hits; they are the cost of making a later hit possible, and
+    /// reporting them as a hit would let a cold cache look warm.
     pub fn prefix_cache_hit_ratio(&self) -> f64 {
         if self.input_tokens == 0 {
             0.0

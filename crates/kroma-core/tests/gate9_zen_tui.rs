@@ -44,6 +44,7 @@ fn assistant_stop(text: &str) -> AssistantTurn {
         usage: Some(TokenUsage {
             input_tokens: 120,
             cached_input_tokens: Some(90),
+            cache_creation_input_tokens: None,
             output_tokens: 40,
             reasoning_tokens: None,
         }),

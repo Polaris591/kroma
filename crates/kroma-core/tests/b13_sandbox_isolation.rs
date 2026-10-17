@@ -605,7 +605,8 @@ async fn scored_benchmark_arm_runs_its_verifier_inside_the_sandbox() {
         reasoning_blocks: Vec::new(),
         tool_calls: Vec::new(),
         finish_reason: FinishReason::Stop,
-        usage: Some(TokenUsage { input_tokens: 10, cached_input_tokens: None, output_tokens: 2, reasoning_tokens: None }),
+        usage: Some(TokenUsage { input_tokens: 10, cached_input_tokens: None, output_tokens: 2, reasoning_tokens: None, cache_creation_input_tokens: None,
+}),
     };
     let strategy = BenchStrategyConfig::single_agent();
     let run_arm = |sandbox: Option<SandboxTemplate>, label: &str| {

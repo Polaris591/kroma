@@ -66,6 +66,7 @@ fn usage() -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: 10,
         cached_input_tokens: None,
+        cache_creation_input_tokens: None,
         output_tokens: 5,
         reasoning_tokens: None,
     })

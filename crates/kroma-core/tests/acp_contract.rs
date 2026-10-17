@@ -84,6 +84,7 @@ fn assistant_stop(text: &str) -> AssistantTurn {
         usage: Some(TokenUsage {
             input_tokens: 10,
             cached_input_tokens: Some(0),
+            cache_creation_input_tokens: None,
             output_tokens: 5,
             reasoning_tokens: None,
         }),
@@ -106,6 +107,7 @@ fn assistant_tools(calls: Vec<(&str, &str, Value)>) -> AssistantTurn {
         usage: Some(TokenUsage {
             input_tokens: 12,
             cached_input_tokens: Some(0),
+            cache_creation_input_tokens: None,
             output_tokens: 6,
             reasoning_tokens: None,
         }),

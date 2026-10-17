@@ -46,6 +46,7 @@ fn usage(input: u64, output: u64) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: input,
         cached_input_tokens: None,
+        cache_creation_input_tokens: None,
         output_tokens: output,
         reasoning_tokens: None,
     })

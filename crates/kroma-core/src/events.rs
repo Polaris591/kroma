@@ -48,6 +48,10 @@ pub enum EventPayload {
         token_accounting: Option<crate::budget::TokenAccountingSnapshot>,
         input_tokens: u64,
         cached_input_tokens: Option<u64>,
+        /// T14 (KR-10): tokens written into the provider's prefix cache this turn. Separate from
+        /// reads because a write is a cost, not a hit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input_tokens: Option<u64>,
         uncached_input_tokens: u64,
         output_tokens: u64,
         reasoning_tokens: Option<u64>,

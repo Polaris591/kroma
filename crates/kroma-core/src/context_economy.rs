@@ -44,6 +44,7 @@ impl RunEconomy {
                 .uncached_input_tokens
                 .saturating_add(self.cached_input_tokens),
             cached_input_tokens: Some(self.cached_input_tokens),
+            cache_creation_input_tokens: None,
             output_tokens: self.output_tokens,
             reasoning_tokens: None,
         }

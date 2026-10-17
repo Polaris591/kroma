@@ -1279,6 +1279,7 @@ impl ModelProvider for AttemptsReportingProvider {
                     usage: Some(kroma_core::messages::TokenUsage {
                         input_tokens: 10,
                         cached_input_tokens: None,
+                        cache_creation_input_tokens: None,
                         output_tokens: 2,
                         reasoning_tokens: None,
                     }),

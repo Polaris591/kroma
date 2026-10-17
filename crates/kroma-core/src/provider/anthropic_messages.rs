@@ -133,6 +133,23 @@ pub fn serialize_anthropic_request_body(
         }
     }
 
+    // Breakpoint 4: the newest message. Caching up to the current tail means the *next* turn reads
+    // this whole conversation from cache instead of writing it again; the previous turn's tail is a
+    // strict prefix of this turn's request, so the read is a hit rather than a fresh write.
+    if wire_messages.len() > 1 {
+        let tail_idx = wire_messages.len() - 1;
+        if let Some(Value::Object(msg)) = wire_messages.get_mut(tail_idx) {
+            if let Some(Value::Array(blocks)) = msg.get_mut("content") {
+                if let Some(Value::Object(last)) = blocks.last_mut() {
+                    last.insert(
+                        "cache_control".to_string(),
+                        json!({ "type": CACHE_CONTROL_EPHEMERAL }),
+                    );
+                }
+            }
+        }
+    }
+
     let mut root = Map::new();
     root.insert("model".to_string(), Value::String(model.to_string()));
     root.insert(
@@ -159,19 +176,28 @@ fn pick_prefix_breakpoint_index(
     if message_count == 0 {
         return None;
     }
-    let candidate = markers
-        .iter()
-        .find(|m| m.breakpoint == CacheBreakpoint::PinnedBaselineEnd)
-        .or_else(|| {
-            markers
-                .iter()
-                .find(|m| m.breakpoint == CacheBreakpoint::TailWindowStart)
-        })?;
-    let mapped = item_to_wire
-        .get(candidate.message_index)
-        .copied()
-        .unwrap_or(candidate.message_index);
-    Some(mapped.min(message_count - 1))
+    // T14 (KR-10): choose the breakpoint that has advanced *furthest* into the stable history.
+    //
+    // `PinnedBaselineEnd` is the run's frozen baseline: it is computed once and never moves, so
+    // always preferring it means every turn appended after the baseline is sent as uncached input —
+    // the cache stays warm on the first few messages and cold on everything the session actually
+    // produced. `TailWindowStart` is quantized by the projector (8-message steps), so it advances
+    // while still being stable between steps, which is exactly the trade-off a prefix cache wants.
+    let mut best: Option<usize> = None;
+    for marker in markers.iter().filter(|m| {
+        matches!(
+            m.breakpoint,
+            CacheBreakpoint::PinnedBaselineEnd | CacheBreakpoint::TailWindowStart
+        )
+    }) {
+        let mapped = item_to_wire
+            .get(marker.message_index)
+            .copied()
+            .unwrap_or(marker.message_index)
+            .min(message_count - 1);
+        best = Some(best.map_or(mapped, |current: usize| current.max(mapped)));
+    }
+    best
 }
 
 /// Translate the kroma transcript into Anthropic `messages`.
@@ -415,6 +441,7 @@ fn parse_anthropic_usage(usage: &Value) -> TokenUsage {
     TokenUsage {
         input_tokens: uncached + cache_read + cache_creation,
         cached_input_tokens: Some(cache_read),
+        cache_creation_input_tokens: Some(cache_creation),
         output_tokens: usage
             .get("output_tokens")
             .and_then(Value::as_u64)
