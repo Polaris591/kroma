@@ -448,6 +448,22 @@
       "exit": 0,
       "log": "logs/test_t20.log",
       "note": "T20: 963 passed / 0 failed"
+    },
+    {
+      "id": "t21_node_upgrade",
+      "cmd": "node scripts/test-kroma-js-upgrade.js",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t21_node_upgrade.log",
+      "note": "T21: all 108 existing Node checks still pass"
+    },
+    {
+      "id": "t21_trust_root",
+      "cmd": "node scripts/test-release-trust-root.js",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t21_trust_root.log",
+      "note": "T21: 13 test-channel checks pass (tamper/unknown/rotated/expired/downgrade/no-overwrite); production trust root is empty by design"
     }
   ]
 }
