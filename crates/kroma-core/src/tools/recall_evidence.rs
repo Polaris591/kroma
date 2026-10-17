@@ -79,11 +79,18 @@ pub fn execute_recall_evidence(
     };
 
     let Some(raw) = projector.evidence_lookup(&args.source_entry_id) else {
+        // T15 (KR-11): say *why*. "No longer retained", "gone", "corrupt" and "forbidden" are
+        // different facts, and collapsing them into one message would make a damaged store look like
+        // a retention policy.
+        let detail = match projector.evidence_status(&args.source_entry_id) {
+            Some(status) => status.describe(),
+            None => "its raw bytes are no longer retained".to_string(),
+        };
         return ToolExecutionOutput::error(
             ErrorCode::InvalidArguments,
             format!(
-                "evidence '{}' is indexed but its raw bytes are no longer retained",
-                args.source_entry_id
+                "evidence '{}' is indexed but {}",
+                args.source_entry_id, detail
             ),
             ToolResultMeta::default(),
         );

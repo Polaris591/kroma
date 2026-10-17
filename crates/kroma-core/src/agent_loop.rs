@@ -2224,6 +2224,24 @@ impl AgentRunner {
             ));
         }
         let mut projector = ContextProjector::new();
+        // T15 (KR-11): attach the durable evidence layer. Memory is a cache with a 16 MiB cap; once
+        // an entry is evicted, `recall_evidence` must still be able to produce the bytes (or say
+        // exactly why it cannot). The branch component is the leaf the run started on, fixed for the
+        // run, so a forked run gets its own artifact domain and cannot read its sibling's evidence.
+        if let Some(journal) = self.session_journal.as_ref() {
+            let state_dir = journal
+                .path()
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(std::env::temp_dir);
+            projector = projector.with_evidence_store(
+                std::sync::Arc::new(crate::evidence_store::EvidenceStore::new(
+                    state_dir.join("evidence"),
+                )),
+                journal.session_id().to_string(),
+                journal.leaf_id().unwrap_or("root").to_string(),
+            );
+        }
         // B2 (`v1.4.0`): honour a configured projection profile (default `P2`).
         if let Some(profile) = self.config.projection_profile {
             projector = projector.with_profile(profile);

@@ -258,6 +258,11 @@ pub struct ContextProjector {
     last_touched_turns: HashMap<String, usize>,
     /// Raw tool output retained for `recall_evidence`, keyed by `source_entry_id`.
     evidence: HashMap<String, Arc<str>>,
+    /// T15 (KR-11): durable artifact layer for evicted evidence. Memory is a cache; this is the
+    /// record. `None` keeps the historical behaviour (evicted bytes are simply gone).
+    evidence_store: Option<std::sync::Arc<crate::evidence_store::EvidenceStore>>,
+    evidence_session: String,
+    evidence_branch: String,
     /// Total bytes currently retained in `evidence`, used to enforce [`MAX_EVIDENCE_BYTES`].
     evidence_bytes: usize,
     /// `call_id` → `source_entry_id`, so a model may recall by either identifier.
@@ -299,6 +304,9 @@ impl ContextProjector {
             last_pinned_baseline_end: 0,
             last_touched_turns: HashMap::new(),
             evidence: HashMap::new(),
+            evidence_store: None,
+            evidence_session: String::new(),
+            evidence_branch: String::new(),
             evidence_bytes: 0,
             evidence_call_index: HashMap::new(),
             evidence_links: Vec::new(),
@@ -380,6 +388,51 @@ impl ContextProjector {
         }
     }
 
+    /// T15 (KR-11): attach the durable artifact store. `session_id` and `branch_id` become part of
+    /// every artifact key, so a fork cannot read its sibling's evidence and a resumed session reads
+    /// exactly the objects it wrote.
+    pub fn with_evidence_store(
+        mut self,
+        store: std::sync::Arc<crate::evidence_store::EvidenceStore>,
+        session_id: impl Into<String>,
+        branch_id: impl Into<String>,
+    ) -> Self {
+        self.evidence_store = Some(store);
+        self.evidence_session = session_id.into();
+        self.evidence_branch = branch_id.into();
+        self
+    }
+
+    fn artifact_key(&self, event_id: &str, sha256: &str) -> crate::evidence_store::ArtifactKey {
+        crate::evidence_store::ArtifactKey::new(
+            &self.evidence_session,
+            &self.evidence_branch,
+            event_id,
+            sha256,
+        )
+    }
+
+    /// T15: availability of an evidence id, including the durable layer.
+    ///
+    /// `None` means "no durable layer is attached and the bytes are not in memory", which is the
+    /// pre-T15 behaviour and stays distinguishable from an explicit `Gone`.
+    pub fn evidence_status(
+        &self,
+        source_entry_id: &str,
+    ) -> Option<crate::evidence_store::ArtifactStatus> {
+        if self.evidence.contains_key(source_entry_id) {
+            return None;
+        }
+        let canonical = self
+            .evidence_call_index
+            .get(source_entry_id)
+            .cloned()
+            .unwrap_or_else(|| source_entry_id.to_string());
+        let link = self.evidence_link(&canonical)?;
+        let store = self.evidence_store.as_ref()?;
+        Some(store.get(&self.artifact_key(&link.source_entry_id, &link.original_sha256)))
+    }
+
     /// Register raw evidence for an Outline Stub (used by compaction and when seeding from a
     /// resumed WAL).
     ///
@@ -436,6 +489,19 @@ impl ContextProjector {
             }
             if let Some(dropped) = self.evidence.remove(&id) {
                 self.evidence_bytes = self.evidence_bytes.saturating_sub(dropped.len());
+                // T15 (KR-11): eviction from memory is not deletion. Hand the bytes to the durable
+                // layer first, keyed by event + content hash, so `recall_evidence` can still produce
+                // them (and can report Gone/Corrupt/Forbidden instead of guessing).
+                if let (Some(store), Some(link)) = (
+                    self.evidence_store.clone(),
+                    self.evidence_links
+                        .iter()
+                        .find(|l| l.source_entry_id == id)
+                        .cloned(),
+                ) {
+                    let key = self.artifact_key(&link.source_entry_id, &link.original_sha256);
+                    let _ = store.put(&key, &dropped);
+                }
             }
         }
     }
@@ -445,8 +511,23 @@ impl ContextProjector {
         if let Some(raw) = self.evidence.get(id) {
             return Some(Arc::clone(raw));
         }
-        let canonical = self.evidence_call_index.get(id)?;
-        self.evidence.get(canonical).map(Arc::clone)
+        let canonical = self
+            .evidence_call_index
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.to_string());
+        if let Some(raw) = self.evidence.get(&canonical) {
+            return Some(Arc::clone(raw));
+        }
+        // T15 (KR-11): a memory miss falls through to the durable artifact, verified against the
+        // content hash recorded when it was captured. It never re-reads the workspace file: an edited
+        // file is not the evidence that was captured.
+        if let Some(crate::evidence_store::ArtifactStatus::Available { text, .. }) =
+            self.evidence_status(&canonical)
+        {
+            return Some(Arc::from(text.as_str()));
+        }
+        None
     }
 
     /// Evidence-graph metadata for `source_entry_id` (or the originating tool `call_id`).

@@ -145,6 +145,24 @@ pub(crate) fn open_existing_no_symlink(path: &Path) -> std::io::Result<File> {
     }
 }
 
+/// T15 (KR-11): is `meta` a directory private to the current user?
+///
+/// Used by the evidence store: bytes in a directory anyone can write are not evidence, no matter what
+/// they hash to.
+pub(crate) fn is_private_dir(meta: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: `getuid` has no preconditions and never fails.
+        let uid = unsafe { libc::getuid() };
+        meta.is_dir() && meta.mode() & 0o077 == 0 && meta.uid() == uid
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_dir()
+    }
+}
+
 /// T06 (KR-06): open for reading with the whole boundary policy applied at once.
 ///
 /// Three separate boundaries, none of which substitutes for another:
