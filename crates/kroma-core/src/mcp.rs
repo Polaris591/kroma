@@ -51,6 +51,18 @@ const MAX_MCP_QUEUE_DEPTH: usize = 16;
 const MAX_MCP_REQUEST_ENVELOPE_BYTES: usize = 256;
 /// The MCP revision this adapter speaks. A server may negotiate a different one back.
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// T13 (KR-19): the versions this client actually implements. Deliberately a list of one: the
+/// declared support range is 2024-11-05, and claiming more without testing it would be a lie in the
+/// other direction. A server that answers with anything else is refused *before* the handshake
+/// completes.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION];
+
+/// T13: bounds for one `tools/list` walk. A hostile or broken server must not be able to make the
+/// host allocate or loop without end.
+pub const MAX_TOOL_PAGES: usize = 32;
+pub const MAX_CATALOG_TOOLS: usize = 256;
+pub const MAX_CATALOG_SCHEMA_BYTES: usize = 256 * 1024;
 /// Default timeout awaiting a single server response.
 pub const DEFAULT_MCP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often a caller waiting on a host reply re-checks for cancellation. Short enough that an
@@ -86,8 +98,35 @@ pub enum McpError {
     /// never queued and never sent to any server.
     RequestTooLarge(usize),
     Protocol(String),
-    Server { code: i64, message: String },
+    Server {
+        code: i64,
+        message: String,
+    },
     NoStdio,
+    /// T13 (KR-19): the server negotiated a protocol version this client does not implement. The
+    /// handshake stops before `notifications/initialized`, so the server is never told the session is
+    /// live.
+    UnsupportedProtocolVersion {
+        server: String,
+        supported: Vec<String>,
+    },
+    /// T13: the server did not declare a capability the call requires (`tools`). Asking anyway would
+    /// be a protocol violation the server is free to answer however it likes.
+    CapabilityMissing {
+        capability: String,
+    },
+    /// T13: `tools/list` exceeded a catalog budget (pages, tools, or schema bytes).
+    CatalogBudgetExceeded {
+        reason: String,
+    },
+    /// T13: the server returned a cursor it had already returned — the pagination would never end.
+    CursorCycle {
+        cursor: String,
+    },
+    /// T13: two entries in the catalog share a name, so the mapping to host tools would be ambiguous.
+    DuplicateToolName {
+        name: String,
+    },
 }
 
 impl std::fmt::Display for McpError {
@@ -123,6 +162,30 @@ impl std::fmt::Display for McpError {
                 write!(f, "MCP server error {}: {}", code, message)
             }
             McpError::NoStdio => write!(f, "MCP child did not expose piped stdio"),
+            McpError::UnsupportedProtocolVersion { server, supported } => write!(
+                f,
+                "MCP server negotiated protocol version '{}', which this client does not support (supported: {})",
+                server,
+                supported.join(", ")
+            ),
+            McpError::CapabilityMissing { capability } => write!(
+                f,
+                "MCP server did not declare the '{}' capability; refusing to call it",
+                capability
+            ),
+            McpError::CatalogBudgetExceeded { reason } => {
+                write!(f, "MCP tool catalog exceeded its budget: {}", reason)
+            }
+            McpError::CursorCycle { cursor } => write!(
+                f,
+                "MCP tools/list returned a cursor it had already returned ('{}'); stopping",
+                cursor
+            ),
+            McpError::DuplicateToolName { name } => write!(
+                f,
+                "MCP server listed tool '{}' twice; the catalog is ambiguous",
+                name
+            ),
         }
     }
 }
@@ -187,6 +250,10 @@ pub struct McpClient {
     /// Set when an aborted or interrupted write left the byte stream in an unknown state. A poisoned
     /// client refuses further calls instead of writing into a corrupted request line.
     poisoned: bool,
+    /// T13: capabilities the server declared during `initialize`. `None` until the handshake
+    /// completes, which is why `list_tools` before `initialize` is a protocol error rather than a
+    /// guess.
+    server_capabilities: Option<Value>,
 }
 
 impl std::fmt::Debug for McpClient {
@@ -209,14 +276,18 @@ impl McpClient {
         timeout: Duration,
     ) -> Result<Self, McpError> {
         if program.trim().is_empty() {
-            return Err(McpError::Spawn("program command cannot be empty".to_string()));
+            return Err(McpError::Spawn(
+                "program command cannot be empty".to_string(),
+            ));
         }
         // F04: the shared launch seam purges inherited environment variables (API keys, tokens,
         // etc.) via the credential scrub, then applies the explicitly authorized server-specific
         // variables. `SanitizedWithCustomNoBaseline` preserves the long-lived server's inherited
         // environment apart from the scrub (no `CI`/`NO_COLOR` injection).
         let (mut child, group) = ProcessLaunch::new(program, args.to_vec())
-            .env_policy(EnvironmentPolicy::SanitizedWithCustomNoBaseline(envs.to_vec()))
+            .env_policy(EnvironmentPolicy::SanitizedWithCustomNoBaseline(
+                envs.to_vec(),
+            ))
             .stdio(Stdio::piped(), Stdio::piped(), Stdio::null())
             // A dropped client must never leave an orphaned server process behind.
             .kill_on_drop(true)
@@ -232,6 +303,7 @@ impl McpClient {
             next_id: 1,
             timeout,
             poisoned: false,
+            server_capabilities: None,
         })
     }
 
@@ -380,21 +452,113 @@ impl McpClient {
                 deadline,
             )
             .await?;
+        let negotiated: McpInitializeResult =
+            serde_json::from_value(result).map_err(|e| McpError::Protocol(e.to_string()))?;
+        // T13 (KR-19): validate *before* telling the server the session is live. The 2024-11-05 spec
+        // lets the server answer with a different version than the one requested, and a client that
+        // ignores that mismatch will misinterpret every later frame.
+        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&negotiated.protocol_version.as_str()) {
+            return Err(McpError::UnsupportedProtocolVersion {
+                server: negotiated.protocol_version.clone(),
+                supported: SUPPORTED_PROTOCOL_VERSIONS
+                    .iter()
+                    .map(|v| (*v).to_string())
+                    .collect(),
+            });
+        }
+        self.server_capabilities = Some(negotiated.capabilities.clone());
         // The spec requires a `notifications/initialized` notification once the handshake completes.
         let notification = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
         self.write_message_until(&notification, deadline).await?;
-        serde_json::from_value(result).map_err(|e| McpError::Protocol(e.to_string()))
+        Ok(negotiated)
+    }
+
+    /// Did the server declare `capability` during the handshake?
+    ///
+    /// A server that declared no capabilities at all is treated as not declaring any specific one:
+    /// calling `tools/list` on it would be a protocol violation, and the caller gets an explicit error
+    /// instead of a confusing empty catalog.
+    pub fn declares_capability(&self, capability: &str) -> bool {
+        match &self.server_capabilities {
+            Some(caps) => caps.get(capability).is_some_and(|v| !v.is_null()),
+            None => false,
+        }
     }
 
     /// `tools/list`: return every tool the server exposes.
     pub async fn list_tools(&mut self) -> Result<Vec<McpToolDescriptor>, McpError> {
+        // T13 (KR-19): `tools/list` is paginated by `nextCursor`. Following it is not optional — a
+        // server with more tools than fit one page would otherwise look like a server with a truncated
+        // catalog, and the missing tools would simply be uncallable.
+        // A poisoned client refuses everything with the transport error: the byte stream is in an
+        // unknown state, so a capability answer here would be a guess dressed up as a protocol fact.
+        if !self.poisoned && !self.declares_capability("tools") {
+            return Err(McpError::CapabilityMissing {
+                capability: "tools".to_string(),
+            });
+        }
         let deadline = Instant::now() + self.timeout;
-        let result = self.request("tools/list", json!({}), deadline).await?;
-        let tools = result
-            .get("tools")
-            .cloned()
-            .unwrap_or(Value::Array(Vec::new()));
-        serde_json::from_value(tools).map_err(|e| McpError::Protocol(e.to_string()))
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors: std::collections::BTreeSet<String> = Default::default();
+        let mut names: std::collections::BTreeSet<String> = Default::default();
+        let mut schema_bytes = 0usize;
+        let mut tools: Vec<McpToolDescriptor> = Vec::new();
+
+        for _page in 0..MAX_TOOL_PAGES {
+            let params = match &cursor {
+                Some(c) => json!({ "cursor": c }),
+                None => json!({}),
+            };
+            let result = self.request("tools/list", params, deadline).await?;
+            let page: Vec<McpToolDescriptor> = serde_json::from_value(
+                result
+                    .get("tools")
+                    .cloned()
+                    .unwrap_or(Value::Array(Vec::new())),
+            )
+            .map_err(|e| McpError::Protocol(e.to_string()))?;
+            for tool in page {
+                if !names.insert(tool.name.clone()) {
+                    return Err(McpError::DuplicateToolName { name: tool.name });
+                }
+                // The schema budget is measured on the serialized schema, because that is what ends up
+                // in every request once the tool is visible.
+                schema_bytes = schema_bytes.saturating_add(
+                    serde_json::to_string(&tool.input_schema)
+                        .map(|s| s.len())
+                        .unwrap_or(0),
+                );
+                if schema_bytes > MAX_CATALOG_SCHEMA_BYTES {
+                    return Err(McpError::CatalogBudgetExceeded {
+                        reason: format!(
+                            "tool schemas exceed {} bytes after {} tools",
+                            MAX_CATALOG_SCHEMA_BYTES,
+                            names.len()
+                        ),
+                    });
+                }
+                tools.push(tool);
+                if tools.len() > MAX_CATALOG_TOOLS {
+                    return Err(McpError::CatalogBudgetExceeded {
+                        reason: format!("more than {} tools", MAX_CATALOG_TOOLS),
+                    });
+                }
+            }
+            match result.get("nextCursor").and_then(Value::as_str) {
+                Some(next) if !next.is_empty() => {
+                    if !seen_cursors.insert(next.to_string()) {
+                        return Err(McpError::CursorCycle {
+                            cursor: next.to_string(),
+                        });
+                    }
+                    cursor = Some(next.to_string());
+                }
+                _ => return Ok(tools),
+            }
+        }
+        Err(McpError::CatalogBudgetExceeded {
+            reason: format!("more than {} pages", MAX_TOOL_PAGES),
+        })
     }
 
     /// `tools/call`: invoke a tool and concatenate the textual content blocks it returns.
@@ -793,7 +957,9 @@ impl McpHostInner {
                     Err(_) => {
                         // Worker already won CAS to STARTED! Signal worker to abort I/O and poison
                         let _ = cancel_tx.send(true);
-                        match reply_rx.recv_timeout(CALL_POLL_INTERVAL.max(Duration::from_millis(100))) {
+                        match reply_rx
+                            .recv_timeout(CALL_POLL_INTERVAL.max(Duration::from_millis(100)))
+                        {
                             Ok(result) => return result,
                             Err(_) => return Err(McpError::StartedCancelled),
                         }
@@ -820,7 +986,9 @@ impl McpHostInner {
                         // Already started: deadline fired while executing on server
                         let _ = cancel_tx.send(true);
                         let elapsed = now.saturating_duration_since(start_instant);
-                        match reply_rx.recv_timeout(CALL_POLL_INTERVAL.max(Duration::from_millis(100))) {
+                        match reply_rx
+                            .recv_timeout(CALL_POLL_INTERVAL.max(Duration::from_millis(100)))
+                        {
                             Ok(result) => return result,
                             Err(_) => return Err(McpError::StartedDeadline(elapsed)),
                         }
@@ -895,12 +1063,24 @@ struct HostedTool {
 pub struct McpToolHost {
     inner: Arc<McpHostInner>,
     descriptors: Vec<HostedTool>,
+    /// T13 (KR-19): servers that started but were not registered because they do not declare the
+    /// `tools` capability, with the reason. Recorded instead of silently dropped: a resource-only
+    /// server is legitimate, but the operator should still be able to see why it contributes nothing.
+    skipped_servers: Vec<(String, String)>,
 }
 
 impl McpToolHost {
     /// Spawn every configured server, complete the `initialize`/`tools/list` handshake, and return a
-    /// host. Any server that fails to start or handshake fails the whole host (the operator
-    /// explicitly configured it, so silently dropping it would hide a broken setup).
+    /// host. A server that fails to start, negotiates an unsupported protocol version, or returns a
+    /// malformed catalog fails the whole host (the operator explicitly configured it, so silently
+    /// dropping it would hide a broken setup).
+    ///
+    /// The one exception is a server that simply does not declare the `tools` capability: it is
+    /// skipped and recorded in [`Self::skipped_servers`], because a resource-only server is a valid
+    /// thing to configure and calling `tools/list` on it would be a protocol violation.
+    pub fn skipped_servers(&self) -> &[(String, String)] {
+        &self.skipped_servers
+    }
     pub fn start(servers: &[McpServerConfig], timeout: Duration) -> Result<Self, McpError> {
         Self::start_with_depth(servers, timeout, MAX_MCP_QUEUE_DEPTH)
     }
@@ -926,7 +1106,8 @@ impl McpToolHost {
         // A bounded queue: at most `queue_depth` calls wait while one further call executes. `0`
         // would be a rendezvous channel, so clamp to at least one.
         let (tx, rx) = std_mpsc::sync_channel::<HostRequest>(queue_depth.max(1));
-        let (ready_tx, ready_rx) = std_mpsc::channel::<Result<Vec<DiscoveredServer>, McpError>>();
+        let (ready_tx, ready_rx) =
+            std_mpsc::channel::<Result<(Vec<DiscoveredServer>, Vec<(String, String)>), McpError>>();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (done_tx, done_rx) = std_mpsc::channel::<()>();
         let server_count = servers.len();
@@ -947,6 +1128,7 @@ impl McpToolHost {
                 };
                 let mut clients: HashMap<String, McpClient> = HashMap::new();
                 let mut discovered: Vec<DiscoveredServer> = Vec::new();
+                let mut skipped: Vec<(String, String)> = Vec::new();
                 for server in &servers {
                     let mut client = match rt.block_on(async {
                         McpClient::spawn(&server.command, &server.args, &server.env, timeout)
@@ -974,6 +1156,14 @@ impl McpToolHost {
                                 read_only: server.read_only,
                             });
                         }
+                        Err(e @ McpError::CapabilityMissing { .. }) => {
+                            // A server without the `tools` capability contributes no tools; calling
+                            // `tools/list` would be a protocol violation. Skip it, record why, and
+                            // keep the rest of the host alive.
+                            skipped.push((server.name.clone(), e.to_string()));
+                            rt.block_on(client.shutdown());
+                            continue;
+                        }
                         Err(e) => {
                             let _ = ready_tx.send(Err(e));
                             // This server never made it into the map, so reap it here as well.
@@ -986,7 +1176,7 @@ impl McpToolHost {
                         }
                     }
                 }
-                let _ = ready_tx.send(Ok(discovered));
+                let _ = ready_tx.send(Ok((discovered, skipped)));
 
                 while let Ok(request) = rx.recv() {
                     // Shutdown has priority over anything still queued behind it.
@@ -1093,8 +1283,8 @@ impl McpToolHost {
             .map_err(|e| McpError::Spawn(e.to_string()))?;
 
         let discovery_timeout = timeout.saturating_mul(server_count as u32 + 1);
-        let discovered = match ready_rx.recv_timeout(discovery_timeout) {
-            Ok(Ok(discovered)) => discovered,
+        let (discovered, skipped_servers) = match ready_rx.recv_timeout(discovery_timeout) {
+            Ok(Ok(pair)) => pair,
             Ok(Err(e)) => return Err(e),
             Err(_) => {
                 // Abort discovery and reap whatever was already spawned.
@@ -1133,6 +1323,7 @@ impl McpToolHost {
                 worker_done: Mutex::new(Some(done_rx)),
             }),
             descriptors,
+            skipped_servers,
         })
     }
 
@@ -1181,7 +1372,13 @@ impl McpToolHost {
                             );
                         }
                     };
-                    match inner.call(&server, &name, arguments, ctx.in_flight.clone(), ctx.exec_context) {
+                    match inner.call(
+                        &server,
+                        &name,
+                        arguments,
+                        ctx.in_flight.clone(),
+                        ctx.exec_context,
+                    ) {
                         Ok(call_res) => {
                             if call_res.is_error {
                                 ToolExecutionOutput::error(
@@ -1454,7 +1651,8 @@ mod call_lifetime_tests {
         });
         let rendered_succ = render_tool_result(&success_both);
         assert!(rendered_succ.contains("operation completed\n"));
-        assert!(rendered_succ.contains("[structuredContent]\n{\"records_updated\":42,\"status\":\"ok\"}\n"));
+        assert!(rendered_succ
+            .contains("[structuredContent]\n{\"records_updated\":42,\"status\":\"ok\"}\n"));
         assert!(!rendered_succ.contains("[mcp tool error]"));
 
         // Error with both content and structuredContent
@@ -1466,14 +1664,18 @@ mod call_lifetime_tests {
         let rendered_err = render_tool_result(&error_both);
         assert!(rendered_err.contains("[mcp tool error]\n"));
         assert!(rendered_err.contains("database failed\n"));
-        assert!(rendered_err.contains("[structuredContent]\n{\"error_code\":1054,\"sql_state\":\"42S22\"}\n"));
+        assert!(rendered_err
+            .contains("[structuredContent]\n{\"error_code\":1054,\"sql_state\":\"42S22\"}\n"));
 
         // Structured-only success (content field absent) - no double encoding
         let struct_only_succ = json!({
             "structuredContent": {"metric": 99.5}
         });
         let rendered_only_succ = render_tool_result(&struct_only_succ);
-        assert_eq!(rendered_only_succ, "[structuredContent]\n{\"metric\":99.5}\n");
+        assert_eq!(
+            rendered_only_succ,
+            "[structuredContent]\n{\"metric\":99.5}\n"
+        );
         assert!(!rendered_only_succ.contains("\"structuredContent\":"));
 
         // Structured-only error (content field absent) - no double encoding
@@ -1585,7 +1787,10 @@ mod call_lifetime_tests {
         let res = read_message_bounded(&mut reader, limit).await;
         match res {
             Err(McpError::MessageTooLarge(n)) => assert_eq!(n, 41),
-            other => panic!("N + 1 boundary must fail with MessageTooLarge(41), got: {:?}", other),
+            other => panic!(
+                "N + 1 boundary must fail with MessageTooLarge(41), got: {:?}",
+                other
+            ),
         }
 
         // N + 1 = 41 bytes (without newline)
@@ -1594,7 +1799,10 @@ mod call_lifetime_tests {
         let res = read_message_bounded(&mut reader, limit).await;
         match res {
             Err(McpError::MessageTooLarge(n)) => assert_eq!(n, 41),
-            other => panic!("N + 1 boundary without newline must fail with MessageTooLarge(41), got: {:?}", other),
+            other => panic!(
+                "N + 1 boundary without newline must fail with MessageTooLarge(41), got: {:?}",
+                other
+            ),
         }
     }
 
@@ -1679,7 +1887,10 @@ mod call_lifetime_tests {
         let res = read_message_bounded(&mut reader, 1024).await;
         match res {
             Err(McpError::Protocol(msg)) => assert!(msg.contains("invalid UTF-8")),
-            other => panic!("expected Protocol error for invalid UTF-8, got: {:?}", other),
+            other => panic!(
+                "expected Protocol error for invalid UTF-8, got: {:?}",
+                other
+            ),
         }
     }
 
@@ -1687,12 +1898,29 @@ mod call_lifetime_tests {
     async fn subsequent_call_fails_closed_when_poisoned() {
         let mut client = McpClient {
             child: tokio::process::Command::new("true").spawn().unwrap(),
-            stdin: tokio::process::Command::new("true").stdin(std::process::Stdio::piped()).spawn().unwrap().stdin.take().unwrap(),
-            stdout: tokio::io::BufReader::new(tokio::process::Command::new("true").stdout(std::process::Stdio::piped()).spawn().unwrap().stdout.take().unwrap()),
-            group: ChildProcessGroup::from_tokio_child(&tokio::process::Command::new("true").spawn().unwrap()),
+            stdin: tokio::process::Command::new("true")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+                .stdin
+                .take()
+                .unwrap(),
+            stdout: tokio::io::BufReader::new(
+                tokio::process::Command::new("true")
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+                    .stdout
+                    .take()
+                    .unwrap(),
+            ),
+            group: ChildProcessGroup::from_tokio_child(
+                &tokio::process::Command::new("true").spawn().unwrap(),
+            ),
             next_id: 1,
             timeout: Duration::from_secs(5),
             poisoned: false,
+            server_capabilities: None,
         };
 
         // Initially not poisoned
@@ -1708,7 +1936,9 @@ mod call_lifetime_tests {
         }
 
         // request immediately fails closed without writing
-        let res = client.request("test", json!({}), Instant::now() + Duration::from_secs(5)).await;
+        let res = client
+            .request("test", json!({}), Instant::now() + Duration::from_secs(5))
+            .await;
         match res {
             Err(McpError::Io(msg)) => assert!(msg.contains("poisoned")),
             other => panic!("expected poisoned Io error, got: {:?}", other),
@@ -1724,7 +1954,7 @@ for line in sys.stdin:
     if not line.strip():
         continue
     # Valid JSON structure, but invalid UTF-8 bytes 0xff 0xfe in string value
-    sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test\xff\xfe","version":"1"}}}\n')
+    sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"test\xff\xfe","version":"1"}}}\n')
     sys.stdout.buffer.flush()
 "#;
         let mut client = McpClient::spawn(
@@ -1738,17 +1968,31 @@ for line in sys.stdin:
         let init_res = client.initialize().await;
         match init_res {
             Err(McpError::Protocol(msg)) => {
-                assert!(msg.contains("invalid UTF-8"), "expected invalid UTF-8 error, got: {}", msg);
+                assert!(
+                    msg.contains("invalid UTF-8"),
+                    "expected invalid UTF-8 error, got: {}",
+                    msg
+                );
             }
-            other => panic!("expected Protocol error with invalid UTF-8, got: {:?}", other),
+            other => panic!(
+                "expected Protocol error with invalid UTF-8, got: {:?}",
+                other
+            ),
         }
 
         let next_res = client.list_tools().await;
         match next_res {
             Err(McpError::Io(msg)) => {
-                assert!(msg.contains("poisoned"), "expected poisoned transport error, got: {}", msg);
+                assert!(
+                    msg.contains("poisoned"),
+                    "expected poisoned transport error, got: {}",
+                    msg
+                );
             }
-            other => panic!("expected poisoned Io error on subsequent request, got: {:?}", other),
+            other => panic!(
+                "expected poisoned Io error on subsequent request, got: {:?}",
+                other
+            ),
         }
 
         client.shutdown().await;
@@ -1780,9 +2024,16 @@ time.sleep(10)
         let next_res = client.list_tools().await;
         match next_res {
             Err(McpError::Io(msg)) => {
-                assert!(msg.contains("poisoned"), "expected poisoned transport error, got: {}", msg);
+                assert!(
+                    msg.contains("poisoned"),
+                    "expected poisoned transport error, got: {}",
+                    msg
+                );
             }
-            other => panic!("expected poisoned Io error on subsequent request, got: {:?}", other),
+            other => panic!(
+                "expected poisoned Io error on subsequent request, got: {:?}",
+                other
+            ),
         }
 
         client.shutdown().await;
@@ -1852,7 +2103,10 @@ time.sleep(10)
     fn bounded_sink_stops_at_the_exact_limit() {
         use std::io::Write;
         let mut sink = BoundedSink::new(8);
-        assert!(sink.write_all(b"xxxxxxxx").is_ok(), "exactly the limit fits");
+        assert!(
+            sink.write_all(b"xxxxxxxx").is_ok(),
+            "exactly the limit fits"
+        );
         assert!(!sink.exceeded());
         assert_eq!(sink.written(), 8);
         assert!(sink.write_all(b"x").is_err(), "one byte over must fail");
@@ -1884,7 +2138,12 @@ time.sleep(10)
         // `i64::MAX` is the largest id `next_id` can ever build (it saturates at `i64::MAX`).
         // Method names: every method this client writes, longest first. `tools/call` is the one the
         // admission path uses; the others share the same frame shape and must fit too.
-        for method in ["notifications/initialized", "tools/call", "tools/list", "initialize"] {
+        for method in [
+            "notifications/initialized",
+            "tools/call",
+            "tools/list",
+            "initialize",
+        ] {
             let empty = json!({});
             let params = QueuedRequestParams {
                 name: "t",
@@ -1961,7 +2220,7 @@ for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
     if method == "initialize":
-        respond(msg["id"], {"protocolVersion": "2024-11-05", "capabilities": {},
+        respond(msg["id"], {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
                             "serverInfo": {"name": "adm", "version": "1"}})
     elif method == "notifications/initialized":
         pass
@@ -1998,7 +2257,10 @@ for line in sys.stdin:
             env: vec![
                 ("B06_ADM_PID".to_string(), pid_file.display().to_string()),
                 ("B06_ADM_ENTERED".to_string(), entered.display().to_string()),
-                ("B06_ADM_EXECUTED".to_string(), executed.display().to_string()),
+                (
+                    "B06_ADM_EXECUTED".to_string(),
+                    executed.display().to_string(),
+                ),
             ],
             read_only: false,
         };
@@ -2010,9 +2272,8 @@ for line in sys.stdin:
         std::thread::scope(|scope| {
             // 1. The active call: the worker dequeues it and the server blocks, freeing the one slot.
             let blocker_inner = Arc::clone(&inner);
-            let blocker = scope.spawn(move || {
-                blocker_inner.call("srv", "slow", json!({}), None, None)
-            });
+            let blocker =
+                scope.spawn(move || blocker_inner.call("srv", "slow", json!({}), None, None));
             wait_for_marker(&entered);
 
             // 2. Fill the single queue slot with a call we will cancel while it waits.
@@ -2052,7 +2313,10 @@ for line in sys.stdin:
                 shutdown_started.elapsed()
             );
             let blocker_out = blocker.join().unwrap();
-            assert!(blocker_out.is_err(), "the blocked call must be aborted on shutdown");
+            assert!(
+                blocker_out.is_err(),
+                "the blocked call must be aborted on shutdown"
+            );
         });
 
         let executed_count = std::fs::read_to_string(&executed)

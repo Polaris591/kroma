@@ -47,7 +47,7 @@ for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
     if method == "initialize":
-        respond(msg["id"], {"protocolVersion": "2024-11-05", "capabilities": {},
+        respond(msg["id"], {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
                             "serverInfo": {"name": "b06", "version": "1"}})
     elif method == "notifications/initialized":
         pass

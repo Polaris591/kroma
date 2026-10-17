@@ -307,6 +307,28 @@
       "exit": 101,
       "log": "logs/test_t12.log",
       "note": "T12: 905 passed / 2 failed (b05 2.1 + b08c 2.2 documented flakes, both green on rerun)"
+    },
+    {
+      "id": "t13_targeted",
+      "cmd": "cargo test -p kroma-core --test t13_mcp_handshake",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T13: 6 passed / 0 failed (real python stdio servers: version, capability, pagination, cursor cycle, budgets, annotations)"
+    },
+    {
+      "id": "t13_mcp_config",
+      "cmd": "cargo test -p kroma-core --test mcp_config",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T13: 9 passed / 0 failed after fixtures declare the tools capability"
+    },
+    {
+      "id": "t13_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t13.log",
+      "note": "T13: 911 passed / 2 failed (session_ownership 2.5 + b08c 2.2 documented flakes, both green on rerun)"
     }
   ]
 }
