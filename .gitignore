@@ -3,3 +3,4 @@
 /npm/dist/
 /npm/cli-*/bin/kroma*
 __pycache__/
+dist-t30/
