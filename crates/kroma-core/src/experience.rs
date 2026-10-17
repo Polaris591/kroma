@@ -129,20 +129,27 @@ pub enum ExperienceError {
     InvalidActor,
     UnknownRecord(String),
     /// The record's text came from the repository, so it cannot reach this scope.
-    UntrustedSource { id: String, source: String },
+    UntrustedSource {
+        id: String,
+        source: String,
+    },
     /// Acceptance without evidence is a claim, not a lesson.
     MissingEvidence(String),
     /// A revoked record is not re-accepted; revoking must mean something.
     Revoked(String),
     /// Accepting or promoting to a narrower/equal scope makes no sense.
-    ScopeNotWider { id: String },
+    ScopeNotWider {
+        id: String,
+    },
 }
 
 impl std::fmt::Display for ExperienceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExperienceError::Capacity => write!(f, "experience store is full"),
-            ExperienceError::InvalidActor => write!(f, "experience acceptance requires a nonblank trusted actor"),
+            ExperienceError::InvalidActor => {
+                write!(f, "experience acceptance requires a nonblank trusted actor")
+            }
             ExperienceError::UnknownRecord(id) => write!(f, "unknown experience record '{}'", id),
             ExperienceError::UntrustedSource { id, source } => write!(
                 f,
@@ -153,7 +160,11 @@ impl std::fmt::Display for ExperienceError {
                 write!(f, "experience '{}' has no evidence to accept", id)
             }
             ExperienceError::Revoked(id) => {
-                write!(f, "experience '{}' was revoked and cannot be re-accepted", id)
+                write!(
+                    f,
+                    "experience '{}' was revoked and cannot be re-accepted",
+                    id
+                )
             }
             ExperienceError::ScopeNotWider { id } => {
                 write!(f, "experience '{}' is already at that scope", id)
@@ -184,6 +195,14 @@ impl ExperienceStore {
 
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// Every record, in id order, for auditing (statistics, invalidation, export).
+    ///
+    /// Read-only on purpose: nothing outside the store may mutate a record's status without going
+    /// through `accept`/`promote`/`revoke`.
+    pub fn all(&self) -> Vec<&ExperienceRecord> {
+        self.records.values().collect()
     }
 
     pub fn get(&self, id: &str) -> Option<&ExperienceRecord> {
@@ -218,7 +237,11 @@ impl ExperienceStore {
                 return Ok(id);
             }
         }
-        if self.records.get(&id).is_some_and(|record| record.status == ExperienceStatus::Accepted) {
+        if self
+            .records
+            .get(&id)
+            .is_some_and(|record| record.status == ExperienceStatus::Accepted)
+        {
             return Ok(id); // A proposal has no authority to replace accepted bytes.
         }
         if !self.records.contains_key(&id) && self.records.len() >= MAX_EXPERIENCE_RECORDS {
@@ -234,7 +257,11 @@ impl ExperienceStore {
             counterexample: None,
             version: truncate(version.into(), MAX_FIELD_LEN),
             expires_at_ms: None,
-            status: if self.revoked_keys.contains_key(&key) { ExperienceStatus::Revoked } else { ExperienceStatus::Candidate },
+            status: if self.revoked_keys.contains_key(&key) {
+                ExperienceStatus::Revoked
+            } else {
+                ExperienceStatus::Candidate
+            },
             source,
             accepted_by: None,
             revoked_reason: None,
@@ -260,7 +287,9 @@ impl ExperienceStore {
 
     /// Accept a candidate. Requires a trusted actor and real evidence.
     pub fn accept(&mut self, id: &str, actor: &TrustedActor) -> Result<(), ExperienceError> {
-        if actor.name().trim().is_empty() { return Err(ExperienceError::InvalidActor); }
+        if actor.name().trim().is_empty() {
+            return Err(ExperienceError::InvalidActor);
+        }
         let record = self
             .records
             .get_mut(id)
@@ -290,7 +319,9 @@ impl ExperienceStore {
         to: ExperienceScope,
         actor: &TrustedActor,
     ) -> Result<(), ExperienceError> {
-        if actor.name().trim().is_empty() { return Err(ExperienceError::InvalidActor); }
+        if actor.name().trim().is_empty() {
+            return Err(ExperienceError::InvalidActor);
+        }
         let record = self
             .records
             .get_mut(id)
@@ -357,7 +388,11 @@ impl ExperienceStore {
             .values()
             .filter(|record| record.status == ExperienceStatus::Accepted)
             .filter(|record| record.scope <= scope)
-            .filter(|record| record.expires_at_ms.is_none_or(|deadline| deadline > now_ms))
+            .filter(|record| {
+                record
+                    .expires_at_ms
+                    .is_none_or(|deadline| deadline > now_ms)
+            })
             .take(limit)
             .collect()
     }
@@ -443,30 +478,82 @@ mod tests {
 
     #[test]
     fn reproposing_an_accepted_key_cannot_rewrite_its_guidance() {
-        let mut store=ExperienceStore::new();
-        let id=store.propose("same",ExperienceScope::Repo,"p","accepted-action","e","v1",ExperienceSource::Operator).unwrap();
-        store.accept(&id,&TrustedActor::new("local-host")).unwrap();
-        store.propose("same",ExperienceScope::Repo,"p","injected-replacement","e","v1",ExperienceSource::Operator).unwrap();
-        assert_eq!(store.get(&id).unwrap().action,"accepted-action");
-        assert_eq!(store.get(&id).unwrap().status,ExperienceStatus::Accepted);
+        let mut store = ExperienceStore::new();
+        let id = store
+            .propose(
+                "same",
+                ExperienceScope::Repo,
+                "p",
+                "accepted-action",
+                "e",
+                "v1",
+                ExperienceSource::Operator,
+            )
+            .unwrap();
+        store.accept(&id, &TrustedActor::new("local-host")).unwrap();
+        store
+            .propose(
+                "same",
+                ExperienceScope::Repo,
+                "p",
+                "injected-replacement",
+                "e",
+                "v1",
+                ExperienceSource::Operator,
+            )
+            .unwrap();
+        assert_eq!(store.get(&id).unwrap().action, "accepted-action");
+        assert_eq!(store.get(&id).unwrap().status, ExperienceStatus::Accepted);
     }
 
     #[test]
     fn a_revoked_key_cannot_reappear_at_a_different_scope() {
-        let mut store=ExperienceStore::new();
-        let id=store.propose("same",ExperienceScope::Repo,"p","a","e","v1",ExperienceSource::Operator).unwrap();
-        store.revoke(&id,"unsafe").unwrap();
-        let next=store.propose("same",ExperienceScope::Global,"p","a","e","v1",ExperienceSource::Operator).unwrap();
-        assert_eq!(store.get(&next).unwrap().status,ExperienceStatus::Revoked);
-        assert!(store.accept(&next,&TrustedActor::new("local-host")).is_err());
+        let mut store = ExperienceStore::new();
+        let id = store
+            .propose(
+                "same",
+                ExperienceScope::Repo,
+                "p",
+                "a",
+                "e",
+                "v1",
+                ExperienceSource::Operator,
+            )
+            .unwrap();
+        store.revoke(&id, "unsafe").unwrap();
+        let next = store
+            .propose(
+                "same",
+                ExperienceScope::Global,
+                "p",
+                "a",
+                "e",
+                "v1",
+                ExperienceSource::Operator,
+            )
+            .unwrap();
+        assert_eq!(store.get(&next).unwrap().status, ExperienceStatus::Revoked);
+        assert!(store
+            .accept(&next, &TrustedActor::new("local-host"))
+            .is_err());
     }
 
     #[test]
     fn a_blank_actor_cannot_accept_a_candidate() {
-        let mut store=ExperienceStore::new();
-        let id=store.propose("same",ExperienceScope::Repo,"p","a","e","v1",ExperienceSource::Operator).unwrap();
-        assert!(store.accept(&id,&TrustedActor::new("  ")).is_err());
-        assert_eq!(store.get(&id).unwrap().status,ExperienceStatus::Candidate);
+        let mut store = ExperienceStore::new();
+        let id = store
+            .propose(
+                "same",
+                ExperienceScope::Repo,
+                "p",
+                "a",
+                "e",
+                "v1",
+                ExperienceSource::Operator,
+            )
+            .unwrap();
+        assert!(store.accept(&id, &TrustedActor::new("  ")).is_err());
+        assert_eq!(store.get(&id).unwrap().status, ExperienceStatus::Candidate);
     }
 
     fn repo_source() -> ExperienceSource {
@@ -497,8 +584,13 @@ mod tests {
         let mut global = store.get(&id).unwrap().clone();
         global.scope = ExperienceScope::Global;
         store.records.insert(id.clone(), global);
-        let err = store.accept(&id, &actor).expect_err("global repo text must be refused");
-        assert!(matches!(err, ExperienceError::UntrustedSource { .. }), "{err:?}");
+        let err = store
+            .accept(&id, &actor)
+            .expect_err("global repo text must be refused");
+        assert!(
+            matches!(err, ExperienceError::UntrustedSource { .. }),
+            "{err:?}"
+        );
         assert_eq!(
             store.get(&id).unwrap().status,
             ExperienceStatus::Candidate,
@@ -519,7 +611,10 @@ mod tests {
         let err = store
             .promote(&id2, ExperienceScope::Global, &actor)
             .expect_err("repo-sourced text must not be promoted to global");
-        assert!(matches!(err, ExperienceError::UntrustedSource { .. }), "{err:?}");
+        assert!(
+            matches!(err, ExperienceError::UntrustedSource { .. }),
+            "{err:?}"
+        );
         // Within repository scope it can still be accepted and used.
         store.accept(&id2, &actor).unwrap();
         assert_eq!(store.get(&id2).unwrap().scope, ExperienceScope::Repo);
@@ -563,7 +658,10 @@ mod tests {
         let err = store
             .accept(&id, &TrustedActor::new("operator"))
             .expect_err("blank evidence must be refused");
-        assert!(matches!(err, ExperienceError::MissingEvidence(_)), "{err:?}");
+        assert!(
+            matches!(err, ExperienceError::MissingEvidence(_)),
+            "{err:?}"
+        );
     }
 
     /// Revocation sticks: re-proposing the same lesson does not bring it back.
@@ -638,7 +736,9 @@ mod tests {
         let actor = TrustedActor::new("operator");
         store.accept(&fresh, &actor).unwrap();
         store.accept(&short, &actor).unwrap();
-        store.with_counterexample(&short, "only true before v2", Some(1_000)).unwrap();
+        store
+            .with_counterexample(&short, "only true before v2", Some(1_000))
+            .unwrap();
 
         assert_eq!(store.retrieve(ExperienceScope::Global, 10, 500).len(), 2);
         assert_eq!(
@@ -679,7 +779,11 @@ mod tests {
             .unwrap();
         assert_eq!(first, second, "the same key must reuse the same record");
         assert_eq!(store.len(), 1);
-        assert_eq!(store.get(&first).unwrap().premise, "p2", "the later text wins");
+        assert_eq!(
+            store.get(&first).unwrap().premise,
+            "p2",
+            "the later text wins"
+        );
 
         for index in 0..20 {
             let id = store
@@ -696,7 +800,11 @@ mod tests {
             store.accept(&id, &TrustedActor::new("operator")).unwrap();
         }
         let retrieved = store.retrieve(ExperienceScope::Global, 5, 0);
-        assert_eq!(retrieved.len(), 5, "retrieval is bounded by the caller's limit");
+        assert_eq!(
+            retrieved.len(),
+            5,
+            "retrieval is bounded by the caller's limit"
+        );
         let again = store.retrieve(ExperienceScope::Global, 5, 0);
         assert_eq!(
             retrieved.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
@@ -730,7 +838,10 @@ mod tests {
         let err = store
             .accept(&repo, &actor)
             .expect_err("a model guess must not become repository knowledge");
-        assert!(matches!(err, ExperienceError::UntrustedSource { .. }), "{err:?}");
+        assert!(
+            matches!(err, ExperienceError::UntrustedSource { .. }),
+            "{err:?}"
+        );
 
         // Within the run it came from, it may be accepted and used.
         let task = store
@@ -756,7 +867,10 @@ mod tests {
         let err = store
             .promote(&task, ExperienceScope::Repo, &actor)
             .expect_err("a model guess must not be promoted");
-        assert!(matches!(err, ExperienceError::UntrustedSource { .. }), "{err:?}");
+        assert!(
+            matches!(err, ExperienceError::UntrustedSource { .. }),
+            "{err:?}"
+        );
     }
 
     /// Carrying experience over must not rewrite the frozen prefix: the block is appended, and the
@@ -799,7 +913,10 @@ mod tests {
             "the injected block must stay bounded, got {}",
             injection.block.len()
         );
-        assert!(injection.truncated, "the cap must be reported when it bites");
+        assert!(
+            injection.truncated,
+            "the cap must be reported when it bites"
+        );
         assert!(!injection.record_ids.contains(&pending));
         assert!(!injection.block.contains("UNACCEPTED-PREMISE"));
 
@@ -812,7 +929,10 @@ mod tests {
             format!("{:x}", hasher.finalize())
         };
         let assembled = append_after_prefix(prefix, &injection);
-        assert!(assembled.starts_with(prefix), "the prefix must remain a byte prefix");
+        assert!(
+            assembled.starts_with(prefix),
+            "the prefix must remain a byte prefix"
+        );
         let after = {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
