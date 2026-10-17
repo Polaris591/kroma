@@ -67,6 +67,7 @@ async fn test_bash_16kib_head_48kib_rolling_tail_and_4mib_spill_file() {
         &budget,
         rx,
         Duration::from_millis(200),
+        &kroma_core::sandbox::ExecutionPolicy::host(),
     )
     .await;
 
@@ -123,6 +124,7 @@ async fn test_bash_200ms_pipe_drain_timeout_prevents_grandchild_deadlock() {
         &budget,
         rx,
         Duration::from_millis(200),
+        &kroma_core::sandbox::ExecutionPolicy::host(),
     )
     .await;
 
@@ -162,6 +164,7 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
         &budget,
         rx,
         Duration::from_millis(100),
+        &kroma_core::sandbox::ExecutionPolicy::host(),
     )
     .await;
     assert!(env_out.outcome.is_success());
@@ -185,6 +188,7 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
         &flood_budget,
         rx2,
         Duration::from_millis(100),
+        &kroma_core::sandbox::ExecutionPolicy::host(),
     )
     .await;
     assert_eq!(
@@ -217,6 +221,7 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
         &budget,
         cancel_rx,
         Duration::from_millis(100),
+        &kroma_core::sandbox::ExecutionPolicy::host(),
     )
     .await;
     assert_eq!(
@@ -277,6 +282,7 @@ async fn test_bash_process_group_cancellation_flood_cap_env_sanitization_and_zer
         &budget,
         rx5,
         Duration::from_millis(100),
+        &kroma_core::sandbox::ExecutionPolicy::host(),
     )
     .await;
     assert!(bg_out.outcome.is_success());

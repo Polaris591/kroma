@@ -228,6 +228,11 @@ pub struct ToolResultMeta {
     /// `serde(default)` keeps pre-Gate-4 WAL transcripts readable.
     #[serde(default)]
     pub mutation: Option<MutationTelemetry>,
+    /// T09 (KR-18): which execution backend actually ran this command (`host`, `bwrap`,
+    /// `container:<runtime>`). Reported, not assumed: a run that required isolation and could not
+    /// get it fails instead of recording `host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<String>,
     /// Host-owned archive metadata. The evidence store, not this immutable marker, is the
     /// authority for whether raw bytes are still available after cache eviction.
     #[serde(default, skip_serializing_if = "Option::is_none")]

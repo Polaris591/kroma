@@ -133,6 +133,10 @@ where
     })
 }
 
+// T09 added the run's execution policy, which belongs beside the budget and deadline rather than
+// inside them: it is a security decision, not a resource limit. Grouping these into a struct would
+// only move the same eight values one level down.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_bash(
     workspace_root: &Path,
     state_dir: &Path,
@@ -141,6 +145,7 @@ pub async fn execute_bash(
     budget: &BudgetConfig,
     cancel_rx: watch::Receiver<bool>,
     grace_period: Duration,
+    policy: &crate::sandbox::ExecutionPolicy,
 ) -> ToolExecutionOutput {
     execute_bash_with_deadline(
         workspace_root,
@@ -151,6 +156,7 @@ pub async fn execute_bash(
         cancel_rx,
         grace_period,
         None,
+        policy,
     )
     .await
 }
@@ -162,6 +168,7 @@ pub async fn execute_bash(
 /// termination path is the same graceful-then-`SIGKILL` sweep used for the other stop triggers —
 /// the future is never simply dropped, which would leave the process group and its pipes alive.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_bash_with_deadline(
     workspace_root: &Path,
     state_dir: &Path,
@@ -171,6 +178,7 @@ pub async fn execute_bash_with_deadline(
     mut cancel_rx: watch::Receiver<bool>,
     grace_period: Duration,
     deadline: Option<crate::budget::RunDeadline>,
+    policy: &crate::sandbox::ExecutionPolicy,
 ) -> ToolExecutionOutput {
     let started = Instant::now();
     let args: BashArgs = match serde_json::from_str(raw_args) {
@@ -220,9 +228,39 @@ pub async fn execute_bash_with_deadline(
     // exactly: the scrub only, with no `CI` / `NO_COLOR` baseline injected. `shell_invocation`
     // preserves the Windows `cmd.exe` verbatim `/D /S /C "<raw>"` argv contract. Stdio is spelled
     // out because `bash` depends on null stdin and piped stdout/stderr.
-    let (mut child, proc_group) = match ProcessLaunch::new(shell_bin, shell_args)
-        .shell_invocation(&args.command)
-        .cwd(workspace_root)
+    // T09 (KR-18): every real spawn goes through the run's execution policy. In isolated mode this
+    // translates the shell invocation into the sandbox argv, and if the backend is unavailable the
+    // command is refused — there is deliberately no branch that runs it on the host instead.
+    let prepared = match policy.launch_argv(
+        crate::sandbox::ExecutionClass::AgentBash,
+        workspace_root,
+        &shell_bin,
+        &shell_args,
+    ) {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            return ToolExecutionOutput::error(
+                ErrorCode::SandboxUnavailable,
+                format!("refusing to run bash: {}", e),
+                ToolResultMeta {
+                    execution_backend: Some("none:refused".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+    };
+    let execution_backend = prepared.backend.clone();
+
+    // The host path is the process's working directory on the host; the sandbox's own `--chdir`
+    // puts the command inside the guest view, so the two must not be confused.
+    let mut launch = ProcessLaunch::new(prepared.program, prepared.args).cwd(workspace_root);
+    if prepared.backend == "host" {
+        // On the host the shell argv is re-derived from the raw command (Windows needs the
+        // `cmd.exe /D /S /C "<raw>"` form). Inside a sandbox the shell invocation is already the
+        // tail of the wrapped argv, so re-deriving it would append the command a second time.
+        launch = launch.shell_invocation(&args.command);
+    }
+    let (mut child, proc_group) = match launch
         .stdio(Stdio::null(), Stdio::piped(), Stdio::piped())
         .env_policy(EnvironmentPolicy::SanitizedWithCustomNoBaseline(Vec::new()))
         .spawn_tokio()
@@ -379,6 +417,7 @@ pub async fn execute_bash_with_deadline(
         truncated,
         exit_code,
         terminated_by: terminated_by.clone(),
+        execution_backend: Some(execution_backend),
         ..Default::default()
     };
 

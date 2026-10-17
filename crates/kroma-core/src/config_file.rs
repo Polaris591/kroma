@@ -64,6 +64,9 @@ pub const SECURITY_SENSITIVE_KEYS: &[&str] = &[
     // T03 (KR-03): which models a run may use is a cost/capability ceiling, so only the operator
     // may declare it.
     "allowed_models",
+    // T09 (KR-18): the execution boundary is a security decision. A workspace that could turn the
+    // sandbox off would make the whole policy decorative.
+    "execution_sandbox",
 ];
 
 /// Environment variable name overrides, in the same order as the config fields.
@@ -79,6 +82,7 @@ const ENV_MAX_TOKENS: &str = "KROMA_MAX_TOKENS";
 const ENV_PROFILE: &str = "KROMA_PROFILE";
 /// T03 (KR-03): comma-separated allow-list of models a run may use.
 const ENV_ALLOWED_MODELS: &str = "KROMA_ALLOWED_MODELS";
+const ENV_EXECUTION_SANDBOX: &str = "KROMA_EXECUTION_SANDBOX";
 /// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`).
 const ENV_PROJECTION_PROFILE: &str = "KROMA_PROJECTION_PROFILE";
 /// Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
@@ -167,6 +171,9 @@ pub struct KromaConfigFile {
     /// T03 (KR-03): comma-separated allow-list of models this run may use. Operator-only, so a
     /// workspace cannot widen it. `None` means "no allow-list configured".
     pub allowed_models: Option<String>,
+    /// T09 (KR-18): the run's execution boundary: `host`, `bwrap`, or `container:<runtime>:<image>`.
+    /// Operator-only: a workspace that could set this could turn the sandbox off.
+    pub execution_sandbox: Option<String>,
     pub profiles: BTreeMap<String, ConfigProfile>,
     /// Every top-level key name present in the file (typed or not), sorted and deduplicated.
     pub raw_keys: Vec<String>,
@@ -213,6 +220,11 @@ impl KromaConfigFile {
                     }
                     "adaptive_tournament" => {
                         file.adaptive_tournament = Some(value.as_positive_usize(&key)?);
+                    }
+                    "execution_sandbox" => {
+                        let raw = value.as_string()?;
+                        validate_execution_sandbox("execution_sandbox", &raw)?;
+                        file.execution_sandbox = Some(raw.trim().to_string());
                     }
                     "allowed_models" => {
                         let raw = value.as_string()?;
@@ -477,6 +489,10 @@ impl KromaConfigFile {
                 validate_model_allowlist(key, value)?;
                 file.allowed_models = Some(value.to_string());
             }
+            "execution_sandbox" => {
+                validate_execution_sandbox(key, value)?;
+                file.execution_sandbox = Some(value.trim().to_string());
+            }
             "max_tokens" => {
                 let parsed = value
                     .trim()
@@ -497,7 +513,7 @@ impl KromaConfigFile {
             }
             other => {
                 return Err(format!(
-                    "unknown configuration key '{}'; expected one of: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents, max_tokens, projection_profile, adaptive_tournament",
+                    "unknown configuration key '{}'; expected one of: default_profile, model, base_url, api_key, protocol, reasoning_effort, policy, verify_command, max_subagents, max_tokens, projection_profile, adaptive_tournament, execution_sandbox",
                     other
                 ));
             }
@@ -559,12 +575,73 @@ pub struct ResolvedConfig {
     pub refused_workspace_keys: Vec<String>,
     /// T03 (KR-03): resolved model allow-list (`None` = unrestricted).
     pub allowed_models: Option<Vec<String>>,
+    /// T09 (KR-18): resolved execution boundary (`host` / `bwrap` / `container:<runtime>:<image>`).
+    pub execution_sandbox: Option<String>,
     pub user_config_path: Option<PathBuf>,
     pub workspace_config_path: Option<PathBuf>,
 }
 
 /// T03 (KR-03): parse and validate a comma-separated model allow-list. An empty entry is a
 /// configuration error rather than a silently ignored token.
+/// T09 (KR-18): validate the execution-boundary value.
+///
+/// Accepted forms are exactly the three the launcher can honour, so an unrecognised value fails at
+/// configuration time instead of silently running on the host:
+/// `host` (explicitly unsandboxed), `bwrap`, `container:<runtime>:<image>`.
+pub fn validate_execution_sandbox(key: &str, value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("host") || trimmed.eq_ignore_ascii_case("bwrap") {
+        return Ok(());
+    }
+    if let Some(rest) = trimmed.strip_prefix("container:") {
+        let mut parts = rest.splitn(2, ':');
+        let runtime = parts.next().unwrap_or("").trim();
+        let image = parts.next().unwrap_or("").trim();
+        if runtime.is_empty() || image.is_empty() {
+            return Err(format!(
+                "'{}' must be container:<runtime>:<image> (both parts non-empty), got '{}'",
+                key, value
+            ));
+        }
+        return Ok(());
+    }
+    Err(format!(
+        "'{}' must be one of host, bwrap, container:<runtime>:<image>, got '{}'",
+        key, value
+    ))
+}
+
+/// T09 (KR-18): turn a resolved boundary value into a policy. `None` keeps the historical host
+/// behaviour, which is a configuration default rather than a fallback from a failed sandbox.
+pub fn execution_policy_from_config(
+    value: Option<&str>,
+) -> Result<crate::sandbox::ExecutionPolicy, String> {
+    use crate::sandbox::{ExecutionPolicy, SandboxBackend, SandboxTemplate};
+    let Some(raw) = value else {
+        return Ok(ExecutionPolicy::host());
+    };
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("host") {
+        return Ok(ExecutionPolicy::host());
+    }
+    if trimmed.eq_ignore_ascii_case("bwrap") {
+        return Ok(ExecutionPolicy::isolated(SandboxTemplate::bwrap()));
+    }
+    if let Some(rest) = trimmed.strip_prefix("container:") {
+        let mut parts = rest.splitn(2, ':');
+        let runtime = parts.next().unwrap_or("").trim().to_string();
+        let image = parts.next().unwrap_or("").trim().to_string();
+        validate_execution_sandbox("execution_sandbox", trimmed)?;
+        return Ok(ExecutionPolicy::isolated(SandboxTemplate::new(
+            SandboxBackend::Container { runtime, image },
+        )));
+    }
+    Err(format!(
+        "execution_sandbox '{}' is not one of host, bwrap, container:<runtime>:<image>",
+        raw
+    ))
+}
+
 pub fn parse_model_allowlist(raw: &str) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for part in raw.split(',') {
@@ -726,6 +803,18 @@ impl ResolvedConfig {
                     None
                 }
             });
+        // T09 (KR-18): the execution boundary is operator-only, like the model allow-list.
+        let execution_sandbox = env_string(ENV_EXECUTION_SANDBOX)
+            .or_else(|| user.execution_sandbox.clone())
+            .and_then(
+                |raw| match validate_execution_sandbox("execution_sandbox", &raw) {
+                    Ok(()) => Some(raw.trim().to_string()),
+                    Err(e) => {
+                        refused_workspace_keys.push(e);
+                        None
+                    }
+                },
+            );
         let operator_model = overrides
             .model
             .clone()
@@ -819,6 +908,7 @@ impl ResolvedConfig {
             clamped_workspace_keys,
             refused_workspace_keys,
             allowed_models,
+            execution_sandbox,
             user_config_path,
             workspace_config_path: Some(workspace_config_path),
         }

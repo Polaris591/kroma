@@ -117,6 +117,9 @@ pub enum ErrorCode {
     TruncatedToolCall,
     InvalidToolBatch,
     PolicyDenied,
+    /// T09: the run required a sandbox for this spawn and the backend is unavailable. Fail-closed:
+    /// the command was NOT run on the host instead.
+    SandboxUnavailable,
     SensitivePathBlocked,
     PathEscapeBlocked,
     SymlinkBlocked,
@@ -146,6 +149,7 @@ impl ErrorCode {
             ErrorCode::TruncatedToolCall => "TRUNCATED_TOOL_CALL",
             ErrorCode::InvalidToolBatch => "INVALID_TOOL_BATCH",
             ErrorCode::PolicyDenied => "POLICY_DENIED",
+            ErrorCode::SandboxUnavailable => "SANDBOX_UNAVAILABLE",
             ErrorCode::SensitivePathBlocked => "SENSITIVE_PATH_BLOCKED",
             ErrorCode::PathEscapeBlocked => "PATH_ESCAPE_BLOCKED",
             ErrorCode::SymlinkBlocked => "SYMLINK_BLOCKED",

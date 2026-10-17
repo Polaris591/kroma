@@ -63,6 +63,9 @@ pub struct ToolRuntime {
     run_deadline: Option<RunDeadline>,
     /// F05: Unified execution context of the enclosing run.
     exec_context: Option<ExecutionContext>,
+    /// T09 (KR-18): the run's execution boundary. Every spawn the runtime performs asks this policy
+    /// first, so "sandbox on" cannot mean "on for the scorer only".
+    execution: crate::sandbox::ExecutionPolicy,
 }
 
 impl ToolRuntime {
@@ -78,6 +81,7 @@ impl ToolRuntime {
             env,
             budget,
             bash_grace_period: Duration::from_secs(2),
+            execution: crate::sandbox::ExecutionPolicy::host(),
             predictive_check: true,
             run_deadline: None,
             exec_context: None,
@@ -105,6 +109,17 @@ impl ToolRuntime {
     pub fn with_bash_grace_period(mut self, grace: Duration) -> Self {
         self.bash_grace_period = grace;
         self
+    }
+
+    /// T09 (KR-18): install the run's execution boundary. Every spawn the runtime performs (today
+    /// `bash`; verifier/probe spawns go through the same policy in `bench`) asks this first.
+    pub fn with_execution_policy(mut self, policy: crate::sandbox::ExecutionPolicy) -> Self {
+        self.execution = policy;
+        self
+    }
+
+    pub fn execution_policy(&self) -> &crate::sandbox::ExecutionPolicy {
+        &self.execution
     }
 
     /// Enable/disable the Gate 4 post-mutation structural check (`--no-predictive-check`).
@@ -799,14 +814,15 @@ impl ToolRuntime {
                         // allow. `evaluate_with_context` did not consume this path (it returned
                         // `Ask`), so this is the single consumption for an approved call.
                         let rejection = match args_digest.as_deref() {
-                            Some(digest) => match self.policy_engine.consume_grant(&auth_scope, digest)
-                            {
-                                Ok(()) => None,
-                                Err(GrantRejection::Missing) => {
-                                    Some("no grant was minted for this approval".to_string())
+                            Some(digest) => {
+                                match self.policy_engine.consume_grant(&auth_scope, digest) {
+                                    Ok(()) => None,
+                                    Err(GrantRejection::Missing) => {
+                                        Some("no grant was minted for this approval".to_string())
+                                    }
+                                    Err(rejection) => Some(format!("{:?}", rejection)),
                                 }
-                                Err(rejection) => Some(format!("{:?}", rejection)),
-                            },
+                            }
                             None => Some("no argument digest to bind the approval".to_string()),
                         };
                         if let Some(detail) = rejection {
@@ -930,6 +946,7 @@ impl ToolRuntime {
                     bash_cancel_rx,
                     self.bash_grace_period,
                     bash_deadline,
+                    &self.execution,
                 )
                 .await
             }

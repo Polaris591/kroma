@@ -100,6 +100,247 @@ impl std::fmt::Display for SandboxError {
 
 impl std::error::Error for SandboxError {}
 
+/// T09 (KR-18): the trust class of a spawn. Each class has its own network and sandbox rule; the
+/// run's policy answers for all of them, so "the sandbox is on" cannot mean "on for the scorer only".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ExecutionClass {
+    /// The agent's `bash` tool: untrusted model-authored commands.
+    AgentBash,
+    /// The suite verifier / scorer command.
+    Verifier,
+    /// A user-supplied hook (pre/post tool, stop hook).
+    Hook,
+    /// An MCP server process. Operator-installed infrastructure, not model-authored code.
+    McpServer,
+    /// A verification probe run against a candidate revision.
+    Probe,
+}
+
+impl ExecutionClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExecutionClass::AgentBash => "agent_bash",
+            ExecutionClass::Verifier => "verifier",
+            ExecutionClass::Hook => "hook",
+            ExecutionClass::McpServer => "mcp_server",
+            ExecutionClass::Probe => "probe",
+        }
+    }
+
+    pub fn all() -> [ExecutionClass; 5] {
+        [
+            ExecutionClass::AgentBash,
+            ExecutionClass::Verifier,
+            ExecutionClass::Hook,
+            ExecutionClass::McpServer,
+            ExecutionClass::Probe,
+        ]
+    }
+}
+
+/// What one class is allowed to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassRule {
+    /// Must this class run inside the sandbox? `true` means "refuse rather than run on the host".
+    pub sandboxed: bool,
+    /// May it reach the network? Only meaningful when sandboxed (the host has whatever the process
+    /// has); an isolated class with `network: false` gets `--unshare-net`.
+    pub network: bool,
+}
+
+/// The run's execution boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionMode {
+    /// Explicitly unsandboxed. This is a configuration choice an operator makes, never a fallback.
+    Host,
+    /// Sandboxed: every class whose rule says `sandboxed` runs inside `template`, and a class that
+    /// cannot be sandboxed (missing backend) is refused instead of being run on the host.
+    Isolated(SandboxTemplate),
+}
+
+/// A prepared spawn: the argv to execute and the backend that will actually run it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedLaunch {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Working directory to launch in. Inside a sandbox this is the guest path the workspace is bound
+    /// at, not the host path — launching in the host path would simply fail to `chdir`.
+    pub cwd: Option<String>,
+    /// `host`, `bwrap`, or `container:<runtime>`. This is what is *actually* used, so it can be
+    /// reported and asserted instead of repeating what the configuration asked for.
+    pub backend: String,
+}
+
+/// The resolved execution policy of one run (T09, KR-18).
+///
+/// The table below is the whole contract; there is no per-call override, so no model-supplied
+/// parameter can move a class into or out of the sandbox:
+///
+/// | class | isolated mode | network |
+/// | --- | --- | --- |
+/// | `agent_bash` | sandboxed | denied |
+/// | `verifier` | sandboxed | denied |
+/// | `hook` | sandboxed | denied |
+/// | `probe` | sandboxed | denied |
+/// | `mcp_server` | host | allowed |
+///
+/// `mcp_server` is deliberately not sandboxed: an MCP server is operator-installed infrastructure
+/// that usually needs the network and its own toolchain, and pretending to sandbox it would only
+/// break it. In host mode every class runs on the host — that is an explicit operator decision
+/// ([`ExecutionMode::Host`]), and [`Self::launch_argv`] still reports `host` as the backend so the
+/// difference is visible in the evidence rather than implied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionPolicy {
+    mode: ExecutionMode,
+    rules: Vec<(ExecutionClass, ClassRule)>,
+}
+
+impl ExecutionPolicy {
+    /// Explicitly unsandboxed. Not a fallback: the caller asked for this.
+    pub fn host() -> Self {
+        Self {
+            mode: ExecutionMode::Host,
+            rules: ExecutionClass::all()
+                .into_iter()
+                .map(|class| {
+                    (
+                        class,
+                        ClassRule {
+                            sandboxed: false,
+                            network: true,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Sandboxed with the default class table above.
+    pub fn isolated(template: SandboxTemplate) -> Self {
+        Self {
+            mode: ExecutionMode::Isolated(template),
+            rules: vec![
+                (
+                    ExecutionClass::AgentBash,
+                    ClassRule {
+                        sandboxed: true,
+                        network: false,
+                    },
+                ),
+                (
+                    ExecutionClass::Verifier,
+                    ClassRule {
+                        sandboxed: true,
+                        network: false,
+                    },
+                ),
+                (
+                    ExecutionClass::Hook,
+                    ClassRule {
+                        sandboxed: true,
+                        network: false,
+                    },
+                ),
+                (
+                    ExecutionClass::Probe,
+                    ClassRule {
+                        sandboxed: true,
+                        network: false,
+                    },
+                ),
+                (
+                    ExecutionClass::McpServer,
+                    ClassRule {
+                        sandboxed: false,
+                        network: true,
+                    },
+                ),
+            ],
+        }
+    }
+
+    /// Narrow one class' rule (used by configuration, never by model input).
+    pub fn with_rule(mut self, class: ExecutionClass, rule: ClassRule) -> Self {
+        for entry in &mut self.rules {
+            if entry.0 == class {
+                entry.1 = rule;
+                return self;
+            }
+        }
+        self.rules.push((class, rule));
+        self
+    }
+
+    pub fn mode(&self) -> &ExecutionMode {
+        &self.mode
+    }
+
+    pub fn rule(&self, class: ExecutionClass) -> ClassRule {
+        self.rules
+            .iter()
+            .find(|(c, _)| *c == class)
+            .map(|(_, r)| *r)
+            .unwrap_or(ClassRule {
+                sandboxed: false,
+                network: true,
+            })
+    }
+
+    /// Does this class have to run inside the sandbox?
+    pub fn requires_sandbox(&self, class: ExecutionClass) -> bool {
+        matches!(self.mode, ExecutionMode::Isolated(_)) && self.rule(class).sandboxed
+    }
+
+    /// Prepare a spawn for `class`.
+    ///
+    /// Fail-closed: when the class requires the sandbox and the backend is unavailable, this
+    /// returns [`SandboxError`] and the caller must not run the command. There is no branch that
+    /// silently produces a host argv for a class that requires isolation.
+    pub fn launch_argv(
+        &self,
+        class: ExecutionClass,
+        workspace: &std::path::Path,
+        program: &str,
+        args: &[String],
+    ) -> Result<PreparedLaunch, SandboxError> {
+        if !self.requires_sandbox(class) {
+            return Ok(PreparedLaunch {
+                program: program.to_string(),
+                args: args.to_vec(),
+                cwd: None,
+                backend: "host".to_string(),
+            });
+        }
+        let ExecutionMode::Isolated(template) = &self.mode else {
+            // Unreachable: `requires_sandbox` is false in host mode. Kept explicit so a future mode
+            // cannot quietly fall through to the host.
+            return Err(SandboxError::InvalidSpec(
+                "isolated mode required but the policy is not isolated".to_string(),
+            ));
+        };
+        let mut spec = template.resolve(workspace.to_path_buf());
+        spec = spec.with_network(self.rule(class).network);
+        // Probe first: `wrap_argv` is pure and would happily emit a bwrap argv even when bwrap is
+        // not installed, which is exactly the silent-degradation path this policy must not have.
+        spec.probe()?;
+        let argv = spec.wrap_argv(program, args)?;
+        let backend = match &spec.backend {
+            SandboxBackend::Bwrap => "bwrap".to_string(),
+            SandboxBackend::Container { runtime, .. } => format!("container:{}", runtime),
+        };
+        let mut argv = argv.into_iter();
+        let program = argv.next().ok_or_else(|| {
+            SandboxError::InvalidSpec("the sandbox produced an empty argv".to_string())
+        })?;
+        Ok(PreparedLaunch {
+            program,
+            args: argv.collect(),
+            cwd: Some(spec.workspace_guest.clone()),
+            backend,
+        })
+    }
+}
+
 /// Everything the sandbox needs to translate a command. Construct with [`SandboxSpec::bwrap`] or
 /// [`SandboxSpec::container`] and refine with the `with_*` builders.
 #[derive(Debug, Clone, PartialEq)]
@@ -216,7 +457,9 @@ impl SandboxSpec {
             ));
         }
         if program.trim().is_empty() {
-            return Err(SandboxError::InvalidSpec("the program is empty".to_string()));
+            return Err(SandboxError::InvalidSpec(
+                "the program is empty".to_string(),
+            ));
         }
         match &self.backend {
             SandboxBackend::Bwrap => Ok(self.wrap_bwrap(program, args)),
@@ -292,7 +535,8 @@ impl SandboxSpec {
         program: &str,
         args: &[String],
     ) -> Vec<String> {
-        let mut argv: Vec<String> = vec![runtime.to_string(), "run".to_string(), "--rm".to_string()];
+        let mut argv: Vec<String> =
+            vec![runtime.to_string(), "run".to_string(), "--rm".to_string()];
         argv.push("--init".to_string());
         argv.push("--network".to_string());
         argv.push(if self.network { "bridge" } else { "none" }.to_string());

@@ -86,6 +86,7 @@ async fn bash_keeps_its_exit_code_output_and_sanitized_env() {
         &BudgetConfig::default(),
         rx,
         Duration::from_millis(200),
+        &kroma_core::sandbox::ExecutionPolicy::host(),
     )
     .await;
 

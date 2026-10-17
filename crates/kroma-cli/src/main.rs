@@ -1201,8 +1201,7 @@ fn fork_resumed_session(
 async fn run_bench(cli: &CliArgs) -> ExitCode {
     use kroma_core::bench::{
         default_strategy_pair, load_held_out_suite, run_paired_benchmark, BenchExecutor,
-        BenchRunOptions,
-        SyntheticBenchExecutor, SYNTHETIC_EXECUTOR_LABEL,
+        BenchRunOptions, SyntheticBenchExecutor, SYNTHETIC_EXECUTOR_LABEL,
     };
 
     let CliSurface::Bench {
@@ -1384,7 +1383,8 @@ async fn build_provider_bench_executor(
     let bench_settings = ProviderBenchSettings::new(model, resolved_protocol.as_str().to_string())
         .with_provider_origin(provider_origin_of(&base_url))
         .with_commit(
-            detect_git_commit(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))).await,
+            detect_git_commit(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+                .await,
         )
         .with_policy_mode(cli.policy_mode)
         .with_max_subagents(resolved.max_subagents.unwrap_or(cli.max_subagents));
@@ -2624,8 +2624,21 @@ async fn main() -> ExitCode {
         subtree_tracker.restore_loaded_dirs(checkpoint.subtree_dirs.clone());
     }
 
+    // T09 (KR-18): the run's execution boundary is resolved once, here, and installed on the runtime
+    // that performs the real spawns. An unrecognised value already failed at config load; this is
+    // the one place that turns the string into a policy, so no surface can disagree.
+    let execution_policy = match kroma_core::config_file::execution_policy_from_config(
+        resolved_config.execution_sandbox.as_deref(),
+    ) {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return ExitCode::from(2);
+        }
+    };
     let runtime = build_runtime_with_registry(registry, env, policy_engine, budget)
-        .with_predictive_check(!cli.no_predictive_check);
+        .with_predictive_check(!cli.no_predictive_check)
+        .with_execution_policy(execution_policy);
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -3956,16 +3969,15 @@ mod tests {
         assert!(text.contains("trusted network"));
         assert!(!text.contains("super-secret-auth-token"));
 
-        let loopback_ep = kroma_core::surface::validate_daemon_listen_endpoint("127.0.0.1:7878", None)
-            .expect("loopback without token should validate");
+        let loopback_ep =
+            kroma_core::surface::validate_daemon_listen_endpoint("127.0.0.1:7878", None)
+                .expect("loopback without token should validate");
         assert!(loopback_ep.is_loopback());
         assert_eq!(loopback_ep.non_loopback_warning(), None);
 
-        let unix_ep = kroma_core::surface::validate_daemon_listen_endpoint(
-            "unix:///tmp/test.sock",
-            None,
-        )
-        .expect("unix endpoint should validate");
+        let unix_ep =
+            kroma_core::surface::validate_daemon_listen_endpoint("unix:///tmp/test.sock", None)
+                .expect("unix endpoint should validate");
         assert!(unix_ep.is_loopback());
         assert_eq!(unix_ep.non_loopback_warning(), None);
     }
