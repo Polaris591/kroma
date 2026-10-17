@@ -500,6 +500,15 @@ impl ContextProjector {
         }
     }
 
+    /// T03 (KR-03): bytes of the context that would be sent right now, *before* a projection step.
+    /// Used to estimate token pressure when the provider has not reported usage yet.
+    pub fn projected_bytes(&self) -> usize {
+        self.projected_items
+            .iter()
+            .map(TranscriptItem::estimated_bytes)
+            .sum()
+    }
+
     /// Project the canonical transcript for the next Provider request while preserving prefix stability.
     // The `>` arm appends to `self.projected_items`, which is the collection the `<` arm compares
     // against, so the two arms are deliberately exclusive rather than a `match` on `cmp`.

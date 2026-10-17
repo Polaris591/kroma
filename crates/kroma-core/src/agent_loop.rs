@@ -62,6 +62,17 @@ pub(crate) fn approx_tokens(bytes: usize) -> u64 {
 /// BUG-09: `static_prefix_bytes` already includes `system_prompt.len()` (see
 /// `prompt.rs::build_static_prefix`), so the system prompt must not be counted a second time here —
 /// doing so would trip `max_total_tokens` early on a long system prompt.
+/// T03: bytes reserved for JSON framing, role markers and tool-call scaffolding that belong to no
+/// single string in the request.
+pub const REQUEST_SERIALIZATION_OVERHEAD_BYTES: usize = 1024;
+
+/// T03 (KR-03): bytes of the canonical history. On a `--resume` the projector has not yet absorbed
+/// the restored transcript when the pre-send estimate is taken, so summing the canonical items (not
+/// the already-projected ones) is what keeps a resumed run from sending an over-window request.
+fn canonical_history_bytes(items: &[TranscriptItem]) -> usize {
+    items.iter().map(TranscriptItem::estimated_bytes).sum()
+}
+
 pub(crate) fn estimate_prompt_input_tokens(
     static_prefix_bytes: usize,
     message_history_bytes: usize,
@@ -261,6 +272,8 @@ pub struct AgentRunner {
     /// T01 (KR-01): host-owned test-tampering protection. A task-level flag may enable it, never
     /// disable it.
     host_disallow_test_tampering: bool,
+    /// T03 (KR-07): the resolved model capabilities for this run, with their provenance.
+    model_capabilities: crate::budget::ModelCapabilities,
     /// Capability gap #2 (`v1.5.2`): opt-in isolated counterfactual probe configuration.
     counterfactual_probe: CounterfactualProbeConfig,
     /// Capability gap #2: approval seam; defaults to denying every probe.
@@ -327,6 +340,13 @@ impl AgentRunner {
         // F05 (`v1.5.1`): seed the shared token ledger from the unified cap carried on the run's
         // `BudgetConfig` (set by the CLI, config file or RPC surface).
         let max_total_tokens = config.budget.max_total_tokens;
+        // T03 (KR-07): resolve the model window once. When the operator did not configure one, a
+        // conservative fallback applies and is pushed into the budget so the context projector
+        // compacts against it instead of running unbounded until the provider refuses.
+        let model_capabilities = crate::budget::ModelCapabilities::resolve(
+            config.budget.model_context_window_tokens,
+            None,
+        );
         Self {
             config,
             provider,
@@ -363,6 +383,7 @@ impl AgentRunner {
             tournament_require_verified: true,
             host_protected_paths: Vec::new(),
             host_disallow_test_tampering: false,
+            model_capabilities,
             counterfactual_probe: CounterfactualProbeConfig::disabled(),
             probe_approval: Arc::new(DenyProbes),
             counterfactual_probes_run: 0,
@@ -1023,12 +1044,32 @@ impl AgentRunner {
         // pre-existing hot file look "0 turns old" and pin it forever.
         state.absolute_turn = self.session_turn_offset.saturating_add(state.current_turn);
 
+        // T03 (KR-03): when the provider has not reported usage yet (first turn, or a `--resume`
+        // with no restored usage), the token watermarks have nothing to compare against and a small
+        // window would only be discovered *after* an over-window request was already sent. Feed a
+        // conservative estimate of this request instead. Provider-reported usage, once present,
+        // wins: it calibrates the estimate rather than being replaced by it.
+        let pressure_tokens = match (
+            state.last_input_tokens,
+            self.model_capabilities.context_window_tokens,
+        ) {
+            (Some(measured), _) => Some(measured),
+            (None, Some(_)) => Some(crate::budget::conservative_bytes_tokens(
+                state
+                    .static_prefix
+                    .static_prefix_bytes
+                    .saturating_add(canonical_history_bytes(&state.transcript))
+                    .saturating_add(REQUEST_SERIALIZATION_OVERHEAD_BYTES),
+            )),
+            (None, None) => None,
+        };
+
         // Project context (100% Append-Only unless watermark crossed)
         let mut projected = match state.projector.project(
             &mut state.transcript,
             state.budget_tracker.config(),
             state.static_prefix.static_prefix_bytes,
-            state.last_input_tokens,
+            pressure_tokens,
             state.absolute_turn,
         ) {
             Ok(p) => p,
@@ -1185,6 +1226,46 @@ impl AgentRunner {
             }
             None => None,
         };
+        // T03 (KR-07): the window check covers the *whole* request — system prompt, tool schemas,
+        // history, images and the output reservation — and runs before anything is transmitted.
+        // `bytes / 4` is not a tokenizer, so this uses the conservative estimator (non-ASCII text is
+        // charged at 1 token per 2 bytes) and says so in the event.
+        if let (Some(window), true) = (
+            self.model_capabilities.context_window_tokens,
+            self.model_capabilities.source == crate::budget::CapabilitySource::Configured,
+        ) {
+            let estimated_input = crate::budget::conservative_request_tokens(
+                &state.static_prefix.system_prompt,
+                &projected.messages,
+                state.static_prefix.tools_json.len(),
+                REQUEST_SERIALIZATION_OVERHEAD_BYTES,
+            );
+            let reserved_output = self
+                .model_capabilities
+                .reserved_output_tokens(max_output_tokens);
+            if estimated_input.saturating_add(reserved_output) > window {
+                let _ = logger.log(EventPayload::ContextBudgetExceeded {
+                    estimated_input_tokens: estimated_input,
+                    reserved_output_tokens: reserved_output,
+                    window_tokens: window,
+                    capability_source: self.model_capabilities.source.as_str().to_string(),
+                    tool_schema_bytes: state.static_prefix.tools_json.len(),
+                    message_count: projected.messages.len(),
+                });
+                return Err(self.finish_run(
+                    TerminalReason::ContextBudgetExceeded,
+                    &state.budget_tracker,
+                    &state.projector,
+                    std::mem::take(&mut state.modified_files_set)
+                        .into_iter()
+                        .collect(),
+                    state.last_assistant_text.take(),
+                    std::mem::take(&mut state.transcript),
+                    logger,
+                ));
+            }
+        }
+
         // F05: reserve *before* dispatching. A failed reservation means another request or child
         // already holds the remaining balance, so this request must not be sent (zero backend
         // calls). Dropping the reservation later (cancel/timeout) records the estimate as spent.

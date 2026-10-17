@@ -122,7 +122,9 @@ impl TokenBudget {
             reserved: state.reserved,
             settled_tokens: state.settled_tokens,
             unknown_tokens: state.unknown_tokens,
-            overage_tokens: self.limit.map_or(0, |limit| state.spent.saturating_sub(limit)),
+            overage_tokens: self
+                .limit
+                .map_or(0, |limit| state.spent.saturating_sub(limit)),
         }
     }
 
@@ -230,7 +232,8 @@ impl TokenReservation {
 impl Drop for TokenReservation {
     fn drop(&mut self) {
         if !self.settled {
-            self.budget.settle_transaction(self.amount, self.amount, true);
+            self.budget
+                .settle_transaction(self.amount, self.amount, true);
         }
     }
 }
@@ -469,7 +472,9 @@ impl BudgetConfig {
 pub(crate) fn combine_usage_basis(left: &str, right: &str) -> &'static str {
     match (left, right) {
         ("provider_reported", "provider_reported") => "provider_reported",
-        ("byte_estimate_not_measured", "byte_estimate_not_measured") => "byte_estimate_not_measured",
+        ("byte_estimate_not_measured", "byte_estimate_not_measured") => {
+            "byte_estimate_not_measured"
+        }
         ("unknown", "unknown") => "unknown",
         _ => "mixed",
     }
@@ -603,12 +608,16 @@ impl BudgetTracker {
             (0, _) => "byte_estimate_not_measured",
             _ => "mixed",
         };
-        self.child_usage_basis.as_deref().map_or(own, |child| combine_usage_basis(own, child))
+        self.child_usage_basis
+            .as_deref()
+            .map_or(own, |child| combine_usage_basis(own, child))
     }
 
     pub(crate) fn record_children_usage_basis(&mut self, basis: &str) {
-        self.child_usage_basis = Some(self.child_usage_basis.as_deref()
-            .map_or_else(|| basis.to_string(), |previous| combine_usage_basis(previous, basis).to_string()));
+        self.child_usage_basis = Some(self.child_usage_basis.as_deref().map_or_else(
+            || basis.to_string(),
+            |previous| combine_usage_basis(previous, basis).to_string(),
+        ));
     }
 
     /// F10 (`v1.4.0`): fold a child subagent's (or tournament candidate's) token spend into this
@@ -686,4 +695,214 @@ impl BudgetTracker {
             (self.total_cached_input_tokens as f64) / (self.total_input_tokens as f64)
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// T03 (KR-03 / KR-07): model capabilities, host budget ceiling and a conservative estimator
+// ---------------------------------------------------------------------------------------------
+
+/// T03: the conservative context window assumed when neither the operator nor a capability
+/// declaration gives one. Deliberately small: sending a request that is too large for the model
+/// wastes a whole turn (and may be rejected by the provider), while compacting a little early only
+/// costs a stub.
+pub const CONSERVATIVE_CONTEXT_WINDOW_TOKENS: u64 = 32_768;
+
+/// T03: where a capability number came from. Reported to the operator instead of pretending every
+/// number is a published spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitySource {
+    /// Explicitly configured by the operator (`model_context_window_tokens` / CLI).
+    Configured,
+    /// Nothing was configured and the model is not declared, so a conservative fallback applies.
+    ConservativeFallback,
+    /// No window is enforced at all (the operator explicitly disabled the check).
+    Unbounded,
+}
+
+impl CapabilitySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapabilitySource::Configured => "configured",
+            CapabilitySource::ConservativeFallback => "conservative_fallback",
+            CapabilitySource::Unbounded => "unbounded",
+        }
+    }
+}
+
+/// T03 (KR-07): the resolved capabilities for the active model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelCapabilities {
+    /// `None` only when the operator explicitly disabled the window check.
+    pub context_window_tokens: Option<u64>,
+    /// The provider's own output cap, when known.
+    pub max_output_tokens: Option<u64>,
+    pub source: CapabilitySource,
+}
+
+impl ModelCapabilities {
+    /// T03: resolve the window from the operator's configuration, falling back conservatively.
+    ///
+    /// Kroma deliberately keeps **no model-name table**: a nickname in one account is not a public
+    /// specification, and a wrong table is worse than an honest fallback.
+    pub fn resolve(
+        configured_window: Option<u64>,
+        configured_output: Option<u64>,
+    ) -> ModelCapabilities {
+        match configured_window {
+            Some(0) => ModelCapabilities {
+                context_window_tokens: None,
+                max_output_tokens: configured_output,
+                source: CapabilitySource::Unbounded,
+            },
+            Some(window) => ModelCapabilities {
+                context_window_tokens: Some(window),
+                max_output_tokens: configured_output,
+                source: CapabilitySource::Configured,
+            },
+            None => ModelCapabilities {
+                context_window_tokens: Some(CONSERVATIVE_CONTEXT_WINDOW_TOKENS),
+                max_output_tokens: configured_output,
+                source: CapabilitySource::ConservativeFallback,
+            },
+        }
+    }
+
+    /// T03: output tokens that must be reserved on top of the input estimate.
+    pub fn reserved_output_tokens(&self, requested: Option<u64>) -> u64 {
+        let cap = self.max_output_tokens.unwrap_or(u64::MAX);
+        requested.unwrap_or(0).min(cap)
+    }
+}
+
+/// T03 (KR-03): the operator-owned ceiling a workspace preference may lower but never raise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HostBudgetCeiling {
+    pub max_total_tokens: Option<u64>,
+    pub max_subagents: Option<usize>,
+    pub context_window_tokens: Option<u64>,
+}
+
+/// T03: result of applying an untrusted preference to a host ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CeilingOutcome<T> {
+    pub effective: T,
+    /// `true` when the preference asked for more than the host allows and was clamped.
+    pub clamped: bool,
+}
+
+impl HostBudgetCeiling {
+    /// A workspace may lower a cap; asking for more is clamped to the host value and reported.
+    pub fn clamp_tokens(&self, preference: Option<u64>) -> CeilingOutcome<Option<u64>> {
+        match (self.max_total_tokens, preference) {
+            (Some(host), Some(pref)) if pref > host => CeilingOutcome {
+                effective: Some(host),
+                clamped: true,
+            },
+            (Some(host), Some(pref)) => CeilingOutcome {
+                effective: Some(pref.min(host)),
+                clamped: false,
+            },
+            (Some(host), None) => CeilingOutcome {
+                effective: Some(host),
+                clamped: false,
+            },
+            (None, pref) => CeilingOutcome {
+                effective: pref,
+                clamped: false,
+            },
+        }
+    }
+
+    /// Same rule for concurrency: a repository cannot grant itself more parallel subagents.
+    pub fn clamp_subagents(&self, preference: Option<usize>) -> CeilingOutcome<Option<usize>> {
+        match (self.max_subagents, preference) {
+            (Some(host), Some(pref)) if pref > host => CeilingOutcome {
+                effective: Some(host),
+                clamped: true,
+            },
+            (Some(host), Some(pref)) => CeilingOutcome {
+                effective: Some(pref.min(host)),
+                clamped: false,
+            },
+            (Some(host), None) => CeilingOutcome {
+                effective: Some(host),
+                clamped: false,
+            },
+            (None, pref) => CeilingOutcome {
+                effective: pref,
+                clamped: false,
+            },
+        }
+    }
+
+    /// Same rule for the model context window.
+    pub fn clamp_window(&self, preference: Option<u64>) -> CeilingOutcome<Option<u64>> {
+        match (self.context_window_tokens, preference) {
+            (Some(host), Some(pref)) if pref > host => CeilingOutcome {
+                effective: Some(host),
+                clamped: true,
+            },
+            (Some(host), Some(pref)) => CeilingOutcome {
+                effective: Some(pref.min(host)),
+                clamped: false,
+            },
+            (Some(host), None) => CeilingOutcome {
+                effective: Some(host),
+                clamped: false,
+            },
+            (None, pref) => CeilingOutcome {
+                effective: pref,
+                clamped: false,
+            },
+        }
+    }
+}
+
+/// T03 (KR-03): conservative token estimate for text.
+///
+/// ASCII is estimated at 4 bytes per token. Every non-ASCII byte is charged at 1 token per 2 bytes,
+/// because CJK text is roughly one token per character (3 UTF-8 bytes) and `bytes / 4` would
+/// *under*-estimate it. This is an estimate, not a tokenizer, and it is documented as such.
+/// T03 (KR-03): conservative token bound for a *byte count* we do not have the text of.
+///
+/// Three bytes per token is the safe direction for both scripts Kroma sees in practice: UTF-8 CJK
+/// is 3 bytes per character and one token per character, so the bound is tight there; ASCII is 4
+/// bytes per token, so the bound over-estimates by a third. Over-estimating is the point — the
+/// number is used to decide whether a request may be sent at all.
+pub fn conservative_bytes_tokens(bytes: usize) -> u64 {
+    ((bytes as u64).saturating_add(2)) / 3
+}
+
+pub fn conservative_text_tokens(text: &str) -> u64 {
+    let mut ascii = 0u64;
+    let mut non_ascii = 0u64;
+    for byte in text.bytes() {
+        if byte.is_ascii() {
+            ascii += 1;
+        } else {
+            non_ascii += 1;
+        }
+    }
+    // `+3`/`+1` round up so a short string never estimates to zero.
+    ascii.saturating_add(3) / 4 + non_ascii.saturating_add(1) / 2
+}
+
+/// T03 (KR-07): conservative estimate for one whole request: text plus image payloads.
+///
+/// Image bytes are charged at 4 bytes per token; a base64 image is far larger than the vision
+/// tokens it bills, so this errs on the safe side. `serialization_overhead_bytes` covers JSON
+/// framing, tool-call scaffolding and role markers that are not part of any single string.
+pub fn conservative_request_tokens(
+    system_prompt: &str,
+    items: &[crate::messages::TranscriptItem],
+    tool_schema_bytes: usize,
+    serialization_overhead_bytes: usize,
+) -> u64 {
+    let mut total = conservative_text_tokens(system_prompt);
+    for item in items {
+        total = total.saturating_add(item.estimated_tokens());
+    }
+    total
+        .saturating_add((tool_schema_bytes as u64).saturating_add(3) / 4)
+        .saturating_add((serialization_overhead_bytes as u64).saturating_add(3) / 4)
 }

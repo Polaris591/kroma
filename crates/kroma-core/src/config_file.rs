@@ -61,6 +61,9 @@ pub const SECURITY_SENSITIVE_KEYS: &[&str] = &[
     "observer_hook",
     "allow_write",
     "allow_shell",
+    // T03 (KR-03): which models a run may use is a cost/capability ceiling, so only the operator
+    // may declare it.
+    "allowed_models",
 ];
 
 /// Environment variable name overrides, in the same order as the config fields.
@@ -74,6 +77,8 @@ const ENV_MAX_SUBAGENTS: &str = "KROMA_MAX_SUBAGENTS";
 /// F05 (`v1.5.1`): unified run-tree token cap (`--max-tokens` / `max_tokens`).
 const ENV_MAX_TOKENS: &str = "KROMA_MAX_TOKENS";
 const ENV_PROFILE: &str = "KROMA_PROFILE";
+/// T03 (KR-03): comma-separated allow-list of models a run may use.
+const ENV_ALLOWED_MODELS: &str = "KROMA_ALLOWED_MODELS";
 /// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`).
 const ENV_PROJECTION_PROFILE: &str = "KROMA_PROJECTION_PROFILE";
 /// Item #3 (`v1.4.0`): adaptive tournament escalation candidate count.
@@ -159,6 +164,9 @@ pub struct KromaConfigFile {
     pub adaptive_tournament: Option<usize>,
     /// Capability gap #6 (`v1.5.2`): trusted MCP servers declared under `[mcp.<name>]`.
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    /// T03 (KR-03): comma-separated allow-list of models this run may use. Operator-only, so a
+    /// workspace cannot widen it. `None` means "no allow-list configured".
+    pub allowed_models: Option<String>,
     pub profiles: BTreeMap<String, ConfigProfile>,
     /// Every top-level key name present in the file (typed or not), sorted and deduplicated.
     pub raw_keys: Vec<String>,
@@ -205,6 +213,11 @@ impl KromaConfigFile {
                     }
                     "adaptive_tournament" => {
                         file.adaptive_tournament = Some(value.as_positive_usize(&key)?);
+                    }
+                    "allowed_models" => {
+                        let raw = value.as_string()?;
+                        validate_model_allowlist(&key, &raw)?;
+                        file.allowed_models = Some(raw);
                     }
                     "projection_profile" => {
                         let raw = value.as_string()?;
@@ -446,6 +459,10 @@ impl KromaConfigFile {
                     .map_err(|_| format!("'{}' is not a valid max_subagents value", value))?;
                 file.max_subagents = Some(parsed);
             }
+            "allowed_models" => {
+                validate_model_allowlist(key, value)?;
+                file.allowed_models = Some(value.to_string());
+            }
             "max_tokens" => {
                 let parsed = value
                     .trim()
@@ -518,8 +535,43 @@ pub struct ResolvedConfig {
     pub active_profile: Option<String>,
     /// Keys a workspace `.kroma.toml` tried to set outside [`WORKSPACE_ALLOWED_KEYS`].
     pub rejected_workspace_keys: Vec<String>,
+    /// T03 (KR-03): allow-listed keys whose workspace value asked for *more* than the operator
+    /// ceiling and were clamped. Visible instead of silently honoured.
+    pub clamped_workspace_keys: Vec<String>,
+    /// T03 (KR-03): workspace values that were *refused* outright (not merely clamped) because
+    /// honouring them would exceed an operator ceiling. A non-empty list makes
+    /// [`ResolvedConfig::load`] fail: silently running a different model than the repository asked
+    /// for is worse than refusing.
+    pub refused_workspace_keys: Vec<String>,
+    /// T03 (KR-03): resolved model allow-list (`None` = unrestricted).
+    pub allowed_models: Option<Vec<String>>,
     pub user_config_path: Option<PathBuf>,
     pub workspace_config_path: Option<PathBuf>,
+}
+
+/// T03 (KR-03): parse and validate a comma-separated model allow-list. An empty entry is a
+/// configuration error rather than a silently ignored token.
+pub fn parse_model_allowlist(raw: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            return Err(format!("'allowed_models' has an empty entry in {raw:?}"));
+        }
+        if !out.iter().any(|m| m == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    if out.is_empty() {
+        return Err("'allowed_models' must list at least one model".to_string());
+    }
+    Ok(out)
+}
+
+fn validate_model_allowlist(key: &str, raw: &str) -> Result<(), String> {
+    parse_model_allowlist(raw)
+        .map(|_| ())
+        .map_err(|e| format!("{key}: {e}"))
 }
 
 impl ResolvedConfig {
@@ -529,14 +581,21 @@ impl ResolvedConfig {
         let user = KromaConfigFile::load_user_global()?;
         let workspace = KromaConfigFile::load_workspace(workspace_root)?;
         let env = collect_env();
-        Ok(Self::resolve(
+        let resolved = Self::resolve(
             &user,
             &workspace,
             &env,
             overrides,
             KromaConfigFile::user_config_path(),
             KromaConfigFile::workspace_config_path(workspace_root),
-        ))
+        );
+        if !resolved.refused_workspace_keys.is_empty() {
+            return Err(format!(
+                "refusing to run: {}",
+                resolved.refused_workspace_keys.join("; ")
+            ));
+        }
+        Ok(resolved)
     }
 
     /// Pure merge, used by tests and by [`Self::load`].
@@ -549,6 +608,7 @@ impl ResolvedConfig {
         workspace_config_path: PathBuf,
     ) -> Self {
         // Trust guard: only the allow-list survives from the untrusted workspace file.
+        let mut refused_workspace_keys: Vec<String> = Vec::new();
         let mut rejected_workspace_keys: Vec<String> = workspace
             .raw_keys
             .iter()
@@ -586,14 +646,97 @@ impl ResolvedConfig {
 
         let env_string = |name: &str| env_get(env, name);
 
+        // T03 (KR-03): the operator owns the ceiling. A workspace `.kroma.toml` may *lower* the
+        // token cap or the subagent concurrency, but asking for more is clamped and recorded — a
+        // repository cannot grant itself a bigger budget or more parallel writers.
+        let mut clamped_workspace_keys: Vec<String> = Vec::new();
+        // An explicit per-invocation layer (CLI flag, `KROMA_*`) is the operator speaking *now*, so
+        // it wins outright; a workspace can neither raise it nor quietly lower it. The ambient user
+        // file is a ceiling a workspace may lower (it only restricts spend).
+        let explicit_max_tokens = overrides
+            .max_tokens
+            .or_else(|| env_string(ENV_MAX_TOKENS).and_then(|v| v.parse::<u64>().ok()));
+        let max_tokens = match (explicit_max_tokens, user.max_tokens, workspace.max_tokens) {
+            (Some(host), _, Some(pref)) if pref > host => {
+                clamped_workspace_keys.push(format!(
+                    "max_tokens: workspace asked for {pref}, host ceiling is {host}"
+                ));
+                Some(host)
+            }
+            (Some(host), _, _) => Some(host),
+            (None, Some(host), Some(pref)) if pref > host => {
+                clamped_workspace_keys.push(format!(
+                    "max_tokens: workspace asked for {pref}, host ceiling is {host}"
+                ));
+                Some(host)
+            }
+            (None, Some(host), Some(pref)) => Some(pref.min(host)),
+            (None, Some(host), None) => Some(host),
+            (None, None, pref) => pref,
+        };
+        let explicit_max_subagents = overrides
+            .max_subagents
+            .or_else(|| env_string(ENV_MAX_SUBAGENTS).and_then(|v| v.parse::<usize>().ok()));
+        let max_subagents = match (
+            explicit_max_subagents,
+            user.max_subagents,
+            workspace.max_subagents,
+        ) {
+            (Some(host), _, Some(pref)) if pref > host => {
+                clamped_workspace_keys.push(format!(
+                    "max_subagents: workspace asked for {pref}, host ceiling is {host}"
+                ));
+                Some(host)
+            }
+            (Some(host), _, _) => Some(host),
+            (None, Some(host), Some(pref)) if pref > host => {
+                clamped_workspace_keys.push(format!(
+                    "max_subagents: workspace asked for {pref}, host ceiling is {host}"
+                ));
+                Some(host)
+            }
+            (None, Some(host), Some(pref)) => Some(pref.min(host)),
+            (None, Some(host), None) => Some(host),
+            (None, None, pref) => pref,
+        };
+
+        // T03 (KR-03): the model is a cost/capability ceiling, so an operator allow-list decides
+        // whether the workspace's requested model may be honoured at all.
+        let allowed_models = env_string(ENV_ALLOWED_MODELS)
+            .or_else(|| user.allowed_models.clone())
+            .and_then(|raw| match parse_model_allowlist(&raw) {
+                Ok(list) => Some(list),
+                Err(e) => {
+                    // A malformed operator value must not be silently ignored.
+                    refused_workspace_keys.push(e);
+                    None
+                }
+            });
+        let operator_model = overrides
+            .model
+            .clone()
+            .or_else(|| env_string(ENV_MODEL))
+            .or_else(|| profile.and_then(|p| p.model.clone()))
+            .or_else(|| user.model.clone());
+        let workspace_model = match (workspace.model.clone(), &allowed_models) {
+            (Some(requested), Some(allow)) if !allow.iter().any(|m| m == &requested) => {
+                refused_workspace_keys.push(format!(
+                    "model: workspace asked for {requested}, which is outside the host allow-list [{}]",
+                    allow.join(", ")
+                ));
+                None
+            }
+            (requested, _) => requested,
+        };
+        let model = overrides
+            .model
+            .clone()
+            .or_else(|| env_string(ENV_MODEL))
+            .or(workspace_model)
+            .or(operator_model);
+
         Self {
-            model: overrides
-                .model
-                .clone()
-                .or_else(|| env_string(ENV_MODEL))
-                .or_else(|| workspace.model.clone())
-                .or_else(|| profile.and_then(|p| p.model.clone()))
-                .or_else(|| user.model.clone()),
+            model,
             base_url: overrides
                 .base_url
                 .clone()
@@ -631,18 +774,10 @@ impl ResolvedConfig {
                 .clone()
                 .or_else(|| env_string(ENV_VERIFY_COMMAND))
                 .or_else(|| user.verify_command.clone()),
-            max_subagents: overrides
-                .max_subagents
-                .or_else(|| env_string(ENV_MAX_SUBAGENTS).and_then(|v| v.parse::<usize>().ok()))
-                .or(workspace.max_subagents)
-                .or(user.max_subagents),
+            max_subagents,
             // F05 (`v1.5.1`): a safe, non-security key — the workspace file may set it. The cap only
             // limits spend, so a workspace-controlled value cannot escalate authority.
-            max_tokens: overrides
-                .max_tokens
-                .or_else(|| env_string(ENV_MAX_TOKENS).and_then(|v| v.parse::<u64>().ok()))
-                .or(workspace.max_tokens)
-                .or(user.max_tokens),
+            max_tokens,
             // B2: a safe, non-security key — the workspace file may set it.
             projection_profile: overrides
                 .projection_profile
@@ -667,6 +802,9 @@ impl ResolvedConfig {
             },
             active_profile,
             rejected_workspace_keys,
+            clamped_workspace_keys,
+            refused_workspace_keys,
+            allowed_models,
             user_config_path,
             workspace_config_path: Some(workspace_config_path),
         }
@@ -686,6 +824,21 @@ impl ResolvedConfig {
             show(&self.active_profile)
         ));
         out.push_str(&format!("model:            {}\n", show(&self.model)));
+        // T03 (KR-03): show the ceiling that decides whether a workspace model may be used, and
+        // every clamp/refusal so an operator never has to guess why a value did not apply.
+        out.push_str(&format!(
+            "allowed_models:   {}\n",
+            match &self.allowed_models {
+                Some(list) => list.join(", "),
+                None => "(unrestricted)".to_string(),
+            }
+        ));
+        for key in &self.clamped_workspace_keys {
+            out.push_str(&format!("clamped:          {key}\n"));
+        }
+        for key in &self.refused_workspace_keys {
+            out.push_str(&format!("refused:          {key}\n"));
+        }
         out.push_str(&format!("base_url:         {}\n", show(&self.base_url)));
         out.push_str(&format!(
             "api_key:          {}\n",

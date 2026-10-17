@@ -844,6 +844,9 @@ fn max_tokens_config_key_resolves_with_documented_precedence() {
         None,
         std::path::PathBuf::from("/ws/.kroma.toml"),
     );
+    // T03 (KR-03): an explicit per-invocation layer (env/CLI) is the operator speaking now, so a
+    // workspace can neither raise it nor quietly lower it. The user-file default, by contrast, is a
+    // ceiling a workspace may lower — see `workspace_cannot_raise_host_token_ceiling`.
     assert_eq!(
         resolved.max_tokens,
         Some(333),

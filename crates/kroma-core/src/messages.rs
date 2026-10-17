@@ -274,6 +274,49 @@ impl TranscriptItem {
             }
         }
     }
+
+    /// T03 (KR-03): conservative token estimate for this item.
+    ///
+    /// Mirrors [`Self::estimated_bytes`] but charges non-ASCII text at 1 token per 2 bytes (CJK is
+    /// ~1 token per character) instead of `bytes / 4`, which would under-estimate it. Image payload
+    /// bytes are charged at 4 bytes per token. This is an estimate, never presented as a tokenizer.
+    pub fn estimated_tokens(&self) -> u64 {
+        use crate::budget::conservative_text_tokens;
+        match self {
+            TranscriptItem::User(u) => conservative_text_tokens(&u.content).saturating_add(8),
+            TranscriptItem::Assistant(a) => {
+                let mut total = a
+                    .content
+                    .as_ref()
+                    .map(|s| conservative_text_tokens(s))
+                    .unwrap_or(0);
+                for r in &a.reasoning_blocks {
+                    if let Some(s) = &r.text {
+                        total = total.saturating_add(conservative_text_tokens(s));
+                    }
+                    if let Some(s) = &r.signature {
+                        total = total.saturating_add(conservative_text_tokens(s));
+                    }
+                    if let Some(s) = &r.opaque_payload {
+                        total = total.saturating_add(conservative_text_tokens(s));
+                    }
+                }
+                for tc in &a.tool_calls {
+                    total = total
+                        .saturating_add(conservative_text_tokens(&tc.call_id.0))
+                        .saturating_add(conservative_text_tokens(&tc.name))
+                        .saturating_add(conservative_text_tokens(&tc.raw_arguments))
+                        .saturating_add(8);
+                }
+                total.saturating_add(12)
+            }
+            TranscriptItem::ToolResult(tr) => conservative_text_tokens(&tr.call_id.0)
+                .saturating_add(conservative_text_tokens(&tr.tool_name))
+                .saturating_add(conservative_text_tokens(&tr.content))
+                .saturating_add((tr.image_attachment_bytes() as u64).saturating_add(3) / 4)
+                .saturating_add(12),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

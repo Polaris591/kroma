@@ -60,6 +60,17 @@ pub enum EventPayload {
         call_count: usize,
         call_ids: Vec<ToolCallId>,
     },
+    /// T03 (KR-07): the whole request would not fit the model window, so it was never sent.
+    /// Recorded structurally so the operator can see the estimate, the reservation and the source
+    /// of the window instead of only a terminal reason.
+    ContextBudgetExceeded {
+        estimated_input_tokens: u64,
+        reserved_output_tokens: u64,
+        window_tokens: u64,
+        capability_source: String,
+        tool_schema_bytes: usize,
+        message_count: usize,
+    },
     PolicyDecision {
         call_id: ToolCallId,
         tool_name: String,
