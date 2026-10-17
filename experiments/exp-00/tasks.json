@@ -1,0 +1,49 @@
+[
+  {
+    "id": "fix-off-by-one",
+    "source": "src/calc.py contains `def total(n): return sum(range(n))`, which is off by one; `tests/test_calc.py` asserts total(3) == 6. Fix the implementation so the test passes. Do not edit the test.",
+    "expect_contains": [["src/calc.py", "range(1"]],
+    "verify_command": ["python3", "-m", "pytest", "-q", "tests/test_calc.py"]
+  },
+  {
+    "id": "add-guard-clause",
+    "source": "`src/parse.py` raises KeyError on missing keys. Add a guard that raises ValueError with the message 'missing field' instead. Existing tests must keep passing.",
+    "expect_contains": [["src/parse.py", "ValueError"]],
+    "verify_command": ["python3", "-m", "pytest", "-q", "tests/"]
+  },
+  {
+    "id": "rename-and-update-callsites",
+    "source": "Rename `compute_total` to `compute_sum` in `src/lib.py` and update every call site in the repository. Behaviour must not change.",
+    "expect_contains": [["src/lib.py", "def compute_sum"]],
+    "verify_command": ["python3", "-m", "pytest", "-q", "tests/"]
+  },
+  {
+    "id": "add-missing-test-case",
+    "source": "`tests/test_edge.py` is missing a case for empty input. Add exactly one test asserting the documented behaviour for an empty list, without changing production code.",
+    "verify_command": ["python3", "-m", "pytest", "-q", "tests/test_edge.py"]
+  },
+  {
+    "id": "refactor-duplication",
+    "source": "`src/a.py` and `src/b.py` both define `normalize_name`; extract one implementation into `src/util.py` and import it from both. All tests must pass.",
+    "expect_contains": [["src/util.py", "def normalize_name"]],
+    "verify_command": ["python3", "-m", "pytest", "-q", "tests/"]
+  },
+  {
+    "id": "reject-symlink-input",
+    "source": "`src/loader.py` follows symlinks when loading config. Make it refuse a symlinked config path and cover the refusal with a test.",
+    "expect_contains": [["src/loader.py", "is_symlink"]],
+    "verify_command": ["python3", "-m", "pytest", "-q", "tests/"]
+  },
+  {
+    "id": "bound-output-size",
+    "source": "`src/report.py` builds an unbounded string. Bound it to 64 KiB and add a test that a large input is truncated with an explicit marker.",
+    "expect_contains": [["src/report.py", "65536"]],
+    "verify_command": ["python3", "-m", "pytest", "-q", "tests/"]
+  },
+  {
+    "id": "holdout-atomic-write",
+    "source": "`src/store.py` writes state with `open(...,'w')`. Make the write atomic (temp file + rename) and keep the existing API.",
+    "expect_contains": [["src/store.py", "os.replace"]],
+    "verify_command": ["python3", "-m", "pytest", "-q", "tests/"]
+  }
+]

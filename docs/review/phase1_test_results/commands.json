@@ -501,6 +501,14 @@
       "exit": 0,
       "log": "logs/test_t23.log",
       "note": "T23: 968 passed / 0 failed"
+    },
+    {
+      "id": "t24_exp00_dryrun",
+      "cmd": "kroma --experiment experiments/exp-00/manifest.json",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t24_exp00_dryrun.log",
+      "note": "T24: EXP-00 dry-run, 48 jobs (2 arms x 8 tasks x 3 repeats), basis=holdout, digest 05757bf3fe69c9f9; real model runs BLOCKED (no authorized spend cap)"
     }
   ]
 }
