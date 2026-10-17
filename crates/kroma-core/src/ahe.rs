@@ -54,9 +54,52 @@ pub enum RepairDecision {
     Refused,
 }
 
+/// T19 (KR-22): the four levels the single `Accepted` used to collapse.
+///
+/// * `prediction_confirmed` — the stated hypothesis predicted what actually happened. This says
+///   nothing about whether the change is good: predicting "this task still fails" is a true
+///   prediction and a useless repair.
+/// * `experiment_valid` — the comparison itself is sound: both sides ran from identical frozen
+///   copies, the judge did not change, and the source tree was not touched.
+/// * `improvement_accepted` — a *real* improvement: valid, confirmed, no regressions, at least one
+///   task improved, and the prediction was that the task would start passing.
+/// * `promotion_approved` — always `false` in this version. Promotion is a human decision taken after
+///   an independent full regression; the experimenter only ever produces a patch and a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RepairVerdict {
+    pub prediction_confirmed: bool,
+    pub experiment_valid: bool,
+    pub improvement_accepted: bool,
+    pub promotion_approved: bool,
+}
+
+impl RepairVerdict {
+    pub fn as_str(&self) -> &'static str {
+        if self.promotion_approved {
+            "promotion_approved"
+        } else if self.improvement_accepted {
+            "improvement_accepted"
+        } else if self.prediction_confirmed && self.experiment_valid {
+            "prediction_confirmed_only"
+        } else if self.experiment_valid {
+            "experiment_valid_no_improvement"
+        } else {
+            "invalid_experiment"
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepairOutcome {
     pub decision: RepairDecision,
+    /// T19: the split verdict. `decision` is kept as a coarse summary for existing callers and is
+    /// derived from `verdict.improvement_accepted`.
+    pub verdict: RepairVerdict,
+    /// T19: identity of the judge (tasks + limits) that produced this comparison. Two outcomes with
+    /// different values were judged by different rules and cannot be compared.
+    pub evaluator_sha256: String,
+    /// T19: `true` when the source tree's content hash is unchanged after the experiment.
+    pub source_untouched: bool,
     pub rationale: String,
     /// `Some(true/false)` when the prediction could be checked; `None` when the run never happened.
     pub prediction_held: Option<bool>,
@@ -70,12 +113,62 @@ impl RepairOutcome {
     fn refused(reason: impl Into<String>) -> Self {
         Self {
             decision: RepairDecision::Refused,
+            verdict: RepairVerdict::default(),
+            evaluator_sha256: String::new(),
+            source_untouched: true,
             rationale: reason.into(),
             prediction_held: None,
             regressions: Vec::new(),
             improvements: Vec::new(),
         }
     }
+}
+
+/// T19 (KR-20): identity of the judge.
+///
+/// Everything that decides the verdict is hashed: task ids, prompts, post-conditions, verification
+/// commands and the limits they run under. If any of it changes, the same candidate is no longer
+/// being compared against the same judge, and [`compare_outcomes`] refuses to treat the two runs as
+/// one experiment.
+pub fn frozen_evaluator_identity(tasks: &[BenchTask], limits: &VerifyCommandLimits) -> String {
+    let mut canonical = String::new();
+    canonical.push_str(&format!(
+        "limits:{}:{}\n",
+        limits.timeout.as_millis(),
+        limits.max_output_bytes
+    ));
+    for task in tasks {
+        canonical.push_str(&format!("task:{}\n", task.id));
+        canonical.push_str(&format!("prompt:{}\n", task.prompt));
+        for (path, needle) in &task.expect_contains {
+            canonical.push_str(&format!("contains:{path}:{needle}\n"));
+        }
+        for path in &task.expect_absent {
+            canonical.push_str(&format!("absent:{path}\n"));
+        }
+        canonical.push_str(&format!("regression_guard:{}\n", task.regression_guard));
+        if let Some(command) = &task.verify_command {
+            canonical.push_str(&format!("verify:{}\n", command.join("\u{1f}")));
+        }
+    }
+    crate::prompt::sha256_hex64(canonical.as_bytes())
+}
+
+/// T19: can two outcomes be compared at all?
+///
+/// Returns `None` when the judge changed between them — the same candidate measured under different
+/// rules is not a before/after pair, and treating it as one is how a comparison quietly becomes
+/// meaningless.
+pub fn compare_outcomes(before: &RepairOutcome, after: &RepairOutcome) -> Option<f64> {
+    if before.evaluator_sha256 != after.evaluator_sha256 {
+        return None;
+    }
+    if !before.source_untouched || !after.source_untouched {
+        return None;
+    }
+    let before_improved = before.improvements.len() as f64 - before.regressions.len() as f64;
+    let after_improved = after.improvements.len() as f64 - after.regressions.len() as f64;
+    Some(after_improved - before_improved)
 }
 
 /// Run the offline repair loop for one candidate.
@@ -110,23 +203,39 @@ pub async fn evaluate_repair(
         )));
     }
 
-    // 2. Before: the contract's verdicts on the untouched copy.
-    let before = evaluate_all(source_root, tasks, limits).await;
+    // T19 (KR-20): identity of the judge, captured before anything runs, so a comparison can be tied
+    // to the rules that produced it.
+    let evaluator_sha256 = frozen_evaluator_identity(tasks, limits);
+    let source_before = crate::provenance::fingerprint_explicit(source_root, None).source_sha256;
 
-    // 3. Apply to an isolated copy.
-    let isolated = copy_workspace(source_root)?;
+    // 2. Baseline and candidate each run in their own frozen copy. The source tree is never an
+    // evaluation root: a verifier that writes (or a task that deletes) would otherwise mutate the
+    // workspace the experiment is supposed to leave alone.
+    let baseline_tree = TempTree::create_from(source_root)?;
+    let candidate_tree = TempTree::create_from(source_root)?;
+
+    // 3. Before: the contract's verdicts on an untouched copy.
+    let before = evaluate_all(baseline_tree.path(), tasks, limits).await;
+
+    // 4. Apply the candidate to its own copy.
     for change in &candidate.changes {
-        let target = isolated.join(&change.path);
+        let target = candidate_tree.path().join(&change.path);
         if let Some(parent) = target.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(&target, &change.contents)
-            .map_err(|error| SelfRepairViolation::UnsafePath(format!("{}: {error}", change.path)))?;
+        std::fs::write(&target, &change.contents).map_err(|error| {
+            SelfRepairViolation::UnsafePath(format!("{}: {error}", change.path))
+        })?;
     }
 
-    // 4. After: the same contract on the patched copy.
-    let after = evaluate_all(&isolated, tasks, limits).await;
-    let _ = std::fs::remove_dir_all(&isolated);
+    // 5. After: the same contract on the patched copy. Both trees are removed by `Drop` on every
+    // exit path, including the early returns above.
+    let after = evaluate_all(candidate_tree.path(), tasks, limits).await;
+    drop(baseline_tree);
+    drop(candidate_tree);
+
+    let source_after = crate::provenance::fingerprint_explicit(source_root, None).source_sha256;
+    let source_untouched = source_before == source_after;
 
     let mut regressions = Vec::new();
     let mut improvements = Vec::new();
@@ -138,47 +247,111 @@ pub async fn evaluate_repair(
         }
     }
 
-    // 5. The prediction must actually hold: a hypothesis that explains nothing is rejected.
+    // 6. The prediction must actually hold: a hypothesis that explains nothing is rejected.
     let predicted_after = after
         .iter()
         .find(|(id, _)| id == &candidate.prediction.task_id)
         .map(|(_, resolved)| *resolved)
         .unwrap_or(false);
     let prediction_held = predicted_after == candidate.prediction.expected_resolved;
-    let (decision, rationale) = if !prediction_held {
-        (
-            RepairDecision::Rejected,
-            format!(
-                "the prediction did not hold: task '{}' was expected resolved={} but is resolved={}",
-                candidate.prediction.task_id, candidate.prediction.expected_resolved, predicted_after
-            ),
+
+    // 7. T19 (KR-22): split the verdict. A confirmed prediction is not an improvement, and an
+    // improvement is not a promotion.
+    let experiment_valid = source_untouched;
+    let improvement_accepted = experiment_valid
+        && prediction_held
+        && regressions.is_empty()
+        && !improvements.is_empty()
+        // Predicting that a failing task *stays* failing is a true prediction and a useless repair.
+        && candidate.prediction.expected_resolved;
+    let verdict = RepairVerdict {
+        prediction_confirmed: prediction_held,
+        experiment_valid,
+        improvement_accepted,
+        // Promotion is a human decision after an independent full regression. The experimenter never
+        // approves its own promotion.
+        promotion_approved: false,
+    };
+
+    let rationale = if !source_untouched {
+        format!(
+            "the source tree changed during the experiment ({} -> {}); the comparison is invalid",
+            source_before.as_deref().unwrap_or("unknown"),
+            source_after.as_deref().unwrap_or("unknown")
+        )
+    } else if !prediction_held {
+        format!(
+            "the prediction did not hold: task '{}' was expected resolved={} but is resolved={}",
+            candidate.prediction.task_id, candidate.prediction.expected_resolved, predicted_after
         )
     } else if !regressions.is_empty() {
-        (
-            RepairDecision::Rejected,
-            format!(
-                "the prediction held but {} previously passing task(s) regressed: {}",
-                regressions.len(),
-                regressions.join(", ")
-            ),
+        format!(
+            "the prediction held but {} previously passing task(s) regressed: {}",
+            regressions.len(),
+            regressions.join(", ")
+        )
+    } else if !candidate.prediction.expected_resolved {
+        format!(
+            "the prediction held (task '{}' still fails) but a confirmed failure is not an improvement",
+            candidate.prediction.task_id
+        )
+    } else if improvements.is_empty() {
+        format!(
+            "the prediction held but nothing improved ({} improved, {} regressed): the candidate stays experimental",
+            improvements.len(),
+            regressions.len()
         )
     } else {
-        (
-            RepairDecision::Accepted,
-            format!(
-                "the prediction held and no task regressed ({} improved)",
-                improvements.len()
-            ),
+        format!(
+            "the prediction held, no task regressed and {} task(s) improved; the patch is a candidate for human review",
+            improvements.len()
         )
     };
 
     Ok(RepairOutcome {
-        decision,
+        decision: if improvement_accepted {
+            RepairDecision::Accepted
+        } else {
+            RepairDecision::Rejected
+        },
+        verdict,
+        evaluator_sha256,
+        source_untouched,
         rationale,
         prediction_held: Some(prediction_held),
         regressions,
         improvements,
     })
+}
+
+/// T19 (KR-20): a temporary copy of the source tree that removes itself on every exit path.
+///
+/// The earlier code removed the copy with an explicit call after the evaluation, so any early return
+/// (a failed write, a refusal, a panic) leaked a full workspace copy. `Drop` makes cleanup
+/// unconditional.
+struct TempTree {
+    path: PathBuf,
+}
+
+impl TempTree {
+    fn create_from(source: &Path) -> Result<Self, SelfRepairViolation> {
+        let path = std::env::temp_dir().join(format!("kroma-ahe-{}", uuid::Uuid::new_v4()));
+        copy_dir(source, &path).map_err(|error| {
+            let _ = std::fs::remove_dir_all(&path);
+            SelfRepairViolation::UnsafePath(format!("isolated copy failed: {error}"))
+        })?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 /// `(task id, resolved)` for every task, in the suite's order.
@@ -193,14 +366,6 @@ async fn evaluate_all(
         verdicts.push((task.id.clone(), evaluation.resolved));
     }
     verdicts
-}
-
-/// A byte copy of the workspace, so a candidate can never be evaluated in place.
-fn copy_workspace(source: &Path) -> Result<PathBuf, SelfRepairViolation> {
-    let target = std::env::temp_dir().join(format!("kroma-ahe-{}", uuid::Uuid::new_v4()));
-    copy_dir(source, &target)
-        .map_err(|error| SelfRepairViolation::UnsafePath(format!("isolated copy failed: {error}")))?;
-    Ok(target)
 }
 
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -241,9 +406,14 @@ mod tests {
 
     /// A workspace with one buggy module and a second module that must keep working.
     fn workspace(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("kroma-ahe-src-{label}-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("kroma-ahe-src-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/calc.py"), "def total(n):\n    return sum(range(n))\n").unwrap();
+        std::fs::write(
+            root.join("src/calc.py"),
+            "def total(n):\n    return sum(range(n))\n",
+        )
+        .unwrap();
         std::fs::write(root.join("src/keep.py"), "def ok():\n    return True\n").unwrap();
         root
     }
@@ -256,7 +426,11 @@ mod tests {
             expect_contains: Vec::new(),
             expect_absent: Vec::new(),
             regression_guard: false,
-            verify_command: Some(vec!["python3".to_string(), "-c".to_string(), verify.to_string()]),
+            verify_command: Some(vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                verify.to_string(),
+            ]),
         };
         vec![
             task(
@@ -292,15 +466,9 @@ mod tests {
             changes: vec![fix_change()],
         };
 
-        let outcome = evaluate_repair(
-            &candidate,
-            &demo_surface(),
-            &root,
-            &tasks(),
-            &limits(),
-        )
-        .await
-        .expect("the candidate is allowed");
+        let outcome = evaluate_repair(&candidate, &demo_surface(), &root, &tasks(), &limits())
+            .await
+            .expect("the candidate is allowed");
 
         assert_eq!(outcome.decision, RepairDecision::Accepted, "{outcome:?}");
         assert_eq!(outcome.prediction_held, Some(true));
@@ -333,16 +501,13 @@ mod tests {
             ],
         };
 
-        let error = evaluate_repair(
-            &candidate,
-            &demo_surface(),
-            &root,
-            &tasks(),
-            &limits(),
-        )
-        .await
-        .expect_err("a patch touching the security policy must be refused");
-        assert!(matches!(error, SelfRepairViolation::Protected { .. }), "{error:?}");
+        let error = evaluate_repair(&candidate, &demo_surface(), &root, &tasks(), &limits())
+            .await
+            .expect_err("a patch touching the security policy must be refused");
+        assert!(
+            matches!(error, SelfRepairViolation::Protected { .. }),
+            "{error:?}"
+        );
         assert!(
             !root.join("crates/kroma-core/src/tool/policy.rs").exists(),
             "a refused candidate must not write anything"
@@ -367,15 +532,9 @@ mod tests {
             }],
         };
 
-        let outcome = evaluate_repair(
-            &candidate,
-            &demo_surface(),
-            &root,
-            &tasks(),
-            &limits(),
-        )
-        .await
-        .expect("the candidate is allowed");
+        let outcome = evaluate_repair(&candidate, &demo_surface(), &root, &tasks(), &limits())
+            .await
+            .expect("the candidate is allowed");
 
         assert_eq!(outcome.decision, RepairDecision::Rejected);
         assert_eq!(outcome.prediction_held, Some(false));
@@ -405,15 +564,9 @@ mod tests {
             ],
         };
 
-        let outcome = evaluate_repair(
-            &candidate,
-            &demo_surface(),
-            &root,
-            &tasks(),
-            &limits(),
-        )
-        .await
-        .expect("the candidate is allowed");
+        let outcome = evaluate_repair(&candidate, &demo_surface(), &root, &tasks(), &limits())
+            .await
+            .expect("the candidate is allowed");
 
         assert_eq!(outcome.decision, RepairDecision::Rejected);
         assert_eq!(outcome.regressions, vec!["keep".to_string()]);
@@ -433,15 +586,9 @@ mod tests {
             },
             changes: vec![fix_change()],
         };
-        let outcome = evaluate_repair(
-            &candidate,
-            &demo_surface(),
-            &root,
-            &tasks(),
-            &limits(),
-        )
-        .await
-        .expect("allowed surface");
+        let outcome = evaluate_repair(&candidate, &demo_surface(), &root, &tasks(), &limits())
+            .await
+            .expect("allowed surface");
         assert_eq!(outcome.decision, RepairDecision::Refused);
         assert!(outcome.rationale.contains("unknown task"), "{outcome:?}");
         let _ = std::fs::remove_dir_all(&root);

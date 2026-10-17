@@ -32,11 +32,9 @@ pub enum SelfRepairViolation {
 impl std::fmt::Display for SelfRepairViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SelfRepairViolation::UnsafePath(path) => write!(
-                f,
-                "self-repair candidate uses an unsafe path '{}'",
-                path
-            ),
+            SelfRepairViolation::UnsafePath(path) => {
+                write!(f, "self-repair candidate uses an unsafe path '{}'", path)
+            }
             SelfRepairViolation::Protected { path, protected } => write!(
                 f,
                 "self-repair candidate touches protected artifact '{}' ('{}'); a patch may not \\
@@ -56,6 +54,9 @@ pub struct ProtectedArtifact {
     pub path: Option<String>,
     /// File name that is protected wherever it appears.
     pub file_name: Option<String>,
+    /// T19: repository-relative directory prefix. Everything under it is protected, so a trusted
+    /// test suite cannot be edited by the candidate it grades.
+    pub path_prefix: Option<String>,
     pub reason: &'static str,
 }
 
@@ -64,6 +65,17 @@ impl ProtectedArtifact {
         Self {
             path: Some(path.to_string()),
             file_name: None,
+            path_prefix: None,
+            reason,
+        }
+    }
+
+    /// T19: protect a whole directory subtree.
+    fn prefix(path_prefix: &str, reason: &'static str) -> Self {
+        Self {
+            path: None,
+            file_name: None,
+            path_prefix: Some(path_prefix.to_string()),
             reason,
         }
     }
@@ -72,6 +84,7 @@ impl ProtectedArtifact {
         Self {
             path: None,
             file_name: Some(file_name.to_string()),
+            path_prefix: None,
             reason,
         }
     }
@@ -84,6 +97,14 @@ impl ProtectedArtifact {
         }
         if let Some(name) = &self.file_name {
             if name.eq_ignore_ascii_case(file_name) {
+                return true;
+            }
+        }
+        if let Some(prefix) = &self.path_prefix {
+            if normalized
+                .to_ascii_lowercase()
+                .starts_with(&prefix.to_ascii_lowercase())
+            {
                 return true;
             }
         }
@@ -122,10 +143,7 @@ pub fn protected_artifacts() -> Vec<ProtectedArtifact> {
             "the guard itself",
         ),
         // Release trust root: the code that decides what may be installed.
-        ProtectedArtifact::at(
-            "bin/kroma.js",
-            "release trust root and installer",
-        ),
+        ProtectedArtifact::at("bin/kroma.js", "release trust root and installer"),
         ProtectedArtifact::at(
             "npm/kroma-cli/bin/kroma.js",
             "release trust root and installer (npm copy)",
@@ -134,6 +152,27 @@ pub fn protected_artifacts() -> Vec<ProtectedArtifact> {
             "scripts/generate-release-manifest.js",
             "release signing tool",
         ),
+        // T19 (KR-21): the judge itself. A candidate that may rewrite the scorer, the statistics,
+        // the completion gate or the experiment policy can make itself look good without fixing
+        // anything, so all four are protected by name.
+        ProtectedArtifact::at(
+            "crates/kroma-core/src/bench.rs",
+            "scorer and paired/cluster statistics",
+        ),
+        ProtectedArtifact::at(
+            "crates/kroma-core/src/completion_gate.rs",
+            "completion gate (decides when a task is done)",
+        ),
+        ProtectedArtifact::at(
+            "crates/kroma-core/src/ahe.rs",
+            "the self-repair experiment policy and verdict rules",
+        ),
+        ProtectedArtifact::at(
+            "crates/kroma-core/src/experiment.rs",
+            "experiment manifest and promotion rules",
+        ),
+        // Trusted tests: a candidate that can edit the suite can edit its own grade.
+        ProtectedArtifact::prefix("crates/kroma-core/tests/", "trusted regression tests"),
         // Scorer and held-out answers.
         ProtectedArtifact::named("smoke_solutions.json", "held-out reference answers"),
         ProtectedArtifact::at(
@@ -141,7 +180,10 @@ pub fn protected_artifacts() -> Vec<ProtectedArtifact> {
             "cost accounting used by scoring",
         ),
         // Evidence rules.
-        ProtectedArtifact::at("rust-toolchain.toml", "pinned toolchain for reproducible evidence"),
+        ProtectedArtifact::at(
+            "rust-toolchain.toml",
+            "pinned toolchain for reproducible evidence",
+        ),
     ]
 }
 
@@ -238,7 +280,9 @@ fn normalize_relative(raw: &str) -> Result<String, SelfRepairViolation> {
 
 /// Convenience: the normalized form of a path, for logging a candidate.
 pub fn normalize(path: &Path) -> Option<PathBuf> {
-    normalize_relative(&path.to_string_lossy()).ok().map(PathBuf::from)
+    normalize_relative(&path.to_string_lossy())
+        .ok()
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -272,7 +316,10 @@ mod tests {
                 .expect_err(&format!("{path} must be refused"));
             match err {
                 SelfRepairViolation::Protected { protected, .. } => {
-                    assert!(!protected.is_empty(), "the refusal must name what is protected");
+                    assert!(
+                        !protected.is_empty(),
+                        "the refusal must name what is protected"
+                    );
                 }
                 other => panic!("expected a protected-artifact refusal, got {other:?}"),
             }
@@ -320,7 +367,9 @@ mod tests {
 
         let closed = SelfRepairSurface::default();
         assert!(
-            closed.check(["crates/kroma-core/src/agent_loop.rs"]).is_err(),
+            closed
+                .check(["crates/kroma-core/src/agent_loop.rs"])
+                .is_err(),
             "a surface with no allowed prefixes must allow nothing"
         );
     }

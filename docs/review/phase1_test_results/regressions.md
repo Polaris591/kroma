@@ -44,6 +44,14 @@
 复现率：补丁树 1/10，基线树 1/10。测试文件与生产代码都不在本批 8 个改动文件里。
 分类：**随机不稳定（既有）**。超时/取消路径上的竞态，真实缺陷，但不属于本批。
 
+### 2.1b `b05_execution_context::agent_runner_real_toolchain_clamps_run_deadline`
+
+Observed once during T19's full-suite run: expected `ToolTimeout`, got `IoError`. The test spawns a
+real toolchain subprocess and asserts the run deadline clamps it; under full-suite load the spawn
+itself failed, which surfaces as `IoError` before the deadline logic runs. The whole `b05` binary is
+green in isolation (14/14) and on the following full run, so this is load sensitivity in the test's
+setup, not a product defect. Same family as §2.1.
+
 ### 2.2 `b08c_git_metadata`（5 条里任一条可能挂）
 
 失败形态两种：拿到的 object id 是另一条用例的 SHA-256（`left` 为 64 位十六进制），或直接 `None`。
