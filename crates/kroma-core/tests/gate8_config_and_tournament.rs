@@ -2244,3 +2244,117 @@ fn test_f07_tournament_conflict_reports_no_preserved_worktree_and_cleans_up() {
     assert!(!root.join("worktrees").join("wt-race-0002").exists());
     let _ = fs::remove_dir_all(&root);
 }
+
+// ---- T01 (KR-01): the RPC entry point uses the same host verification policy as the tool path ----
+
+/// A provider that makes a subagent write a fix into its isolated worktree, then stop.
+struct FixingChildProvider;
+
+impl ModelProvider for FixingChildProvider {
+    fn complete<'a>(
+        &'a self,
+        req: ProviderRequest,
+        _budget: &'a BudgetConfig,
+        _cancel_rx: watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let is_child = req.system_prompt.contains("[SUBAGENT ROLE:");
+            let turn = if is_child {
+                if req.messages.iter().any(|m| {
+                    matches!(
+                        m,
+                        TranscriptItem::ToolResult(tr) if tr.tool_name == "write"
+                    )
+                }) {
+                    AssistantTurn {
+                        content: Some("fixed".to_string()),
+                        reasoning_blocks: Vec::new(),
+                        tool_calls: Vec::new(),
+                        finish_reason: FinishReason::Stop,
+                        usage: None,
+                    }
+                } else {
+                    AssistantTurn {
+                        content: None,
+                        reasoning_blocks: Vec::new(),
+                        tool_calls: vec![ToolCall {
+                            call_id: ToolCallId::new("child_write"),
+                            name: "write".to_string(),
+                            raw_arguments: serde_json::json!({
+                                "path": "lib.rs",
+                                "content": "pub fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }\n"
+                            })
+                            .to_string(),
+                        }],
+                        finish_reason: FinishReason::ToolCalls,
+                        usage: None,
+                    }
+                }
+            } else {
+                AssistantTurn {
+                    content: Some("parent done".to_string()),
+                    reasoning_blocks: Vec::new(),
+                    tool_calls: Vec::new(),
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                }
+            };
+            Ok(ProviderCompletion {
+                turn,
+                request_body_bytes: 128,
+                latency_ms: 1,
+                ttft_ms: Some(1),
+                attempts_used: 1,
+                reported_model: None,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn t01_rpc_tournament_follows_the_host_verification_policy() {
+    use kroma_core::surface::{JsonRpcRequest, RpcDispatcher};
+
+    for (host_strict, expect_merge) in [(true, false), (false, true)] {
+        let root = temp_root(if host_strict {
+            "t01-rpc-strict"
+        } else {
+            "t01-rpc-relaxed"
+        });
+        let ws = root.join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(
+            ws.join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .unwrap();
+
+        let mut cfg = KromaRuntimeConfig::new(&ws, root.join("state"), PolicyMode::FullAutonomous);
+        cfg.tournament_require_verified = host_strict;
+        // Verification never runs: `skipped`, so only a relaxed host may merge it.
+        cfg.completion_gate = Arc::new(SkippedGate);
+        let dispatcher = RpcDispatcher::new(cfg, Arc::new(FixingChildProvider)).unwrap();
+        let resp = dispatcher
+            .handle_request(JsonRpcRequest::new(
+                1,
+                "session.tournament",
+                serde_json::json!({ "task": "fix lib.rs", "candidates": 2 }),
+            ))
+            .await;
+        assert!(resp.error.is_none(), "tournament failed: {:?}", resp.error);
+
+        let after = fs::read_to_string(ws.join("lib.rs")).unwrap();
+        if expect_merge {
+            assert!(
+                after.contains("wrapping_add"),
+                "a relaxed host must let a skipped-gate winner merge over RPC"
+            );
+        } else {
+            assert_eq!(
+                after, "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+                "a strict host must not merge an unverified winner over RPC"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+}

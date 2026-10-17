@@ -26,6 +26,12 @@ pub struct KromaRuntimeConfig {
     pub counterfactual_probe: bool,
     /// Capability gap #5 (`v1.5.2`): whether a repair race requires a real verification pass.
     pub tournament_require_verified: bool,
+    /// T01 (KR-01): host-owned protected globs for repair races started over RPC. Caller-supplied
+    /// `protected_paths` are merged into this set and can never remove an entry.
+    pub tournament_protected_paths: Vec<String>,
+    /// T01 (KR-01): host-owned test-tampering protection for RPC repair races. A caller may enable
+    /// it, never disable it.
+    pub tournament_disallow_test_tampering: bool,
     /// Capability gap #6 (`v1.5.2`): pin only core tool schemas and discover the rest on demand.
     pub on_demand_tools: bool,
     /// Capability gap #3 (`v1.5.2`): replace dead-end branch output with evidence-linked stubs so it
@@ -76,6 +82,8 @@ impl KromaRuntimeConfig {
             adaptive_tournament_candidates: 0,
             counterfactual_probe: false,
             tournament_require_verified: true,
+            tournament_protected_paths: Vec::new(),
+            tournament_disallow_test_tampering: false,
             on_demand_tools: false,
             causal_pruning: false,
             initial_skill: None,

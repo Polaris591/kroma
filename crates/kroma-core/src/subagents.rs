@@ -565,6 +565,74 @@ pub struct TournamentRequest {
     pub require_verified: Option<bool>,
 }
 
+/// T01 (KR-01): where the effective verification requirement came from. Every decision is
+/// attributable, so a model that tried to turn verification off can be reported instead of being
+/// silently ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationPolicySource {
+    /// The host requires verification; the model said nothing (or asked for it as well).
+    HostStrict,
+    /// The model explicitly asked for verification the host did not require.
+    ModelRequestedStrict,
+    /// The model tried to turn verification off while the host requires it. The host wins and the
+    /// attempt is recorded in the run log.
+    ModelDowngradeIgnored,
+    /// Neither the host nor the model asked for verification (operator-owned relaxed mode).
+    HostRelaxed,
+}
+
+impl VerificationPolicySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerificationPolicySource::HostStrict => "host_strict",
+            VerificationPolicySource::ModelRequestedStrict => "model_requested_strict",
+            VerificationPolicySource::ModelDowngradeIgnored => "model_downgrade_ignored",
+            VerificationPolicySource::HostRelaxed => "host_relaxed",
+        }
+    }
+
+    /// `true` when the model asked for a relaxation the host refused to grant.
+    pub fn is_downgrade_attempt(self) -> bool {
+        matches!(self, VerificationPolicySource::ModelDowngradeIgnored)
+    }
+}
+
+/// T01 (KR-01): the effective requirement plus its provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedVerificationPolicy {
+    pub require_verified: bool,
+    pub source: VerificationPolicySource,
+}
+
+/// T01 (KR-01): resolve the trust boundary between the host's verification policy and model
+/// arguments, keeping the provenance.
+///
+/// A model may opt in to stronger verification, but it must never weaken a host requirement. The
+/// host-only `false` setting remains available through the operator-owned runner config.
+pub fn resolve_tournament_verification(
+    host_required: bool,
+    model_requested: Option<bool>,
+) -> ResolvedVerificationPolicy {
+    match (host_required, model_requested) {
+        (true, Some(false)) => ResolvedVerificationPolicy {
+            require_verified: true,
+            source: VerificationPolicySource::ModelDowngradeIgnored,
+        },
+        (true, _) => ResolvedVerificationPolicy {
+            require_verified: true,
+            source: VerificationPolicySource::HostStrict,
+        },
+        (false, Some(true)) => ResolvedVerificationPolicy {
+            require_verified: true,
+            source: VerificationPolicySource::ModelRequestedStrict,
+        },
+        (false, _) => ResolvedVerificationPolicy {
+            require_verified: false,
+            source: VerificationPolicySource::HostRelaxed,
+        },
+    }
+}
+
 /// Resolve the trust boundary between the host's verification policy and model arguments.
 /// A model may opt in to stronger verification, but it must never weaken a host requirement.
 /// The host-only `false` setting remains available through the operator-owned runner config.
@@ -572,7 +640,24 @@ pub fn effective_tournament_require_verified(
     host_required: bool,
     model_requested: Option<bool>,
 ) -> bool {
-    host_required || model_requested.unwrap_or(false)
+    resolve_tournament_verification(host_required, model_requested).require_verified
+}
+
+/// T01 (KR-01): union of the host-owned protection set with task-level additions.
+///
+/// Task-level globs (model tool arguments or RPC parameters) can only *expand* the protected set;
+/// there is no input that removes a host-protected glob.
+pub fn merge_protected_globs(host: &[String], requested: &[String]) -> Vec<String> {
+    let mut globs: Vec<String> = host.iter().chain(requested.iter()).cloned().collect();
+    globs.sort();
+    globs.dedup();
+    globs
+}
+
+/// T01 (KR-01): a task-level flag may enable test-path protection but must not disable a
+/// host-owned one.
+pub fn effective_disallow_test_tampering(host: bool, requested: bool) -> bool {
+    host || requested
 }
 
 /// Detect a tournament request in `spawn_subagent` arguments.
@@ -2167,7 +2252,9 @@ pub struct TournamentScore {
     pub winner: bool,
 }
 
-fn unknown_child_usage() -> String { "unknown".to_string() }
+fn unknown_child_usage() -> String {
+    "unknown".to_string()
+}
 
 impl TournamentScore {
     /// `true` when the candidate's gate did not reject it under the given winner policy.
@@ -2725,11 +2812,20 @@ pub async fn run_worktree_tournament(
     let total_input_tokens = scores.iter().map(|s| s.input_tokens).sum::<u64>();
     let total_output_tokens = scores.iter().map(|s| s.output_tokens).sum::<u64>();
     let total_cached_input_tokens = scores.iter().try_fold(0u64, |total, score| {
-        score.cached_input_tokens.map(|cached| total.saturating_add(cached))
+        score
+            .cached_input_tokens
+            .map(|cached| total.saturating_add(cached))
     });
-    let usage_basis = scores.iter().map(|s| s.usage_basis.as_str()).fold(None, |basis, next| {
-        Some(basis.map_or(next, |previous| crate::budget::combine_usage_basis(previous, next)))
-    }).unwrap_or("unknown").to_string();
+    let usage_basis = scores
+        .iter()
+        .map(|s| s.usage_basis.as_str())
+        .fold(None, |basis, next| {
+            Some(basis.map_or(next, |previous| {
+                crate::budget::combine_usage_basis(previous, next)
+            }))
+        })
+        .unwrap_or("unknown")
+        .to_string();
 
     // F06 (`v1.4.0`): run the *real* three-way conflict pre-check against the live parent workspace
     // BEFORE ranking, so `conflict_free_with_parent` reflects reality instead of being hardcoded

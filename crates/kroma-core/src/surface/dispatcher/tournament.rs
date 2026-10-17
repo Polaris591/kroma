@@ -365,6 +365,22 @@ impl RpcDispatcher {
             })
             .unwrap_or_default();
 
+        // T01 (KR-01): the host decides the verification requirement and owns the base protection
+        // set; RPC parameters can only tighten them. Resolved here, before the approval intent is
+        // built, so the digest covers exactly what will run.
+        let verification = crate::subagents::resolve_tournament_verification(
+            self.inner.config.tournament_require_verified,
+            None,
+        );
+        let protected_paths = crate::subagents::merge_protected_globs(
+            &self.inner.config.tournament_protected_paths,
+            &protected_paths,
+        );
+        let disallow_test_tampering = crate::subagents::effective_disallow_test_tampering(
+            self.inner.config.tournament_disallow_test_tampering,
+            disallow_test_tampering,
+        );
+
         // Resolve every candidate strategy before authorization: the hook must inspect the
         // exact prompts used in isolated worktrees, including defaulted strategies.
         let default_strategies = [
@@ -420,7 +436,8 @@ impl RpcDispatcher {
             "timeout_ms": timeout_ms,
             "disallow_test_tampering": disallow_test_tampering,
             "protected_paths": protected_paths,
-            "require_verified": true,
+            "require_verified": verification.require_verified,
+            "verification_policy_source": verification.source.as_str(),
             "budget": approved_budget,
             "predictive_check": self.inner.config.predictive_check,
         })
@@ -517,9 +534,9 @@ impl RpcDispatcher {
             timeout_ms,
             disallow_test_tampering,
             protected_paths: protected_paths.clone(),
-            // Capability gap #5 (`v1.5.2`): an RPC repair race is strict by default — a candidate
-            // whose verification was skipped cannot win.
-            require_verified: true,
+            // Capability gap #5 (`v1.5.2`): an RPC repair race follows the same host policy as the
+            // tool path (T01 parity) — strict unless the operator relaxed it.
+            require_verified: verification.require_verified,
         };
 
         let outcome = crate::subagents::run_worktree_tournament(

@@ -255,6 +255,12 @@ pub struct AgentRunner {
     /// passed verification before it may merge. Strict by default, so a `Skipped` gate is never
     /// mistaken for a verified success.
     tournament_require_verified: bool,
+    /// T01 (KR-01): host-owned protected globs for repair races. Task-level arguments can only add
+    /// to this set, never remove from it.
+    host_protected_paths: Vec<String>,
+    /// T01 (KR-01): host-owned test-tampering protection. A task-level flag may enable it, never
+    /// disable it.
+    host_disallow_test_tampering: bool,
     /// Capability gap #2 (`v1.5.2`): opt-in isolated counterfactual probe configuration.
     counterfactual_probe: CounterfactualProbeConfig,
     /// Capability gap #2: approval seam; defaults to denying every probe.
@@ -355,6 +361,8 @@ impl AgentRunner {
             adaptive_tournament_candidates: 0,
             adaptive_tournament_attempted: false,
             tournament_require_verified: true,
+            host_protected_paths: Vec::new(),
+            host_disallow_test_tampering: false,
             counterfactual_probe: CounterfactualProbeConfig::disabled(),
             probe_approval: Arc::new(DenyProbes),
             counterfactual_probes_run: 0,
@@ -411,6 +419,20 @@ impl AgentRunner {
         self
     }
 
+    /// T01 (KR-01): install the host-owned protection set for repair races. Tool/RPC arguments are
+    /// merged into this set and can only expand it.
+    pub fn with_host_protected_paths(mut self, globs: Vec<String>) -> Self {
+        self.host_protected_paths = globs;
+        self
+    }
+
+    /// T01 (KR-01): host-owned test-tampering protection for repair races. A model argument may
+    /// enable it, but never disable it.
+    pub fn with_host_disallow_test_tampering(mut self, value: bool) -> Self {
+        self.host_disallow_test_tampering = value;
+        self
+    }
+
     /// Capability gap #2 (`v1.5.2`): opt in to the isolated counterfactual probe. Disabled by
     /// default; even when enabled, `approval` must authorize each probe and the live workspace is
     /// never modified or rolled back.
@@ -435,7 +457,10 @@ impl AgentRunner {
     }
 
     /// Local-host experience decisions are shared so revocation/off is visible before each request.
-    pub fn with_experience(mut self, experience: Arc<std::sync::Mutex<crate::experience_runtime::ExperienceSession>>) -> Self {
+    pub fn with_experience(
+        mut self,
+        experience: Arc<std::sync::Mutex<crate::experience_runtime::ExperienceSession>>,
+    ) -> Self {
         self.experience = Some(experience);
         self
     }
@@ -1080,12 +1105,21 @@ impl AgentRunner {
                 let experience = experience.lock().unwrap_or_else(|e| e.into_inner());
                 if experience.enabled() {
                     let revision = crate::experience_runtime::live_revision(store, workspace).ok();
-                    experience.injection(workspace, revision.as_ref(), self.tool_runtime.policy_engine().mode())
-                } else { String::new() }
+                    experience.injection(
+                        workspace,
+                        revision.as_ref(),
+                        self.tool_runtime.policy_engine().mode(),
+                    )
+                } else {
+                    String::new()
+                }
             };
             if !block.is_empty() {
-                projected.message_history_bytes = projected.message_history_bytes.saturating_add(block.len());
-                projected.messages.push(TranscriptItem::User(UserMessage { content: block }));
+                projected.message_history_bytes =
+                    projected.message_history_bytes.saturating_add(block.len());
+                projected
+                    .messages
+                    .push(TranscriptItem::User(UserMessage { content: block }));
             }
         }
 
@@ -1719,6 +1753,7 @@ impl AgentRunner {
                             let (tournament_out, _label, merged) = self
                                 .execute_spawn_tournament(
                                     request,
+                                    &crate::types::ToolCallId::new("adaptive_tournament"),
                                     state.absolute_turn,
                                     &mut state.modified_files_set,
                                     &mut logger,
@@ -2580,8 +2615,9 @@ impl AgentRunner {
                     .with_revision(self.current_revision_id.clone());
                     let handle = tokio::spawn(async move {
                         let _permit = sem.acquire_owned().await.ok();
-                        let (msg, decision, hooks) =
-                            rt.execute_call_with_context(&call_for_task, batch_turn, &batch_exec_ctx).await;
+                        let (msg, decision, hooks) = rt
+                            .execute_call_with_context(&call_for_task, batch_turn, &batch_exec_ctx)
+                            .await;
                         (local_i, msg, decision, hooks)
                     });
                     join_handles.push((local_i, call, rel_path, handle));
@@ -2857,7 +2893,11 @@ impl AgentRunner {
                         )
                         .with_revision(self.current_revision_id.clone());
                         self.tool_runtime
-                            .execute_call_with_context(call, budget_tracker.turns_used(), &call_exec_ctx)
+                            .execute_call_with_context(
+                                call,
+                                budget_tracker.turns_used(),
+                                &call_exec_ctx,
+                            )
                             .await
                     };
                     for approval_ev in self.tool_runtime.policy_engine().drain_approval_events() {
@@ -3036,9 +3076,13 @@ impl AgentRunner {
     }
 
     fn record_child_usage_metadata(&mut self, cached: Option<u64>, basis: &str) {
-        self.children_tokens_pending_cached = self.children_tokens_pending_cached.saturating_add(cached.unwrap_or(0));
-        self.children_usage_pending = Some(self.children_usage_pending.as_deref()
-            .map_or_else(|| basis.to_string(), |previous| crate::budget::combine_usage_basis(previous, basis).to_string()));
+        self.children_tokens_pending_cached = self
+            .children_tokens_pending_cached
+            .saturating_add(cached.unwrap_or(0));
+        self.children_usage_pending = Some(self.children_usage_pending.as_deref().map_or_else(
+            || basis.to_string(),
+            |previous| crate::budget::combine_usage_basis(previous, basis).to_string(),
+        ));
     }
 
     /// Run a Best-of-N tournament and merge the winning candidate.
@@ -3050,6 +3094,7 @@ impl AgentRunner {
     async fn execute_spawn_tournament(
         &mut self,
         request: TournamentRequest,
+        call_id: &crate::types::ToolCallId,
         absolute_turn: usize,
         modified_files_set: &mut HashSet<String>,
         logger: &mut EventLogger,
@@ -3126,6 +3171,47 @@ impl AgentRunner {
         // F04 (`v1.5.1`): bound the tournament by the parent run's remaining wall-clock time —
         // both the candidate budget and the tournament's own timeout.
         let deadline = self.run_deadline;
+        let verification = crate::subagents::resolve_tournament_verification(
+            self.tournament_require_verified,
+            request.require_verified,
+        );
+        let audit_reason = match verification.source {
+            crate::subagents::VerificationPolicySource::ModelDowngradeIgnored => Some(
+                "model requested require_verified=false but the host requires verification; the \
+                 request was ignored"
+                    .to_string(),
+            ),
+            crate::subagents::VerificationPolicySource::ModelRequestedStrict => Some(
+                "model requested stricter verification than the host required; granted".to_string(),
+            ),
+            crate::subagents::VerificationPolicySource::HostRelaxed => Some(
+                "operator-owned relaxed verification policy: a skipped gate may still win"
+                    .to_string(),
+            ),
+            crate::subagents::VerificationPolicySource::HostStrict => None,
+        };
+        if let Some(reason) = audit_reason {
+            let _ = logger.log(EventPayload::PolicyDecision {
+                call_id: call_id.clone(),
+                tool_name: "spawn_subagent".to_string(),
+                decision: "allow".to_string(),
+                reason: Some(format!(
+                    "verification_policy={} {}",
+                    verification.source.as_str(),
+                    reason
+                )),
+            });
+        }
+        // T01 (KR-01): host-owned protection wins; task-level arguments can only add to it.
+        let disallow_test_tampering = crate::subagents::effective_disallow_test_tampering(
+            self.host_disallow_test_tampering,
+            request.disallow_test_tampering,
+        );
+        let protected_paths = crate::subagents::merge_protected_globs(
+            &self.host_protected_paths,
+            &request.protected_paths,
+        );
+
         let spec = TournamentSpec {
             candidates,
             worktree_base: self.tool_runtime.env().state_dir().join("worktrees"),
@@ -3158,14 +3244,11 @@ impl AgentRunner {
             // Test path protection remains an independent policy: verified repairs may
             // legitimately add new regression tests. Frozen oracles need their own host-
             // managed protected paths (T19), not a blanket ban on editing tests.
-            disallow_test_tampering: request.disallow_test_tampering,
+            disallow_test_tampering,
             // Tool-provided paths can only expand, never shrink, the protection set.
-            protected_paths: request.protected_paths.clone(),
+            protected_paths,
             // Model options can request stricter verification, but cannot relax host policy.
-            require_verified: crate::subagents::effective_tournament_require_verified(
-                self.tournament_require_verified,
-                request.require_verified,
-            ),
+            require_verified: verification.require_verified,
         };
 
         let outcome = match run_worktree_tournament(
@@ -3195,8 +3278,10 @@ impl AgentRunner {
         for score in &outcome.scores {
             let _ = logger.log(EventPayload::SubagentCompleted {
                 subagent_id: format!("tournament-{}", score.label),
-                role: "worker".to_string(), status: score.status.clone(),
-                turns_used: score.turns_used, tool_calls_used: score.tool_calls_used,
+                role: "worker".to_string(),
+                status: score.status.clone(),
+                turns_used: score.turns_used,
+                tool_calls_used: score.tool_calls_used,
                 tokens_used: score.input_tokens.saturating_add(score.output_tokens),
                 duration_ms: score.duration_ms,
             });
@@ -3209,16 +3294,34 @@ impl AgentRunner {
         });
         if let Some(merge) = &outcome.merge {
             let (written_files, removed_files, conflict_paths, revision_after) = match merge {
-                WorktreeMergeResult::Applied { written_files, removed_files, merged_revision, .. } =>
-                    (written_files.clone(), removed_files.clone(), Vec::new(), Some(merged_revision.as_str().to_string())),
-                WorktreeMergeResult::Conflict { conflicting_paths, .. } =>
-                    (Vec::new(), Vec::new(), conflicting_paths.clone(), None),
-                WorktreeMergeResult::VerificationFailed { .. } => (Vec::new(), Vec::new(), Vec::new(), None),
+                WorktreeMergeResult::Applied {
+                    written_files,
+                    removed_files,
+                    merged_revision,
+                    ..
+                } => (
+                    written_files.clone(),
+                    removed_files.clone(),
+                    Vec::new(),
+                    Some(merged_revision.as_str().to_string()),
+                ),
+                WorktreeMergeResult::Conflict {
+                    conflicting_paths, ..
+                } => (Vec::new(), Vec::new(), conflicting_paths.clone(), None),
+                WorktreeMergeResult::VerificationFailed { .. } => {
+                    (Vec::new(), Vec::new(), Vec::new(), None)
+                }
             };
             let _ = logger.log(EventPayload::WorktreeMerged {
-                subagent_id: outcome.winner.map(|i| format!("tournament-{}", outcome.scores[i].label))
+                subagent_id: outcome
+                    .winner
+                    .map(|i| format!("tournament-{}", outcome.scores[i].label))
                     .unwrap_or_else(|| "tournament".to_string()),
-                status: merge.status_str().to_string(), written_files, removed_files, conflict_paths, revision_after,
+                status: merge.status_str().to_string(),
+                written_files,
+                removed_files,
+                conflict_paths,
+                revision_after,
             });
         }
 
@@ -3466,8 +3569,10 @@ impl AgentRunner {
                         // B11a: consume the grant the approval just minted for this exact scope and
                         // argument digest. Anything but a base-policy `Missing` fails closed.
                         if let Some(ref digest) = args_digest {
-                            if let Err(rejection) =
-                                self.tool_runtime.policy_engine().consume_grant(&auth_scope, digest)
+                            if let Err(rejection) = self
+                                .tool_runtime
+                                .policy_engine()
+                                .consume_grant(&auth_scope, digest)
                             {
                                 if !matches!(rejection, GrantRejection::Missing) {
                                     return (
@@ -3506,6 +3611,7 @@ impl AgentRunner {
             let (output, label, _merged) = self
                 .execute_spawn_tournament(
                     request,
+                    &call.call_id,
                     absolute_turn,
                     modified_files_set,
                     logger,
@@ -3581,10 +3687,9 @@ impl AgentRunner {
 
         // B11b: refuse an unsupported delegation *before* any worktree or state dir is materialized,
         // so a rejection leaves no side effect (the backend repeats this check as the final gate).
-        if let Err(reason) = crate::subagents::ParentPolicyHooks::from_registry(
-            self.tool_runtime.registry(),
-        )
-        .ensure_delegatable()
+        if let Err(reason) =
+            crate::subagents::ParentPolicyHooks::from_registry(self.tool_runtime.registry())
+                .ensure_delegatable()
         {
             return (
                 ToolExecutionOutput::error(
@@ -3596,7 +3701,8 @@ impl AgentRunner {
             );
         }
         for spec in &specs {
-            if let Err(reason) = crate::subagents::child_policy_mode_for(parent_policy_mode, spec.role)
+            if let Err(reason) =
+                crate::subagents::child_policy_mode_for(parent_policy_mode, spec.role)
             {
                 return (
                     ToolExecutionOutput::error(

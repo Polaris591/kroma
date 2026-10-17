@@ -58,6 +58,12 @@
 根因：用例传 `deadlineMs: 1`，然后用一个 `GatedWritable` 在 cleanup 之后才补写 stage 文件并 `emit('open')`。谁先赢是纯时序：deadline 先触发 → 报 `/deadline/`（期望）；cleanup 先删掉 stage 文件、晚到的 `lstat` 先失败 → 报 ENOENT（失败）。
 分类：**测试设计缺陷 + 生产代码语义漏洞（既有）**。正确的修法不是放宽正则，而是让「已 cleanup 的流再写入」以终止错误（deadline/aborted）收场，而不是把底层 ENOENT 漏出去。留到 T20/T30 门禁收口时修。
 
+### 2.4 `mcp::call_lifetime_tests::subsequent_call_fails_closed_when_poisoned`
+
+失败形态：`mcp.rs:1692` 里 `unwrap()` 拿到 `Os { code: 2, NotFound }`。
+复现率：全量跑时出现 1 次，单独重跑该模块 8 次全过。
+分类：**随机不稳定（既有）**，`mcp.rs` 不在本批改动范围内。同一台机器上并发跑全 workspace 时，临时文件/目录的创建与删除存在竞态。
+
 ## 3. 交接包声称 vs 本环境实测
 
 | 交接包说法 | 本环境实测 |

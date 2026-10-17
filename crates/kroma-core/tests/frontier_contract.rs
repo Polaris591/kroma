@@ -223,6 +223,348 @@ async fn strict_tournament_rejects_a_skipped_verification_instead_of_merging_it(
 }
 
 // ---------------------------------------------------------------------------------------------
+// T01 (KR-01) — the host owns the verification requirement; the model may only tighten it
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn verification_policy_matrix_is_resolved_with_provenance() {
+    use kroma_core::subagents::{resolve_tournament_verification, VerificationPolicySource as Src};
+
+    // (host_required, model_requested, effective, provenance)
+    let cases = [
+        (true, None, true, Src::HostStrict),
+        (true, Some(true), true, Src::HostStrict),
+        (true, Some(false), true, Src::ModelDowngradeIgnored),
+        (false, None, false, Src::HostRelaxed),
+        (false, Some(false), false, Src::HostRelaxed),
+        (false, Some(true), true, Src::ModelRequestedStrict),
+    ];
+    for (host, model, effective, source) in cases {
+        let resolved = resolve_tournament_verification(host, model);
+        assert_eq!(
+            resolved.require_verified, effective,
+            "host={host} model={model:?} must resolve to {effective}"
+        );
+        assert_eq!(
+            resolved.source, source,
+            "host={host} model={model:?} must be attributed to {source:?}"
+        );
+    }
+    assert!(Src::ModelDowngradeIgnored.is_downgrade_attempt());
+    assert!(!Src::HostStrict.is_downgrade_attempt());
+}
+
+#[test]
+fn protected_paths_and_test_tampering_cannot_shrink_from_tool_or_rpc() {
+    use kroma_core::subagents::{effective_disallow_test_tampering, merge_protected_globs};
+
+    let host = vec!["oracle/**".to_string(), "tests/**".to_string()];
+    // A caller that supplies nothing cannot clear the host set.
+    assert_eq!(merge_protected_globs(&host, &[]), host);
+    // A caller can only add to it.
+    let merged = merge_protected_globs(&host, &["src/**.rs".to_string()]);
+    for glob in &host {
+        assert!(merged.contains(glob), "host glob {glob} disappeared");
+    }
+    assert!(merged.contains(&"src/**.rs".to_string()));
+    // Duplicates collapse; order is stable.
+    assert_eq!(
+        merge_protected_globs(&["b".to_string()], &["a".to_string(), "b".to_string()]),
+        vec!["a".to_string(), "b".to_string()]
+    );
+    // Host test-tampering protection cannot be switched off by a task-level flag.
+    assert!(effective_disallow_test_tampering(true, false));
+    assert!(effective_disallow_test_tampering(true, true));
+    assert!(effective_disallow_test_tampering(false, true));
+    assert!(!effective_disallow_test_tampering(false, false));
+}
+
+/// Gate that always errors: an infrastructure failure, not the candidate's fault.
+struct InfrastructureErrorGate;
+
+impl CompletionGate for InfrastructureErrorGate {
+    fn check<'a>(
+        &'a self,
+        _ctx: &'a CompletionGateContext,
+    ) -> Pin<Box<dyn Future<Output = Result<GateOutcome, String>> + Send + 'a>> {
+        Box::pin(async move { Err("verification harness crashed".to_string()) })
+    }
+}
+
+/// Gate that rejects: the candidate's patch is wrong.
+struct RejectingGate;
+
+impl CompletionGate for RejectingGate {
+    fn check<'a>(
+        &'a self,
+        _ctx: &'a CompletionGateContext,
+    ) -> Pin<Box<dyn Future<Output = Result<GateOutcome, String>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(GateOutcome::Rejected {
+                feedback: "assertion failed".to_string(),
+            })
+        })
+    }
+}
+
+/// Backend that never completes: the candidate did not reach verification.
+struct FailingBackend;
+
+impl SubagentBackend for FailingBackend {
+    fn run_subagent(
+        &self,
+        _req: SubagentExecutionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<SubagentRunOutcome, String>> + Send + '_>> {
+        Box::pin(async move { Err("child loop aborted".to_string()) })
+    }
+}
+
+/// The verification state transition table: only a real pass may win under a strict host, and a
+/// `Skipped` gate is the only non-pass a relaxed host may accept.
+#[tokio::test]
+async fn verification_state_transition_table_holds_for_every_terminal_status() {
+    use kroma_core::subagents::GateVerificationStatus;
+
+    struct Case {
+        tag: &'static str,
+        gate: Arc<dyn CompletionGate>,
+        backend: Arc<dyn SubagentBackend>,
+        expected: GateVerificationStatus,
+        merges_when_relaxed: bool,
+    }
+
+    let cases = [
+        Case {
+            tag: "skipped",
+            gate: Arc::new(SkippedGate),
+            backend: Arc::new(ScriptedBackend {
+                files: vec![(
+                    "lib.rs".to_string(),
+                    "pub fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }\n".to_string(),
+                )],
+            }),
+            expected: GateVerificationStatus::Skipped,
+            merges_when_relaxed: true,
+        },
+        Case {
+            tag: "failed",
+            gate: Arc::new(RejectingGate),
+            backend: Arc::new(ScriptedBackend {
+                files: vec![(
+                    "lib.rs".to_string(),
+                    "pub fn add(a: i32, b: i32) -> i32 { a - b }\n".to_string(),
+                )],
+            }),
+            expected: GateVerificationStatus::Failed,
+            merges_when_relaxed: false,
+        },
+        Case {
+            tag: "infrastructure-error",
+            gate: Arc::new(InfrastructureErrorGate),
+            backend: Arc::new(ScriptedBackend {
+                files: vec![(
+                    "lib.rs".to_string(),
+                    "pub fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }\n".to_string(),
+                )],
+            }),
+            expected: GateVerificationStatus::InfrastructureError,
+            merges_when_relaxed: false,
+        },
+        Case {
+            tag: "not-run",
+            gate: Arc::new(SkippedGate),
+            backend: Arc::new(FailingBackend),
+            expected: GateVerificationStatus::NotRun,
+            merges_when_relaxed: false,
+        },
+    ];
+
+    for case in cases {
+        let root = temp_root(case.tag);
+        let (workspace, store) = baseline_workspace(&root);
+        let strict = run_worktree_tournament(
+            tournament_spec(&root, 2, true),
+            &workspace,
+            &store,
+            Arc::clone(&case.backend),
+            None,
+            &case.gate,
+        )
+        .await
+        .expect("tournament runs");
+        assert_eq!(
+            strict.scores[0].gate_status, case.expected,
+            "{}: terminal status must be preserved",
+            case.tag
+        );
+        assert!(
+            strict.winner.is_none(),
+            "{}: a strict host must never merge a {}",
+            case.tag,
+            case.expected.as_str()
+        );
+        assert!(
+            strict.parent_untouched(),
+            "{}: the parent workspace must stay untouched",
+            case.tag
+        );
+
+        let relaxed = run_worktree_tournament(
+            tournament_spec(&root, 2, false),
+            &workspace,
+            &store,
+            case.backend,
+            None,
+            &case.gate,
+        )
+        .await
+        .expect("tournament runs");
+        assert_eq!(
+            relaxed.winner.is_some(),
+            case.merges_when_relaxed,
+            "{}: relaxed host merge expectation",
+            case.tag
+        );
+        if !case.merges_when_relaxed {
+            assert!(
+                relaxed.parent_untouched(),
+                "{}: a relaxed host still must not merge this candidate",
+                case.tag
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// Drive the *real* `spawn_subagent` tool through the agent loop so the assertion covers the tool
+/// entry point, not just `run_worktree_tournament`. Returns the parent file afterwards.
+async fn run_spawn_subagent_tournament(
+    tag: &str,
+    host_require_verified: bool,
+    host_protected: Vec<String>,
+    model_args: serde_json::Value,
+) -> (String, String) {
+    use kroma_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
+    use kroma_core::events::EventLogger;
+    use kroma_core::messages::{AssistantTurn, FinishReason, ToolCall};
+    use kroma_core::provider::FakeProvider;
+    use kroma_core::session::SessionJournal;
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine};
+    use kroma_core::types::ToolCallId;
+
+    let root = temp_root(tag);
+    let ws_dir = root.join("ws");
+    let state_dir = root.join("state");
+    fs::create_dir_all(&ws_dir).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        ws_dir.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+
+    let tool_turn = AssistantTurn {
+        content: None,
+        reasoning_blocks: Vec::new(),
+        tool_calls: vec![ToolCall {
+            call_id: ToolCallId::new("call_race"),
+            name: "spawn_subagent".to_string(),
+            raw_arguments: model_args.to_string(),
+        }],
+        finish_reason: FinishReason::ToolCalls,
+        usage: None,
+    };
+    let stop_turn = AssistantTurn {
+        content: Some("race finished".to_string()),
+        reasoning_blocks: Vec::new(),
+        tool_calls: Vec::new(),
+        finish_reason: FinishReason::Stop,
+        usage: None,
+    };
+    let provider = Arc::new(FakeProvider::new(vec![tool_turn, stop_turn]));
+
+    let store = Arc::new(SnapshotStore::new(root.join("snapshots")));
+    let journal = SessionJournal::create(state_dir.join("sessions"), &ws_dir).unwrap();
+    let env = Arc::new(kroma_core::env::LocalHostEnv::new(&ws_dir, state_dir.clone()).unwrap());
+    let policy = PolicyEngine::new(
+        PolicyMode::FullAutonomous,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    let budget = BudgetConfig::default();
+    let runtime = build_default_runtime(env, policy, budget.clone(), None);
+    let cfg = AgentRunConfig::new("run a repair race", budget);
+    let run_id = cfg.run_id;
+    let logger = EventLogger::new(run_id, Some(state_dir.clone()), true).unwrap();
+    let backend: Arc<dyn SubagentBackend> = Arc::new(ScriptedBackend {
+        files: vec![(
+            "lib.rs".to_string(),
+            "pub fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }\n".to_string(),
+        )],
+    });
+    let (_tx, rx) = watch::channel(false);
+
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .with_session_journal(journal)
+        .with_snapshot_store(store)
+        .with_completion_gate(Arc::new(SkippedGate))
+        .with_subagent_backend(backend)
+        .with_tournament_require_verified(host_require_verified)
+        .with_host_protected_paths(host_protected)
+        .run(logger)
+        .await;
+    assert_eq!(
+        summary.status,
+        RunStatus::Completed,
+        "{:?}",
+        summary.terminal_reason
+    );
+
+    let parent = fs::read_to_string(ws_dir.join("lib.rs")).unwrap();
+    let log = fs::read_to_string(state_dir.join(format!("{}.jsonl", run_id))).unwrap_or_default();
+    let _ = fs::remove_dir_all(&root);
+    (parent, log)
+}
+
+#[tokio::test]
+async fn host_true_and_model_false_still_rejects_skipped_through_the_tool_entry() {
+    let args = serde_json::json!({
+        "mode": "tournament",
+        "task": "fix add()",
+        "candidates": 2,
+        "require_verified": false,
+    });
+    let (parent, log) =
+        run_spawn_subagent_tournament("t01-strict-false", true, Vec::new(), args).await;
+    assert_eq!(
+        parent, "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        "a model must not merge an unverified candidate into the parent workspace"
+    );
+    assert!(
+        log.contains("model_downgrade_ignored"),
+        "the refused downgrade must be audited; log:\n{log}"
+    );
+}
+
+#[tokio::test]
+async fn operator_only_unverified_mode_is_audited() {
+    // No `require_verified` argument: the relaxed decision is the operator's, and it is logged.
+    let args = serde_json::json!({
+        "mode": "tournament",
+        "task": "fix add()",
+        "candidates": 2,
+    });
+    let (parent, log) = run_spawn_subagent_tournament("t01-relaxed", false, Vec::new(), args).await;
+    assert_eq!(
+        parent, "pub fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }\n",
+        "a relaxed host accepts a skipped gate, as configured by the operator"
+    );
+    assert!(
+        log.contains("host_relaxed"),
+        "the operator-owned relaxed policy must be audited; log:\n{log}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Capability gap #6 — skills (.claude + paths), on-demand tool schema, MCP stdio adapter
 // ---------------------------------------------------------------------------------------------
 
