@@ -70,9 +70,19 @@ fn bwrap_argv_is_whitelisted_and_has_exactly_one_writable_path() {
     // Exactly one `--bind` (the writable workspace); everything else is `--ro-bind-try`.
     let binds = argv.iter().filter(|a| *a == "--bind").count();
     assert_eq!(binds, 1, "exactly one writable bind: {joined}");
-    assert!(joined.contains("--bind /tmp/kroma-b13-argv-ws /workspace"), "{joined}");
+    assert!(
+        joined.contains("--bind /tmp/kroma-b13-argv-ws /workspace"),
+        "{joined}"
+    );
     // Host secret/state paths must never be bound.
-    for forbidden in ["/root", "/home", "/var", "/etc/shadow", "/etc/ssh", "/proc/self"] {
+    for forbidden in [
+        "/root",
+        "/home",
+        "/var",
+        "/etc/shadow",
+        "/etc/ssh",
+        "/proc/self",
+    ] {
         assert!(
             !argv.iter().any(|a| a == forbidden),
             "forbidden path {forbidden} appears in argv: {joined}"
@@ -95,12 +105,16 @@ fn bwrap_argv_opts_into_network_only_when_explicit() {
 fn container_argv_disables_network_and_carries_the_caps() {
     let spec = SandboxSpec::container("docker", "kroma-sandbox:pinned", "/tmp/kroma-b13-argv-ctr")
         .with_tmpfs_bytes(64 * 1024 * 1024);
-    let argv = spec.wrap_argv("python3", &args(&["-m", "unittest"]))
+    let argv = spec
+        .wrap_argv("python3", &args(&["-m", "unittest"]))
         .expect("wrap");
     let joined = argv.join(" ");
     assert_eq!(argv[0], "docker");
     assert!(joined.contains("run --rm"), "{joined}");
-    assert!(joined.contains("--network none"), "network must be off: {joined}");
+    assert!(
+        joined.contains("--network none"),
+        "network must be off: {joined}"
+    );
     assert!(joined.contains("--read-only"), "{joined}");
     assert!(
         joined.contains("-v /tmp/kroma-b13-argv-ctr:/workspace:rw"),
@@ -109,8 +123,14 @@ fn container_argv_disables_network_and_carries_the_caps() {
     assert!(joined.contains("--memory 536870912"), "{joined}");
     assert!(joined.contains("--pids-limit 128"), "{joined}");
     assert!(joined.contains("--cpus 1"), "{joined}");
-    assert!(joined.contains("--tmpfs /tmp:rw,size=67108864,mode=1777"), "{joined}");
-    assert!(joined.ends_with("kroma-sandbox:pinned python3 -m unittest"), "{joined}");
+    assert!(
+        joined.contains("--tmpfs /tmp:rw,size=67108864,mode=1777"),
+        "{joined}"
+    );
+    assert!(
+        joined.ends_with("kroma-sandbox:pinned python3 -m unittest"),
+        "{joined}"
+    );
 }
 
 #[test]
@@ -172,8 +192,14 @@ async fn symlink_escape_from_the_workspace_does_not_reach_host_files() {
     .await
     .expect("sandboxed run");
     let text = out.combined_output();
-    assert!(text.contains("escape-blocked"), "symlink escape must fail: {text}");
-    assert!(!text.contains("root:"), "no shadow content may leak: {text}");
+    assert!(
+        text.contains("escape-blocked"),
+        "symlink escape must fail: {text}"
+    );
+    assert!(
+        !text.contains("root:"),
+        "no shadow content may leak: {text}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -246,11 +272,7 @@ async fn a_normal_task_runs_and_writes_only_inside_the_workspace() {
     require_bwrap();
     let root = unique_root("normal");
     let ws = workspace_of(&root);
-    std::fs::write(
-        ws.join("calc.py"),
-        "def add(a, b):\n    return a + b\n",
-    )
-    .expect("seed module");
+    std::fs::write(ws.join("calc.py"), "def add(a, b):\n    return a + b\n").expect("seed module");
     let spec = SandboxSpec::bwrap(&ws);
     let verify = r#"import sys; sys.path.insert(0, '/workspace')
 from calc import add
@@ -287,7 +309,10 @@ async fn tmpfs_cap_stops_a_runaway_writer() {
     let out = execute_sandboxed(
         &spec,
         "sh",
-        &args(&["-c", "dd if=/dev/zero of=/tmp/fill bs=1M count=4 2>/dev/null; echo dd-exit=$?"]),
+        &args(&[
+            "-c",
+            "dd if=/dev/zero of=/tmp/fill bs=1M count=4 2>/dev/null; echo dd-exit=$?",
+        ]),
         Duration::from_secs(30),
     )
     .await
@@ -473,7 +498,11 @@ async fn address_space_limit_stops_an_oversized_allocation() {
     )
     .await
     .expect("sandboxed run");
-    assert!(small.is_success(), "a small task must still run: {}", small.combined_output());
+    assert!(
+        small.is_success(),
+        "a small task must still run: {}",
+        small.combined_output()
+    );
 
     let big = execute_sandboxed(
         &spec,
@@ -487,7 +516,10 @@ async fn address_space_limit_stops_an_oversized_allocation() {
     .await
     .expect("sandboxed run");
     let text = big.combined_output();
-    assert!(!big.is_success(), "a 400MiB allocation must fail under a 256MiB limit: {text}");
+    assert!(
+        !big.is_success(),
+        "a 400MiB allocation must fail under a 256MiB limit: {text}"
+    );
     assert!(!text.contains("alloc-ok"), "{text}");
     assert!(text.contains("MemoryError"), "expected MemoryError: {text}");
     let _ = std::fs::remove_dir_all(&root);
@@ -516,11 +548,19 @@ async fn file_size_limit_stops_an_oversized_write() {
     .await
     .expect("sandboxed run");
     let text = out.combined_output();
-    assert!(!out.is_success(), "a 4MiB write must fail under a 1MiB file limit: {text}");
+    assert!(
+        !out.is_success(),
+        "a 4MiB write must fail under a 1MiB file limit: {text}"
+    );
     assert!(!text.contains("write-ok"), "{text}");
     // The partial write may exist on the host, but it must be bounded by the limit.
-    let written = std::fs::metadata(ws.join("big.bin")).map(|m| m.len()).unwrap_or(0);
-    assert!(written <= 4 * 1024 * 1024, "unexpected large file: {written} bytes");
+    let written = std::fs::metadata(ws.join("big.bin"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert!(
+        written <= 4 * 1024 * 1024,
+        "unexpected large file: {written} bytes"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -545,7 +585,11 @@ async fn cpu_time_limit_terminates_a_spin_loop() {
     .await
     .expect("sandboxed run");
     let elapsed = started.elapsed();
-    assert!(!out.is_success(), "a spin loop must not be reported as success: {}", out.combined_output());
+    assert!(
+        !out.is_success(),
+        "a spin loop must not be reported as success: {}",
+        out.combined_output()
+    );
     assert!(
         elapsed < Duration::from_secs(20),
         "the CPU limit must end the run well before the wall deadline, took {elapsed:?}"
@@ -579,7 +623,9 @@ fn container_argv_is_unaffected_by_rlimits() {
 /// is the difference between "a sandbox exists" and "the scored path is sandboxed".
 #[tokio::test]
 async fn scored_benchmark_arm_runs_its_verifier_inside_the_sandbox() {
-    use kroma_core::bench::{BenchExecutor, BenchStrategyConfig, BenchTask, ProviderBenchExecutor, ProviderBenchSettings};
+    use kroma_core::bench::{
+        BenchExecutor, BenchStrategyConfig, BenchTask, ProviderBenchExecutor, ProviderBenchSettings,
+    };
     use kroma_core::messages::{AssistantTurn, FinishReason, TokenUsage};
     use kroma_core::provider::FakeProvider;
     use kroma_core::sandbox::SandboxTemplate;
@@ -605,8 +651,13 @@ async fn scored_benchmark_arm_runs_its_verifier_inside_the_sandbox() {
         reasoning_blocks: Vec::new(),
         tool_calls: Vec::new(),
         finish_reason: FinishReason::Stop,
-        usage: Some(TokenUsage { input_tokens: 10, cached_input_tokens: None, output_tokens: 2, reasoning_tokens: None, cache_creation_input_tokens: None,
-}),
+        usage: Some(TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: None,
+            output_tokens: 2,
+            reasoning_tokens: None,
+            cache_creation_input_tokens: None,
+        }),
     };
     let strategy = BenchStrategyConfig::single_agent();
     let run_arm = |sandbox: Option<SandboxTemplate>, label: &str| {
@@ -620,13 +671,9 @@ async fn scored_benchmark_arm_runs_its_verifier_inside_the_sandbox() {
             .with_max_run_duration(Duration::from_secs(30))
             .with_sandbox(sandbox);
         async move {
-            let executor = ProviderBenchExecutor::new(
-                Arc::new(FakeProvider::new(vec![stop])),
-                settings,
-            );
-            let result = executor
-                .execute(&task, &strategy, 100_000, &root)
-                .await;
+            let executor =
+                ProviderBenchExecutor::new(Arc::new(FakeProvider::new(vec![stop])), settings);
+            let result = executor.execute(&task, &strategy, 100_000, &root).await;
             let _ = std::fs::remove_dir_all(&root);
             result
         }
@@ -634,7 +681,10 @@ async fn scored_benchmark_arm_runs_its_verifier_inside_the_sandbox() {
 
     // Control: with no sandbox configured the verifier reads the host secret, so the arm resolves.
     let unsandboxed = run_arm(None, "bench-arm-plain").await;
-    assert!(unsandboxed.resolved, "control arm must resolve: {unsandboxed:?}");
+    assert!(
+        unsandboxed.resolved,
+        "control arm must resolve: {unsandboxed:?}"
+    );
 
     // Sandboxed: the executor must route the verifier through the sandbox, so it cannot read it.
     let sandboxed = run_arm(Some(SandboxTemplate::bwrap()), "bench-arm-sandbox").await;
@@ -711,9 +761,14 @@ async fn container_backend_really_isolates_and_carries_the_caps() {
         "touch /definitely-not-writable 2>/dev/null; echo ro-exit=$?\n",
         "echo workspace-proof > /workspace/container-proof.txt\n",
     );
-    let out = execute_sandboxed(&spec, "sh", &args(&["-c", script]), Duration::from_secs(180))
-        .await
-        .expect("a real container run");
+    let out = execute_sandboxed(
+        &spec,
+        "sh",
+        &args(&["-c", script]),
+        Duration::from_secs(180),
+    )
+    .await
+    .expect("a real container run");
     let text = out.combined_output();
     assert!(
         text.contains("marker=3.20"),
@@ -741,7 +796,9 @@ async fn container_backend_really_isolates_and_carries_the_caps() {
     );
     let proof = ws.join("container-proof.txt");
     assert_eq!(
-        std::fs::read_to_string(&proof).expect("the bind mount must be visible on the host").trim(),
+        std::fs::read_to_string(&proof)
+            .expect("the bind mount must be visible on the host")
+            .trim(),
         "workspace-proof",
         "the workspace bind mount must be the only writable path"
     );

@@ -323,8 +323,7 @@ fn mentioned_paths(content: &str) -> Vec<String> {
                 !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric())
             })
             .unwrap_or(false);
-        if has_slash && has_ext && !token.starts_with("http") && !paths.iter().any(|p| p == token)
-        {
+        if has_slash && has_ext && !token.starts_with("http") && !paths.iter().any(|p| p == token) {
             paths.push(token.to_string());
         }
     }

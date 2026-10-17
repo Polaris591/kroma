@@ -813,9 +813,13 @@ mod b01_broker_tests {
         broker.set_timeout(Duration::from_millis(10));
         let sink_called = Arc::new(AtomicBool::new(false));
         let sc = Arc::clone(&sink_called);
-        broker.enable_acp_permissions_for("s1".into(), Arc::new(move |_| {
-            sc.store(true, Ordering::SeqCst);
-        }), 42);
+        broker.enable_acp_permissions_for(
+            "s1".into(),
+            Arc::new(move |_| {
+                sc.store(true, Ordering::SeqCst);
+            }),
+            42,
+        );
 
         let b = Arc::clone(&broker);
         broker.set_pre_acp_insert_hook(Some(Box::new(move || {
@@ -836,8 +840,15 @@ mod b01_broker_tests {
 
         let decision = broker.request_approval(&req);
         assert_eq!(decision, ApprovalDecision::Deny);
-        assert_eq!(broker.acp_pending_count(), 0, "must not resurrect a ghost waiter");
-        assert!(!sink_called.load(Ordering::SeqCst), "stale request frame must not be sent to sink");
+        assert_eq!(
+            broker.acp_pending_count(),
+            0,
+            "must not resurrect a ghost waiter"
+        );
+        assert!(
+            !sink_called.load(Ordering::SeqCst),
+            "stale request frame must not be sent to sink"
+        );
     }
 
     /// Finding 2: `disable_acp_permissions_for(owner)` clears only that owner's state and pending
@@ -848,12 +859,22 @@ mod b01_broker_tests {
         // Owner 1 registers
         broker.enable_acp_permissions_for("s1".into(), Arc::new(|_| ()), 1);
         let (tx1, _rx1) = std_mpsc::channel();
-        broker.acp.lock().unwrap().pending.insert("apr-0001".into(), (1, tx1));
+        broker
+            .acp
+            .lock()
+            .unwrap()
+            .pending
+            .insert("apr-0001".into(), (1, tx1));
 
         // Successor Owner 2 registers
         broker.enable_acp_permissions_for("s2".into(), Arc::new(|_| ()), 2);
         let (tx2, _rx2) = std_mpsc::channel();
-        broker.acp.lock().unwrap().pending.insert("apr-0002".into(), (2, tx2));
+        broker
+            .acp
+            .lock()
+            .unwrap()
+            .pending
+            .insert("apr-0002".into(), (2, tx2));
 
         // Stale cleanup for Owner 1
         broker.disable_acp_permissions_for(1);
@@ -864,11 +885,15 @@ mod b01_broker_tests {
         assert_eq!(broker.acp_pending_count(), 1);
 
         // Resolving with stale owner 1 must fail
-        assert!(broker.resolve_acp_permission_owned(1, "apr-0002", json!({"outcome": "allow_once"})).is_err());
+        assert!(broker
+            .resolve_acp_permission_owned(1, "apr-0002", json!({"outcome": "allow_once"}))
+            .is_err());
         assert_eq!(broker.acp_pending_count(), 1);
 
         // Resolving with real owner 2 succeeds
-        assert!(broker.resolve_acp_permission_owned(2, "apr-0002", json!({"outcome": "allow_once"})).is_ok());
+        assert!(broker
+            .resolve_acp_permission_owned(2, "apr-0002", json!({"outcome": "allow_once"}))
+            .is_ok());
         assert_eq!(broker.acp_pending_count(), 0);
     }
 }

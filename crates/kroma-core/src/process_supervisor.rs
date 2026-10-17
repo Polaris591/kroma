@@ -108,8 +108,6 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
-
-
 /// Reason for process termination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TerminationReason {

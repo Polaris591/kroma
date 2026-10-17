@@ -541,20 +541,25 @@ fn secure_unix_socket_parent(parent: &Path) -> Result<bool, String> {
         ));
     }
 
-    let is_controlled_private = match unix_socket_parent_policy(created, meta.uid(), meta.mode(), euid) {
+    let is_controlled_private = match unix_socket_parent_policy(
+        created,
+        meta.uid(),
+        meta.mode(),
+        euid,
+    ) {
         UnixSocketParentPolicy::RestrictOwnerOnly => {
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
-                format!(
-                    "failed to set 0700 permissions on Unix socket parent directory '{}': {}",
-                    parent.display(),
-                    e
-                )
-            })?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                |e| {
+                    format!(
+                        "failed to set 0700 permissions on Unix socket parent directory '{}': {}",
+                        parent.display(),
+                        e
+                    )
+                },
+            )?;
             true
         }
-        UnixSocketParentPolicy::LeaveShared => {
-            meta.uid() == euid && (meta.mode() & 0o022 == 0)
-        }
+        UnixSocketParentPolicy::LeaveShared => meta.uid() == euid && (meta.mode() & 0o022 == 0),
         UnixSocketParentPolicy::RefuseSharedWritable => {
             return Err(format!(
                 "refusing to bind Unix socket in untrusted/shared parent directory '{}': owned by uid {} (current uid {}), mode {:o}; must be owned by root or current user and not writable by others",
@@ -992,11 +997,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn temp_test_root(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "kroma-daemon-{}-{}",
-            label,
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("kroma-daemon-{}-{}", label, uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         root
     }
@@ -1026,7 +1028,10 @@ mod tests {
 
         assert!(!daemon.is_loopback());
         let warning = daemon.non_loopback_warning();
-        assert!(warning.is_some(), "non-loopback bind must emit explicit warning");
+        assert!(
+            warning.is_some(),
+            "non-loopback bind must emit explicit warning"
+        );
         let warning_text = warning.unwrap();
         assert!(
             warning_text.contains("plaintext") && warning_text.contains("no TLS"),
@@ -1060,12 +1065,9 @@ mod tests {
         // Binding to Unix domain socket
         let sock_path = root.join("loopback-test.sock");
         let disp_unix = test_dispatcher(None, &root);
-        let unix_daemon = KromaDaemon::bind(
-            &format!("unix://{}", sock_path.display()),
-            disp_unix,
-        )
-        .await
-        .expect("should bind unix domain socket");
+        let unix_daemon = KromaDaemon::bind(&format!("unix://{}", sock_path.display()), disp_unix)
+            .await
+            .expect("should bind unix domain socket");
         assert!(unix_daemon.is_loopback());
         assert_eq!(
             unix_daemon.non_loopback_warning(),
@@ -1118,11 +1120,7 @@ mod tests {
         // anchor such as `/run` is never tightened by a root bind.
         let existing_parent = root.join("existing_parent_dir");
         std::fs::create_dir(&existing_parent).unwrap();
-        std::fs::set_permissions(
-            &existing_parent,
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        std::fs::set_permissions(&existing_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let initial_mode = std::fs::symlink_metadata(&existing_parent)
             .unwrap()
@@ -1480,7 +1478,10 @@ mod tests {
             "drop must not unlink a path replaced by a regular file"
         );
         let meta = std::fs::symlink_metadata(&sock_path).unwrap();
-        assert!(meta.is_file(), "replacement path must still be a regular file");
+        assert!(
+            meta.is_file(),
+            "replacement path must still be a regular file"
+        );
         assert_eq!(
             std::fs::read(&sock_path).unwrap(),
             replacement_bytes,
@@ -1501,7 +1502,10 @@ mod tests {
         let repl_meta = std::fs::symlink_metadata(&sock_path2).unwrap();
         assert!(repl_meta.file_type().is_socket());
         let new_inode = repl_meta.ino();
-        assert_ne!(orig_inode, new_inode, "new socket must have a distinct inode");
+        assert_ne!(
+            orig_inode, new_inode,
+            "new socket must have a distinct inode"
+        );
 
         // Dropping daemon2 must NOT unlink replacement_listener's socket because dev/inode mismatch
         drop(daemon2);
@@ -1536,7 +1540,11 @@ mod tests {
             res_0777.is_err(),
             "bind in non-sticky 0777 directory must be refused even if owned by current user"
         );
-        let mode_0777 = std::fs::symlink_metadata(&shared_0777).unwrap().permissions().mode() & 0o7777;
+        let mode_0777 = std::fs::symlink_metadata(&shared_0777)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
         assert_eq!(
             mode_0777, 0o777,
             "refused shared writable directory mode must not be modified"
@@ -1554,7 +1562,11 @@ mod tests {
             res_0770.is_err(),
             "bind in non-sticky 0770 directory must be refused"
         );
-        let mode_0770 = std::fs::symlink_metadata(&shared_0770).unwrap().permissions().mode() & 0o7777;
+        let mode_0770 = std::fs::symlink_metadata(&shared_0770)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
         assert_eq!(
             mode_0770, 0o770,
             "refused shared writable directory mode must not be modified"
@@ -1572,12 +1584,17 @@ mod tests {
             drop(std_listener);
         }
         let disp3 = test_dispatcher(None, &root);
-        let res_stale_shared = KromaDaemon::bind(&format!("unix://{}", stale_shared.display()), disp3).await;
+        let res_stale_shared =
+            KromaDaemon::bind(&format!("unix://{}", stale_shared.display()), disp3).await;
         assert!(
             res_stale_shared.is_err(),
             "stale socket in non-private shared directory must not be removed"
         );
-        let sticky_mode = std::fs::symlink_metadata(&shared_sticky).unwrap().permissions().mode() & 0o7777;
+        let sticky_mode = std::fs::symlink_metadata(&shared_sticky)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
         assert_eq!(
             sticky_mode, 0o1777,
             "shared sticky parent directory mode must not be modified"
@@ -1598,7 +1615,10 @@ mod tests {
         let daemon = KromaDaemon::bind(&format!("unix://{}", sock_path.display()), disp)
             .await
             .expect("bind must succeed");
-        assert!(sock_path.exists(), "socket must exist while daemon is alive");
+        assert!(
+            sock_path.exists(),
+            "socket must exist while daemon is alive"
+        );
 
         drop(daemon);
 
@@ -1697,10 +1717,7 @@ mod tests {
             !target_dir.join("untrusted_new_dir").exists(),
             "untrusted new_dir must NOT be created before ancestor validation"
         );
-        assert!(
-            !new_dir.exists(),
-            "new_dir must completely not exist"
-        );
+        assert!(!new_dir.exists(), "new_dir must completely not exist");
         let target_mode = std::fs::symlink_metadata(&target_dir)
             .unwrap()
             .permissions()

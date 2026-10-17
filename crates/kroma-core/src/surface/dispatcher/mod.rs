@@ -548,7 +548,9 @@ impl RpcDispatcher {
             provider: Mutex::new(provider),
             env,
             snapshot_store,
-            experience: Arc::new(Mutex::new(crate::experience_runtime::ExperienceSession::default())),
+            experience: Arc::new(Mutex::new(
+                crate::experience_runtime::ExperienceSession::default(),
+            )),
             registry,
             policy_engine,
             approval_broker: Arc::clone(&approval_broker),
@@ -785,18 +787,41 @@ impl RpcDispatcher {
         Self::broadcast_to_subscribers(&self.inner, note);
     }
     /// Trusted local-host control only; deliberately not registered as a network RPC method.
-    pub fn experience_local_control(&self, action: &str, argument: Option<&str>) -> Result<String, String> {
-        let _guard = self.inner.op_lock.try_lock().map_err(|_| "experience control requires an idle local session".to_string())?;
+    pub fn experience_local_control(
+        &self,
+        action: &str,
+        argument: Option<&str>,
+    ) -> Result<String, String> {
+        let _guard = self
+            .inner
+            .op_lock
+            .try_lock()
+            .map_err(|_| "experience control requires an idle local session".to_string())?;
         if self.inner.in_flight.load(Ordering::SeqCst) {
             return Err("experience control requires an idle local session".into());
         }
         let workspace = self.inner.env.workspace();
-        let revision = crate::experience_runtime::live_revision(&self.inner.snapshot_store, workspace)?;
-        let mut experience = self.inner.experience.lock().unwrap_or_else(|e|e.into_inner());
+        let revision =
+            crate::experience_runtime::live_revision(&self.inner.snapshot_store, workspace)?;
+        let mut experience = self
+            .inner
+            .experience
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if action == "load" {
-            experience.load(std::path::Path::new(argument.ok_or("experience load needs an absolute file")?), workspace, &revision)
+            experience.load(
+                std::path::Path::new(argument.ok_or("experience load needs an absolute file")?),
+                workspace,
+                &revision,
+            )
         } else {
-            experience.control(action, argument, workspace, &revision, self.inner.policy_engine.mode())
+            experience.control(
+                action,
+                argument,
+                workspace,
+                &revision,
+                self.inner.policy_engine.mode(),
+            )
         }
     }
 
@@ -1147,7 +1172,8 @@ impl RpcDispatcher {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        self.serve_stream_with_config(reader, writer, TransportConfig::default()).await
+        self.serve_stream_with_config(reader, writer, TransportConfig::default())
+            .await
     }
 
     /// Serve newline-delimited JSON-RPC 2.0 with configurable transport bounds and timeouts.
@@ -1179,7 +1205,12 @@ impl RpcDispatcher {
         };
         let conn = ConnectionContext::with_default_session(acp_sink, Some(self.session_id()));
 
-        let writer_task = tokio::spawn(run_bounded_writer(out_rx, writer, state.clone(), state_rx.clone()));
+        let writer_task = tokio::spawn(run_bounded_writer(
+            out_rx,
+            writer,
+            state.clone(),
+            state_rx.clone(),
+        ));
 
         let mut buf_reader = BufReader::new(reader);
         let mut frame_reader = FrameReader::new(config.max_frame_bytes);
@@ -1539,7 +1570,10 @@ impl RpcDispatcher {
         while let Some(join_res) = in_flight_prompts.join_next().await {
             if let Err(e) = join_res {
                 if e.is_panic() {
-                    eprintln!("[kroma] single dispatcher prompt task panicked on exit: {:?}", e);
+                    eprintln!(
+                        "[kroma] single dispatcher prompt task panicked on exit: {:?}",
+                        e
+                    );
                 }
             }
         }

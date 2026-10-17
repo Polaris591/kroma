@@ -3,9 +3,9 @@
 //! environment policy, stdio, and exit-code/output semantics; and a directly dropped long-lived MCP
 //! client sweeps its server's descendants instead of leaking them.
 
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
@@ -13,7 +13,7 @@ use std::time::Instant;
 use kroma_core::budget::BudgetConfig;
 use kroma_core::completion_gate::WorkspaceCompletionGate;
 use kroma_core::env::{CompletionGate, CompletionGateContext, GateOutcome};
-use kroma_core::extensions::{CommandHookRunner, HookEvent, HookContext};
+use kroma_core::extensions::{CommandHookRunner, HookContext, HookEvent};
 #[cfg(unix)]
 use kroma_core::mcp::McpClient;
 use kroma_core::tools::bash::execute_bash;
@@ -158,7 +158,9 @@ fn command_hook_keeps_event_env_and_exit_semantics() {
     ]);
     let ctx = HookContext::new(1, &ws);
 
-    let outcome = runner.run(HookEvent::PreToolUse, &ctx).expect("hook must run");
+    let outcome = runner
+        .run(HookEvent::PreToolUse, &ctx)
+        .expect("hook must run");
     assert!(outcome.success, "hook outcome: {outcome:?}");
     assert_eq!(outcome.exit_code, Some(0));
     assert!(!outcome.timed_out);

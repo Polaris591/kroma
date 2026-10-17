@@ -705,8 +705,7 @@ impl InteractiveRepl {
             .unwrap_or("latest");
 
         if target != "latest" {
-            let is_explicit_task_prefix =
-                target.starts_with("sub-") || target.starts_with("task-");
+            let is_explicit_task_prefix = target.starts_with("sub-") || target.starts_with("task-");
             let in_tasks = if is_task_keyword || is_explicit_task_prefix {
                 true
             } else {
@@ -720,9 +719,8 @@ impl InteractiveRepl {
                     .and_then(|r| r.get("tasks"))
                     .and_then(Value::as_array)
                     .map(|arr| {
-                        arr.iter().any(|t| {
-                            t.get("task_id").and_then(Value::as_str) == Some(target)
-                        })
+                        arr.iter()
+                            .any(|t| t.get("task_id").and_then(Value::as_str) == Some(target))
                     })
                     .unwrap_or(false)
             };
@@ -739,7 +737,10 @@ impl InteractiveRepl {
                 return match resp.result {
                     Some(val) => {
                         let tid = val.get("task_id").and_then(Value::as_str).unwrap_or(target);
-                        let state = val.get("state").and_then(Value::as_str).unwrap_or("running");
+                        let state = val
+                            .get("state")
+                            .and_then(Value::as_str)
+                            .unwrap_or("running");
                         Ok(ReplStepOutcome {
                             output: format!(
                                 "resumed task {} (state: {})\n",
@@ -848,10 +849,7 @@ impl InteractiveRepl {
         out.push('\n');
 
         for task in tasks.iter().take(crate::async_tasks::MAX_TASKS) {
-            let task_id = task
-                .get("task_id")
-                .and_then(Value::as_str)
-                .unwrap_or("-");
+            let task_id = task.get("task_id").and_then(Value::as_str).unwrap_or("-");
             let role = task.get("role").and_then(Value::as_str).unwrap_or("-");
             let state = task.get("state").and_then(Value::as_str).unwrap_or("-");
             let spent = task.get("token_spent").and_then(Value::as_u64).unwrap_or(0);
@@ -969,7 +967,10 @@ impl InteractiveRepl {
             "unknown" => (json!({ "kind": "acknowledged_unknown" }), 2),
             "verified" => {
                 // The remaining text is both the external evidence and the audit reason.
-                let evidence = rest.get(2..).map(|parts| parts.join(" ")).unwrap_or_default();
+                let evidence = rest
+                    .get(2..)
+                    .map(|parts| parts.join(" "))
+                    .unwrap_or_default();
                 let evidence = evidence.trim();
                 if evidence.is_empty() {
                     return Ok(ReplStepOutcome {
@@ -1060,7 +1061,12 @@ impl InteractiveRepl {
 
     /// `/cancel <task_id>`: cancel a durable async task.
     async fn repl_cancel_task_command(&self, rest: &[&str]) -> Result<ReplStepOutcome, String> {
-        let task_id = match rest.first().copied().map(str::trim).filter(|s| !s.is_empty()) {
+        let task_id = match rest
+            .first()
+            .copied()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(id) => id,
             None => {
                 return Ok(ReplStepOutcome {
@@ -1081,8 +1087,14 @@ impl InteractiveRepl {
 
         match resp.result {
             Some(val) => {
-                let tid = val.get("task_id").and_then(Value::as_str).unwrap_or(task_id);
-                let state = val.get("state").and_then(Value::as_str).unwrap_or("unknown");
+                let tid = val
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(task_id);
+                let state = val
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
                 Ok(ReplStepOutcome {
                     output: format!(
                         "task {} state: {}\n",
@@ -1257,11 +1269,19 @@ impl InteractiveRepl {
                         return Ok(ReplStepOutcome { output: "experience refused: too many arguments; use an absolute path without spaces\n".into(), should_exit: false });
                     }
                     let result = self.dispatcher.experience_local_control(
-                        rest.first().copied().unwrap_or("status"), rest.get(1).copied(),
+                        rest.first().copied().unwrap_or("status"),
+                        rest.get(1).copied(),
                     );
-                    Ok(ReplStepOutcome { output: format!("{}\n", sanitize_terminal_text(
-                        &result.unwrap_or_else(|error| format!("experience refused: {error}")),
-                    )), should_exit: false })
+                    Ok(ReplStepOutcome {
+                        output: format!(
+                            "{}\n",
+                            sanitize_terminal_text(
+                                &result
+                                    .unwrap_or_else(|error| format!("experience refused: {error}")),
+                            )
+                        ),
+                        should_exit: false,
+                    })
                 }
                 "/accept" => self.repl_accept_command(&rest).await,
                 "/reconcile" => self.repl_reconcile_command(&rest).await,
@@ -1523,9 +1543,7 @@ impl InteractiveRepl {
             let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
             return match history.back() {
                 Some(entry) => HistoryRecall::Text(entry.clone()),
-                None => {
-                    HistoryRecall::Error("error: no previous prompt to re-run.\n".to_string())
-                }
+                None => HistoryRecall::Error("error: no previous prompt to re-run.\n".to_string()),
             };
         }
         let Some(rest) = trimmed.strip_prefix('!') else {

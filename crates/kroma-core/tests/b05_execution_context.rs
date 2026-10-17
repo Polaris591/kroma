@@ -14,12 +14,11 @@ use kroma_core::config_file::McpServerConfig;
 use kroma_core::env::{ExecutionContext, LocalHostEnv, SharedExecutionEnv};
 use kroma_core::events::EventLogger;
 use kroma_core::extensions::{
-    CustomToolContext, CustomToolHandler, ExtensionManifest, ScopedExtension,
-    ScopedToolDefinition,
+    CustomToolContext, CustomToolHandler, ExtensionManifest, ScopedExtension, ScopedToolDefinition,
 };
 use kroma_core::mcp::{
-    McpClient, McpError, McpToolHost, CALL_STATE_CANCELLED_BEFORE_START,
-    CALL_STATE_QUEUED, CALL_STATE_STARTED,
+    McpClient, McpError, McpToolHost, CALL_STATE_CANCELLED_BEFORE_START, CALL_STATE_QUEUED,
+    CALL_STATE_STARTED,
 };
 use kroma_core::messages::{
     AssistantTurn, FinishReason, ToolCall, ToolOutcome, ToolResultMeta, TranscriptItem,
@@ -114,7 +113,9 @@ fn setup_mcp_host(root: &Path, timeout: Duration) -> (ToolRegistry, String) {
     let host = McpToolHost::start(&[config], timeout).expect("host start");
     let ext = host.into_extension("b05");
     let registry = ToolRegistry::new(None);
-    let id = registry.register_extension(ext).expect("register extension");
+    let id = registry
+        .register_extension(ext)
+        .expect("register extension");
     (registry, id.as_str().to_string())
 }
 
@@ -128,7 +129,9 @@ fn queued_cancel_does_not_dispatch() {
 
     let (registry, _id) = setup_mcp_host(&root, Duration::from_secs(10));
     let slow_dispatch = registry.extension_dispatch("mcp__b05__slow_tool").unwrap();
-    let mutate_dispatch = registry.extension_dispatch("mcp__b05__mutate_tool").unwrap();
+    let mutate_dispatch = registry
+        .extension_dispatch("mcp__b05__mutate_tool")
+        .unwrap();
 
     let started_marker = root.join("slow_started.marker");
     let done_marker = root.join("slow_done.marker");
@@ -147,13 +150,8 @@ fn queued_cancel_does_not_dispatch() {
     .to_string();
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let mutate_ctx_holder = ExecutionContext::new(
-        Some(RunId::new()),
-        None,
-        Some(cancel_rx),
-        None,
-        None,
-    );
+    let mutate_ctx_holder =
+        ExecutionContext::new(Some(RunId::new()), None, Some(cancel_rx), None, None);
 
     std::thread::scope(|scope| {
         // First call occupies the MCP worker
@@ -169,7 +167,10 @@ fn queued_cancel_does_not_dispatch() {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(started_marker.exists(), "slow call must have started on server");
+        assert!(
+            started_marker.exists(),
+            "slow call must have started on server"
+        );
 
         // Cancel the mutate call before queueing it
         cancel_tx.send(true).unwrap();
@@ -223,13 +224,7 @@ fn started_cancel_returns_timely_with_unknown_side_effects() {
     .to_string();
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let exec_ctx = ExecutionContext::new(
-        Some(RunId::new()),
-        None,
-        Some(cancel_rx),
-        None,
-        None,
-    );
+    let exec_ctx = ExecutionContext::new(Some(RunId::new()), None, Some(cancel_rx), None, None);
 
     let start_time = Instant::now();
     let (h_res, _) = std::thread::scope(|scope| {
@@ -320,13 +315,7 @@ fn run_deadline_clamps_mcp_timeout() {
 
     // Run deadline is 200ms from now
     let run_deadline = RunDeadline::at(Instant::now() + Duration::from_millis(200));
-    let exec_ctx = ExecutionContext::new(
-        Some(RunId::new()),
-        Some(run_deadline),
-        None,
-        None,
-        None,
-    );
+    let exec_ctx = ExecutionContext::new(Some(RunId::new()), Some(run_deadline), None, None, None);
 
     let started = Instant::now();
     let ctx = CustomToolContext::with_exec_context(&workspace, Some(&exec_ctx));
@@ -338,10 +327,7 @@ fn run_deadline_clamps_mcp_timeout() {
         "call must be clamped by run deadline (200ms), not 30s MCP timeout, took {:?}",
         elapsed
     );
-    assert!(
-        !out.outcome.is_success(),
-        "clamped timeout must fail"
-    );
+    assert!(!out.outcome.is_success(), "clamped timeout must fail");
     match out.outcome {
         kroma_core::messages::ToolOutcome::Error { code } => {
             assert_eq!(
@@ -392,7 +378,11 @@ time.sleep(5)
     let list_res = client.list_tools().await;
     match list_res {
         Err(McpError::Io(msg)) => {
-            assert!(msg.contains("poisoned"), "subsequent call must report poisoned, got: {}", msg);
+            assert!(
+                msg.contains("poisoned"),
+                "subsequent call must report poisoned, got: {}",
+                msg
+            );
         }
         other => panic!("expected poisoned Io error, got: {:?}", other),
     }
@@ -407,7 +397,10 @@ async fn spawn_blocking_abort_does_not_wait_and_retains_permit() {
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let env: SharedExecutionEnv = Arc::new(LocalHostEnv::new(&ws, &root).unwrap());
-    let policy_engine = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy_engine = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let budget = BudgetConfig::default();
 
     let thread_finished = Arc::new(AtomicBool::new(false));
@@ -417,11 +410,12 @@ async fn spawn_blocking_abort_does_not_wait_and_retains_permit() {
     manifest.capabilities.push("tools".to_string());
     let mut ext = ScopedExtension::new(manifest);
 
-    let slow_handler: Arc<dyn CustomToolHandler> = Arc::new(move |_raw: &str, _ctx: &CustomToolContext<'_>| {
-        std::thread::sleep(Duration::from_millis(1500));
-        tf_clone.store(true, Ordering::SeqCst);
-        ToolExecutionOutput::success("slow_done".to_string(), ToolResultMeta::default())
-    });
+    let slow_handler: Arc<dyn CustomToolHandler> =
+        Arc::new(move |_raw: &str, _ctx: &CustomToolContext<'_>| {
+            std::thread::sleep(Duration::from_millis(1500));
+            tf_clone.store(true, Ordering::SeqCst);
+            ToolExecutionOutput::success("slow_done".to_string(), ToolResultMeta::default())
+        });
 
     let tool_def = ToolDefinition {
         name: "slow_custom".to_string(),
@@ -443,13 +437,7 @@ async fn spawn_blocking_abort_does_not_wait_and_retains_permit() {
     let runtime = ToolRuntime::new(registry, policy_engine, env, budget);
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let exec_ctx = ExecutionContext::new(
-        Some(RunId::new()),
-        None,
-        Some(cancel_rx),
-        None,
-        None,
-    );
+    let exec_ctx = ExecutionContext::new(Some(RunId::new()), None, Some(cancel_rx), None, None);
 
     let call = ToolCall {
         call_id: ToolCallId::new("call_slow"),
@@ -458,9 +446,8 @@ async fn spawn_blocking_abort_does_not_wait_and_retains_permit() {
     };
 
     let start = Instant::now();
-    let call_task = tokio::spawn(async move {
-        runtime.execute_call_with_context(&call, 1, &exec_ctx).await
-    });
+    let call_task =
+        tokio::spawn(async move { runtime.execute_call_with_context(&call, 1, &exec_ctx).await });
 
     // Wait a brief moment, then cancel
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -522,7 +509,10 @@ fn extension_chain_passes_real_context() {
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let env: SharedExecutionEnv = Arc::new(LocalHostEnv::new(&ws, &root).unwrap());
-    let policy_engine = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy_engine = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let budget = BudgetConfig::default();
 
     let expected_run_id = RunId::new();
@@ -545,19 +535,20 @@ fn extension_chain_passes_real_context() {
     manifest.capabilities.push("tools".to_string());
     let mut ext = ScopedExtension::new(manifest);
 
-    let inspect_handler: Arc<dyn CustomToolHandler> = Arc::new(move |_raw: &str, ctx: &CustomToolContext<'_>| {
-        if let Some(id) = ctx.run_id() {
-            *r_id.lock().unwrap() = Some(id.to_string());
-        }
-        if let Some(dl) = ctx.deadline() {
-            *r_dl.lock().unwrap() = Some(dl.remaining());
-        }
-        r_c.store(ctx.is_cancelled(), Ordering::SeqCst);
-        if let Some(b) = ctx.budget() {
-            *r_b.lock().unwrap() = b.limit();
-        }
-        ToolExecutionOutput::success("inspected".to_string(), ToolResultMeta::default())
-    });
+    let inspect_handler: Arc<dyn CustomToolHandler> =
+        Arc::new(move |_raw: &str, ctx: &CustomToolContext<'_>| {
+            if let Some(id) = ctx.run_id() {
+                *r_id.lock().unwrap() = Some(id.to_string());
+            }
+            if let Some(dl) = ctx.deadline() {
+                *r_dl.lock().unwrap() = Some(dl.remaining());
+            }
+            r_c.store(ctx.is_cancelled(), Ordering::SeqCst);
+            if let Some(b) = ctx.budget() {
+                *r_b.lock().unwrap() = b.limit();
+            }
+            ToolExecutionOutput::success("inspected".to_string(), ToolResultMeta::default())
+        });
 
     let tool_def = ToolDefinition {
         name: "inspect_ctx".to_string(),
@@ -589,7 +580,10 @@ fn extension_chain_passes_real_context() {
         raw_arguments: "{}".to_string(),
     };
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let (msg, _, _) = runtime.execute_call_with_context(&call, 1, &exec_ctx).await;
         assert!(msg.outcome.is_success());
@@ -643,11 +637,19 @@ fn deterministic_cas_caller_wins_before_start() {
         Err(CALL_STATE_CANCELLED_BEFORE_START),
         "worker CAS must fail because caller already marked CANCELLED_BEFORE_START"
     );
-    assert_eq!(state.load(Ordering::SeqCst), CALL_STATE_CANCELLED_BEFORE_START);
+    assert_eq!(
+        state.load(Ordering::SeqCst),
+        CALL_STATE_CANCELLED_BEFORE_START
+    );
 
     // Verify error mapping: caller's won race maps to NotExecutedCancelled
     let out = kroma_core::mcp::mcp_error_output("tool", &McpError::Cancelled);
-    assert_eq!(out.outcome, ToolOutcome::Error { code: ErrorCode::NotExecutedCancelled });
+    assert_eq!(
+        out.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::NotExecutedCancelled
+        }
+    );
     assert!(out.content.contains("cancelled before it ran"));
 }
 
@@ -681,8 +683,15 @@ fn deterministic_cas_worker_wins_and_starts_before_cancel() {
 
     // Caller is forbidden from returning NotExecutedCancelled; must report StartedCancelled (IoError, unknown side-effects)
     let out = kroma_core::mcp::mcp_error_output("tool", &McpError::StartedCancelled);
-    assert_eq!(out.outcome, ToolOutcome::Error { code: ErrorCode::IoError });
-    assert!(out.content.contains("execution state unknown and side-effects may have occurred"));
+    assert_eq!(
+        out.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::IoError
+        }
+    );
+    assert!(out
+        .content
+        .contains("execution state unknown and side-effects may have occurred"));
 }
 
 /// 8b. Deterministic gate: Drop happens first, then mark_residual -> no residual increment.
@@ -709,12 +718,20 @@ fn deterministic_drop_first_then_mark_residual_does_not_leak() {
     handle.mark_residual();
 
     // MUST NOT leak residual: drop was first, so mark_residual is a no-op
-    assert_eq!(tracker.residual_active(), 0, "mark_residual after drop must be no-op and not leak residual");
+    assert_eq!(
+        tracker.residual_active(),
+        0,
+        "mark_residual after drop must be no-op and not leak residual"
+    );
     assert_eq!(tracker.active(), 0);
 
     // Subsequent admission must succeed!
     let next_guard = tracker.begin_admission();
-    assert!(next_guard.is_ok(), "subsequent admission must succeed, but got: {:?}", next_guard.err());
+    assert!(
+        next_guard.is_ok(),
+        "subsequent admission must succeed, but got: {:?}",
+        next_guard.err()
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -743,7 +760,10 @@ fn deterministic_mark_first_then_drop_decrements_to_zero() {
     // New admission while residual is active must be refused
     let blocked_admission = tracker.begin_admission();
     assert!(
-        matches!(blocked_admission, Err(kroma_core::extensions::AdmissionError::OverlappingResidual { residual: 1 })),
+        matches!(
+            blocked_admission,
+            Err(kroma_core::extensions::AdmissionError::OverlappingResidual { residual: 1 })
+        ),
         "new admission must be refused while residual is active, got: {:?}",
         blocked_admission
     );
@@ -757,11 +777,18 @@ fn deterministic_mark_first_then_drop_decrements_to_zero() {
 
     // Both active and residual MUST return to 0
     assert_eq!(tracker.active(), 0, "active count must return to 0");
-    assert_eq!(tracker.residual_active(), 0, "residual count must return to 0");
+    assert_eq!(
+        tracker.residual_active(),
+        0,
+        "residual count must return to 0"
+    );
 
     // Subsequent admission must succeed!
     let next_guard = tracker.begin_admission();
-    assert!(next_guard.is_ok(), "subsequent admission must succeed after drop");
+    assert!(
+        next_guard.is_ok(),
+        "subsequent admission must succeed after drop"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -784,7 +811,11 @@ fn deterministic_panic_unwind_cleans_up_without_leak() {
     assert!(res.is_err());
 
     // RAII Drop MUST have run during unwinding
-    assert_eq!(tracker.active(), 0, "panic unwind must drop guard and decrement active");
+    assert_eq!(
+        tracker.active(),
+        0,
+        "panic unwind must drop guard and decrement active"
+    );
     assert_eq!(tracker.residual_active(), 0);
 
     // Test with residual marked before panic
@@ -798,7 +829,11 @@ fn deterministic_panic_unwind_cleans_up_without_leak() {
 
     // RAII Drop MUST have decremented both active and residual
     assert_eq!(tracker.active(), 0);
-    assert_eq!(tracker.residual_active(), 0, "panic unwind must decrement residual");
+    assert_eq!(
+        tracker.residual_active(),
+        0,
+        "panic unwind must decrement residual"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -829,7 +864,10 @@ fn deterministic_mark_and_admit_serialization() {
     // While residual is active, new admission must be refused
     let adm_err = tracker.begin_admission();
     assert!(
-        matches!(adm_err, Err(kroma_core::extensions::AdmissionError::OverlappingResidual { residual: 1 })),
+        matches!(
+            adm_err,
+            Err(kroma_core::extensions::AdmissionError::OverlappingResidual { residual: 1 })
+        ),
         "admission must be refused while residual is active"
     );
 
@@ -860,7 +898,10 @@ async fn residual_blocking_rejects_new_overlapping_calls() {
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let env: SharedExecutionEnv = Arc::new(LocalHostEnv::new(&ws, &root).unwrap());
-    let policy_engine = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy_engine = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
     let budget = BudgetConfig::default();
 
     let thread_finished = Arc::new(AtomicBool::new(false));
@@ -870,11 +911,12 @@ async fn residual_blocking_rejects_new_overlapping_calls() {
     manifest.capabilities.push("tools".to_string());
     let mut ext = ScopedExtension::new(manifest);
 
-    let slow_handler: Arc<dyn CustomToolHandler> = Arc::new(move |_raw: &str, _ctx: &CustomToolContext<'_>| {
-        std::thread::sleep(Duration::from_millis(800));
-        tf_clone.store(true, Ordering::SeqCst);
-        ToolExecutionOutput::success("done".to_string(), ToolResultMeta::default())
-    });
+    let slow_handler: Arc<dyn CustomToolHandler> =
+        Arc::new(move |_raw: &str, _ctx: &CustomToolContext<'_>| {
+            std::thread::sleep(Duration::from_millis(800));
+            tf_clone.store(true, Ordering::SeqCst);
+            ToolExecutionOutput::success("done".to_string(), ToolResultMeta::default())
+        });
 
     let tool_def = ToolDefinition {
         name: "linger_tool".to_string(),
@@ -893,13 +935,7 @@ async fn residual_blocking_rejects_new_overlapping_calls() {
     let runtime = ToolRuntime::new(registry, policy_engine, env, budget);
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let exec_ctx = ExecutionContext::new(
-        Some(RunId::new()),
-        None,
-        Some(cancel_rx),
-        None,
-        None,
-    );
+    let exec_ctx = ExecutionContext::new(Some(RunId::new()), None, Some(cancel_rx), None, None);
 
     let call1 = ToolCall {
         call_id: ToolCallId::new("call_1"),
@@ -911,7 +947,9 @@ async fn residual_blocking_rejects_new_overlapping_calls() {
     let rt_clone = runtime.clone();
     let ctx_clone = exec_ctx.clone();
     let h1 = tokio::spawn(async move {
-        rt_clone.execute_call_with_context(&call1, 1, &ctx_clone).await
+        rt_clone
+            .execute_call_with_context(&call1, 1, &ctx_clone)
+            .await
     });
 
     // Wait 50ms, then cancel call 1
@@ -920,7 +958,12 @@ async fn residual_blocking_rejects_new_overlapping_calls() {
     let (msg1, _, _) = h1.await.unwrap();
 
     // Call 1 returns promptly with unknown side-effects
-    assert_eq!(msg1.outcome, ToolOutcome::Error { code: ErrorCode::IoError });
+    assert_eq!(
+        msg1.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::IoError
+        }
+    );
     assert!(msg1.content.contains("side-effects may have occurred"));
 
     // Immediately attempt call 2 on the same tool: must be REFUSED because thread 1 is still residual
@@ -930,8 +973,15 @@ async fn residual_blocking_rejects_new_overlapping_calls() {
         raw_arguments: "{}".to_string(),
     };
     let fresh_ctx = ExecutionContext::empty();
-    let (msg2, _, _) = runtime.execute_call_with_context(&call2, 2, &fresh_ctx).await;
-    assert_eq!(msg2.outcome, ToolOutcome::Error { code: ErrorCode::IoError });
+    let (msg2, _, _) = runtime
+        .execute_call_with_context(&call2, 2, &fresh_ctx)
+        .await;
+    assert_eq!(
+        msg2.outcome,
+        ToolOutcome::Error {
+            code: ErrorCode::IoError
+        }
+    );
     assert!(
         msg2.content.contains("residual background execution"),
         "overlapping call must be refused while residual thread runs, got: {}",
@@ -945,7 +995,10 @@ async fn residual_blocking_rejects_new_overlapping_calls() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(thread_finished.load(Ordering::SeqCst), "background thread must complete");
+    assert!(
+        thread_finished.load(Ordering::SeqCst),
+        "background thread must complete"
+    );
 
     // Give a brief moment for the drop to settle
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -956,7 +1009,9 @@ async fn residual_blocking_rejects_new_overlapping_calls() {
         name: "linger_tool".to_string(),
         raw_arguments: "{}".to_string(),
     };
-    let (msg3, _, _) = runtime.execute_call_with_context(&call3, 3, &fresh_ctx).await;
+    let (msg3, _, _) = runtime
+        .execute_call_with_context(&call3, 3, &fresh_ctx)
+        .await;
     assert_eq!(msg3.outcome, ToolOutcome::Success);
     assert_eq!(msg3.content.as_ref(), "done");
 
@@ -999,7 +1054,10 @@ async fn agent_runner_real_toolchain_clamps_run_deadline() {
 
     let (registry, _id) = setup_mcp_host(&root, Duration::from_secs(30));
     let env: SharedExecutionEnv = Arc::new(LocalHostEnv::new(&ws, &state).unwrap());
-    let policy_engine = PolicyEngine::new(PolicyMode::AllowWrite, Arc::new(NonInteractiveApprovalHandler));
+    let policy_engine = PolicyEngine::new(
+        PolicyMode::AllowWrite,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
 
     // Run deadline is 400ms (enough time for Python mock to start and write marker, but much less than 3s delay)
     let budget = BudgetConfig {
@@ -1028,7 +1086,9 @@ async fn agent_runner_real_toolchain_clamps_run_deadline() {
         finish_reason: FinishReason::ToolCalls,
         usage: None,
     };
-    let provider = Arc::new(MockToolCallingProvider { turn: assistant_turn });
+    let provider = Arc::new(MockToolCallingProvider {
+        turn: assistant_turn,
+    });
 
     let cfg = AgentRunConfig::new("test agent deadline", budget);
     let logger = EventLogger::new(cfg.run_id, Some(state), false).unwrap();
@@ -1068,7 +1128,9 @@ async fn agent_runner_real_toolchain_clamps_run_deadline() {
 
     assert_eq!(
         tool_res.outcome,
-        ToolOutcome::Error { code: ErrorCode::ToolTimeout }
+        ToolOutcome::Error {
+            code: ErrorCode::ToolTimeout
+        }
     );
     assert!(
         tool_res.content.contains("side-effects may have occurred")

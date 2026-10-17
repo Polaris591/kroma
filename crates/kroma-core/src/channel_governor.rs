@@ -80,7 +80,9 @@ impl ChannelPolicy {
 pub enum BreakerState {
     Closed,
     /// Refusing until this instant; exactly one probe is allowed after it.
-    Open { until: Instant },
+    Open {
+        until: Instant,
+    },
     /// One probe is in flight; further callers wait for its verdict.
     HalfOpen,
 }
@@ -178,19 +180,28 @@ impl ChannelGovernor {
         let probe = self.check_breaker(true)?;
         permit.forget();
         self.in_flight.fetch_add(1, Ordering::SeqCst);
-        Ok(ChannelPermit { governor: self, probe })
+        Ok(ChannelPermit {
+            governor: self,
+            probe,
+        })
     }
 
     /// Non-blocking variant, for callers that prefer to shed load instead of queueing.
     pub fn try_acquire(&self) -> Result<ChannelPermit<'_>, GovernorError> {
         self.check_breaker(false)?;
-        let permit = self.permits.try_acquire().map_err(|_| GovernorError::ChannelOpen {
-            retry_after: Duration::ZERO,
-        })?;
+        let permit = self
+            .permits
+            .try_acquire()
+            .map_err(|_| GovernorError::ChannelOpen {
+                retry_after: Duration::ZERO,
+            })?;
         let probe = self.check_breaker(true)?;
         permit.forget();
         self.in_flight.fetch_add(1, Ordering::SeqCst);
-        Ok(ChannelPermit { governor: self, probe })
+        Ok(ChannelPermit {
+            governor: self,
+            probe,
+        })
     }
 
     fn check_breaker(&self, admit: bool) -> Result<bool, GovernorError> {
@@ -306,24 +317,40 @@ mod tests {
         let first = governor.acquire().await.expect("first request admitted");
         let mut queued = Box::pin(governor.acquire());
         // Poll the actual acquire future before opening the breaker, with no sleeps or tasks.
-        assert!(tokio::time::timeout(Duration::from_millis(20), queued.as_mut()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), queued.as_mut())
+                .await
+                .is_err()
+        );
         governor.record_failure();
         drop(first);
-        assert!(queued.await.is_err(), "a queued caller must not bypass a newly opened breaker");
+        assert!(
+            queued.await.is_err(),
+            "a queued caller must not bypass a newly opened breaker"
+        );
         assert_eq!(governor.snapshot().in_flight, 0);
     }
 
     #[tokio::test]
     async fn dropping_a_half_open_probe_does_not_wedge_the_channel() {
         let governor = ChannelGovernor::new(
-            ChannelPolicy::serial().with_failure_threshold(1).with_cooldown(Duration::ZERO),
+            ChannelPolicy::serial()
+                .with_failure_threshold(1)
+                .with_cooldown(Duration::ZERO),
         );
         governor.record_failure();
         let probe = governor.acquire().await.expect("cooldown elapsed");
         assert_eq!(governor.snapshot().state, "half_open");
         drop(probe); // Cancellation/future-drop supplies no health verdict.
-        assert_ne!(governor.snapshot().state, "half_open", "a dropped probe must not strand the breaker");
-        assert!(governor.try_acquire().is_ok(), "a later probe must remain possible");
+        assert_ne!(
+            governor.snapshot().state,
+            "half_open",
+            "a dropped probe must not strand the breaker"
+        );
+        assert!(
+            governor.try_acquire().is_ok(),
+            "a later probe must remain possible"
+        );
     }
 
     #[test]
@@ -366,7 +393,10 @@ mod tests {
         let outcome = governor.try_acquire();
         match outcome {
             Err(GovernorError::ChannelOpen { retry_after }) => {
-                assert!(retry_after > Duration::ZERO, "the caller is told when to retry");
+                assert!(
+                    retry_after > Duration::ZERO,
+                    "the caller is told when to retry"
+                );
             }
             Ok(permit) => {
                 drop(permit);
@@ -377,9 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_success_resets_the_failure_streak() {
-        let governor = ChannelGovernor::new(
-            ChannelPolicy::serial().with_failure_threshold(3),
-        );
+        let governor = ChannelGovernor::new(ChannelPolicy::serial().with_failure_threshold(3));
         governor.record_failure();
         governor.record_failure();
         governor.record_success();
@@ -416,7 +444,10 @@ mod tests {
         governor.record_success();
         assert_eq!(governor.snapshot().state, "closed");
         drop(probe);
-        assert!(governor.try_acquire().is_ok(), "the channel is usable again");
+        assert!(
+            governor.try_acquire().is_ok(),
+            "the channel is usable again"
+        );
     }
 
     #[tokio::test]

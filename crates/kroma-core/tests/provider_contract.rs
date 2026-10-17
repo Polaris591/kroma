@@ -6,9 +6,7 @@ use kroma_core::messages::FinishReason;
 use kroma_core::provider::chat_completions::{
     validate_base_url, ChatCompletionsClient, ChatCompletionsConfig,
 };
-use kroma_core::provider::{
-    ModelProvider, ProviderCompletion, ProviderError, ProviderRequest,
-};
+use kroma_core::provider::{ModelProvider, ProviderCompletion, ProviderError, ProviderRequest};
 use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
 use kroma_core::types::{RunStatus, TerminalReason};
 use std::fs;
@@ -25,90 +23,144 @@ async fn retry_token_allowance_blocks_transmission_and_preserves_unknown_spend()
     use kroma_core::budget::TokenBudget;
     use kroma_core::provider::RetryBudget;
     for protocol in ["chat", "anthropic", "responses"] {
-    for (cap, expected_hits, report_usage) in [(100, 1, true), (200, 2, true), (200, 2, false)] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let hits = Arc::new(AtomicUsize::new(0));
-        let server_hits = Arc::clone(&hits);
-        let server = tokio::spawn(async move {
-            loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let n = server_hits.fetch_add(1, Ordering::SeqCst);
-                let mut request = Vec::new();
+        for (cap, expected_hits, report_usage) in [(100, 1, true), (200, 2, true), (200, 2, false)]
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let server_hits = Arc::clone(&hits);
+            let server = tokio::spawn(async move {
                 loop {
-                    let mut buf = [0; 4096];
-                    let read = socket.read(&mut buf).await.unwrap();
-                    if read == 0 { break; }
-                    request.extend_from_slice(&buf[..read]);
-                    if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let header = String::from_utf8_lossy(&request[..pos]);
-                        let size: usize = header.lines().find_map(|line| {
-                            let (key, value) = line.split_once(':')?;
-                            key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
-                        }).unwrap_or(0);
-                        if request.len() >= pos + 4 + size { break; }
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let n = server_hits.fetch_add(1, Ordering::SeqCst);
+                    let mut request = Vec::new();
+                    loop {
+                        let mut buf = [0; 4096];
+                        let read = socket.read(&mut buf).await.unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..read]);
+                        if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let header = String::from_utf8_lossy(&request[..pos]);
+                            let size: usize = header
+                                .lines()
+                                .find_map(|line| {
+                                    let (key, value) = line.split_once(':')?;
+                                    key.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse().unwrap())
+                                })
+                                .unwrap_or(0);
+                            if request.len() >= pos + 4 + size {
+                                break;
+                            }
+                        }
                     }
+                    let success_body = match protocol {
+                        "anthropic" => {
+                            r#"{"id":"fixture","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":3}}"#
+                        }
+                        "responses" => {
+                            r#"{"id":"fixture","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":7,"output_tokens":3}}"#
+                        }
+                        _ => {
+                            r#"{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#
+                        }
+                    };
+                    let mut payload: serde_json::Value =
+                        serde_json::from_str(success_body).unwrap();
+                    payload["model"] = serde_json::json!("returned-checkpoint");
+                    if !report_usage {
+                        payload.as_object_mut().unwrap().remove("usage");
+                    }
+                    let success_body = payload.to_string();
+                    let (status, body) = if n == 0 {
+                        ("503 Service Unavailable", "retry")
+                    } else {
+                        ("200 OK", success_body.as_str())
+                    };
+                    let response = format!("HTTP/1.1 {}\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", status, body.len(), body);
+                    socket.write_all(response.as_bytes()).await.unwrap();
                 }
-                let success_body = match protocol {
-                    "anthropic" => r#"{"id":"fixture","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":3}}"#,
-                    "responses" => r#"{"id":"fixture","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":7,"output_tokens":3}}"#,
-                    _ => r#"{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
-                };
-                let mut payload: serde_json::Value = serde_json::from_str(success_body).unwrap();
-                payload["model"] = serde_json::json!("returned-checkpoint");
-                if !report_usage {
-                    payload.as_object_mut().unwrap().remove("usage");
-                }
-                let success_body = payload.to_string();
-                let (status, body) = if n == 0 {
-                    ("503 Service Unavailable", "retry")
-                } else {
-                    ("200 OK", success_body.as_str())
-                };
-                let response = format!("HTTP/1.1 {}\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", status, body.len(), body);
-                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let ledger = Arc::new(TokenBudget::new(Some(cap)));
+            let first = ledger.try_reserve(100).unwrap();
+            let base_url = format!("http://{}", addr);
+            let client: Box<dyn ModelProvider> = match protocol {
+                "anthropic" => Box::new(
+                    kroma_core::provider::anthropic_messages::AnthropicMessagesClient::new(
+                        kroma_core::provider::anthropic_messages::AnthropicMessagesConfig {
+                            base_url,
+                            api_key: "fixture".into(),
+                            model: "fixture".into(),
+                            max_retries: 2,
+                            max_tokens: 100,
+                        },
+                    )
+                    .unwrap(),
+                ),
+                "responses" => Box::new(
+                    kroma_core::provider::openai_responses::OpenAiResponsesClient::new(
+                        kroma_core::provider::openai_responses::OpenAiResponsesConfig {
+                            base_url,
+                            api_key: "fixture".into(),
+                            model: "fixture".into(),
+                            max_retries: 2,
+                            reasoning_effort: None,
+                        },
+                    )
+                    .unwrap(),
+                ),
+                _ => Box::new(
+                    ChatCompletionsClient::new(ChatCompletionsConfig {
+                        base_url,
+                        api_key: "fixture".into(),
+                        model: "fixture".into(),
+                        max_retries: 2,
+                        reasoning_effort: None,
+                    })
+                    .unwrap(),
+                ),
+            };
+            let (_tx, rx) = watch::channel(false);
+            let result = client
+                .complete(
+                    ProviderRequest {
+                        retry_budget: Some(RetryBudget {
+                            ledger: Arc::clone(&ledger),
+                            per_attempt: 100,
+                        }),
+                        ..ProviderRequest::default()
+                    },
+                    &BudgetConfig::default(),
+                    rx,
+                )
+                .await;
+            if cap == 100 {
+                assert!(
+                    matches!(result, Err(ProviderError::RetryBudgetExhausted)),
+                    "{result:?}"
+                );
+            } else {
+                let completion = result.unwrap();
+                assert_eq!(completion.attempts_used, 2);
+                assert_eq!(
+                    completion.reported_model.as_deref(),
+                    Some("returned-checkpoint")
+                );
             }
-        });
-        let ledger = Arc::new(TokenBudget::new(Some(cap)));
-        let first = ledger.try_reserve(100).unwrap();
-        let base_url = format!("http://{}", addr);
-        let client: Box<dyn ModelProvider> = match protocol {
-            "anthropic" => Box::new(kroma_core::provider::anthropic_messages::AnthropicMessagesClient::new(
-                kroma_core::provider::anthropic_messages::AnthropicMessagesConfig {
-                    base_url, api_key: "fixture".into(), model: "fixture".into(), max_retries: 2, max_tokens: 100,
-                }).unwrap()),
-            "responses" => Box::new(kroma_core::provider::openai_responses::OpenAiResponsesClient::new(
-                kroma_core::provider::openai_responses::OpenAiResponsesConfig {
-                    base_url, api_key: "fixture".into(), model: "fixture".into(), max_retries: 2, reasoning_effort: None,
-                }).unwrap()),
-            _ => Box::new(ChatCompletionsClient::new(ChatCompletionsConfig {
-                base_url, api_key: "fixture".into(), model: "fixture".into(), max_retries: 2, reasoning_effort: None,
-            }).unwrap()),
-        };
-        let (_tx, rx) = watch::channel(false);
-        let result = client.complete(ProviderRequest {
-            retry_budget: Some(RetryBudget { ledger: Arc::clone(&ledger), per_attempt: 100 }),
-            ..ProviderRequest::default()
-        }, &BudgetConfig::default(), rx).await;
-        if cap == 100 {
-            assert!(matches!(result, Err(ProviderError::RetryBudgetExhausted)), "{result:?}");
-        } else {
-            let completion = result.unwrap();
-            assert_eq!(completion.attempts_used, 2);
-            assert_eq!(completion.reported_model.as_deref(), Some("returned-checkpoint"));
+            // The caller's first-attempt allowance remains an unknown hold, independent of retry usage.
+            drop(first);
+            assert_eq!(hits.load(Ordering::SeqCst), expected_hits);
+            let snapshot = ledger.accounting_snapshot();
+            let unknown = if report_usage { 100 } else { 200 };
+            let settled = if cap == 200 && report_usage { 10 } else { 0 };
+            assert_eq!(snapshot.unknown_tokens, unknown);
+            assert_eq!(snapshot.settled_tokens, settled);
+            assert_eq!(snapshot.spent, unknown + settled);
+            server.abort();
+            let _ = server.await;
         }
-        // The caller's first-attempt allowance remains an unknown hold, independent of retry usage.
-        drop(first);
-        assert_eq!(hits.load(Ordering::SeqCst), expected_hits);
-        let snapshot = ledger.accounting_snapshot();
-        let unknown = if report_usage { 100 } else { 200 };
-        let settled = if cap == 200 && report_usage { 10 } else { 0 };
-        assert_eq!(snapshot.unknown_tokens, unknown);
-        assert_eq!(snapshot.settled_tokens, settled);
-        assert_eq!(snapshot.spent, unknown + settled);
-        server.abort();
-        let _ = server.await;
-    }
     }
 }
 
@@ -135,15 +187,23 @@ async fn runner_retry_exhaustion_retains_first_attempt_and_sends_once() {
             loop {
                 let mut buf = [0; 4096];
                 let n = socket.read(&mut buf).await.unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 request.extend_from_slice(&buf[..n]);
                 if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
                     let header = String::from_utf8_lossy(&request[..pos]);
-                    let len: usize = header.lines().find_map(|line| {
-                        let (key, value) = line.split_once(':')?;
-                        key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
-                    }).unwrap_or(0);
-                    if request.len() >= pos + 4 + len { break; }
+                    let len: usize = header
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= pos + 4 + len {
+                        break;
+                    }
                 }
             }
             socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 5\r\nConnection: close\r\n\r\nretry").await.unwrap();
@@ -154,20 +214,38 @@ async fn runner_retry_exhaustion_retains_first_attempt_and_sends_once() {
     fs::create_dir_all(&workspace).unwrap();
     let budget = BudgetConfig::default();
     let env = Arc::new(LocalHostEnv::new(&workspace, root.join("state")).unwrap());
-    let runtime = build_default_runtime(env, PolicyEngine::new(
-        PolicyMode::ReadOnly, Arc::new(NonInteractiveApprovalHandler)), budget.clone(), None);
+    let runtime = build_default_runtime(
+        env,
+        PolicyEngine::new(
+            PolicyMode::ReadOnly,
+            Arc::new(NonInteractiveApprovalHandler),
+        ),
+        budget.clone(),
+        None,
+    );
     let cfg = AgentRunConfig::new("retry accounting fixture", budget);
     let logger = EventLogger::new(cfg.run_id, Some(root.join("state")), false).unwrap();
-    let provider = Arc::new(ChatCompletionsClient::new(ChatCompletionsConfig {
-        base_url: format!("http://{}", addr), api_key: "fixture".into(), model: "fixture".into(),
-        max_retries: 2, reasoning_effort: None,
-    }).unwrap());
+    let provider = Arc::new(
+        ChatCompletionsClient::new(ChatCompletionsConfig {
+            base_url: format!("http://{}", addr),
+            api_key: "fixture".into(),
+            model: "fixture".into(),
+            max_retries: 2,
+            reasoning_effort: None,
+        })
+        .unwrap(),
+    );
     let ledger = Arc::new(TokenBudget::new(Some(64000)));
     let (_tx, rx) = watch::channel(false);
     let (summary, _) = AgentRunner::new(cfg, provider, runtime, rx)
-        .with_token_budget(Arc::clone(&ledger)).run(logger).await;
+        .with_token_budget(Arc::clone(&ledger))
+        .run(logger)
+        .await;
     assert!(
-        matches!(summary.terminal_reason, TerminalReason::ProviderProtocolError(_)),
+        matches!(
+            summary.terminal_reason,
+            TerminalReason::ProviderProtocolError(_)
+        ),
         "the run ends on the provider's 503, not on a budget refusal: {:?}",
         summary.terminal_reason
     );
@@ -224,7 +302,9 @@ async fn streaming_responses_report_their_own_model_identity() {
                     let mut request = Vec::new();
                     loop {
                         let mut buf = [0; 4096];
-                        let Ok(read) = socket.read(&mut buf).await else { return };
+                        let Ok(read) = socket.read(&mut buf).await else {
+                            return;
+                        };
                         if read == 0 {
                             return;
                         }
@@ -257,28 +337,64 @@ async fn streaming_responses_report_their_own_model_identity() {
     }
 
     let chat_ok = sse(&[
-        ("", r#"{"id":"c1","model":"stream-model","choices":[{"index":0,"delta":{"content":"hi"}}]}"#),
-        ("", r#"{"id":"c1","model":"stream-model","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#),
+        (
+            "",
+            r#"{"id":"c1","model":"stream-model","choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
+        ),
+        (
+            "",
+            r#"{"id":"c1","model":"stream-model","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#,
+        ),
         ("", "[DONE]"),
     ]);
     let anthropic_ok = sse(&[
-        ("message_start", r#"{"type":"message_start","message":{"id":"m1","model":"stream-model","role":"assistant","content":[],"usage":{"input_tokens":3,"output_tokens":0}}}"#),
-        ("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#),
-        ("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#),
-        ("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
-        ("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#),
+        (
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"m1","model":"stream-model","role":"assistant","content":[],"usage":{"input_tokens":3,"output_tokens":0}}}"#,
+        ),
+        (
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        ),
+        (
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+        ),
+        (
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
+        ),
         ("message_stop", r#"{"type":"message_stop"}"#),
     ]);
     let responses_ok = sse(&[
-        ("response.created", r#"{"type":"response.created","response":{"id":"r1","status":"in_progress","model":"stream-model"}}"#),
-        ("response.output_text.delta", r#"{"type":"response.output_text.delta","delta":"hi"}"#),
-        ("response.completed", r#"{"type":"response.completed","response":{"id":"r1","status":"completed","model":"stream-model","usage":{"input_tokens":3,"output_tokens":1}}}"#),
+        (
+            "response.created",
+            r#"{"type":"response.created","response":{"id":"r1","status":"in_progress","model":"stream-model"}}"#,
+        ),
+        (
+            "response.output_text.delta",
+            r#"{"type":"response.output_text.delta","delta":"hi"}"#,
+        ),
+        (
+            "response.completed",
+            r#"{"type":"response.completed","response":{"id":"r1","status":"completed","model":"stream-model","usage":{"input_tokens":3,"output_tokens":1}}}"#,
+        ),
     ]);
     // Same shape but the identity changes mid-stream: attribution must not be guessed. Chat
     // completions repeat the model on every chunk, so a contradiction is expressible there.
     let conflicting = sse(&[
-        ("", r#"{"id":"c1","model":"first-model","choices":[{"index":0,"delta":{"content":"hi"}}]}"#),
-        ("", r#"{"id":"c1","model":"changed-model","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#),
+        (
+            "",
+            r#"{"id":"c1","model":"first-model","choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
+        ),
+        (
+            "",
+            r#"{"id":"c1","model":"changed-model","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#,
+        ),
         ("", "[DONE]"),
     ]);
 
@@ -286,39 +402,111 @@ async fn streaming_responses_report_their_own_model_identity() {
 
     // chat-completions
     let addr = serve(chat_ok).await;
-    let client = chat_completions::ChatCompletionsClient::new(chat_completions::ChatCompletionsConfig {
-        base_url: format!("http://{}", addr), api_key: "fixture".into(), model: "request-alias".into(),
-        max_retries: 0, reasoning_effort: None,
-    }).unwrap();
-    let done = client.complete(ProviderRequest { stream: true, ..ProviderRequest::default() }, &BudgetConfig::default(), rx.clone()).await.unwrap();
-    assert_eq!(done.reported_model.as_deref(), Some("stream-model"), "chat stream identity");
+    let client =
+        chat_completions::ChatCompletionsClient::new(chat_completions::ChatCompletionsConfig {
+            base_url: format!("http://{}", addr),
+            api_key: "fixture".into(),
+            model: "request-alias".into(),
+            max_retries: 0,
+            reasoning_effort: None,
+        })
+        .unwrap();
+    let done = client
+        .complete(
+            ProviderRequest {
+                stream: true,
+                ..ProviderRequest::default()
+            },
+            &BudgetConfig::default(),
+            rx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        done.reported_model.as_deref(),
+        Some("stream-model"),
+        "chat stream identity"
+    );
 
     // anthropic-messages
     let addr = serve(anthropic_ok).await;
-    let client = anthropic_messages::AnthropicMessagesClient::new(anthropic_messages::AnthropicMessagesConfig {
-        base_url: format!("http://{}", addr), api_key: "fixture".into(), model: "request-alias".into(),
-        max_retries: 0, max_tokens: 64,
-    }).unwrap();
-    let done = client.complete(ProviderRequest { stream: true, ..ProviderRequest::default() }, &BudgetConfig::default(), rx.clone()).await.unwrap();
-    assert_eq!(done.reported_model.as_deref(), Some("stream-model"), "anthropic stream identity");
+    let client = anthropic_messages::AnthropicMessagesClient::new(
+        anthropic_messages::AnthropicMessagesConfig {
+            base_url: format!("http://{}", addr),
+            api_key: "fixture".into(),
+            model: "request-alias".into(),
+            max_retries: 0,
+            max_tokens: 64,
+        },
+    )
+    .unwrap();
+    let done = client
+        .complete(
+            ProviderRequest {
+                stream: true,
+                ..ProviderRequest::default()
+            },
+            &BudgetConfig::default(),
+            rx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        done.reported_model.as_deref(),
+        Some("stream-model"),
+        "anthropic stream identity"
+    );
 
     // openai-responses
     let addr = serve(responses_ok).await;
-    let client = openai_responses::OpenAiResponsesClient::new(openai_responses::OpenAiResponsesConfig {
-        base_url: format!("http://{}", addr), api_key: "fixture".into(), model: "request-alias".into(),
-        max_retries: 0, reasoning_effort: None,
-    }).unwrap();
-    let done = client.complete(ProviderRequest { stream: true, ..ProviderRequest::default() }, &BudgetConfig::default(), rx).await.unwrap();
-    assert_eq!(done.reported_model.as_deref(), Some("stream-model"), "responses stream identity");
+    let client =
+        openai_responses::OpenAiResponsesClient::new(openai_responses::OpenAiResponsesConfig {
+            base_url: format!("http://{}", addr),
+            api_key: "fixture".into(),
+            model: "request-alias".into(),
+            max_retries: 0,
+            reasoning_effort: None,
+        })
+        .unwrap();
+    let done = client
+        .complete(
+            ProviderRequest {
+                stream: true,
+                ..ProviderRequest::default()
+            },
+            &BudgetConfig::default(),
+            rx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        done.reported_model.as_deref(),
+        Some("stream-model"),
+        "responses stream identity"
+    );
 
     // A stream that contradicts itself is refused (attribution must not be guessed).
     let addr = serve(conflicting).await;
-    let client = chat_completions::ChatCompletionsClient::new(chat_completions::ChatCompletionsConfig {
-        base_url: format!("http://{}", addr), api_key: "fixture".into(), model: "request-alias".into(),
-        max_retries: 0, reasoning_effort: None,
-    }).unwrap();
+    let client =
+        chat_completions::ChatCompletionsClient::new(chat_completions::ChatCompletionsConfig {
+            base_url: format!("http://{}", addr),
+            api_key: "fixture".into(),
+            model: "request-alias".into(),
+            max_retries: 0,
+            reasoning_effort: None,
+        })
+        .unwrap();
     let (_tx2, rx2) = watch::channel(false);
-    let result = client.complete(ProviderRequest { stream: true, ..ProviderRequest::default() }, &BudgetConfig::default(), rx2).await;
+    let result = client
+        .complete(
+            ProviderRequest {
+                stream: true,
+                ..ProviderRequest::default()
+            },
+            &BudgetConfig::default(),
+            rx2,
+        )
+        .await;
     match result {
         Err(err) => {
             let text = err.to_string();
@@ -1122,7 +1310,9 @@ async fn failed_provider_call_reports_its_real_wire_attempts() {
             let mut request = Vec::new();
             loop {
                 let mut buf = [0; 4096];
-                let Ok(read) = socket.read(&mut buf).await else { return };
+                let Ok(read) = socket.read(&mut buf).await else {
+                    return;
+                };
                 if read == 0 {
                     return;
                 }
@@ -1170,7 +1360,11 @@ async fn failed_provider_call_reports_its_real_wire_attempts() {
         )
         .await;
     assert!(result.is_err(), "an always-503 server must fail the call");
-    assert_eq!(attempts.get(), 3, "max_retries=2 means three transmitted attempts");
+    assert_eq!(
+        attempts.get(),
+        3,
+        "max_retries=2 means three transmitted attempts"
+    );
     assert_eq!(hits.load(Ordering::SeqCst), 3, "the server side must agree");
 }
 
@@ -1191,7 +1385,9 @@ async fn failed_run_summary_counts_every_transmitted_attempt() {
             let mut request = Vec::new();
             loop {
                 let mut buf = [0; 4096];
-                let Ok(read) = socket.read(&mut buf).await else { return };
+                let Ok(read) = socket.read(&mut buf).await else {
+                    return;
+                };
                 if read == 0 {
                     return;
                 }
@@ -1224,7 +1420,10 @@ async fn failed_run_summary_counts_every_transmitted_attempt() {
     let env = Arc::new(LocalHostEnv::new(&workspace, root.join("state")).unwrap());
     let runtime = build_default_runtime(
         env,
-        PolicyEngine::new(PolicyMode::ReadOnly, Arc::new(NonInteractiveApprovalHandler)),
+        PolicyEngine::new(
+            PolicyMode::ReadOnly,
+            Arc::new(NonInteractiveApprovalHandler),
+        ),
         budget.clone(),
         None,
     );
@@ -1243,7 +1442,9 @@ async fn failed_run_summary_counts_every_transmitted_attempt() {
     // No token ledger: an unbounded run must be allowed to retry, so the attempt count is what is
     // under test here rather than the retry budget admission.
     let (_tx, rx) = watch::channel(false);
-    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx).run(logger).await;
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .run(logger)
+        .await;
 
     assert_eq!(summary.status, RunStatus::Failed);
     assert_eq!(
@@ -1267,7 +1468,9 @@ impl ModelProvider for AttemptsReportingProvider {
         _budget: &'a BudgetConfig,
         _cancel_rx: watch::Receiver<bool>,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a,
+        >,
     > {
         Box::pin(async move {
             Ok(ProviderCompletion {
@@ -1306,7 +1509,10 @@ async fn a_provider_without_the_counter_still_reports_its_attempts() {
     let env = Arc::new(LocalHostEnv::new(&workspace, root.join("state")).unwrap());
     let runtime = build_default_runtime(
         env,
-        PolicyEngine::new(PolicyMode::ReadOnly, Arc::new(NonInteractiveApprovalHandler)),
+        PolicyEngine::new(
+            PolicyMode::ReadOnly,
+            Arc::new(NonInteractiveApprovalHandler),
+        ),
         budget.clone(),
         None,
     );
@@ -1316,7 +1522,9 @@ async fn a_provider_without_the_counter_still_reports_its_attempts() {
         reported_attempts: 3,
     });
     let (_tx, rx) = watch::channel(false);
-    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx).run(logger).await;
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .run(logger)
+        .await;
 
     assert_eq!(
         summary.request_attempts_used, 3,

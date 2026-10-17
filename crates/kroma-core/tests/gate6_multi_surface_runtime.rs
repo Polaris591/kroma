@@ -1810,7 +1810,9 @@ async fn test_unix_domain_socket_daemon_0600_permissions_and_worker_subagent_rpc
         daemon_ok.serve(cancel_rx_ok).await.unwrap();
     });
 
-    let unix_stream_ok = tokio::net::UnixStream::connect(&sock_path_ok).await.unwrap();
+    let unix_stream_ok = tokio::net::UnixStream::connect(&sock_path_ok)
+        .await
+        .unwrap();
     let (ur_ok, mut uw_ok) = unix_stream_ok.into_split();
     let mut ulines_ok = BufReader::new(ur_ok).lines();
 

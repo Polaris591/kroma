@@ -232,9 +232,7 @@ impl ExecutionContext {
 
     /// True if cancellation has been signalled. Checks *rx.borrow() synchronously.
     pub fn is_cancelled(&self) -> bool {
-        self.cancel
-            .as_ref()
-            .is_some_and(|rx| *rx.borrow())
+        self.cancel.as_ref().is_some_and(|rx| *rx.borrow())
     }
 
     /// True if the run deadline has already passed.

@@ -341,7 +341,10 @@ impl BenchTask {
             if argv.is_empty() {
                 failures.push("failed: empty verify_command argv".to_string());
             } else if let Some(reason) = limits.invalid_reason() {
-                failures.push(format!("failed: invalid verify_command limits ({})", reason));
+                failures.push(format!(
+                    "failed: invalid verify_command limits ({})",
+                    reason
+                ));
             } else {
                 let label = format!("verify_command exit 0 for {:?}", argv);
                 let started = Instant::now();
@@ -1201,7 +1204,9 @@ impl BenchComparisonReport {
         let estimated_arms: Vec<&str> = self
             .results
             .iter()
-            .filter(|result| result.usage_basis != "provider_reported" && result.usage_basis != "unknown")
+            .filter(|result| {
+                result.usage_basis != "provider_reported" && result.usage_basis != "unknown"
+            })
             .map(|result| result.strategy.as_str())
             .collect();
         if !estimated_arms.is_empty() {
@@ -1479,18 +1484,18 @@ impl BenchExecutor for SyntheticBenchExecutor {
                 strategy: strategy.name.clone(),
                 resolved,
                 gate_status: if resolved { "approved" } else { "rejected" }.to_string(),
-            // No provider usage exists for this result, so every priced field stays unknown rather
-            // than being defaulted to a free run.
-            self_input_tokens: 0,
-            self_cached_input_tokens: 0,
-            self_output_tokens: 0,
-            children_input_tokens: 0,
-            children_cached_input_tokens: 0,
-            children_output_tokens: 0,
-            reported_model: None,
-            usage_basis: "unknown".to_string(),
-            estimated_cost_nano_usd: None,
-            cost_unknown_reason: None,
+                // No provider usage exists for this result, so every priced field stays unknown rather
+                // than being defaulted to a free run.
+                self_input_tokens: 0,
+                self_cached_input_tokens: 0,
+                self_output_tokens: 0,
+                children_input_tokens: 0,
+                children_cached_input_tokens: 0,
+                children_output_tokens: 0,
+                reported_model: None,
+                usage_basis: "unknown".to_string(),
+                estimated_cost_nano_usd: None,
+                cost_unknown_reason: None,
                 self_tokens,
                 children_tokens,
                 total_tokens: self_tokens + children_tokens,
@@ -1737,7 +1742,7 @@ impl ProviderBenchExecutor {
             modified_files: Vec::new(),
             final_text: None,
             tool_trace: Vec::new(),
-                mechanism: None,
+            mechanism: None,
         }
     }
 
@@ -1832,11 +1837,15 @@ impl ProviderBenchExecutor {
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let runner = AgentRunner::new(cfg, Arc::clone(&self.provider), runtime, cancel_rx)
             .with_prompt_builder(self.prompt_builder.clone())
-            .with_completion_gate(self.development_gate.clone().unwrap_or_else(|| Arc::new(
-                crate::completion_gate::WorkspaceCompletionGate::with_auto_detection(
-                    None, self.settings.verify_timeout, bash_allowed,
-                ),
-            )))
+            .with_completion_gate(self.development_gate.clone().unwrap_or_else(|| {
+                Arc::new(
+                    crate::completion_gate::WorkspaceCompletionGate::with_auto_detection(
+                        None,
+                        self.settings.verify_timeout,
+                        bash_allowed,
+                    ),
+                )
+            }))
             .with_max_subagents(max_subagents)
             .with_adaptive_tournament_candidates(strategy.adaptive_tournament_candidates)
             // Capability gap #5 (`v1.5.2`): the arm-level strict-verification switch.
@@ -1873,8 +1882,12 @@ impl ProviderBenchExecutor {
         let mut mechanism = MechanismActivity::default();
         for event in logger.events() {
             if let crate::events::EventPayload::TournamentCompleted {
-                adaptive, candidate_runs, verified_candidates, merged,
-            } = &event.event {
+                adaptive,
+                candidate_runs,
+                verified_candidates,
+                merged,
+            } = &event.event
+            {
                 mechanism.adaptive_tournaments += usize::from(*adaptive);
                 mechanism.candidate_runs += candidate_runs;
                 mechanism.verified_candidates += verified_candidates;
@@ -1968,8 +1981,12 @@ impl ProviderBenchExecutor {
             children_output_tokens,
             reported_model,
             usage_basis: summary.usage_basis.clone(),
-            estimated_cost_nano_usd: cost.as_ref().and_then(|estimate| estimate.estimated_nano_usd),
-            cost_unknown_reason: cost.as_ref().and_then(|estimate| estimate.unknown_reason.clone()),
+            estimated_cost_nano_usd: cost
+                .as_ref()
+                .and_then(|estimate| estimate.estimated_nano_usd),
+            cost_unknown_reason: cost
+                .as_ref()
+                .and_then(|estimate| estimate.unknown_reason.clone()),
             budget_exceeded: budget_overage > 0,
             budget_tokens,
             budget_overage,
@@ -2074,7 +2091,11 @@ impl BenchExecutor for ProviderBenchExecutor {
             seed: DEFAULT_BENCH_SEED,
             randomized_order: true,
             source_fingerprint,
-            price_table_version: self.settings.price_table.as_ref().map(|t| t.version.clone()),
+            price_table_version: self
+                .settings
+                .price_table
+                .as_ref()
+                .map(|t| t.version.clone()),
             price_table_source: self.settings.price_table.as_ref().map(|t| t.source.clone()),
         }
     }
@@ -2265,8 +2286,8 @@ pub fn load_held_out_suite(path: &Path, workspace_root: &Path) -> Result<Vec<Ben
         .map_err(|e| format!("cannot resolve benchmark suite {}: {}", path.display(), e))?;
     let given = absolute_lexical(path)?;
     let workspace_lexical = absolute_lexical(workspace_root)?;
-    let inside_workspace = suite_canonical.starts_with(&workspace_canonical)
-        || given.starts_with(&workspace_lexical);
+    let inside_workspace =
+        suite_canonical.starts_with(&workspace_canonical) || given.starts_with(&workspace_lexical);
     if inside_workspace {
         return Err(format!(
             "refusing held-out suite {}: it is inside the graded workspace {} — the agent could edit \
@@ -2565,11 +2586,7 @@ fn paired_deltas(
         if observations == 0 {
             continue;
         }
-        let mean = by_task
-            .values()
-            .flatten()
-            .sum::<f64>()
-            / observations as f64;
+        let mean = by_task.values().flatten().sum::<f64>() / observations as f64;
         let order: Vec<String> = by_task.keys().cloned().collect();
         let clusters: Vec<Vec<f64>> = by_task.values().cloned().collect();
         let cluster_count = clusters.len();
@@ -2591,8 +2608,8 @@ fn paired_deltas(
                 None
             } else {
                 let holdout_observations: usize = holdout_by_task.values().map(Vec::len).sum();
-                let holdout_mean = holdout_by_task.values().flatten().sum::<f64>()
-                    / holdout_observations as f64;
+                let holdout_mean =
+                    holdout_by_task.values().flatten().sum::<f64>() / holdout_observations as f64;
                 let holdout_clusters: Vec<Vec<f64>> = holdout_by_task.into_values().collect();
                 let (holdout_low, holdout_high) =
                     bootstrap_interval_clustered(&holdout_clusters, seed ^ hash_str(&arm) ^ 0x51ED);
@@ -2844,7 +2861,10 @@ mod tests {
             clustered_width > naive_width,
             "clustered width {clustered_width} must exceed the naive width {naive_width}"
         );
-        assert!(clustered_width > 0.0, "a split must not produce a zero-width interval");
+        assert!(
+            clustered_width > 0.0,
+            "a split must not produce a zero-width interval"
+        );
     }
 
     /// A verdict needs enough independent tasks, whatever the interval looks like.

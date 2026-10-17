@@ -36,11 +36,11 @@ pub use rpc_types::*;
 pub use runtime::*;
 pub use session_manager::*;
 pub use terminal::*;
-pub use transport::{TransportConfig, TransportState};
 pub(crate) use transport::{
-    bounded_outbound_channel, normalize_request_params, run_bounded_writer,
-    BoundedOutboundSender, FrameReader, MAX_AUTH_FAILURES,
+    bounded_outbound_channel, normalize_request_params, run_bounded_writer, BoundedOutboundSender,
+    FrameReader, MAX_AUTH_FAILURES,
 };
+pub use transport::{TransportConfig, TransportState};
 
 pub(crate) use crate::agent_loop::{build_runtime_with_registry, AgentRunConfig, AgentRunner};
 pub(crate) use crate::attribution::{MutationLedger, MutationRecord};

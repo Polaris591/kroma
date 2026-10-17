@@ -149,22 +149,22 @@ impl ModelProvider for SlowThenFastProvider {
             if n == 0 {
                 loop {
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(15)) => {
-                            return Ok(ProviderCompletion {
-                                turn: assistant_stop("late provider result"),
-                                request_body_bytes: 128,
-                                latency_ms: 1,
-                                ttft_ms: Some(1),
-                                attempts_used: 1,
-                reported_model: None,
-                            });
-                        }
-                        changed = cancel_rx.changed() => {
-                            if changed.is_err() || *cancel_rx.borrow() {
-                                return Err(ProviderError::Cancelled);
+                            _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                                return Ok(ProviderCompletion {
+                                    turn: assistant_stop("late provider result"),
+                                    request_body_bytes: 128,
+                                    latency_ms: 1,
+                                    ttft_ms: Some(1),
+                                    attempts_used: 1,
+                    reported_model: None,
+                                });
+                            }
+                            changed = cancel_rx.changed() => {
+                                if changed.is_err() || *cancel_rx.borrow() {
+                                    return Err(ProviderError::Cancelled);
+                                }
                             }
                         }
-                    }
                 }
             }
             Ok(ProviderCompletion {
@@ -1233,7 +1233,11 @@ fn subagent_live_lines_name_child_id_and_state() {
     assert!(spawned.contains("sub-0001"), "{spawned}");
     assert!(spawned.contains("scout"), "{spawned}");
     assert!(spawned.contains("running"), "{spawned}");
-    assert_eq!(spawned.matches('\n').count(), 1, "one bounded line: {spawned}");
+    assert_eq!(
+        spawned.matches('\n').count(),
+        1,
+        "one bounded line: {spawned}"
+    );
 
     let completed = repl
         .render_live_event(&note(
@@ -1252,7 +1256,11 @@ fn subagent_live_lines_name_child_id_and_state() {
     assert!(completed.contains("sub-0001"), "{completed}");
     assert!(completed.contains("completed"), "{completed}");
     assert!(completed.contains("1200"), "{completed}");
-    assert_eq!(completed.matches('\n').count(), 1, "one bounded line: {completed}");
+    assert_eq!(
+        completed.matches('\n').count(),
+        1,
+        "one bounded line: {completed}"
+    );
 
     let merged = repl
         .render_live_event(&note(

@@ -275,7 +275,11 @@ fn write_index_atomically(path: &Path, bytes: &[u8]) -> Result<(), JsonRpcError>
         let _ = std::fs::remove_file(&tmp);
         return Err(JsonRpcError::new(
             JSONRPC_INTERNAL_ERROR,
-            format!("failed to persist the session index {}: {}", path.display(), e),
+            format!(
+                "failed to persist the session index {}: {}",
+                path.display(),
+                e
+            ),
         ));
     }
     if let Err(e) = crate::secure_fs::sync_dir(parent) {
@@ -463,7 +467,8 @@ impl SessionManager {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        self.serve_stream_with_config(reader, writer, TransportConfig::default()).await
+        self.serve_stream_with_config(reader, writer, TransportConfig::default())
+            .await
     }
 
     /// Route one daemon stream with configurable transport parameters (timeouts, capacities).
@@ -478,7 +483,12 @@ impl SessionManager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (out_tx, out_rx, mut state_rx, state) = bounded_outbound_channel(config);
-        let writer_task = tokio::spawn(run_bounded_writer(out_rx, writer, state.clone(), state_rx.clone()));
+        let writer_task = tokio::spawn(run_bounded_writer(
+            out_rx,
+            writer,
+            state.clone(),
+            state_rx.clone(),
+        ));
 
         let mut sub_guard = SubscriptionGuard::new();
         let mut subscribed: BTreeSet<String> = BTreeSet::new();
@@ -1005,7 +1015,10 @@ impl SessionManager {
             let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             match &requested {
                 Some(sid) => state.runtimes.get(sid).cloned(),
-                None => state.runtimes.get(&self.inner.primary.session_id()).cloned(),
+                None => state
+                    .runtimes
+                    .get(&self.inner.primary.session_id())
+                    .cloned(),
             }
         };
 

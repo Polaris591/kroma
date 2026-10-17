@@ -1234,11 +1234,10 @@ mod b01_ownership_tests {
             Arc::new(|_| ()),
             claim.run_id,
         );
-        dispatcher.inner.approval_broker.insert_test_pending_acp(
-            claim.run_id,
-            "apr-0001",
-            tx,
-        );
+        dispatcher
+            .inner
+            .approval_broker
+            .insert_test_pending_acp(claim.run_id, "apr-0001", tx);
 
         // Wrong connection (stranger / non-owner): refused with specific error
         let err = dispatcher.resolve_acp_response_from(
@@ -1250,7 +1249,10 @@ mod b01_ownership_tests {
             err,
             Err("no active run owned by this connection".to_string())
         );
-        assert!(rx.try_recv().is_err(), "waiter must not be resolved by stranger");
+        assert!(
+            rx.try_recv().is_err(),
+            "waiter must not be resolved by stranger"
+        );
 
         // True owner connection: accepted
         let ok = dispatcher.resolve_acp_response_from(

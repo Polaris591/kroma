@@ -147,7 +147,9 @@ fn running_confirmed(pid: i32, starttime: Option<u64>) -> bool {
         return false;
     }
     match proc_stat(pid) {
-        Some((state, observed)) => state != 'Z' && starttime.is_none_or(|expect| expect == observed),
+        Some((state, observed)) => {
+            state != 'Z' && starttime.is_none_or(|expect| expect == observed)
+        }
         // `/proc` unavailable: `kill(0) == 0` is the strongest portable evidence.
         None => true,
     }
@@ -259,7 +261,10 @@ fn started_cancel_keeps_the_server_running_until_host_teardown() {
         ENTERED_SERVER,
         Duration::from_secs(10),
         vec![
-            ("B06_MCP_PID_FILE".to_string(), pid_file.display().to_string()),
+            (
+                "B06_MCP_PID_FILE".to_string(),
+                pid_file.display().to_string(),
+            ),
             ("B06_MCP_ENTERED".to_string(), entered.display().to_string()),
         ],
     );
@@ -290,7 +295,10 @@ fn started_cancel_keeps_the_server_running_until_host_teardown() {
         "a started cancel must return promptly, took {:?}",
         started.elapsed()
     );
-    assert!(!out.outcome.is_success(), "cancelled call must error: {out:?}");
+    assert!(
+        !out.outcome.is_success(),
+        "cancelled call must error: {out:?}"
+    );
     assert!(
         out.content.contains("side-effects") || out.content.contains("unknown"),
         "a started cancel must report unknown execution state, got: {}",

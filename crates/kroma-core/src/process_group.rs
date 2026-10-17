@@ -248,7 +248,10 @@ impl ChildProcessGroup {
         #[cfg(windows)]
         {
             let job = attach()?;
-            Ok(Self { pgid, job: Some(job) })
+            Ok(Self {
+                pgid,
+                job: Some(job),
+            })
         }
         #[cfg(not(windows))]
         {

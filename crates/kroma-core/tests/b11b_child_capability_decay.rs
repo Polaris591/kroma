@@ -10,8 +10,8 @@
 //! pre-fix mapping (`allows_shell_auto() ? FullAutonomous : AllowWrite`) an `Ask` or `AllowShell`
 //! parent silently promotes the worker to automatic writes it never authorized.
 
-use kroma_core::budget::BudgetConfig;
 use kroma_core::async_tasks::{AsyncTaskRecord, AsyncTaskRegistry, NewTask, TaskState};
+use kroma_core::budget::BudgetConfig;
 use kroma_core::extensions::{
     HookContext, HookError, HookEvent, ObserverHook, PolicyHook, PolicyHookDecision,
     ScopedExtension, EXTENSION_API_VERSION,
@@ -266,7 +266,11 @@ impl PolicyHook for DenyWritePolicyHook {
     fn events(&self) -> &'static [HookEvent] {
         &[HookEvent::PreToolUse]
     }
-    fn evaluate(&self, _event: HookEvent, _ctx: &HookContext) -> Result<PolicyHookDecision, HookError> {
+    fn evaluate(
+        &self,
+        _event: HookEvent,
+        _ctx: &HookContext,
+    ) -> Result<PolicyHookDecision, HookError> {
         Ok(PolicyHookDecision::Deny {
             reason: "writes under src/** are denied".to_string(),
         })
@@ -289,9 +293,9 @@ impl ObserverHook for NoopObserverHook {
 
 fn registry_with(extension: ScopedExtension, name: &str) -> ToolRegistry {
     let registry = ToolRegistry::new(None);
-    registry.register_extension(extension).unwrap_or_else(|e| {
-        panic!("registering the {name} extension must succeed: {e:?}")
-    });
+    registry
+        .register_extension(extension)
+        .unwrap_or_else(|e| panic!("registering the {name} extension must succeed: {e:?}"));
     registry
 }
 
@@ -336,7 +340,10 @@ fn from_registry_distinguishes_policy_hooks_from_observer_hooks() {
 /// directory is created.
 #[tokio::test]
 async fn a_parent_policy_hook_refuses_worker_and_scout_without_side_effects() {
-    for spec in [SubagentSpec::worker("write"), SubagentSpec::scout("explore")] {
+    for spec in [
+        SubagentSpec::worker("write"),
+        SubagentSpec::scout("explore"),
+    ] {
         let root = temp_root("hook");
         let (_ws, workspace) = baseline_workspace(&root);
         let hooks = ParentPolicyHooks::Required {
@@ -455,7 +462,11 @@ impl PolicyHook for AllowAllPolicyHook {
     fn events(&self) -> &'static [HookEvent] {
         &[HookEvent::PreToolUse]
     }
-    fn evaluate(&self, _event: HookEvent, _ctx: &HookContext) -> Result<PolicyHookDecision, HookError> {
+    fn evaluate(
+        &self,
+        _event: HookEvent,
+        _ctx: &HookContext,
+    ) -> Result<PolicyHookDecision, HookError> {
         Ok(PolicyHookDecision::Allow)
     }
 }
@@ -472,9 +483,7 @@ impl ModelProvider for SpawnThenStopProvider {
         _cancel_rx: watch::Receiver<bool>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            let n = self
-                .turns
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let turn = if n == 0 {
                 AssistantTurn {
                     content: None,
@@ -559,7 +568,9 @@ async fn agent_loop_tool_caller_refuses_before_materializing_a_worktree() {
     let provider = Arc::new(SpawnThenStopProvider {
         turns: std::sync::atomic::AtomicUsize::new(0),
     });
-    let (summary, _) = AgentRunner::new(cfg, provider, runtime, rx).run(logger).await;
+    let (summary, _) = AgentRunner::new(cfg, provider, runtime, rx)
+        .run(logger)
+        .await;
 
     let spawn = summary
         .transcript

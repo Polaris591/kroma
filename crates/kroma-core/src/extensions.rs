@@ -353,7 +353,9 @@ impl InFlightTracker {
             return Err(AdmissionError::Unmounted);
         }
         if state.residual > 0 {
-            return Err(AdmissionError::OverlappingResidual { residual: state.residual });
+            return Err(AdmissionError::OverlappingResidual {
+                residual: state.residual,
+            });
         }
         if state.active >= self.max_concurrent {
             return Err(AdmissionError::CapacityExceeded {
@@ -411,7 +413,10 @@ impl InFlightTracker {
     }
 
     pub fn residual_active(&self) -> usize {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).residual
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .residual
     }
 
     fn side_effects_snapshot(&self) -> Vec<String> {
@@ -1206,11 +1211,16 @@ impl CommandHookRunner {
         )
         .cwd(&ctx.workspace_root)
         .stdio(Stdio::piped(), Stdio::piped(), Stdio::piped())
-        .env_policy(crate::process_launch::EnvironmentPolicy::SanitizedWithCustomNoBaseline(
-            vec![("KROMA_HOOK_EVENT".to_string(), event.as_str().to_string())],
-        ))
+        .env_policy(
+            crate::process_launch::EnvironmentPolicy::SanitizedWithCustomNoBaseline(vec![(
+                "KROMA_HOOK_EVENT".to_string(),
+                event.as_str().to_string(),
+            )]),
+        )
         .spawn_std()
-        .map_err(|e| HookError::Failed(hook_name.clone(), format!("failed to spawn hook: {}", e)))?;
+        .map_err(|e| {
+            HookError::Failed(hook_name.clone(), format!("failed to spawn hook: {}", e))
+        })?;
 
         // Hard stop shared by every helper thread (the stdin writer and the stdout/stderr
         // readers). A hook may `setsid()`/double-fork a grandchild that escapes the process-group

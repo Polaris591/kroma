@@ -7,8 +7,8 @@
 //! it does" counted as a repair.
 
 use kroma_core::ahe::{
-    evaluate_repair, frozen_evaluator_identity, FileChange, Prediction,
-    RepairCandidate, RepairDecision,
+    evaluate_repair, frozen_evaluator_identity, FileChange, Prediction, RepairCandidate,
+    RepairDecision,
 };
 use kroma_core::bench::{BenchTask, VerifyCommandLimits};
 use kroma_core::self_repair_guard::{protected_artifacts, SelfRepairSurface, SelfRepairViolation};

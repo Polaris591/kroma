@@ -168,7 +168,11 @@ pub struct TestPostReserveGate {
 
 #[cfg(test)]
 impl TestPostReserveGate {
-    pub fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>, std::sync::mpsc::SyncSender<()>) {
+    pub fn new() -> (
+        Arc<Self>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
         let (enter_tx, enter_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let gate = Arc::new(Self {
@@ -277,7 +281,9 @@ pub struct OutboundReservation {
 impl Drop for OutboundReservation {
     fn drop(&mut self) {
         self.state.current_items.fetch_sub(1, Ordering::SeqCst);
-        self.state.current_bytes.fetch_sub(self.bytes, Ordering::SeqCst);
+        self.state
+            .current_bytes
+            .fetch_sub(self.bytes, Ordering::SeqCst);
     }
 }
 
@@ -556,18 +562,21 @@ pub async fn run_bounded_writer<W>(
 /// - If `params` is null or omitted, normalizes to an empty object `{}` and inserts `session_id`.
 /// - If `params` is an object, ensures `session_id` is present (or keeps explicit session_id/sessionId).
 /// - If `params` is an array or primitive scalar, rejects with `JSONRPC_INVALID_PARAMS`.
-pub fn normalize_request_params(
-    params: &mut Value,
-    target_sid: &str,
-) -> Result<(), JsonRpcError> {
+pub fn normalize_request_params(params: &mut Value, target_sid: &str) -> Result<(), JsonRpcError> {
     if params.is_null() {
         let mut map = serde_json::Map::new();
-        map.insert("session_id".to_string(), Value::String(target_sid.to_string()));
+        map.insert(
+            "session_id".to_string(),
+            Value::String(target_sid.to_string()),
+        );
         *params = Value::Object(map);
         Ok(())
     } else if let Value::Object(ref mut map) = params {
         if !map.contains_key("session_id") && !map.contains_key("sessionId") {
-            map.insert("session_id".to_string(), Value::String(target_sid.to_string()));
+            map.insert(
+                "session_id".to_string(),
+                Value::String(target_sid.to_string()),
+            );
         }
         Ok(())
     } else {
@@ -584,7 +593,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_outbound_queue_item_limit_overflow_fail_closes() {
-        let (sender, mut rx, state_rx, state) = bounded_outbound_channel(TransportConfig::default());
+        let (sender, mut rx, state_rx, state) =
+            bounded_outbound_channel(TransportConfig::default());
         assert!(!sender.is_fail_closed());
         assert_eq!(state.current_items(), 0);
 
@@ -602,11 +612,17 @@ mod tests {
         // 257th item must fail with ItemCapacityExceeded and trigger fail-closed
         let overflow_res = sender.try_send_sync("overflow".to_string());
         assert_eq!(overflow_res, Err(OutboundError::ItemCapacityExceeded));
-        assert!(sender.is_fail_closed(), "overflow must mark sender fail-closed");
+        assert!(
+            sender.is_fail_closed(),
+            "overflow must mark sender fail-closed"
+        );
         assert_eq!(*state_rx.borrow(), TransportState::Aborted);
 
         // Subsequent sends must return FailClosed
-        assert_eq!(sender.try_send_sync("subsequent".to_string()), Err(OutboundError::FailClosed));
+        assert_eq!(
+            sender.try_send_sync("subsequent".to_string()),
+            Err(OutboundError::FailClosed)
+        );
 
         // Draining/dropping messages releases capacity automatically via RAII
         let mut drained = 0;
@@ -615,8 +631,16 @@ mod tests {
             drained += 1;
         }
         assert_eq!(drained, MAX_OUTBOUND_ITEMS);
-        assert_eq!(state.current_items(), 0, "RAII reservations must release item count to 0");
-        assert_eq!(state.current_bytes(), 0, "RAII reservations must release byte count to 0");
+        assert_eq!(
+            state.current_items(),
+            0,
+            "RAII reservations must release item count to 0"
+        );
+        assert_eq!(
+            state.current_bytes(),
+            0,
+            "RAII reservations must release byte count to 0"
+        );
     }
 
     #[tokio::test]
@@ -626,7 +650,10 @@ mod tests {
 
         // Payload exceeding single frame bound
         let single_huge = "x".repeat(MAX_FRAME_BYTES + 10);
-        assert_eq!(sender.try_send_sync(single_huge), Err(OutboundError::FrameTooLarge));
+        assert_eq!(
+            sender.try_send_sync(single_huge),
+            Err(OutboundError::FrameTooLarge)
+        );
 
         // Total bytes exceeding 4 MiB across multiple frames (each < 2 MiB)
         let frame_size = 1024 * 1024; // 1 MiB
@@ -635,7 +662,10 @@ mod tests {
         }
         // 4th frame (another 1 MiB + 4 newline bytes total) pushes it over 4 MiB total capacity
         assert!(sender.try_send_sync("y".repeat(frame_size + 10)).is_err());
-        assert!(sender.is_fail_closed(), "byte overflow must mark sender fail-closed");
+        assert!(
+            sender.is_fail_closed(),
+            "byte overflow must mark sender fail-closed"
+        );
         assert_eq!(*state_rx.borrow(), TransportState::Aborted);
     }
 
@@ -657,20 +687,30 @@ mod tests {
         assert!(matches!(state.state(), TransportState::Closing { .. }));
 
         // Any new send must be rejected immediately
-        assert_eq!(sender.try_send_sync("rejected".to_string()), Err(OutboundError::FailClosed));
+        assert_eq!(
+            sender.try_send_sync("rejected".to_string()),
+            Err(OutboundError::FailClosed)
+        );
 
         let (client_r, server_w) = tokio::io::duplex(4096);
         let writer_task = tokio::spawn(run_bounded_writer(rx, server_w, state.clone(), state_rx));
 
         let mut lines = tokio::io::BufReader::new(client_r).lines();
         for i in 0..total_items {
-            let line = lines.next_line().await.unwrap().expect("must receive frame");
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("must receive frame");
             assert_eq!(line, format!("msg-{}", i));
         }
 
         // After all items are flushed, stream should close cleanly (EOF)
         let eof = lines.next_line().await.unwrap();
-        assert!(eof.is_none(), "stream must EOF cleanly after graceful flush");
+        assert!(
+            eof.is_none(),
+            "stream must EOF cleanly after graceful flush"
+        );
 
         writer_task.await.unwrap();
 
@@ -683,14 +723,19 @@ mod tests {
     async fn test_graceful_close_repeated_does_not_extend_deadline() {
         let (sender, _rx, _state_rx, state) = bounded_outbound_channel(TransportConfig::default());
 
-        let d1 = sender.initiate_graceful_close().expect("first call sets deadline");
+        let d1 = sender
+            .initiate_graceful_close()
+            .expect("first call sets deadline");
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let d2 = sender.initiate_graceful_close();
         assert!(d2.is_none(), "repeated close must not set a new deadline");
 
         if let TransportState::Closing { deadline } = state.state() {
-            assert_eq!(deadline, d1, "deadline must remain fixed at first initiation");
+            assert_eq!(
+                deadline, d1,
+                "deadline must remain fixed at first initiation"
+            );
         } else {
             panic!("state must be Closing");
         }
@@ -705,7 +750,11 @@ mod tests {
 
         let res = sender.initiate_graceful_close();
         assert!(res.is_none());
-        assert_eq!(state.state(), TransportState::Aborted, "abort must not be overwritten by close");
+        assert_eq!(
+            state.state(),
+            TransportState::Aborted,
+            "abort must not be overwritten by close"
+        );
     }
 
     #[tokio::test]
@@ -750,8 +799,16 @@ mod tests {
             .unwrap();
 
         // All reservations must be released to 0
-        assert_eq!(state.current_items(), 0, "all items must be dropped on fail_closed");
-        assert_eq!(state.current_bytes(), 0, "all bytes must be dropped on fail_closed");
+        assert_eq!(
+            state.current_items(),
+            0,
+            "all items must be dropped on fail_closed"
+        );
+        assert_eq!(
+            state.current_bytes(),
+            0,
+            "all bytes must be dropped on fail_closed"
+        );
     }
 
     #[tokio::test]
@@ -779,7 +836,10 @@ mod tests {
             .expect("writer must timeout within close deadline")
             .unwrap();
         let elapsed = start.elapsed();
-        assert!(elapsed < Duration::from_millis(250), "must not exceed close deadline window");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "must not exceed close deadline window"
+        );
 
         assert_eq!(state.state(), TransportState::Aborted);
         assert_eq!(state.current_items(), 0);
@@ -815,11 +875,21 @@ mod tests {
         release_tx.send(()).expect("must release gate");
 
         // 4. Sender thread must reject with FailClosed and decrement reservations to 0
-        let send_res = thread_handle.join().expect("sender thread should not panic");
+        let send_res = thread_handle
+            .join()
+            .expect("sender thread should not panic");
         assert_eq!(send_res, Err(OutboundError::FailClosed));
 
-        assert_eq!(state.current_items(), 0, "reservation must be released on post-reserve abort");
-        assert_eq!(state.current_bytes(), 0, "bytes must be released on post-reserve abort");
+        assert_eq!(
+            state.current_items(),
+            0,
+            "reservation must be released on post-reserve abort"
+        );
+        assert_eq!(
+            state.current_bytes(),
+            0,
+            "bytes must be released on post-reserve abort"
+        );
     }
 
     #[tokio::test]
@@ -830,22 +900,36 @@ mod tests {
         let mut buf_reader = tokio::io::BufReader::new(client_r);
 
         // Write first half without newline
-        server_w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1").await.unwrap();
+        server_w
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1")
+            .await
+            .unwrap();
         server_w.flush().await.unwrap();
 
         // Polling read_frame once yields pending (simulated with short timeout)
         let first_attempt = tokio::time::timeout(
             Duration::from_millis(20),
             reader.read_frame(&mut buf_reader),
-        ).await;
-        assert!(first_attempt.is_err(), "partial frame must yield pending without newline");
+        )
+        .await;
+        assert!(
+            first_attempt.is_err(),
+            "partial frame must yield pending without newline"
+        );
 
         // Write second half with newline
-        server_w.write_all(b",\"method\":\"ping\"}\n").await.unwrap();
+        server_w
+            .write_all(b",\"method\":\"ping\"}\n")
+            .await
+            .unwrap();
         server_w.flush().await.unwrap();
 
         // Resume read_frame: must return full concatenated frame
-        let frame = reader.read_frame(&mut buf_reader).await.unwrap().expect("must yield complete frame");
+        let frame = reader
+            .read_frame(&mut buf_reader)
+            .await
+            .unwrap()
+            .expect("must yield complete frame");
         assert_eq!(frame, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}");
     }
 
@@ -858,12 +942,22 @@ mod tests {
         let mut buf_reader = tokio::io::BufReader::new(client_r);
 
         // Write only the corrupted tail of a frame
-        server_w.write_all(b"status\",\"params\":{}}\n").await.unwrap();
+        server_w
+            .write_all(b"status\",\"params\":{}}\n")
+            .await
+            .unwrap();
         server_w.flush().await.unwrap();
 
-        let frame = reader.read_frame(&mut buf_reader).await.unwrap().expect("line returned");
+        let frame = reader
+            .read_frame(&mut buf_reader)
+            .await
+            .unwrap()
+            .expect("line returned");
         // Deserializing this raw tail fails immediately with JSON parse error
         let parse_res: Result<Value, _> = serde_json::from_str(&frame);
-        assert!(parse_res.is_err(), "corrupted tail must produce JSON parse error immediately");
+        assert!(
+            parse_res.is_err(),
+            "corrupted tail must produce JSON parse error immediately"
+        );
     }
 }

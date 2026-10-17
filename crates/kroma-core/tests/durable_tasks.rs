@@ -10,7 +10,9 @@
 use kroma_core::agent_loop::{
     build_runtime_with_registry, AgentRunConfig, AgentRunner, RunSummary,
 };
-use kroma_core::async_tasks::{AsyncTaskRegistry, NewTask, PendingMergeLink, TaskControlRequest, TaskState};
+use kroma_core::async_tasks::{
+    AsyncTaskRegistry, NewTask, PendingMergeLink, TaskControlRequest, TaskState,
+};
 use kroma_core::budget::BudgetConfig;
 use kroma_core::completion_gate::WorkspaceCompletionGate;
 use kroma_core::env::{
@@ -136,7 +138,7 @@ impl ModelProvider for ScriptProvider {
                     latency_ms: 1,
                     ttft_ms: Some(1),
                     attempts_used: 1,
-                reported_model: None,
+                    reported_model: None,
                 }),
                 Action::AwaitCancel => {
                     let _ = cancel_rx.changed().await;
@@ -150,7 +152,7 @@ impl ModelProvider for ScriptProvider {
                         latency_ms: 1,
                         ttft_ms: Some(1),
                         attempts_used: 1,
-                reported_model: None,
+                        reported_model: None,
                     })
                 }
             }
@@ -676,13 +678,20 @@ async fn legacy_suspended_record_without_a_recovery_marker_is_not_resumable() {
     });
     let dir = root.join("state/tasks");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("registry.json"), serde_json::to_string(&doc).unwrap()).unwrap();
+    std::fs::write(
+        dir.join("registry.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
 
     let registry = open_registry(&root);
     {
         let r = registry.lock().unwrap();
         let record = r.get("task-1").unwrap();
-        assert!(record.recovery.is_none(), "a legacy record deserializes to no marker");
+        assert!(
+            record.recovery.is_none(),
+            "a legacy record deserializes to no marker"
+        );
         assert!(
             !record.can_resume_safely(),
             "a legacy Suspended record is not provably never-started"
@@ -709,7 +718,11 @@ async fn legacy_suspended_record_without_a_recovery_marker_is_not_resumable() {
     let err = host
         .resume_task("task-1")
         .expect_err("a legacy record must not be re-run");
-    assert!(err.contains("reconciled"), "structured refusal, got: {}", err);
+    assert!(
+        err.contains("reconciled"),
+        "structured refusal, got: {}",
+        err
+    );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
@@ -782,7 +795,11 @@ async fn a_live_paused_started_task_refuses_a_second_run() {
     let err = host
         .resume_task("task-1")
         .expect_err("a live-paused started task must not spawn a second run");
-    assert!(err.contains("reconciled"), "structured refusal, got: {}", err);
+    assert!(
+        err.contains("reconciled"),
+        "structured refusal, got: {}",
+        err
+    );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
@@ -1227,11 +1244,8 @@ async fn resume_a_worker_that_writes_out_txt(
 /// bound to the merged revision, but execution completion is **not** acceptance.
 #[tokio::test]
 async fn completed_worker_resume_is_verified_but_not_accepted() {
-    let (registry, host) = resume_a_worker_that_writes_out_txt(
-        "accept-boundary",
-        Arc::new(ArmedApproveGate),
-    )
-    .await;
+    let (registry, host) =
+        resume_a_worker_that_writes_out_txt("accept-boundary", Arc::new(ArmedApproveGate)).await;
     assert_eq!(
         wait_terminal(&registry, "task-1").await,
         TaskState::Completed
@@ -1254,7 +1268,10 @@ async fn completed_worker_resume_is_verified_but_not_accepted() {
         .verification
         .as_ref()
         .expect("an armed gate that approved must record verification evidence");
-    assert!(verification.passed, "an approved armed gate must record passed=true");
+    assert!(
+        verification.passed,
+        "an approved armed gate must record passed=true"
+    );
     assert_eq!(
         verification.revision.as_deref(),
         Some(merged.as_str()),
@@ -1285,11 +1302,8 @@ async fn completed_worker_resume_is_verified_but_not_accepted() {
 /// fake `verified`, and the task is still not accepted.
 #[tokio::test]
 async fn a_disabled_gate_records_unknown_verification_not_verified() {
-    let (registry, _host) = resume_a_worker_that_writes_out_txt(
-        "accept-unknown",
-        Arc::new(AllowAllGate),
-    )
-    .await;
+    let (registry, _host) =
+        resume_a_worker_that_writes_out_txt("accept-unknown", Arc::new(AllowAllGate)).await;
     assert_eq!(
         wait_terminal(&registry, "task-1").await,
         TaskState::Completed
@@ -1822,7 +1836,11 @@ fn worker_spec(task: &str) -> SubagentSpec {
 }
 
 /// A worker whose scripted provider writes one file, then stops.
-fn worker_provider(calls: Arc<AtomicUsize>, path: &'static str, body: &'static str) -> Arc<dyn ModelProvider> {
+fn worker_provider(
+    calls: Arc<AtomicUsize>,
+    path: &'static str,
+    body: &'static str,
+) -> Arc<dyn ModelProvider> {
     Arc::new(ScriptProvider {
         script: Arc::new(move |_req: &ProviderRequest| {
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -1919,13 +1937,7 @@ async fn report_artifact_carries_durable_bytes_that_survive_a_restart() {
     let reopened = Arc::new(Mutex::new(
         AsyncTaskRegistry::open(root.join("state/tasks/registry.json")).unwrap(),
     ));
-    let (host2, _env2) = make_host(
-        &root,
-        &ws,
-        provider,
-        reopened,
-        Arc::new(AllowAllGate),
-    );
+    let (host2, _env2) = make_host(&root, &ws, provider, reopened, Arc::new(AllowAllGate));
     assert_eq!(
         host2.read_report(&task_id).unwrap(),
         expected,
@@ -2008,7 +2020,10 @@ async fn a_session_switch_does_not_redirect_an_admitted_tasks_wal() {
 
     // Resuming A links its merge into A's WAL, not the current session's.
     host.resume_task("task-A").unwrap();
-    assert_eq!(wait_terminal(&registry, "task-A").await, TaskState::Completed);
+    assert_eq!(
+        wait_terminal(&registry, "task-A").await,
+        TaskState::Completed
+    );
     let records_a = SessionJournal::open(&path_a).unwrap().revision_records();
     assert!(
         records_a
@@ -2024,10 +2039,7 @@ async fn a_session_switch_does_not_redirect_an_admitted_tasks_wal() {
     assert!(
         records_b.is_empty(),
         "the current session's WAL must not be touched by another session's task, got {:?}",
-        records_b
-            .iter()
-            .map(|r| &r.revision_id)
-            .collect::<Vec<_>>()
+        records_b.iter().map(|r| &r.revision_id).collect::<Vec<_>>()
     );
 }
 
@@ -2095,11 +2107,21 @@ async fn worker_resume_with_a_locked_session_wal_is_refused_before_merging() {
     // Releasing the WAL lets the resume proceed and link the merge.
     drop(held);
     host.resume_task("task-1").unwrap();
-    assert_eq!(wait_terminal(&registry, "task-1").await, TaskState::Completed);
-    assert_eq!(std::fs::read_to_string(ws.join("out.txt")).unwrap(), "must not land");
-    let records = SessionJournal::open(&session_path).unwrap().revision_records();
+    assert_eq!(
+        wait_terminal(&registry, "task-1").await,
+        TaskState::Completed
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap(),
+        "must not land"
+    );
+    let records = SessionJournal::open(&session_path)
+        .unwrap()
+        .revision_records();
     assert!(
-        records.iter().any(|r| r.changed_paths.iter().any(|p| p == "out.txt")),
+        records
+            .iter()
+            .any(|r| r.changed_paths.iter().any(|p| p == "out.txt")),
         "the successful resume must link its merge into the WAL"
     );
 }
@@ -2321,7 +2343,8 @@ impl CompletionGate for SabotageRegistryGate {
                 let backup = self.tasks_dir.with_extension("sabotaged");
                 let _ = std::fs::remove_dir_all(&backup);
                 std::fs::rename(&self.tasks_dir, &backup).expect("move the registry dir aside");
-                std::fs::write(&self.tasks_dir, b"not a directory").expect("block the registry dir");
+                std::fs::write(&self.tasks_dir, b"not a directory")
+                    .expect("block the registry dir");
             }
             Ok(GateOutcome::Approved)
         })
@@ -2427,7 +2450,10 @@ async fn capacity_pressure_keeps_a_pending_merge_record_and_still_admits() {
         "a capacity prune must never evict a record with a pending merge intent"
     );
     assert_eq!(r.pending_merges().len(), 1);
-    assert!(r.get("new-child").is_some(), "the new admission must be recorded");
+    assert!(
+        r.get("new-child").is_some(),
+        "the new admission must be recorded"
+    );
 }
 
 /// P1-b: an intent that carries no merged revision can never be replayed, so it must be reported and
@@ -2765,7 +2791,10 @@ async fn two_admissions_reusing_a_task_id_keep_report_bytes_and_spend_separate()
         let r = registry.lock().unwrap();
         let a = r.get("sub-0001").expect("the first record must survive");
         let b = r.get(&id_b).expect("the second record must be recorded");
-        assert_eq!(a.token_spent, 11, "the first record's spend must be unchanged");
+        assert_eq!(
+            a.token_spent, 11,
+            "the first record's spend must be unchanged"
+        );
         assert_eq!(b.token_spent, 22, "the second record's spend is its own");
         assert_eq!(a.artifacts.len(), 1);
         assert_eq!(b.artifacts.len(), 1);
@@ -3023,7 +3052,11 @@ async fn a_persist_uncertain_resume_transition_still_admits_the_run_exactly_once
         TaskState::Completed,
         "the admitted run must settle normally once the commit path is repaired"
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "still exactly one backend run");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "still exactly one backend run"
+    );
 }
 
 /// P2-3: an over-cap report must never block settlement. It is stored truncated and explicitly
@@ -3129,10 +3162,10 @@ async fn an_over_cap_report_is_truncated_and_marked_without_blocking_settlement(
     );
 
     // The bytes on disk are exactly the bytes the reference promises.
-    let on_disk =
-        std::fs::read(root.join("state/subagents/reports/sub-cap.report")).unwrap();
+    let on_disk = std::fs::read(root.join("state/subagents/reports/sub-cap.report")).unwrap();
     assert_eq!(
-        on_disk, stored.as_bytes(),
+        on_disk,
+        stored.as_bytes(),
         "the reference must match the bytes actually stored"
     );
 }
@@ -3231,7 +3264,9 @@ async fn resume_of_a_task_with_parent_policy_hooks_is_refused_without_side_effec
             "the refused resume must not materialize a worktree"
         );
         let r = registry.lock().unwrap();
-        let task = r.get("task-1").expect("the durable record must be preserved");
+        let task = r
+            .get("task-1")
+            .expect("the durable record must be preserved");
         assert!(
             task.notifications
                 .iter()

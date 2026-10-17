@@ -52,7 +52,9 @@ impl RunEconomy {
 
     /// Estimated cost, or `None` when the model identity or a rate is missing.
     fn cost(&self, table: Option<&PriceTable>) -> Option<u64> {
-        table?.estimate(self.reported_model.as_deref(), Some(self.usage())).estimated_nano_usd
+        table?
+            .estimate(self.reported_model.as_deref(), Some(self.usage()))
+            .estimated_nano_usd
     }
 }
 

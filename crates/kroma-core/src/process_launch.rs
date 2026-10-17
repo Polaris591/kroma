@@ -8,10 +8,10 @@
 //! module only sequences them and never re-implements containment, sanitization, or deadlines.
 
 use std::io;
-use std::path::PathBuf;
-use std::process::Stdio;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::Stdio;
 
 use crate::env::build_sanitized_env;
 use crate::process_group::{ChildProcessGroup, Containment};
@@ -254,7 +254,9 @@ impl ProcessLaunch {
         if let Some(ref cwd) = self.cwd {
             cmd.current_dir(cwd);
         }
-        cmd.stdin(self.stdin).stdout(self.stdout).stderr(self.stderr);
+        cmd.stdin(self.stdin)
+            .stdout(self.stdout)
+            .stderr(self.stderr);
         self.env_policy.apply(cmd);
         // A sanitized environment drops `PATH` when the host had none, which would stop a bare
         // program name from resolving. Mirror the one-shot supervisor's fallback so both launch
@@ -330,7 +332,10 @@ mod tests {
         assert_eq!(
             launched_path(
                 ProcessLaunch::new("/bin/true", Vec::<String>::new()).env_policy(
-                    EnvironmentPolicy::Explicit(vec![("PATH".to_string(), "/policy/bin".to_string())])
+                    EnvironmentPolicy::Explicit(vec![(
+                        "PATH".to_string(),
+                        "/policy/bin".to_string()
+                    )])
                 )
             )
             .as_deref(),
@@ -382,8 +387,11 @@ mod tests {
     fn only_policies_carrying_path_suppress_the_fallback() {
         assert!(!EnvironmentPolicy::SanitizedMinimal.sets_path());
         assert!(!EnvironmentPolicy::Explicit(Vec::new()).sets_path());
-        assert!(!EnvironmentPolicy::SanitizedWithCustom(vec![("CI".to_string(), "true".to_string())])
-            .sets_path());
+        assert!(!EnvironmentPolicy::SanitizedWithCustom(vec![(
+            "CI".to_string(),
+            "true".to_string()
+        )])
+        .sets_path());
         assert!(
             EnvironmentPolicy::Explicit(vec![("PATH".to_string(), "/x".to_string())]).sets_path()
         );

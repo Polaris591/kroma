@@ -724,7 +724,10 @@ fn mcp_server_inherits_sanitized_env_and_receives_explicit_env() {
         "env_check",
         ENV_CHECK_SERVER,
         std::time::Duration::from_secs(5),
-        vec![("AUTHORIZED_MCP_KEY".to_string(), "explicitly_granted".to_string())],
+        vec![(
+            "AUTHORIZED_MCP_KEY".to_string(),
+            "explicitly_granted".to_string(),
+        )],
     );
 
     let dispatch = registry.extension_dispatch("mcp__srv__check_env").unwrap();
@@ -736,10 +739,20 @@ fn mcp_server_inherits_sanitized_env_and_receives_explicit_env() {
         exec_context: None,
     };
     let out = dispatch.handler.execute("{}", &ctx);
-    assert!(out.outcome.is_success(), "env check must succeed: {:?}", out.outcome);
+    assert!(
+        out.outcome.is_success(),
+        "env check must succeed: {:?}",
+        out.outcome
+    );
 
-    let parsed: serde_json::Value = serde_json::from_str(out.content.trim()).expect("valid JSON response");
-    let keys: Vec<String> = parsed["keys"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let parsed: serde_json::Value =
+        serde_json::from_str(out.content.trim()).expect("valid JSON response");
+    let keys: Vec<String> = parsed["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
 
     assert!(
         !keys.iter().any(|k| k == "SENTINEL_API_KEY"),
@@ -879,13 +892,17 @@ fn mcp_tool_is_error_returns_tool_failure_and_preserves_content() {
         fail_out.content
     );
     assert!(
-        fail_out.content.contains("[structuredContent]\n{\"err_code\":404}"),
+        fail_out
+            .content
+            .contains("[structuredContent]\n{\"err_code\":404}"),
         "structuredContent must be appended with JSON tag on failure, got: {}",
         fail_out.content
     );
 
     // 2. success_tool with isError: false
-    let succ_dispatch = registry.extension_dispatch("mcp__srv__success_tool").unwrap();
+    let succ_dispatch = registry
+        .extension_dispatch("mcp__srv__success_tool")
+        .unwrap();
     let _guard2 = succ_dispatch.in_flight.begin();
     let ctx2 = CustomToolContext {
         workspace: &workspace,
@@ -901,7 +918,9 @@ fn mcp_tool_is_error_returns_tool_failure_and_preserves_content() {
     assert!(succ_out.content.contains("normal success"));
 
     // 3. default_tool with omitted isError
-    let def_dispatch = registry.extension_dispatch("mcp__srv__default_tool").unwrap();
+    let def_dispatch = registry
+        .extension_dispatch("mcp__srv__default_tool")
+        .unwrap();
     let _guard3 = def_dispatch.in_flight.begin();
     let ctx3 = CustomToolContext {
         workspace: &workspace,
@@ -933,7 +952,9 @@ fn mcp_tool_is_error_returns_tool_failure_and_preserves_content() {
         succ_struct_out.outcome
     );
     assert!(
-        succ_struct_out.content.contains("structured success details"),
+        succ_struct_out
+            .content
+            .contains("structured success details"),
         "success content must be preserved, got: {}",
         succ_struct_out.content
     );
@@ -1029,7 +1050,9 @@ fn mcp_tool_invalid_arguments_rejected_without_server_dispatch() {
         Vec::new(),
     );
     let workspace = WorkspaceCap::new(&ws).unwrap();
-    let dispatch = registry.extension_dispatch("mcp__srv__success_tool").unwrap();
+    let dispatch = registry
+        .extension_dispatch("mcp__srv__success_tool")
+        .unwrap();
 
     // 1. Malformed JSON
     let _guard1 = dispatch.in_flight.begin();
@@ -1073,4 +1096,3 @@ fn mcp_tool_invalid_arguments_rejected_without_server_dispatch() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
-
