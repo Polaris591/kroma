@@ -1,0 +1,47 @@
+[
+  {
+    "id": "heldout-off-by-one",
+    "prompt": "src/calc.py contains an off-by-one bug: total(n) must sum 1..=n so that total(3) == 6. Fix it. Do not change the module name or the function signature.",
+    "files": {
+      "src/calc.py": "def total(n):\n    return sum(range(n))\n"
+    },
+    "expect_contains": [],
+    "expect_absent": [],
+    "regression_guard": true,
+    "verify_command": [
+      "python3",
+      "-c",
+      "import sys; sys.path.insert(0, 'src'); from calc import total; assert total(0) == 0, total(0); assert total(1) == 1, total(1); assert total(3) == 6, total(3); assert total(10) == 55, total(10); print('ok')"
+    ]
+  },
+  {
+    "id": "heldout-guard-division",
+    "prompt": "Make src/guard.py raise ValueError for ratio(a, 0) instead of letting a ZeroDivisionError escape. The happy path (for example ratio(6, 2) == 3) must keep working.",
+    "files": {
+      "src/guard.py": "def ratio(a, b):\n    return a / b\n"
+    },
+    "expect_contains": [],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "python3",
+      "-c",
+      "import sys; sys.path.insert(0, 'src'); from guard import ratio; assert ratio(6, 2) == 3, ratio(6, 2); assert ratio(-4, 2) == -2, ratio(-4, 2)\ntry:\n    ratio(1, 0)\nexcept ValueError:\n    pass\nexcept ZeroDivisionError as exc:\n    raise SystemExit('ZeroDivisionError escaped instead of ValueError: %r' % (exc,))\nelse:\n    raise SystemExit('ratio(1, 0) did not raise')\nprint('ok')"
+    ]
+  },
+  {
+    "id": "heldout-normalize-whitespace",
+    "prompt": "src/text.py normalizes whitespace with split(' '), so repeated spaces survive. Make normalize(s) collapse every run of whitespace to a single space and strip the ends, without changing its signature.",
+    "files": {
+      "src/text.py": "def normalize(s):\n    return ' '.join(s.split(' '))\n"
+    },
+    "expect_contains": [],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "python3",
+      "-c",
+      "import sys; sys.path.insert(0, 'src'); from text import normalize; assert normalize('a  b') == 'a b', repr(normalize('a  b')); assert normalize('  a   b  ') == 'a b', repr(normalize('  a   b  ')); assert normalize('a') == 'a'; assert normalize('') == ''; assert normalize('a\\tb') == 'a b', repr(normalize('a\\tb')); print('ok')"
+    ]
+  }
+]

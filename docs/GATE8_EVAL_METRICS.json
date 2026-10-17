@@ -1,0 +1,30 @@
+{
+  "gate": "Gate 8 (v1.3.0)",
+  "kroma_version": "1.3.0",
+  "config_layers": {
+    "precedence": ["cli_flags", "kroma_env_vars", "workspace_.kroma.toml", "user_profile", "user_top_level_defaults"],
+    "workspace_allowed_keys": ["model", "protocol", "reasoning_effort", "max_subagents"],
+    "workspace_denied_keys": ["api_key", "base_url", "verify_command", "policy", "policy_hook", "observer_hook", "allow_write", "allow_shell", "profiles"],
+    "user_global_permissions_unix": "0600 (dir 0700)",
+    "api_key_redaction": "sk-***",
+    "tests": ["test_config_toml_precedence_untrusted_workspace_guard_and_redaction", "test_config_hot_swap_and_model_thinking_mixup_hints_over_repl"]
+  },
+  "tournament": {
+    "candidate_range": [2, 4],
+    "ranking_order": ["gate_passed", "predictive_warnings", "conflict_free_with_parent", "total_changed_lines", "files_modified", "turns_used", "candidate_index"],
+    "verification_scope": "inside the candidate isolated worktree, before touching the parent",
+    "merge_policy": "winner only; losers always cleaned up; zero merges when no candidate passes",
+    "undo": "single WorkspaceRevision, revertible in one --undo",
+    "tests": ["test_best_of_n_worktree_tournament_selects_passing_minimal_candidate_and_cleans_losers", "test_best_of_n_tournament_all_fail_preserves_parent_workspace", "test_tournament_rejects_invalid_candidate_count_and_scout_role", "test_spawn_subagent_tournament_arguments_parse"]
+  },
+  "workspace_tests": {
+    "total_passed": 173,
+    "total_failed": 0,
+    "compiler_warnings": 0,
+    "test_binaries": 19
+  },
+  "notes": [
+    "approximate_changed_lines = line-multiset difference (lines added + lines removed); deterministic and O(n)",
+    "a gate result of Skipped counts as passed, consistent with the kernel-wide CompletionGate contract"
+  ]
+}

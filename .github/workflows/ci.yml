@@ -1,0 +1,244 @@
+name: CI
+
+# Why this exists: the Windows release build was broken for three months without anyone noticing,
+# because verification used `cargo check` (which type-checks but never links) on all six targets.
+# A single `cargo build --release --target x86_64-pc-windows-gnu` catches that whole class, so the
+# per-push jobs below always *link* the artifacts users actually run.
+#
+# The Android and musl targets are built here too, not only on a release tag: both link a
+# hand-written TLS backend, and both have shipped a binary whose TLS could never work (a link-only
+# stub). Building them per push is what stops that from reaching a tag unnoticed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  OPENSSL_VERSION: '3.5.7'
+  ANDROID_NDK_VERSION: '26.3.11579264'
+
+jobs:
+  lint-and-test:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        # rust-toolchain.toml is the single source of truth: `cargo fmt --check` output is
+        # toolchain-specific, so the fmt gate must run the exact pinned formatter.
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: JavaScript upgrade-helper checks
+        run: node scripts/test-kroma-js-upgrade.js
+
+      - name: The two bin/kroma.js copies must stay identical
+        run: |
+          if ! diff -q bin/kroma.js npm/kroma-cli/bin/kroma.js; then
+            echo "::error::bin/kroma.js and npm/kroma-cli/bin/kroma.js have diverged; sync them"
+            exit 1
+          fi
+
+  build-linux:
+    name: release build (linux-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p kroma-cli
+      - run: ./target/release/kroma --version
+      # Real TLS, not `--version`: the artifact performs an HTTPS request and an untrusted
+      # certificate must be rejected.
+      - name: TLS smoke (real HTTPS + untrusted certificate rejected)
+        run: scripts/tls-smoke.sh target/release/kroma
+
+  build-windows:
+    name: release build (windows-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - run: rustup target add x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target x86_64-pc-windows-gnu -p kroma-cli
+      # A spurious OpenSSL dependency on this target is exactly the bug this job exists for:
+      # mingw-w64 has no libssl, and Windows uses schannel, so no libssl/libcrypto may appear.
+      - name: Windows binary must not depend on OpenSSL
+        run: |
+          if x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/kroma.exe \
+             | grep -iE 'DLL Name: .*(ssl|crypto)'; then
+            echo "::error::the Windows binary links an OpenSSL DLL; it should use schannel only"
+            exit 1
+          fi
+
+  build-macos:
+    name: release build (macOS, native)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      # Built on a real Mac on purpose: since the Gate-3 audit macOS uses native-tls, so the link
+      # needs Security.framework and CoreFoundation.framework and therefore a genuine SDK. Apple's
+      # .tbd stubs carry per-symbol availability data that a hand-made stub cannot reproduce.
+      - run: cargo build --release --target aarch64-apple-darwin -p kroma-cli
+      - run: cargo build --release --target x86_64-apple-darwin -p kroma-cli
+      - run: ./target/aarch64-apple-darwin/release/kroma --version
+      - run: ./target/x86_64-apple-darwin/release/kroma --version
+
+  # linux-arm64 and android-arm64 link a real static OpenSSL. Neither may fall back to a stub: the
+  # stub-linked musl binary shipped once and failed every HTTPS request at runtime.
+  build-musl:
+    name: release build (linux-arm64 musl)
+    runs-on: ubuntu-latest
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
+      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - run: rustup target add aarch64-unknown-linux-musl
+      - run: pip install --break-system-packages ziglang
+      - name: Locate the zig installation
+        run: |
+          ZIG="$(python3 -c 'import os, ziglang; print(os.path.join(os.path.dirname(ziglang.__file__), "zig"))')"
+          echo "ZIG=${ZIG}" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        id: openssl-cache
+        with:
+          path: openssl-musl
+          key: openssl-musl-${{ env.OPENSSL_VERSION }}
+      - name: Fetch OpenSSL sources
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 3 -o openssl.tar.gz \
+            "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
+            || curl -fsSL --retry 3 -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar -xzf openssl.tar.gz
+      - name: Build static OpenSSL for aarch64-musl
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: scripts/build-musl-openssl.sh "openssl-${OPENSSL_VERSION}" "$PWD/openssl-musl"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C link-self-contained=no
+        run: |
+          printf '#!/bin/sh\nexport ZIG_GLOBAL_CACHE_DIR="%s"\nexport ZIG_LOCAL_CACHE_DIR="%s"\nexec "%s" cc -target aarch64-linux-musl -L"%s/openssl-musl/lib" "$@"\n' \
+            "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR" "$ZIG" "$GITHUB_WORKSPACE" > musl-linker.sh
+          chmod +x musl-linker.sh
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$PWD/musl-linker.sh" \
+            cargo build --release --target aarch64-unknown-linux-musl -p kroma-cli
+      - name: The musl binary must actually contain OpenSSL
+        # `strings | grep -q` under `pipefail` reports 141 (SIGPIPE) on a good artifact; grep a file.
+        run: |
+          strings -a target/aarch64-unknown-linux-musl/release/kroma > "$RUNNER_TEMP/musl.strings"
+          grep -q 'OpenSSL 3' "$RUNNER_TEMP/musl.strings" || {
+            echo "::error::the musl binary has no OpenSSL in it; TLS would fail at runtime"
+            exit 1
+          }
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - name: TLS smoke under qemu (real HTTPS + untrusted certificate rejected)
+        run: scripts/tls-smoke.sh target/aarch64-unknown-linux-musl/release/kroma qemu-aarch64-static
+
+  build-android:
+    name: release build (android-arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - run: rustup target add aarch64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install the NDK
+        run: sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+      - uses: actions/cache@v4
+        id: openssl-cache
+        with:
+          path: openssl-android
+          key: openssl-android-${{ env.OPENSSL_VERSION }}-${{ env.ANDROID_NDK_VERSION }}
+      - name: Fetch OpenSSL sources
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 3 -o openssl.tar.gz \
+            "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
+            || curl -fsSL --retry 3 -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar -xzf openssl.tar.gz
+      - name: Build static OpenSSL for aarch64-linux-android
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          scripts/build-android-openssl.sh "openssl-${OPENSSL_VERSION}" "$PWD/openssl-android" 24
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ github.workspace }}/android-linker.sh
+        run: |
+          NDK="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64"
+          printf '#!/bin/sh\nexec "%s/bin/aarch64-linux-android24-clang" -L"%s/openssl-android/lib" "$@"\n' \
+            "$NDK" "$GITHUB_WORKSPACE" > android-linker.sh
+          chmod +x android-linker.sh
+          cargo build --release --target aarch64-linux-android -p kroma-cli
+      - name: The Android binary must carry real OpenSSL, not link-only stubs
+        run: |
+          NDK_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          BIN=target/aarch64-linux-android/release/kroma
+          "${NDK_BIN}/llvm-readelf" -d "$BIN" > "$RUNNER_TEMP/android.dynamic"
+          if grep -E 'NEEDED.*(libssl|libcrypto)' "$RUNNER_TEMP/android.dynamic"; then
+            echo "::error::the Android binary dynamically requires libssl/libcrypto (BoringSSL is not OpenSSL ABI)"
+            exit 1
+          fi
+          "${NDK_BIN}/llvm-nm" "$BIN" > "$RUNNER_TEMP/android.nm"
+          for sym in TLS_client_method SSL_CTX_new SSL_ctrl SSL_set1_host SSL_connect; do
+            grep -qE " [Tt] ${sym}$" "$RUNNER_TEMP/android.nm" || {
+              echo "::error::${sym} is not linked into the Android binary; its TLS backend is incomplete"
+              exit 1
+            }
+          done
+      # No runtime smoke here: executing an Android binary needs a device or emulator, and this job
+      # does not fake that. The TLS runtime gate for Android is a manual release step.

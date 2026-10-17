@@ -1,0 +1,120 @@
+{
+  "gate": "Gate 6 — Multi-Surface Runtime (v1.0.0)",
+  "kroma_version": "1.0.0",
+  "event_schema_version": "1.0.0",
+  "acp_protocol_version": "1.0",
+  "jsonrpc_version": "2.0",
+  "environment_freeze": {
+    "rustc_version": "1.85.1",
+    "os": "Linux x86_64",
+    "projection_profile": "P3",
+    "budget_config": "default",
+    "tool_schema_version": "1.0.0"
+  },
+  "surfaces_verified": [
+    {
+      "surface": "headless",
+      "transports": ["text", "jsonl"],
+      "private_session_state": false,
+      "cross_surface_wal_parity": 1.0,
+      "cross_surface_revision_parity": 1.0,
+      "tty_approval_events_recorded": true
+    },
+    {
+      "surface": "repl",
+      "transports": ["tty", "stdio"],
+      "private_session_state": false,
+      "initial_prompt_turn_supported": true,
+      "slash_commands_verified": [
+        "/help",
+        "/status",
+        "/revisions",
+        "/diff",
+        "/undo",
+        "/restore",
+        "/skills",
+        "/fork",
+        "/inspect",
+        "/clear",
+        "/quit"
+      ]
+    },
+    {
+      "surface": "acp",
+      "transports": ["stdio"],
+      "stdout_frame_purity": 1.0,
+      "methods_verified": [
+        "initialize",
+        "acp.initialize",
+        "session.new",
+        "session.start",
+        "session.prompt",
+        "acp.prompt",
+        "session.cancel",
+        "session.status",
+        "session.fork",
+        "approval.pending",
+        "approval.respond",
+        "revision.list",
+        "revision.undo",
+        "revision.restore",
+        "evidence.recall",
+        "skills.list",
+        "skills.activate",
+        "shutdown"
+      ]
+    },
+    {
+      "surface": "serve",
+      "transports": ["tcp", "unix"],
+      "unix_socket_mode_octal": "0600",
+      "non_loopback_without_token_rejected": true,
+      "token_auth_sha256_constant_time_verified": true,
+      "unauthenticated_stream_isolated_from_events_and_broker": true,
+      "authenticated_disconnect_cancels_in_flight_run": true,
+      "http_csrf_request_rejected": true,
+      "max_frame_bytes": 4194304,
+      "max_concurrent_connections": 16
+    }
+  ],
+  "approval_broker_contract": {
+    "approve_once_resumes_and_commits": true,
+    "approve_session_caches_category": true,
+    "deny_blocks_execution": true,
+    "client_disconnect_fails_closed": true,
+    "timeout_fails_closed": true,
+    "worker_subagent_rpc_approval_causal_order_verified": true
+  },
+  "five_group_benchmark_summary": {
+    "quality": {
+      "resolved_rate": 1.0,
+      "cross_surface_wal_and_revision_parity": 1.0,
+      "verification_pass_rate": 1.0
+    },
+    "efficiency": {
+      "rpc_roundtrip_median_ms": 2,
+      "cancel_latency_ms": 60
+    },
+    "cache_context": {
+      "prefix_rebuild_count": 0,
+      "stdout_jsonrpc_frame_purity": 1.0
+    },
+    "reversibility_recovery": {
+      "undo_success_rate": 1.0,
+      "restore_conflict_detection_precision": 1.0,
+      "evidence_recall_hit_rate": 1.0
+    },
+    "security_resource": {
+      "policy_bypass_count": 0,
+      "sandbox_escape_count": 0,
+      "unauthenticated_notification_leak_count": 0,
+      "max_frame_bytes": 4194304,
+      "max_daemon_connections": 16
+    }
+  },
+  "workspace_test_totals": {
+    "total_passed": 152,
+    "total_failed": 0,
+    "compiler_warnings": 0
+  }
+}
