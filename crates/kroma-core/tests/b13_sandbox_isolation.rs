@@ -658,3 +658,91 @@ fn backend_choice_is_explicit_and_never_falls_back() {
     );
     assert!(!container.network_allowed());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Container backend: a real run
+// ---------------------------------------------------------------------------------------------
+
+/// The image used by the real container run. ~8 MiB, pulled explicitly; production pins by digest.
+const CONTAINER_TEST_IMAGE: &str = "alpine:3.20";
+
+fn container_test_image() -> String {
+    std::env::var("KROMA_B13_CONTAINER_IMAGE").unwrap_or_else(|_| CONTAINER_TEST_IMAGE.to_string())
+}
+
+/// `true` when a container runtime is present *and* the image is already local. The run below is
+/// skipped otherwise, so a host without a container runtime still passes the suite.
+fn container_ready() -> bool {
+    std::process::Command::new("docker")
+        .args(["image", "inspect", &container_test_image()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// A real container run: the pinned image executes the command, the runtime's caps land in the
+/// container's own cgroup, the network is unshared, the root filesystem is read-only, and the
+/// workspace bind mount is the only writable path — visible from the host afterwards.
+#[tokio::test]
+async fn container_backend_really_isolates_and_carries_the_caps() {
+    if !container_ready() {
+        eprintln!("skipping: no container runtime / test image on this host");
+        return;
+    }
+    const MEMORY: u64 = 64 * 1024 * 1024;
+    const PIDS: u64 = 32;
+    let root = unique_root("container-real");
+    let ws = workspace_of(&root);
+    let spec = SandboxSpec::container("docker", container_test_image(), &ws).with_container_limits(
+        Some(MEMORY),
+        Some(PIDS),
+        Some(1.0),
+    );
+    let script = concat!(
+        "echo marker=$(cat /etc/alpine-release 2>/dev/null || echo none)\n",
+        "echo mem=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo none)\n",
+        "echo pids=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo none)\n",
+        "echo cpus=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo none)\n",
+        "echo net=$(ls /sys/class/net 2>/dev/null | tr '\\n' ',')\n",
+        "touch /definitely-not-writable 2>/dev/null; echo ro-exit=$?\n",
+        "echo workspace-proof > /workspace/container-proof.txt\n",
+    );
+    let out = execute_sandboxed(&spec, "sh", &args(&["-c", script]), Duration::from_secs(180))
+        .await
+        .expect("a real container run");
+    let text = out.combined_output();
+    assert!(
+        text.contains("marker=3.20"),
+        "the pinned image must be what actually ran: {text}"
+    );
+    assert!(
+        text.contains(&format!("mem={MEMORY}")),
+        "the memory cap must be installed in the container's cgroup: {text}"
+    );
+    assert!(
+        text.contains(&format!("pids={PIDS}")),
+        "the pid cap must be installed in the container's cgroup: {text}"
+    );
+    assert!(
+        text.contains("cpus=100000 100000"),
+        "the cpu cap must be installed in the container's cgroup: {text}"
+    );
+    assert!(
+        text.contains("net=lo,"),
+        "the network must be unshared inside the container: {text}"
+    );
+    assert!(
+        !text.contains("ro-exit=0"),
+        "the container root filesystem must be read-only: {text}"
+    );
+    let proof = ws.join("container-proof.txt");
+    assert_eq!(
+        std::fs::read_to_string(&proof).expect("the bind mount must be visible on the host").trim(),
+        "workspace-proof",
+        "the workspace bind mount must be the only writable path"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
