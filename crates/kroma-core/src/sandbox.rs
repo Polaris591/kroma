@@ -25,6 +25,7 @@
 //! backend passes its caps to the runtime directly.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::process_launch::ResourceLimits;
 use crate::process_supervisor::{OneShotCommandSpec, OneShotExecutionResult, ProcessSupervisor};
@@ -79,6 +80,10 @@ pub enum SandboxError {
     ContainerUnavailable(String),
     /// The spec itself is invalid (empty runtime/image, missing workspace, ...).
     InvalidSpec(String),
+    /// T10 (KR-16): the backend answered `--version` but could not actually isolate (namespaces,
+    /// cgroups or the image's own runtime are unusable). Reported separately from "missing" because
+    /// the operator action is different, and both are fail-closed.
+    NamespaceUnavailable(String),
 }
 
 impl std::fmt::Display for SandboxError {
@@ -94,11 +99,432 @@ impl std::fmt::Display for SandboxError {
                 msg
             ),
             SandboxError::InvalidSpec(msg) => write!(f, "invalid sandbox spec: {}", msg),
+            SandboxError::NamespaceUnavailable(msg) => write!(
+                f,
+                "sandbox backend is installed but cannot isolate ({}); refusing to run unsandboxed",
+                msg
+            ),
         }
     }
 }
 
 impl std::error::Error for SandboxError {}
+
+/// Successful probes, keyed by backend + image. Failures are never cached: a transient daemon
+/// problem must not permanently disable the run.
+fn probe_success_cache() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+}
+
+/// T10 (KR-16): outcome of one bounded CLI invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliOutcome {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// T10: the wall-clock budget for a probe or a container control command.
+///
+/// A probe that cannot answer within this budget is treated as *unavailable*, never as success: a
+/// hung `docker image inspect` must not turn into a run that waits forever, and it must not turn
+/// into "assume it works, run on the host".
+pub const DEFAULT_CONTROL_BUDGET: Duration = Duration::from_secs(15);
+
+/// Run one control command with a hard wall-clock budget.
+///
+/// This is deliberately not `Command::status()`: that blocks forever when the runtime's daemon
+/// hangs. The child is spawned, polled, and killed once the budget is spent, so the caller always
+/// gets an answer.
+pub fn run_bounded(program: &str, args: &[String], budget: Duration) -> Result<CliOutcome, String> {
+    use std::io::Read as _;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot spawn {}: {}", program, e))?;
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                return Ok(CliOutcome {
+                    success: status.success(),
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => return Err(format!("cannot poll {}: {}", program, e)),
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{} did not finish within {}ms and was killed",
+                program,
+                budget.as_millis()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// T10 (KR-16): the transport a probe uses. Injectable so a hanging runtime can be tested without
+/// installing one — the failure mode is "the daemon does not answer", not "the binary is missing".
+pub trait ProbeTransport: Send + Sync {
+    fn run(&self, program: &str, args: &[String], budget: Duration) -> Result<CliOutcome, String>;
+}
+
+/// The real transport: a bounded child process.
+pub struct ProcessProbeTransport;
+
+impl ProbeTransport for ProcessProbeTransport {
+    fn run(&self, program: &str, args: &[String], budget: Duration) -> Result<CliOutcome, String> {
+        run_bounded(program, args, budget)
+    }
+}
+
+/// T10 (KR-17): the observable states of one container workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkloadState {
+    Created,
+    Started,
+    Stopped,
+    Removed,
+}
+
+impl WorkloadState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkloadState::Created => "created",
+            WorkloadState::Started => "started",
+            WorkloadState::Stopped => "stopped",
+            WorkloadState::Removed => "removed",
+        }
+    }
+}
+
+/// T10 (KR-17): what cleanup actually achieved.
+///
+/// There is no `cleaned: bool` that can be set optimistically: a cleanup that could not confirm the
+/// container is gone says so, keeps the id, and tells the operator how to retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupOutcome {
+    /// The workload never created a container, so there is nothing to clean.
+    NothingToClean,
+    /// `inspect` no longer finds the container.
+    Cleaned { container_id: Option<String> },
+    /// Cleanup did not complete. The container id is retained so a retry is possible, and
+    /// `retry_command` is the exact command an operator can run.
+    RecoveryRequired {
+        container_id: Option<String>,
+        reason: String,
+        retry_command: String,
+    },
+}
+
+impl CleanupOutcome {
+    pub fn is_cleaned(&self) -> bool {
+        matches!(
+            self,
+            CleanupOutcome::Cleaned { .. } | CleanupOutcome::NothingToClean
+        )
+    }
+}
+
+/// T10 (KR-16/17): one container workload, addressed by a unique name and tracked by a cidfile in
+/// the trusted state area.
+///
+/// The lifecycle is explicit — `create` → `start` → `cancel` (stop, remove, verify) — instead of a
+/// foreground `run --rm`, because a foreground client is not the workload: killing it (or the
+/// process that spawned it) leaves the container running in the daemon with no record of its id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerWorkload {
+    runtime: String,
+    image: String,
+    name: String,
+    cidfile: PathBuf,
+}
+
+impl ContainerWorkload {
+    /// Build a workload with a unique name and a cidfile inside `state_dir` (the trusted run state
+    /// area, never the workspace the model can write).
+    pub fn new(
+        runtime: impl Into<String>,
+        image: impl Into<String>,
+        name_prefix: &str,
+        state_dir: &Path,
+    ) -> Result<Self, SandboxError> {
+        let runtime = runtime.into();
+        let image = image.into();
+        if runtime.trim().is_empty() || image.trim().is_empty() {
+            return Err(SandboxError::InvalidSpec(
+                "container runtime and image must be non-empty".to_string(),
+            ));
+        }
+        std::fs::create_dir_all(state_dir).map_err(|e| {
+            SandboxError::InvalidSpec(format!(
+                "cannot create the container state directory {}: {}",
+                state_dir.display(),
+                e
+            ))
+        })?;
+        let unique = format!(
+            "{}-{}-{}",
+            name_prefix,
+            std::process::id(),
+            &crate::prompt::sha256_hex64(uuid::Uuid::new_v4().as_bytes())[..12]
+        );
+        let name = unique.replace(
+            |c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "-",
+        );
+        let cidfile = state_dir.join(format!("{}.cid", name));
+        Ok(Self {
+            runtime,
+            image,
+            name,
+            cidfile,
+        })
+    }
+
+    /// Adopt a workload that a previous process recorded (crash recovery). The name must come from
+    /// the trusted state area, never from model output.
+    pub fn adopt(
+        runtime: impl Into<String>,
+        image: impl Into<String>,
+        name: impl Into<String>,
+        state_dir: &Path,
+    ) -> Result<Self, SandboxError> {
+        let runtime = runtime.into();
+        let image = image.into();
+        let name = name.into();
+        if runtime.trim().is_empty() || name.trim().is_empty() {
+            return Err(SandboxError::InvalidSpec(
+                "runtime and container name must be non-empty".to_string(),
+            ));
+        }
+        std::fs::create_dir_all(state_dir).map_err(|e| {
+            SandboxError::InvalidSpec(format!(
+                "cannot create the container state directory {}: {}",
+                state_dir.display(),
+                e
+            ))
+        })?;
+        let cidfile = state_dir.join(format!("{}.cid", name));
+        Ok(Self {
+            runtime,
+            image,
+            name,
+            cidfile,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn cidfile(&self) -> &Path {
+        &self.cidfile
+    }
+
+    /// The container id the runtime recorded, if it recorded one.
+    pub fn container_id(&self) -> Option<String> {
+        std::fs::read_to_string(&self.cidfile)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// `create` argv for this workload: the same isolation flags as [`SandboxSpec::wrap_argv`], but
+    /// detached from any client, named, and with the id recorded.
+    pub fn create_argv(&self, spec: &SandboxSpec, program: &str, args: &[String]) -> Vec<String> {
+        spec.container_create_argv(
+            &self.runtime,
+            &self.image,
+            &self.name,
+            &self.cidfile,
+            program,
+            args,
+        )
+    }
+
+    /// Create the container (no process starts yet).
+    pub fn create(
+        &self,
+        spec: &SandboxSpec,
+        program: &str,
+        args: &[String],
+        transport: &dyn ProbeTransport,
+        budget: Duration,
+    ) -> Result<Option<String>, SandboxError> {
+        let argv = self.create_argv(spec, program, args);
+        let (program, rest) = argv
+            .split_first()
+            .ok_or_else(|| SandboxError::InvalidSpec("empty container argv".to_string()))?;
+        let out = transport
+            .run(program, rest, budget)
+            .map_err(SandboxError::ContainerUnavailable)?;
+        if !out.success {
+            return Err(SandboxError::ContainerUnavailable(format!(
+                "container create failed: {}",
+                out.stderr.trim()
+            )));
+        }
+        let id = out.stdout.trim().to_string();
+        let id = if id.is_empty() {
+            self.container_id()
+        } else {
+            Some(id)
+        };
+        Ok(id)
+    }
+
+    /// Start the created container.
+    pub fn start(
+        &self,
+        transport: &dyn ProbeTransport,
+        budget: Duration,
+    ) -> Result<(), SandboxError> {
+        let out = transport
+            .run(
+                &self.runtime,
+                &["start".to_string(), self.name.clone()],
+                budget,
+            )
+            .map_err(SandboxError::ContainerUnavailable)?;
+        if out.success {
+            Ok(())
+        } else {
+            Err(SandboxError::ContainerUnavailable(format!(
+                "container start failed: {}",
+                out.stderr.trim()
+            )))
+        }
+    }
+
+    /// Is the container still known to the runtime?
+    pub fn exists(
+        &self,
+        transport: &dyn ProbeTransport,
+        budget: Duration,
+    ) -> Result<bool, SandboxError> {
+        let out = transport
+            .run(
+                &self.runtime,
+                &[
+                    "inspect".to_string(),
+                    "--format".to_string(),
+                    "{{.Id}}".to_string(),
+                    self.name.clone(),
+                ],
+                budget,
+            )
+            .map_err(SandboxError::ContainerUnavailable)?;
+        Ok(out.success)
+    }
+
+    /// Stop (if running), remove, and **verify** the container is gone.
+    ///
+    /// Every step is observable and every failure keeps the id: this returns
+    /// [`CleanupOutcome::RecoveryRequired`] rather than pretending the workload is gone.
+    pub fn cancel(&self, transport: &dyn ProbeTransport, budget: Duration) -> CleanupOutcome {
+        let container_id = self.container_id();
+        // Nothing was ever created: nothing to clean.
+        if container_id.is_none() && !self.cidfile.exists() {
+            match self.exists(transport, budget) {
+                Ok(false) => return CleanupOutcome::NothingToClean,
+                Ok(true) => {}
+                Err(reason) => {
+                    return CleanupOutcome::RecoveryRequired {
+                        container_id,
+                        reason: format!("cannot determine whether the workload exists: {reason}"),
+                        retry_command: self.retry_command(),
+                    }
+                }
+            }
+        }
+        let stop = transport.run(
+            &self.runtime,
+            &[
+                "stop".to_string(),
+                "--time".to_string(),
+                "1".to_string(),
+                self.name.clone(),
+            ],
+            budget,
+        );
+        if let Err(reason) = &stop {
+            return CleanupOutcome::RecoveryRequired {
+                container_id,
+                reason: format!("container stop did not complete: {reason}"),
+                retry_command: self.retry_command(),
+            };
+        }
+        let remove = transport.run(
+            &self.runtime,
+            &["rm".to_string(), "-f".to_string(), self.name.clone()],
+            budget,
+        );
+        match remove {
+            Ok(out) if out.success => {}
+            Ok(out) => {
+                return CleanupOutcome::RecoveryRequired {
+                    container_id,
+                    reason: format!("container remove failed: {}", out.stderr.trim()),
+                    retry_command: self.retry_command(),
+                }
+            }
+            Err(reason) => {
+                return CleanupOutcome::RecoveryRequired {
+                    container_id,
+                    reason: format!("container remove did not complete: {reason}"),
+                    retry_command: self.retry_command(),
+                }
+            }
+        }
+        // Confirm, rather than assume: `rm` returning success is not the same as the daemon having
+        // no record of the workload.
+        match self.exists(transport, budget) {
+            Ok(false) => {
+                let _ = std::fs::remove_file(&self.cidfile);
+                CleanupOutcome::Cleaned { container_id }
+            }
+            Ok(true) => CleanupOutcome::RecoveryRequired {
+                container_id,
+                reason: "the runtime still reports the container after remove".to_string(),
+                retry_command: self.retry_command(),
+            },
+            Err(reason) => CleanupOutcome::RecoveryRequired {
+                container_id,
+                reason: format!("cannot confirm removal: {reason}"),
+                retry_command: self.retry_command(),
+            },
+        }
+    }
+
+    /// The exact command an operator can run to finish a failed cleanup.
+    pub fn retry_command(&self) -> String {
+        format!(
+            "{} stop --time 1 {n} && {} rm -f {n}",
+            self.runtime,
+            self.runtime,
+            n = self.name
+        )
+    }
+}
 
 /// T09 (KR-18): the trust class of a spawn. Each class has its own network and sandbox rule; the
 /// run's policy answers for all of them, so "the sandbox is on" cannot mean "on for the scorer only".
@@ -169,6 +595,9 @@ pub struct PreparedLaunch {
     /// `host`, `bwrap`, or `container:<runtime>`. This is what is *actually* used, so it can be
     /// reported and asserted instead of repeating what the configuration asked for.
     pub backend: String,
+    /// T10 (KR-17): present when the backend is a container, so the caller can stop and remove the
+    /// workload by name when the run is cancelled. Killing the client alone would leave it running.
+    pub container: Option<ContainerWorkload>,
 }
 
 /// The resolved execution policy of one run (T09, KR-18).
@@ -300,6 +729,7 @@ impl ExecutionPolicy {
         &self,
         class: ExecutionClass,
         workspace: &std::path::Path,
+        state_dir: &std::path::Path,
         program: &str,
         args: &[String],
     ) -> Result<PreparedLaunch, SandboxError> {
@@ -309,6 +739,7 @@ impl ExecutionPolicy {
                 args: args.to_vec(),
                 cwd: None,
                 backend: "host".to_string(),
+                container: None,
             });
         }
         let ExecutionMode::Isolated(template) = &self.mode else {
@@ -323,10 +754,23 @@ impl ExecutionPolicy {
         // Probe first: `wrap_argv` is pure and would happily emit a bwrap argv even when bwrap is
         // not installed, which is exactly the silent-degradation path this policy must not have.
         spec.probe()?;
-        let argv = spec.wrap_argv(program, args)?;
-        let backend = match &spec.backend {
-            SandboxBackend::Bwrap => "bwrap".to_string(),
-            SandboxBackend::Container { runtime, .. } => format!("container:{}", runtime),
+        let (argv, backend, container) = match &spec.backend {
+            SandboxBackend::Bwrap => (spec.wrap_argv(program, args)?, "bwrap".to_string(), None),
+            SandboxBackend::Container { runtime, image } => {
+                // T10 (KR-17): a container the run cannot address by name is a workload it cannot
+                // cancel. The name and cidfile live in the trusted state area, never the workspace.
+                let workload =
+                    ContainerWorkload::new(runtime.clone(), image.clone(), "kroma", state_dir)?;
+                let argv = spec.wrap_container_named(
+                    runtime,
+                    image,
+                    workload.name(),
+                    workload.cidfile(),
+                    program,
+                    args,
+                );
+                (argv, format!("container:{}", runtime), Some(workload))
+            }
         };
         let mut argv = argv.into_iter();
         let program = argv.next().ok_or_else(|| {
@@ -337,6 +781,7 @@ impl ExecutionPolicy {
             args: argv.collect(),
             cwd: Some(spec.workspace_guest.clone()),
             backend,
+            container,
         })
     }
 }
@@ -528,6 +973,96 @@ impl SandboxSpec {
         argv
     }
 
+    /// T10 (KR-17): `run` form that is *trackable*: same isolation flags, plus a unique `--name` and
+    /// a `--cidfile` in the trusted state area, so cancelling can stop and remove the workload even
+    /// if the client process is killed.
+    pub fn wrap_container_named(
+        &self,
+        runtime: &str,
+        image: &str,
+        name: &str,
+        cidfile: &Path,
+        program: &str,
+        args: &[String],
+    ) -> Vec<String> {
+        let mut argv = self.container_create_argv(runtime, image, name, cidfile, program, args);
+        // `create` -> `run`: the rest of the argv is identical, which is the point — a container the
+        // run can track is configured exactly like one it cannot.
+        if argv.len() > 1 {
+            argv[1] = "run".to_string();
+        }
+        argv
+    }
+
+    /// T10 (KR-17): `create` form of [`Self::wrap_container`].
+    ///
+    /// Same isolation flags, but the container is *named*, its id is written to a cidfile, and it is
+    /// not tied to a foreground client. `--rm` is deliberately absent: removal is an explicit,
+    /// observable step ([`ContainerWorkload::cancel`]) so a failed cleanup can be reported instead of
+    /// vanishing with the client.
+    pub fn container_create_argv(
+        &self,
+        runtime: &str,
+        image: &str,
+        name: &str,
+        cidfile: &Path,
+        program: &str,
+        args: &[String],
+    ) -> Vec<String> {
+        let mut argv: Vec<String> = vec![
+            runtime.to_string(),
+            "create".to_string(),
+            "--name".to_string(),
+            name.to_string(),
+            "--cidfile".to_string(),
+            cidfile.display().to_string(),
+            "--init".to_string(),
+        ];
+        argv.push("--network".to_string());
+        argv.push(if self.network { "bridge" } else { "none" }.to_string());
+        argv.push("--read-only".to_string());
+        argv.push("--tmpfs".to_string());
+        argv.push(format!("/tmp:rw,size={},mode=1777", self.tmpfs_bytes));
+        if let Some(memory) = self.memory_bytes {
+            argv.push("--memory".to_string());
+            argv.push(memory.to_string());
+        }
+        if let Some(pids) = self.pids_max {
+            argv.push("--pids-limit".to_string());
+            argv.push(pids.to_string());
+        }
+        if let Some(cores) = self.cpu_cores {
+            argv.push("--cpus".to_string());
+            argv.push(cores.to_string());
+        }
+        argv.push("-v".to_string());
+        argv.push(format!(
+            "{}:{}:rw",
+            self.workspace_host.display(),
+            self.workspace_guest
+        ));
+        // Extra paths (a toolchain, an oracle fixture) are mounted read-only: a container must not be
+        // able to rewrite the thing it is being graded against.
+        for extra in &self.ro_extra {
+            argv.push("--mount".to_string());
+            argv.push(format!(
+                "type=bind,source={},target={},readonly",
+                extra.display(),
+                extra.display()
+            ));
+        }
+        argv.push("-w".to_string());
+        argv.push(self.workspace_guest.clone());
+        argv.push("--env".to_string());
+        argv.push("HOME=/tmp".to_string());
+        argv.push("--env".to_string());
+        argv.push("TMPDIR=/tmp".to_string());
+        argv.push(image.to_string());
+        argv.push(program.to_string());
+        argv.extend(args.iter().cloned());
+        argv
+    }
+
     fn wrap_container(
         &self,
         runtime: &str,
@@ -579,21 +1114,86 @@ impl SandboxSpec {
     /// Fail-closed: an unusable backend is an error the caller must surface — never a reason to run
     /// the command on the bare host. For containers this also checks that the image exists locally,
     /// so a missing image cannot silently degrade into "runs anyway".
+    /// Probe the backend, cached: a successful probe is remembered for the life of the process, so a
+    /// per-spawn check stays cheap while a failure is always re-tested (a transient daemon hiccup
+    /// must not permanently disable a run).
     pub fn probe(&self) -> Result<(), SandboxError> {
+        self.probe_within(&ProcessProbeTransport, DEFAULT_CONTROL_BUDGET)
+    }
+
+    /// T10 (KR-16): bounded probe with an injectable transport.
+    ///
+    /// Three separate questions, all bounded by `budget`:
+    /// 1. is the binary there and does it answer (`--version`);
+    /// 2. is the image/namespace usable (a real no-op run, not just an inspect);
+    /// 3. does any of it hang — a hung daemon is "unavailable", never "assume it works".
+    pub fn probe_within(
+        &self,
+        transport: &dyn ProbeTransport,
+        budget: Duration,
+    ) -> Result<(), SandboxError> {
+        let key = self.probe_cache_key();
+        if probe_success_cache()
+            .lock()
+            .map(|cache| cache.contains(&key))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        self.probe_uncached(transport, budget)?;
+        if let Ok(mut cache) = probe_success_cache().lock() {
+            cache.insert(key);
+        }
+        Ok(())
+    }
+
+    fn probe_cache_key(&self) -> String {
+        match &self.backend {
+            SandboxBackend::Bwrap => "bwrap".to_string(),
+            SandboxBackend::Container { runtime, image } => {
+                format!("container:{}:{}", runtime, image)
+            }
+        }
+    }
+
+    fn probe_uncached(
+        &self,
+        transport: &dyn ProbeTransport,
+        budget: Duration,
+    ) -> Result<(), SandboxError> {
+        let version = |program: &str| transport.run(program, &["--version".to_string()], budget);
         match &self.backend {
             SandboxBackend::Bwrap => {
-                let ok = std::process::Command::new("bwrap")
-                    .arg("--version")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
-                if ok {
-                    Ok(())
-                } else {
-                    Err(SandboxError::BwrapMissing)
+                match version("bwrap") {
+                    Ok(out) if out.success => {}
+                    Ok(_) => return Err(SandboxError::BwrapMissing),
+                    Err(_) => return Err(SandboxError::BwrapMissing),
+                }
+                // `--version` succeeding says nothing about whether user namespaces work (they are
+                // commonly disabled in containers). Run a real, tiny namespace.
+                let smoke = transport.run(
+                    "bwrap",
+                    &[
+                        "--ro-bind".to_string(),
+                        "/".to_string(),
+                        "/".to_string(),
+                        "--dev".to_string(),
+                        "/dev".to_string(),
+                        "--unshare-net".to_string(),
+                        "/bin/true".to_string(),
+                    ],
+                    budget,
+                );
+                match smoke {
+                    Ok(out) if out.success => Ok(()),
+                    Ok(out) => Err(SandboxError::NamespaceUnavailable(format!(
+                        "bwrap cannot create a namespace: {}",
+                        out.stderr.trim()
+                    ))),
+                    Err(e) => Err(SandboxError::NamespaceUnavailable(format!(
+                        "bwrap namespace probe did not finish: {}",
+                        e
+                    ))),
                 }
             }
             SandboxBackend::Container { runtime, image } => {
@@ -602,35 +1202,68 @@ impl SandboxSpec {
                         "the container image is empty".to_string(),
                     ));
                 }
-                let runtime_ok = std::process::Command::new(runtime)
-                    .arg("--version")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
-                if !runtime_ok {
-                    return Err(SandboxError::ContainerUnavailable(format!(
-                        "runtime '{}' is not usable",
-                        runtime
-                    )));
+                match version(runtime) {
+                    Ok(out) if out.success => {}
+                    Ok(_) => {
+                        return Err(SandboxError::ContainerUnavailable(format!(
+                            "runtime '{}' is not usable",
+                            runtime
+                        )))
+                    }
+                    Err(e) => {
+                        return Err(SandboxError::ContainerUnavailable(format!(
+                            "runtime '{}' did not answer --version: {}",
+                            runtime, e
+                        )))
+                    }
                 }
-                let image_ok = std::process::Command::new(runtime)
-                    .args(["image", "inspect", image])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
-                if !image_ok {
-                    return Err(SandboxError::ContainerUnavailable(format!(
-                        "image '{}' is not present in runtime '{}'",
-                        image, runtime
-                    )));
+                let inspect = transport.run(
+                    runtime,
+                    &["image".to_string(), "inspect".to_string(), image.clone()],
+                    budget,
+                );
+                match inspect {
+                    Ok(out) if out.success => {}
+                    Ok(_) => {
+                        return Err(SandboxError::ContainerUnavailable(format!(
+                            "image '{}' is not present in runtime '{}'",
+                            image, runtime
+                        )))
+                    }
+                    Err(e) => {
+                        return Err(SandboxError::ContainerUnavailable(format!(
+                            "image inspect did not finish: {}",
+                            e
+                        )))
+                    }
                 }
-                Ok(())
+                // The image can exist while the runtime cannot actually start a container (no
+                // namespaces, no cgroups delegation, a broken storage driver). One no-op run is the
+                // only honest check.
+                let smoke = transport.run(
+                    runtime,
+                    &[
+                        "run".to_string(),
+                        "--rm".to_string(),
+                        "--network".to_string(),
+                        "none".to_string(),
+                        image.clone(),
+                        "/bin/true".to_string(),
+                    ],
+                    budget,
+                );
+                match smoke {
+                    Ok(out) if out.success => Ok(()),
+                    Ok(out) => Err(SandboxError::NamespaceUnavailable(format!(
+                        "runtime '{}' cannot start a container: {}",
+                        runtime,
+                        out.stderr.trim()
+                    ))),
+                    Err(e) => Err(SandboxError::NamespaceUnavailable(format!(
+                        "container namespace probe did not finish: {}",
+                        e
+                    ))),
+                }
             }
         }
     }

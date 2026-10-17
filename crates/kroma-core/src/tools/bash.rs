@@ -234,6 +234,7 @@ pub async fn execute_bash_with_deadline(
     let prepared = match policy.launch_argv(
         crate::sandbox::ExecutionClass::AgentBash,
         workspace_root,
+        state_dir,
         &shell_bin,
         &shell_args,
     ) {
@@ -409,7 +410,38 @@ pub async fn execute_bash_with_deadline(
             .await;
     }
 
-    let (body_output, truncated) = buf_inner.finalize();
+    // T10 (KR-17): a container workload is not the client process. Once the client is done (normal
+    // exit, timeout, cancel or output cap) the workload is stopped, removed and verified — otherwise
+    // a cancelled run leaves the real work running in the daemon.
+    let container_note = match prepared.container.as_ref() {
+        Some(workload) => {
+            let outcome = workload.cancel(
+                &crate::sandbox::ProcessProbeTransport,
+                crate::sandbox::DEFAULT_CONTROL_BUDGET,
+            );
+            match outcome {
+                crate::sandbox::CleanupOutcome::RecoveryRequired {
+                    container_id,
+                    reason,
+                    retry_command,
+                } => Some(format!(
+                    "container cleanup requires recovery (id {}): {}; retry: {}",
+                    container_id.unwrap_or_else(|| "<unknown>".to_string()),
+                    reason,
+                    retry_command
+                )),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
+    let (mut body_output, truncated) = buf_inner.finalize();
+    if let Some(note) = container_note {
+        body_output.push_str("\n[");
+        body_output.push_str(&note);
+        body_output.push(']');
+    }
     let duration_ms = started.elapsed().as_millis() as u64;
 
     let meta = ToolResultMeta {
