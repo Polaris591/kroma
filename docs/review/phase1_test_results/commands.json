@@ -186,6 +186,28 @@
       "exit": 101,
       "log": "logs/test_t05.log",
       "note": "T05: 857 passed / 1 failed (b08c_git_metadata pre-existing flake, 5/5 green serially)"
+    },
+    {
+      "id": "t06_secure_fs_unit",
+      "cmd": "cargo test -p kroma-core --lib secure_fs",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T06: 21 passed (14 existing + 7 new)"
+    },
+    {
+      "id": "t06_targeted",
+      "cmd": "cargo test -p kroma-core --test t06_bounded_io",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T06: 7 passed / 0 failed"
+    },
+    {
+      "id": "t06_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t06.log",
+      "note": "T06: 872 passed / 0 failed"
     }
   ]
 }

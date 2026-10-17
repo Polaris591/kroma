@@ -35,6 +35,29 @@ pub(crate) const OPEN_FILE_NO_FOLLOW: libc::c_int = libc::O_RDONLY | NO_FOLLOW_C
 pub(crate) const OPEN_DIR_NO_FOLLOW: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | NO_FOLLOW_CUSTOM_FLAGS;
 
+/// T06 (KR-06): absolute ceiling for any single bounded read, applied before the per-category
+/// limit so a caller that passes a huge limit still cannot allocate without bound.
+pub(crate) const HARD_MAX_READ_BYTES: u64 = 64 * 1024 * 1024;
+
+/// T06: what to do when a file is longer than the caller's limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Overflow {
+    /// Keep the first `limit` bytes and report `truncated = true`. Only for inputs whose contract
+    /// explicitly allows truncation (log tails, ignore-file scanning).
+    Truncate,
+    /// Refuse the whole read. This is the default for structured inputs: a partially parsed config,
+    /// registry or CAS manifest is worse than a clear error.
+    Refuse,
+}
+
+/// T06: result of a bounded read. `bytes` never exceeds the requested limit.
+#[derive(Debug)]
+pub(crate) struct BoundedRead {
+    pub bytes: Vec<u8>,
+    /// `true` only when [`Overflow::Truncate`] was requested and the source was longer.
+    pub truncated: bool,
+}
+
 /// Failure from a hardening primitive.
 #[derive(Debug)]
 pub(crate) enum SecureFsError {
@@ -44,6 +67,14 @@ pub(crate) enum SecureFsError {
     /// The underlying OS call failed. The original error is preserved so callers can still inspect
     /// `raw_os_error()` (`ELOOP`, `ENOTDIR`, ...).
     Io(std::io::Error),
+    /// T06: the handle is not a regular file (directory, FIFO, socket, device). Decided by `fstat`
+    /// on the opened handle, never by a pathname `stat` before the open.
+    NotRegularFile(String),
+    /// T06: the file is longer than the caller's limit and the contract does not allow truncation.
+    TooLarge { display: String, limit: u64 },
+    /// T06: the bytes are not valid UTF-8. Decided *after* the size check, so a huge binary file is
+    /// refused for its size instead of being decoded first.
+    NotUtf8 { display: String },
 }
 
 impl From<std::io::Error> for SecureFsError {
@@ -57,6 +88,15 @@ impl std::fmt::Display for SecureFsError {
         match self {
             SecureFsError::InvalidPath(reason) => write!(f, "{}", reason),
             SecureFsError::Io(err) => write!(f, "{}", err),
+            SecureFsError::NotRegularFile(display) => {
+                write!(f, "{} is not a regular file", display)
+            }
+            SecureFsError::TooLarge { display, limit } => {
+                write!(f, "{} is larger than the {} byte limit", display, limit)
+            }
+            SecureFsError::NotUtf8 { display } => {
+                write!(f, "{} is not valid UTF-8", display)
+            }
         }
     }
 }
@@ -102,6 +142,128 @@ pub(crate) fn open_existing_no_symlink(path: &Path) -> std::io::Result<File> {
             ));
         }
         Ok(f)
+    }
+}
+
+/// T06 (KR-06): open for reading with the whole boundary policy applied at once.
+///
+/// Three separate boundaries, none of which substitutes for another:
+/// 1. **Open** — `O_NOFOLLOW` refuses a symlinked leaf (`ELOOP`), and `O_NONBLOCK` keeps a FIFO from
+///    blocking the open itself. `O_NOFOLLOW` is *not* "non-blocking"; that is why both flags are set.
+/// 2. **Type** — `fstat` on the *opened handle* (not a pathname `stat` before the open, which the
+///    path can swap out from under) must report a regular file. FIFOs, directories, sockets and
+///    devices are refused before a single byte is read.
+/// 3. **Read** — at most `limit + 1` bytes are streamed from that same verified handle, so a file
+///    that keeps growing is bounded by the read, not by its length at open time.
+fn open_reading_bounded(path: &Path) -> Result<File, SecureFsError> {
+    #[cfg(unix)]
+    let handle = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(NO_FOLLOW_CUSTOM_FLAGS | libc::O_NONBLOCK)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let handle = open_existing_no_symlink(path)?;
+
+    let meta = handle.metadata()?;
+    if !meta.is_file() {
+        return Err(SecureFsError::NotRegularFile(format!(
+            "{} (mode {:o})",
+            path.display(),
+            file_mode(&meta)
+        )));
+    }
+    Ok(handle)
+}
+
+fn file_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.mode() & 0o170000
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0
+    }
+}
+
+/// T06: read at most `limit` bytes from a regular file, with the boundary enforced at open, type
+/// check and read time.
+///
+/// `limit` is clamped to [`HARD_MAX_READ_BYTES`]. A non-regular file, a symlinked leaf, an
+/// oversized file under [`Overflow::Refuse`], and an unreadable handle all produce an error instead
+/// of a partial value.
+pub(crate) fn read_bounded_file(
+    path: &Path,
+    limit: u64,
+    overflow: Overflow,
+) -> Result<BoundedRead, SecureFsError> {
+    let mut handle = open_reading_bounded(path)?;
+    read_bounded_handle(&mut handle, &path.display().to_string(), limit, overflow)
+}
+
+/// T06: the read half of the boundary, for callers that already hold a verified handle (the
+/// workspace capability opens every path FD-relative without following a symlink, and the caller
+/// has already decided *which* path it is reading).
+///
+/// Re-checks the file type with `fstat` on the handle — a pathname `stat` before the open is not
+/// trusted, because the entry can be swapped in between — and streams at most `limit + 1` bytes, so
+/// a file that grows while being read still stops at the limit.
+pub(crate) fn read_bounded_handle(
+    handle: &mut File,
+    display: &str,
+    limit: u64,
+    overflow: Overflow,
+) -> Result<BoundedRead, SecureFsError> {
+    let limit = limit.min(HARD_MAX_READ_BYTES);
+    let meta = handle.metadata()?;
+    if !meta.is_file() {
+        return Err(SecureFsError::NotRegularFile(format!(
+            "{} (mode {:o})",
+            display,
+            file_mode(&meta)
+        )));
+    }
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    // `limit + 1` is what distinguishes "exactly at the limit" from "over it" without a second
+    // syscall, and it is also the reason a growing file cannot outrun the bound.
+    let mut reader = std::io::Read::take(handle, limit.saturating_add(1));
+    reader.read_to_end(&mut bytes)?;
+    let truncated = bytes.len() as u64 > limit;
+    if truncated {
+        match overflow {
+            Overflow::Refuse => {
+                return Err(SecureFsError::TooLarge {
+                    display: display.to_string(),
+                    limit,
+                })
+            }
+            Overflow::Truncate => bytes.truncate(limit as usize),
+        }
+    }
+    Ok(BoundedRead { bytes, truncated })
+}
+
+/// T06: [`read_bounded_file`] followed by UTF-8 validation, in that order.
+///
+/// Decoding after the size check means a 4 GiB binary blob is refused for being too large rather
+/// than for being invalid UTF-8 after a 4 GiB allocation.
+pub(crate) fn read_bounded_utf8(
+    path: &Path,
+    limit: u64,
+    overflow: Overflow,
+) -> Result<(String, bool), SecureFsError> {
+    let read = read_bounded_file(path, limit, overflow)?;
+    match String::from_utf8(read.bytes) {
+        Ok(text) => Ok((text, read.truncated)),
+        Err(_) => Err(SecureFsError::NotUtf8 {
+            display: path.display().to_string(),
+        }),
     }
 }
 
@@ -774,6 +936,135 @@ mod tests {
             err.to_string().contains("not a real directory"),
             "got {err}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- T06 (KR-06): bounded, type-checked, non-blocking reads -------------------------------
+
+    #[test]
+    fn bounded_read_truncates_at_the_limit_and_reports_it() {
+        let dir = scratch("bounded-truncate");
+        let path = dir.join("big.txt");
+        fs::write(&path, "a".repeat(100)).unwrap();
+
+        let read = read_bounded_file(&path, 10, Overflow::Truncate).expect("truncating read");
+        assert_eq!(read.bytes.len(), 10);
+        assert!(read.truncated, "truncation must be reported, not silent");
+
+        let exact = read_bounded_file(&path, 100, Overflow::Truncate).expect("exact read");
+        assert_eq!(exact.bytes.len(), 100);
+        assert!(
+            !exact.truncated,
+            "a file exactly at the limit is not truncated"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bounded_read_refuses_oversized_content_before_decoding() {
+        let dir = scratch("bounded-refuse");
+        let path = dir.join("big.txt");
+        fs::write(&path, "a".repeat(100)).unwrap();
+        match read_bounded_file(&path, 10, Overflow::Refuse) {
+            Err(SecureFsError::TooLarge { limit, .. }) => assert_eq!(limit, 10),
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+
+        // A huge binary file is refused for its size, never decoded first.
+        let bin = dir.join("blob.bin");
+        fs::write(&bin, vec![0xffu8; 4096]).unwrap();
+        match read_bounded_utf8(&bin, 1024, Overflow::Refuse) {
+            Err(SecureFsError::TooLarge { .. }) => {}
+            other => panic!("expected TooLarge before UTF-8 decoding, got {other:?}"),
+        }
+        // ...and under the limit the same bytes fail as invalid UTF-8, not as a size error.
+        match read_bounded_utf8(&bin, 4096, Overflow::Refuse) {
+            Err(SecureFsError::NotUtf8 { .. }) => {}
+            other => panic!("expected NotUtf8, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bounded_read_refuses_a_symlinked_leaf() {
+        let dir = scratch("bounded-symlink");
+        let target = dir.join("target.txt");
+        fs::write(&target, "secret").unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = read_bounded_file(&link, 1024, Overflow::Refuse)
+            .expect_err("a symlinked leaf must be refused at open time");
+        match err {
+            SecureFsError::Io(io) => {
+                // ELOOP from O_NOFOLLOW, not a permission error after reading the target.
+                assert!(
+                    io.raw_os_error() == Some(libc::ELOOP)
+                        || io.raw_os_error() == Some(libc::EMLINK),
+                    "expected ELOOP, got {io:?}"
+                );
+            }
+            other => panic!("expected an Io(ELOOP), got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bounded_read_refuses_a_fifo_without_blocking() {
+        let dir = scratch("bounded-fifo");
+        let path = dir.join("pipe");
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo with a NUL-terminated path that lives in `c_path`.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+        // No writer is attached: a plain `open(O_RDONLY)` would block here forever. The reader opens
+        // with O_NONBLOCK and then refuses on `fstat`, so the call returns promptly with an error.
+        let started = std::time::Instant::now();
+        match read_bounded_file(&path, 1024, Overflow::Refuse) {
+            Err(SecureFsError::NotRegularFile(display)) => assert!(display.contains("pipe")),
+            other => panic!("expected NotRegularFile, got {other:?}"),
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "a FIFO read must not block on a missing writer"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bounded_read_refuses_a_directory() {
+        let dir = scratch("bounded-dir");
+        let inner = dir.join("sub");
+        fs::create_dir(&inner).unwrap();
+        match read_bounded_file(&inner, 1024, Overflow::Refuse) {
+            Err(SecureFsError::NotRegularFile(_)) => {}
+            other => panic!("expected NotRegularFile for a directory, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bounded_read_stops_a_growing_file_at_the_limit() {
+        let dir = scratch("bounded-grow");
+        let path = dir.join("grow.txt");
+        // Simulates a file that keeps growing: it is already past the limit by the time the read
+        // runs, and the read still stops after `limit + 1` bytes instead of following it.
+        fs::write(&path, "x".repeat(4096)).unwrap();
+        let read = read_bounded_file(&path, 64, Overflow::Truncate).expect("bounded read");
+        assert_eq!(read.bytes.len(), 64);
+        assert!(read.truncated);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bounded_handle_read_uses_the_handle_type_not_the_path() {
+        let dir = scratch("bounded-handle");
+        let path = dir.join("ok.txt");
+        fs::write(&path, "hello").unwrap();
+        let mut handle = open_existing_no_symlink(&path).unwrap();
+        let read = read_bounded_handle(&mut handle, "ok.txt", 1024, Overflow::Refuse).unwrap();
+        assert_eq!(read.bytes, b"hello");
         let _ = fs::remove_dir_all(&dir);
     }
 }

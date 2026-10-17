@@ -355,9 +355,9 @@ impl DurableTaskHost {
                         ));
                     }
                     capacity_retried = true;
-                    let removed = registry.prune_terminal_checked(1).map_err(|e| {
-                        format!("task registry is full and pruning failed: {}", e)
-                    })?;
+                    let removed = registry
+                        .prune_terminal_checked(1)
+                        .map_err(|e| format!("task registry is full and pruning failed: {}", e))?;
                     if removed == 0 {
                         return Err(
                             "task registry is full and no terminal record is evictable (records with a pending merge link are protected)"
@@ -841,8 +841,7 @@ impl DurableTaskHost {
                                             other => {
                                                 state = TaskState::Failed;
                                                 keep_pending_merge = other.retain_intent();
-                                                summary =
-                                                    format!("{}; {}", summary, other.note());
+                                                summary = format!("{}; {}", summary, other.note());
                                             }
                                         }
                                     }
@@ -952,7 +951,10 @@ impl DurableTaskHost {
                         .as_ref()
                         .map(|m| m.changed_paths.clone())
                         .unwrap_or_default(),
-                    tracked_files: manifest.as_ref().map(|m| m.tracked_files.len()).unwrap_or(0),
+                    tracked_files: manifest
+                        .as_ref()
+                        .map(|m| m.tracked_files.len())
+                        .unwrap_or(0),
                 },
             )
         };
@@ -1010,7 +1012,10 @@ impl DurableTaskHost {
                     Ok(()) => report.unresolved.push(task_id),
                     Err(e) => report.failed.push((
                         task_id,
-                        format!("the intent carries no merged revision and could not be cleared: {}", e),
+                        format!(
+                            "the intent carries no merged revision and could not be cleared: {}",
+                            e
+                        ),
                     )),
                 }
                 continue;
@@ -1040,7 +1045,10 @@ impl DurableTaskHost {
                 // Re-derive the metadata when the intent recorded none (the manifest was unreadable
                 // when the link was first attempted).
                 let (changed_paths, tracked_files) = if link.changed_paths.is_empty() {
-                    match self.snapshot_store.load_revision(&RevisionId::new(merged.clone())) {
+                    match self
+                        .snapshot_store
+                        .load_revision(&RevisionId::new(merged.clone()))
+                    {
                         Ok(manifest) => {
                             (manifest.changed_paths.clone(), manifest.tracked_files.len())
                         }
@@ -1056,10 +1064,9 @@ impl DurableTaskHost {
                     changed_paths,
                     tracked_files,
                 ) {
-                    report.failed.push((
-                        task_id,
-                        format!("cannot replay the WAL link: {}", e),
-                    ));
+                    report
+                        .failed
+                        .push((task_id, format!("cannot replay the WAL link: {}", e)));
                     continue;
                 }
             }
@@ -1068,7 +1075,10 @@ impl DurableTaskHost {
                 // must still see it. Report it rather than claiming a fully resolved replay.
                 report.failed.push((
                     task_id,
-                    format!("the WAL link was recorded but its intent could not be cleared: {}", e),
+                    format!(
+                        "the WAL link was recorded but its intent could not be cleared: {}",
+                        e
+                    ),
                 ));
                 continue;
             }
@@ -1119,22 +1129,26 @@ impl DurableTaskHost {
             .iter()
             .find(|artifact| artifact.kind == "report")
             .ok_or_else(|| format!("task '{}' has no report artifact", task_id))?;
-        let relative = artifact
-            .location
-            .strip_prefix("file:")
-            .ok_or_else(|| {
-                format!(
-                    "report artifact for task '{}' is not a durable file reference: {}",
-                    task_id, artifact.location
-                )
-            })?;
+        let relative = artifact.location.strip_prefix("file:").ok_or_else(|| {
+            format!(
+                "report artifact for task '{}' is not a durable file reference: {}",
+                task_id, artifact.location
+            )
+        })?;
         let path = self.report_base.join(
             Path::new(relative)
                 .file_name()
                 .ok_or_else(|| format!("report reference '{}' has no file name", relative))?,
         );
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("cannot read report {}: {}", path.display(), e))?;
+        // T06 (KR-06): refuse an oversized or symlinked report *before* allocating, instead of
+        // reading whatever is on disk and comparing lengths afterwards. The limit is the length the
+        // reference already recorded (capped by the report ceiling), so a report that grew — or a
+        // path swapped for a symlink — fails closed rather than being parsed.
+        let limit = artifact.bytes.min(MAX_REPORT_BYTES as u64);
+        let bytes =
+            crate::secure_fs::read_bounded_file(&path, limit, crate::secure_fs::Overflow::Refuse)
+                .map_err(|e| format!("cannot read report {}: {}", path.display(), e))?
+                .bytes;
         if bytes.len() as u64 != artifact.bytes {
             return Err(format!(
                 "report for task '{}' is {} bytes but the reference records {}",
@@ -1331,7 +1345,10 @@ mod tests {
     fn settle_finish_reaches_suspended_task_completion() {
         let mut registry = AsyncTaskRegistry::in_memory();
         seed(&mut registry, "{}", TaskState::Suspended);
-        assert_eq!(settle(&mut registry, TaskState::Completed).unwrap(), TaskState::Completed);
+        assert_eq!(
+            settle(&mut registry, TaskState::Completed).unwrap(),
+            TaskState::Completed
+        );
         assert_eq!(registry.get("t").unwrap().state, TaskState::Completed);
     }
 
@@ -1360,7 +1377,11 @@ mod tests {
                 TaskFinish {
                     state: TaskState::Completed,
                     spent: 7,
-                    artifact: Some(ArtifactRef::new("t-report", "file:reports/t.report", "report")),
+                    artifact: Some(ArtifactRef::new(
+                        "t-report",
+                        "file:reports/t.report",
+                        "report",
+                    )),
                     summary: "done".into(),
                     turn: 3,
                     keep_pending_merge: false,

@@ -55,6 +55,13 @@ pub const MAX_SNAPSHOT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 /// Directory recursion guard so a pathological/deep tree cannot exhaust the stack.
 const MAX_SNAPSHOT_DEPTH: usize = 32;
 
+/// T06 (KR-06): ceiling for a crash-recovery intent journal (merge/fork/restore). These are small
+/// JSON documents; anything larger is corruption or an attack, and refusing is better than a
+/// partially applied recovery.
+const MAX_INTENT_BYTES: u64 = 64 * 1024;
+/// T06: ceiling for one revision record.
+const MAX_REVISION_RECORD_BYTES: u64 = 1024 * 1024;
+
 /// Build outputs and dependency caches are never part of a reviewable revision.
 pub(crate) const SNAPSHOT_EXCLUDED_DIRS: &[&str] = &[
     ".git",
@@ -442,8 +449,14 @@ impl SnapshotStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        // T06 (KR-06): bounded on the verified handle, not on a pathname length.
+        let bytes = crate::secure_fs::read_bounded_handle(
+            &mut file,
+            "merge intent journal",
+            MAX_INTENT_BYTES,
+            crate::secure_fs::Overflow::Refuse,
+        )?
+        .bytes;
         let intent: MergeIntent = serde_json::from_slice(&bytes)?;
         if intent.version != MERGE_INTENT_VERSION {
             return Err(RevisionError::InvalidStore(format!(
@@ -489,8 +502,13 @@ impl SnapshotStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        let bytes = crate::secure_fs::read_bounded_handle(
+            &mut file,
+            "fork intent journal",
+            MAX_INTENT_BYTES,
+            crate::secure_fs::Overflow::Refuse,
+        )?
+        .bytes;
         let intent: ForkIntent = serde_json::from_slice(&bytes)?;
         if intent.version != FORK_INTENT_VERSION {
             return Err(RevisionError::InvalidStore(format!(
@@ -916,7 +934,10 @@ impl SnapshotStore {
 
     /// Capture the current workspace state as a new revision.
     /// Read the live tracked-content identity without rewriting any revision/WAL metadata.
-    pub fn workspace_content_revision(&self, workspace: &WorkspaceCap) -> Result<RevisionId, RevisionError> {
+    pub fn workspace_content_revision(
+        &self,
+        workspace: &WorkspaceCap,
+    ) -> Result<RevisionId, RevisionError> {
         let (tracked, _) = self.scan_workspace_to_blobs(workspace)?;
         Ok(compute_revision_id(&tracked))
     }
@@ -995,8 +1016,13 @@ impl SnapshotStore {
         let path = self.revision_path(id);
         let mut file = crate::secure_fs::open_existing_no_symlink(&path)
             .map_err(|_| RevisionError::UnknownRevision(id.as_str().to_string()))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        let bytes = crate::secure_fs::read_bounded_handle(
+            &mut file,
+            "revision record",
+            MAX_REVISION_RECORD_BYTES,
+            crate::secure_fs::Overflow::Refuse,
+        )?
+        .bytes;
         let revision: WorkspaceRevision = serde_json::from_slice(&bytes)?;
         if revision.revision_id != *id {
             return Err(RevisionError::InvalidStore(format!(
@@ -1080,8 +1106,13 @@ impl SnapshotStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        let bytes = crate::secure_fs::read_bounded_handle(
+            &mut file,
+            "restore intent journal",
+            MAX_INTENT_BYTES,
+            crate::secure_fs::Overflow::Refuse,
+        )?
+        .bytes;
         let intent: RestoreIntent = serde_json::from_slice(&bytes)?;
         if intent.version != RESTORE_INTENT_VERSION {
             return Err(RevisionError::InvalidStore(format!(
@@ -1710,8 +1741,15 @@ impl SnapshotStore {
         let mut file = crate::secure_fs::open_existing_no_symlink(&path).map_err(|e| {
             RevisionError::InvalidStore(format!("cannot read snapshot blob {}: {}", sha256, e))
         })?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        // T06 (KR-06): a blob is content-addressed, so a read longer than the per-file snapshot
+        // ceiling can only be corruption; refusing keeps the CAS from allocating an arbitrary size.
+        let bytes = crate::secure_fs::read_bounded_handle(
+            &mut file,
+            &format!("snapshot blob {}", sha256),
+            MAX_SNAPSHOT_FILE_BYTES,
+            crate::secure_fs::Overflow::Refuse,
+        )?
+        .bytes;
         if sha256_hex64(&bytes) != sha256 {
             return Err(RevisionError::InvalidStore(format!(
                 "snapshot blob {} is corrupt (content hash mismatch)",
@@ -1788,8 +1826,18 @@ impl SnapshotStore {
                 skipped.insert(child_str);
                 continue;
             }
-            let mut bytes = Vec::with_capacity(size as usize);
-            file.read_to_end(&mut bytes)?;
+            // T06 (KR-06): `size` came from a `stat` before the read; the read itself is bounded to
+            // it, so a file that grows in between is refused (and skipped) instead of captured torn.
+            let Ok(read) = crate::secure_fs::read_bounded_handle(
+                &mut file,
+                &child_str,
+                size,
+                crate::secure_fs::Overflow::Refuse,
+            ) else {
+                skipped.insert(child_str);
+                continue;
+            };
+            let bytes = read.bytes;
             if bytes.len() as u64 != size {
                 // The file changed size mid-read; never record a torn snapshot.
                 skipped.insert(child_str);
@@ -1871,6 +1919,18 @@ impl From<crate::secure_fs::SecureFsError> for RevisionError {
                 RevisionError::InvalidStore(reason)
             }
             crate::secure_fs::SecureFsError::Io(io) => RevisionError::Io(io),
+            crate::secure_fs::SecureFsError::NotRegularFile(display) => {
+                RevisionError::InvalidStore(format!("{} is not a regular file", display))
+            }
+            crate::secure_fs::SecureFsError::TooLarge { display, limit } => {
+                RevisionError::InvalidStore(format!(
+                    "{} is larger than the {} byte limit",
+                    display, limit
+                ))
+            }
+            crate::secure_fs::SecureFsError::NotUtf8 { display } => {
+                RevisionError::InvalidStore(format!("{} is not valid UTF-8", display))
+            }
         }
     }
 }

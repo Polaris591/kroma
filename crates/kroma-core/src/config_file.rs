@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Hard cap on the size of a workspace `.kroma.toml`.
@@ -289,10 +289,21 @@ impl KromaConfigFile {
     /// Load a configuration file. A missing file yields the empty default; an unreadable or
     /// malformed file is an error so a typo never silently changes behaviour.
     pub fn load(path: &Path) -> Result<Self, String> {
-        match fs::read_to_string(path) {
-            Ok(text) => Self::parse_str(&text)
+        // T06 (KR-06): bounded, symlink-refusing, FIFO-refusing read. A missing file still yields
+        // the empty default — the one condition callers rely on — so `NotFound` is matched on the
+        // raw OS error instead of on the rendered message.
+        match crate::secure_fs::read_bounded_utf8(
+            path,
+            MAX_WORKSPACE_CONFIG_BYTES,
+            crate::secure_fs::Overflow::Refuse,
+        ) {
+            Ok((text, _)) => Self::parse_str(&text)
                 .map_err(|e| format!("invalid configuration file {}: {}", path.display(), e)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(crate::secure_fs::SecureFsError::Io(err))
+                if err.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(Self::default())
+            }
             Err(err) => Err(format!(
                 "cannot read configuration file {}: {}",
                 path.display(),
@@ -347,24 +358,27 @@ impl KromaConfigFile {
             return Err(workspace_config_too_large(&path, meta.len()));
         }
 
-        // Bound the read as well: the file could grow between the `stat` above and the read, and a
-        // regular file can be arbitrarily large on disk.
-        let mut file = fs::File::open(&path)
-            .map_err(|err| format!("cannot read configuration file {}: {}", path.display(), err))?;
-        let mut bytes = Vec::new();
-        (&mut file)
-            .take(MAX_WORKSPACE_CONFIG_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|err| format!("cannot read configuration file {}: {}", path.display(), err))?;
-        if bytes.len() as u64 > MAX_WORKSPACE_CONFIG_BYTES {
-            return Err(workspace_config_too_large(&path, bytes.len() as u64));
-        }
-        let text = String::from_utf8(bytes).map_err(|_| {
-            format!(
-                "cannot read configuration file {}: content is not valid UTF-8",
-                path.display()
-            )
-        })?;
+        // T06 (KR-06): the checks above are diagnostics, not the boundary. The read itself goes
+        // through the shared bounded reader, which opens with `O_NOFOLLOW | O_NONBLOCK`, re-checks
+        // the file type with `fstat` on that handle, streams at most `limit + 1` bytes, and only
+        // then decodes UTF-8. A file that grows after the `stat`, or a path swapped for a FIFO or a
+        // symlink between the check and the open, is therefore still bounded and still refused.
+        let text = crate::secure_fs::read_bounded_utf8(
+            &path,
+            MAX_WORKSPACE_CONFIG_BYTES,
+            crate::secure_fs::Overflow::Refuse,
+        )
+        .map_err(|err| match err {
+            crate::secure_fs::SecureFsError::TooLarge { .. } => {
+                workspace_config_too_large(&path, MAX_WORKSPACE_CONFIG_BYTES + 1)
+            }
+            other => format!(
+                "cannot read configuration file {}: {}",
+                path.display(),
+                other
+            ),
+        })?
+        .0;
         Self::parse_str(&text)
             .map_err(|e| format!("invalid configuration file {}: {}", path.display(), e))
     }

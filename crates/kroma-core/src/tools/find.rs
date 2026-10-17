@@ -6,7 +6,6 @@ use crate::types::ErrorCode;
 use crate::workspace::WorkspaceCap;
 use regex::Regex;
 use serde::Deserialize;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -273,6 +272,11 @@ fn walk_workspace_files_inner(
     }
 }
 
+/// T06 (KR-06): ceiling for one ignore file. `.gitignore`/`.ignore` are untrusted repository
+/// content; anything longer is truncated (with the truncation reported by the read) rather than
+/// allocated in full.
+pub const MAX_IGNORE_FILE_BYTES: u64 = 1024 * 1024;
+
 pub fn load_workspace_ignore_patterns(workspace: &WorkspaceCap) -> Vec<IgnoreRule> {
     let mut rules = Vec::new();
     load_dir_ignore_rules(workspace, Path::new(""), &mut rules);
@@ -292,10 +296,21 @@ fn load_dir_ignore_rules(workspace: &WorkspaceCap, dir_rel: &Path, rules: &mut V
         let Ok((_, mut file)) = workspace.open_existing_no_symlink(&rel_str) else {
             continue;
         };
-        let mut content = String::new();
-        if file.read_to_string(&mut content).is_err() {
+        // T06 (KR-06): ignore files are attacker-influenced repository content, so the read is
+        // bounded on the already-verified handle. Truncation is explicit and allowed here: a
+        // 1 MiB ignore file still yields its first megabyte of rules instead of an unbounded
+        // allocation, and the truncation is visible to the caller rather than silent.
+        let Ok(read) = crate::secure_fs::read_bounded_handle(
+            &mut file,
+            &rel_str,
+            MAX_IGNORE_FILE_BYTES,
+            crate::secure_fs::Overflow::Truncate,
+        ) else {
             continue;
-        }
+        };
+        let Ok(content) = String::from_utf8(read.bytes) else {
+            continue;
+        };
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {

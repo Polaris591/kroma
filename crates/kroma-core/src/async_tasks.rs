@@ -285,9 +285,7 @@ impl ReconcileDecision {
     /// The replacement attempt this decision names, when it names one.
     pub fn new_attempt_id(&self) -> Option<&str> {
         match self {
-            ReconcileDecision::RetryAsNewAttempt { new_task_id } => {
-                Some(new_task_id.as_str())
-            }
+            ReconcileDecision::RetryAsNewAttempt { new_task_id } => Some(new_task_id.as_str()),
             _ => None,
         }
     }
@@ -525,7 +523,10 @@ pub enum TaskRegistryError {
     /// B12: a reconcile decision was malformed (blank reason/evidence, or a bad replacement id).
     InvalidReconcile(String),
     /// B12: a task was already superseded by a different replacement attempt.
-    AlreadySuperseded { task_id: String, by: String },
+    AlreadySuperseded {
+        task_id: String,
+        by: String,
+    },
     Persist(String),
     /// The new document was renamed into place, so the mutation is visible to readers, but the
     /// directory sync that would make the rename survive a power loss failed. The in-memory state
@@ -703,13 +704,37 @@ impl AsyncTaskRegistry {
                     MAX_STORE_BYTES
                 )));
             }
-            let raw = std::fs::read_to_string(&registry.path)
-                .map_err(|e| TaskRegistryError::Load(e.to_string()))?;
+            // T06 (KR-06): the `metadata()` check above is a diagnostic; the boundary is the read
+            // itself — bounded on a handle opened without following a symlink, so a registry that
+            // grows after the check, or a path swapped for a symlink/FIFO, cannot allocate freely.
+            let raw = crate::secure_fs::read_bounded_utf8(
+                &registry.path,
+                MAX_STORE_BYTES,
+                crate::secure_fs::Overflow::Refuse,
+            )
+            .map_err(|e| TaskRegistryError::Load(e.to_string()))?
+            .0;
             if !raw.trim().is_empty() {
                 let doc: RegistryDocument = serde_json::from_str(&raw)
                     .map_err(|e| TaskRegistryError::Load(e.to_string()))?;
                 registry.next_notification_seq = doc.next_notification_seq.max(1);
-                for task in doc.tasks.into_iter().take(MAX_TASKS) {
+                // T06: refuse a document that overflows the record cap or repeats an id. Silently
+                // keeping the first N (or letting a duplicate overwrite an earlier task) would drop
+                // legitimate tasks without telling anyone.
+                if doc.tasks.len() > MAX_TASKS {
+                    return Err(TaskRegistryError::Load(format!(
+                        "registry document holds {} tasks, over the {} task cap",
+                        doc.tasks.len(),
+                        MAX_TASKS
+                    )));
+                }
+                for task in doc.tasks {
+                    if registry.tasks.contains_key(&task.task_id) {
+                        return Err(TaskRegistryError::Load(format!(
+                            "registry document repeats task id '{}'",
+                            task.task_id
+                        )));
+                    }
                     registry.tasks.insert(task.task_id.clone(), task);
                 }
             }
@@ -1745,11 +1770,7 @@ impl AsyncTaskRegistry {
     /// same-user attacker cannot predict the name and pre-plant a symlink; `create_new_no_symlink`
     /// uses `O_CREAT|O_EXCL|O_NOFOLLOW`, so a pre-existing entry makes the open fail instead of
     /// being followed or truncated.
-    fn create_temp(
-        &self,
-        dir: &Path,
-        base: &str,
-    ) -> Result<(PathBuf, std::fs::File), CommitError> {
+    fn create_temp(&self, dir: &Path, base: &str) -> Result<(PathBuf, std::fs::File), CommitError> {
         for _ in 0..16u32 {
             let candidate = dir.join(format!(
                 ".{}.tmp-{}-{}",
@@ -2248,7 +2269,9 @@ mod tests {
             Err(TaskRegistryError::AcceptanceRefused(_))
         ));
 
-        let record = registry.accept("a", "local-host", 4, Some("rev-1")).unwrap();
+        let record = registry
+            .accept("a", "local-host", 4, Some("rev-1"))
+            .unwrap();
         assert_eq!(record.evidence_revision.as_deref(), Some("rev-1"));
         assert_eq!(record.artifact_digests, vec!["report:deadbeef".to_string()]);
         assert_eq!(record.token_spent, 0);
@@ -2256,9 +2279,14 @@ mod tests {
 
         // Replaying the identical decision adds no second decision and no notification.
         let notifications = registry.get("a").unwrap().notifications.len();
-        let again = registry.accept("a", "local-host", 4, Some("rev-1")).unwrap();
+        let again = registry
+            .accept("a", "local-host", 4, Some("rev-1"))
+            .unwrap();
         assert_eq!(again, record);
-        assert_eq!(registry.get("a").unwrap().notifications.len(), notifications);
+        assert_eq!(
+            registry.get("a").unwrap().notifications.len(),
+            notifications
+        );
 
         // A different verified revision replaces the recorded decision.
         set_evidence(
@@ -2266,7 +2294,9 @@ mod tests {
             Some("rev-1"),
             Some(("post-merge", true, Some("rev-9"))),
         );
-        let replaced = registry.accept("a", "local-host", 5, Some("rev-9")).unwrap();
+        let replaced = registry
+            .accept("a", "local-host", 5, Some("rev-9"))
+            .unwrap();
         assert_eq!(replaced.evidence_revision.as_deref(), Some("rev-9"));
         assert!(registry.get("a").unwrap().notifications.len() > notifications);
     }
@@ -2378,7 +2408,10 @@ mod tests {
                 "fresh attempt b",
             )
             .unwrap();
-        assert_eq!(registry.get("a").unwrap().superseded_by.as_deref(), Some("b"));
+        assert_eq!(
+            registry.get("a").unwrap().superseded_by.as_deref(),
+            Some("b")
+        );
         registry.register(new_task("c")).unwrap();
         assert!(matches!(
             registry.reconcile(
@@ -2481,14 +2514,22 @@ mod tests {
             !registry.get("a").unwrap().is_accepted(),
             "an acceptance without a revision is not an acceptance"
         );
-        set_evidence(&mut registry, None, Some(("post-merge", true, Some("rev-1"))));
+        set_evidence(
+            &mut registry,
+            None,
+            Some(("post-merge", true, Some("rev-1"))),
+        );
         assert!(
             !registry.get("a").unwrap().is_accepted(),
             "an acceptance without a revision is never accepted"
         );
 
         // A blank evidence revision is not a revision either.
-        set_evidence(&mut registry, Some("   "), Some(("post-merge", true, Some("   "))));
+        set_evidence(
+            &mut registry,
+            Some("   "),
+            Some(("post-merge", true, Some("   "))),
+        );
         assert!(!registry.get("a").unwrap().is_accepted());
 
         // Bound to a revision: missing / failed / wrong-revision / no-revision verification all fail;
@@ -2498,22 +2539,38 @@ mod tests {
             !registry.get("a").unwrap().is_accepted(),
             "a missing verification must not be accepted"
         );
-        set_evidence(&mut registry, Some("rev-1"), Some(("post-merge", false, Some("rev-1"))));
+        set_evidence(
+            &mut registry,
+            Some("rev-1"),
+            Some(("post-merge", false, Some("rev-1"))),
+        );
         assert!(
             !registry.get("a").unwrap().is_accepted(),
             "a failed verification must never be accepted"
         );
-        set_evidence(&mut registry, Some("rev-1"), Some(("post-merge", true, Some("rev-2"))));
+        set_evidence(
+            &mut registry,
+            Some("rev-1"),
+            Some(("post-merge", true, Some("rev-2"))),
+        );
         assert!(
             !registry.get("a").unwrap().is_accepted(),
             "a different revision must not satisfy the acceptance"
         );
-        set_evidence(&mut registry, Some("rev-1"), Some(("post-merge", true, None)));
+        set_evidence(
+            &mut registry,
+            Some("rev-1"),
+            Some(("post-merge", true, None)),
+        );
         assert!(
             !registry.get("a").unwrap().is_accepted(),
             "a verification without a revision must not satisfy the acceptance"
         );
-        set_evidence(&mut registry, Some("rev-1"), Some(("post-merge", true, Some("rev-1"))));
+        set_evidence(
+            &mut registry,
+            Some("rev-1"),
+            Some(("post-merge", true, Some("rev-1"))),
+        );
         assert!(
             registry.get("a").unwrap().is_accepted(),
             "an exact passed verification of the accepted revision is acceptance"
@@ -2746,10 +2803,8 @@ mod tests {
         // A genuine precommit failure that does not depend on permissions (which would pass under
         // root): the registry's parent path is a regular file, so creating the temp file fails with
         // NotADirectory before anything is committed.
-        let dir = std::env::temp_dir().join(format!(
-            "kroma-tasks-blocked-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kroma-tasks-blocked-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let blocker = dir.join("blocked");
         std::fs::write(&blocker, b"not a directory").unwrap();
@@ -2893,7 +2948,9 @@ mod tests {
         let mut registry = AsyncTaskRegistry::in_memory();
         // The protected record is deliberately the *oldest*, so a naive prune would evict it first.
         registry.register(new_task("protected")).unwrap();
-        registry.transition("protected", TaskState::Running, 0).unwrap();
+        registry
+            .transition("protected", TaskState::Running, 0)
+            .unwrap();
         registry.fail("protected", "link failed", 0).unwrap();
         registry
             .set_pending_merge(

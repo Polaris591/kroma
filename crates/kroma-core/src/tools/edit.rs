@@ -5,7 +5,6 @@ use crate::tools::ToolExecutionOutput;
 use crate::types::{EditDiagKind, EditMatchTier, ErrorCode};
 use crate::workspace::{InodeMutationLock, WorkspaceCap};
 use serde::Deserialize;
-use std::io::Read;
 use std::time::Instant;
 
 pub const MAX_EDITS_PER_CALL: usize = 16;
@@ -241,17 +240,40 @@ pub async fn execute_edit(
         );
     }
 
-    let mut raw_bytes = Vec::with_capacity(sym_meta.len() as usize);
-    if let Err(e) = file.read_to_end(&mut raw_bytes) {
-        return ToolExecutionOutput::error(
-            ErrorCode::IoError,
-            format!("failed to read '{}': {}", rel_str, e),
-            ToolResultMeta {
-                relative_path: Some(rel_str),
-                ..Default::default()
-            },
-        );
-    }
+    // T06 (KR-06): the `sym_meta` length check above is a friendly pre-check, not the boundary. The
+    // read streams at most `max_edit_file_bytes + 1` bytes from the verified handle, so a file that
+    // grows after the check (or a sparse/hostile file) cannot allocate past the limit.
+    let raw_bytes = match crate::secure_fs::read_bounded_handle(
+        &mut file,
+        &rel_str,
+        max_edit_file_bytes as u64,
+        crate::secure_fs::Overflow::Refuse,
+    ) {
+        Ok(read) => read.bytes,
+        Err(crate::secure_fs::SecureFsError::TooLarge { .. }) => {
+            return ToolExecutionOutput::error(
+                ErrorCode::InvalidArguments,
+                format!(
+                    "file '{}' grew beyond max_edit_file_bytes ({} bytes) while being read",
+                    rel_str, max_edit_file_bytes
+                ),
+                ToolResultMeta {
+                    relative_path: Some(rel_str),
+                    ..Default::default()
+                },
+            )
+        }
+        Err(e) => {
+            return ToolExecutionOutput::error(
+                ErrorCode::IoError,
+                format!("failed to read '{}': {}", rel_str, e),
+                ToolResultMeta {
+                    relative_path: Some(rel_str),
+                    ..Default::default()
+                },
+            )
+        }
+    };
 
     if raw_bytes.contains(&0u8) {
         return ToolExecutionOutput::error(
