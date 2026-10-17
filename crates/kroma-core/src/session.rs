@@ -5,7 +5,7 @@
 //! hits: those additionally depend on stable wire serialization and provider cache policy.
 
 use crate::attribution::MutationRecord;
-use crate::context_projector::{extract_source_entry_id, ContextProjector, EvidenceLink};
+use crate::context_projector::{ContextProjector, EvidenceLink};
 use crate::messages::TranscriptItem;
 use crate::prompt::sha256_hex64;
 use serde::{Deserialize, Serialize};
@@ -623,15 +623,22 @@ impl SessionJournal {
             }) else {
                 continue;
             };
+            // T05 (KR-04): the typed metadata is the authority. The text pointer is only a
+            // cross-check, and a legacy entry is migrated only when it is *shaped* like a host stub
+            // for this exact id — a bare `source_entry_id=` substring anywhere in tool output never
+            // upgrades an entry into a compacted one.
             let metadata_matches = if let Some(meta) = active_tr.meta.compaction.as_ref() {
                 meta.schema_version == 1
                     && meta.source_entry_id == link.source_entry_id
                     && meta.original_sha256 == link.original_sha256
+                    // A stub whose evidence was evicted keeps its identity but must not advertise
+                    // recoverable bytes.
+                    && meta.is_available()
             } else {
-                // Legacy v1 projection: allow only a genuine host-recorded WAL overlay with
-                // evidence-link metadata, never infer a link from a marker alone.
-                extract_source_entry_id(&active_tr.content).as_deref()
-                    == Some(link.source_entry_id.as_str())
+                crate::context_projector::is_host_stub_header(
+                    &active_tr.content,
+                    &link.source_entry_id,
+                )
             };
             if metadata_matches {
                 projector.register_evidence(link.clone(), Arc::clone(&raw_tr.content));

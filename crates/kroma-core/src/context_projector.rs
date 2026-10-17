@@ -45,7 +45,30 @@ pub fn source_entry_id(canonical_index: usize, call_id: &str) -> String {
     format!("ev-{:04}-{}", canonical_index, call_id)
 }
 
-/// Parse the `source_entry_id=<id>` field back out of an Outline Stub header.
+/// T05 (KR-04): is `content` exactly the host's own stub shape for `source_entry_id`?
+///
+/// A bare `source_entry_id=...` substring is **not** enough: source code, logs and tool output can
+/// contain one. The host stub always starts with `[Compacted: ` or `[Dead-end: ` and carries the
+/// pointer in its exact rendered form. This is the only text-level check trusted anywhere, and it is
+/// still only a *cross-check*: the authority is the branch-scoped projection overlay.
+pub fn is_host_stub_header(content: &str, source_entry_id: &str) -> bool {
+    if source_entry_id.is_empty() {
+        return false;
+    }
+    if !(content.starts_with("[Compacted: ") || content.starts_with("[Dead-end: ")) {
+        return false;
+    }
+    let pointer = format!(
+        " | source_entry_id={id} | call recall_evidence(source_entry_id={id})",
+        id = source_entry_id
+    );
+    content.contains(&pointer)
+}
+
+/// Parse the `source_entry_id=<id>` field back out of a stub header.
+///
+/// T05: display/telemetry only. Nothing may grant trust from this alone — see
+/// [`is_host_stub_header`].
 pub fn extract_source_entry_id(content: &str) -> Option<String> {
     let start = content.find("source_entry_id=")? + "source_entry_id=".len();
     let rest = &content[start..];
@@ -1011,6 +1034,13 @@ impl ContextProjector {
                                 CompactionReason::DeadEnd => "dead_end",
                             }
                             .into(),
+                            // T05 (KR-04): the raw bytes were just registered in the evidence
+                            // store, so the pointer is honest at the moment it is written.
+                            availability: if records_evidence {
+                                crate::messages::CompactionAvailability::Available
+                            } else {
+                                crate::messages::CompactionAvailability::Unknown
+                            },
                         });
                         // Gate 7: the raw image payload is dropped with the raw text. Older turns keep
                         // only the one-line summary (already inside the stub) so the context budget

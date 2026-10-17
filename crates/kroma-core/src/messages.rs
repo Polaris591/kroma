@@ -147,15 +147,66 @@ impl ImageAttachment {
     }
 }
 
+/// T05 (KR-04): whether the raw bytes behind a stub can still be produced on demand.
+///
+/// The stub text is a human-readable hint; *this* is the machine-readable answer. A stub whose
+/// evidence was evicted must not be advertised as recoverable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionAvailability {
+    /// The raw output is still registered in the evidence store and `recall_evidence` can return it.
+    Available,
+    /// The raw output is gone (cache eviction, retention limit). The stub remains, the pointer lies.
+    Evicted,
+    /// Not recorded (pre-T05 WAL): unknown until the evidence store is consulted.
+    #[default]
+    Unknown,
+}
+
+impl CompactionAvailability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CompactionAvailability::Available => "available",
+            CompactionAvailability::Evicted => "evicted",
+            CompactionAvailability::Unknown => "unknown",
+        }
+    }
+}
+
 /// Trusted projection identity, written by the host when an output is archived.
-/// The human-readable source_entry_id in tool text is NEVER authoritative.
-/// serde(default) on the containing field preserves pre-v2 WAL compatibility.
+///
+/// T05 (KR-04): this typed metadata — not the `source_entry_id=` text inside tool output — is what
+/// decides whether an item is compacted and whether its raw bytes are recoverable. Field names map
+/// onto the contract as: `source_entry_id` = the host's source event id, `original_sha256` = the raw
+/// hash, `reason` = why it was archived, `availability` = whether the raw bytes are still there.
+///
+/// `serde(default)` on the containing field preserves pre-v2 WAL compatibility, and `availability`
+/// defaults to [`CompactionAvailability::Unknown`] so an older WAL never claims availability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactionMetadata {
     pub schema_version: u32,
     pub source_entry_id: String,
     pub original_sha256: String,
     pub reason: String,
+    #[serde(default)]
+    pub availability: CompactionAvailability,
+}
+
+impl CompactionMetadata {
+    /// T05: the host event this stub was minted for (contract name: `source_event_id`).
+    pub fn source_event_id(&self) -> &str {
+        &self.source_entry_id
+    }
+
+    /// T05: hash of the raw bytes this stub replaced (contract name: `raw_hash`).
+    pub fn raw_hash(&self) -> &str {
+        &self.original_sha256
+    }
+
+    /// T05: `true` when the raw bytes can still be produced on demand.
+    pub fn is_available(&self) -> bool {
+        !matches!(self.availability, CompactionAvailability::Evicted)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

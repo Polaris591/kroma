@@ -164,6 +164,28 @@
       "exit": 0,
       "log": "logs/test_t04.log",
       "note": "T04: 852 passed / 0 failed"
+    },
+    {
+      "id": "t05_targeted",
+      "cmd": "cargo test -p kroma-core --test t05_compaction_identity",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T05: 6 passed / 0 failed"
+    },
+    {
+      "id": "t05_gate2",
+      "cmd": "cargo test -p kroma-core --test gate2_evidence_projection",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T05: 18 passed / 0 failed"
+    },
+    {
+      "id": "t05_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t05.log",
+      "note": "T05: 857 passed / 1 failed (b08c_git_metadata pre-existing flake, 5/5 green serially)"
     }
   ]
 }
