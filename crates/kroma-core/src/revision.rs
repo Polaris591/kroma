@@ -145,7 +145,16 @@ pub struct TrackedFile {
 /// Metadata for a captured workspace state (§5 `WorkspaceRevision`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRevision {
+    /// Content address of this tree (path + hash + mode). See `docs/adr/0001-snapshot-identity.md`:
+    /// identical content *is* the same snapshot, even when it was reached twice.
     pub revision_id: RevisionId,
+    /// Best-effort pointer to the revision captured just before this one.
+    ///
+    /// **Not an immutable history graph.** `revision_id` is content-addressed, so returning to earlier
+    /// content overwrites this manifest and rewrites the pointer (A → B → A loses the A→B edge here).
+    /// The authoritative history is the session WAL's `RevisionRecord`; undo and `--restore-rev` targets
+    /// must be resolved from there (`revision_at_or_before_turn`, checkpoints), never by walking this
+    /// field.
     pub parent_revision_id: Option<RevisionId>,
     #[serde(default)]
     pub wal_entry_id: Option<String>,
