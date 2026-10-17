@@ -1,0 +1,34 @@
+tampered_source_archive_fails_before_extract
+  ok  a matching digest passes
+  ok  a tampered archive is refused before extraction
+  ok  no pin in the repository is a configuration error, not a pass
+  ok  the workflow verifies the digest before extracting
+release_uses_same_commit_for_tests_and_artifacts
+  ok  the same commit passes
+  ok  artifacts from another commit are refused
+release_quality_failure_blocks_pack_and_sign
+  ok  all gates passing allows packing
+  ok  any failing gate blocks pack and sign
+missing_platform_artifact_cannot_publish
+  ok  every declared platform present allows publishing
+  ok  a missing platform blocks the release
+cargo_lock_change_requires_review
+  ok  the checked-in lock matches its pinned digest
+  ok  a changed lock is refused (and so is a missing pin)
+rebuild_identity_is_comparable
+  ok  the same artifacts produce the same identity regardless of order
+  ok  any byte or length change changes the identity
+  ok  an artifact without a digest cannot contribute to an identity
+release artifacts and the signed manifest agree
+  ok  matching manifest passes
+  ok  a manifest for different bytes is refused
+SBOM is recomputable
+  ok  the SBOM is deterministic and every component is pinned
+  ok  a registry crate without a checksum is refused
+third-party actions are pinned
+  ok  an unpinned action reference is detected
+       release.yml: 0 pinned, 22 on mutable tags (owner must supply reviewed SHAs)
+  ok  the repository's current action pinning state is reported
+
+all 21 checks passed
+EXIT=0

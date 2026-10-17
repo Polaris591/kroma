@@ -21,6 +21,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   OPENSSL_VERSION: '3.5.7'
+  # T22 (KR-29): the digest of openssl-${OPENSSL_VERSION}.tar.gz. It is verified before extraction;
+  # an empty value fails the step instead of silently extracting an unverified archive. Record the
+  # value the owner verified (see docs/release/README.md) rather than a digest copied from a mirror.
+  OPENSSL_SHA256: ''
   ANDROID_NDK_VERSION: '26.3.11579264'
 
 jobs:
@@ -121,12 +125,19 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Install the NDK
         run: sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
-      - name: Fetch OpenSSL sources
+      - name: Fetch and verify OpenSSL sources
         run: |
+          if [ -z "${OPENSSL_SHA256}" ]; then
+            echo "error: OPENSSL_SHA256 is not set; refusing to extract an unverified archive" >&2
+            exit 1
+          fi
           curl -fsSL --retry 3 -o openssl.tar.gz \
             "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
             || curl -fsSL --retry 3 -o openssl.tar.gz \
             "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          # T22 (KR-29): verify *before* extract, so a tampered archive never reaches the filesystem
+          # as source. `sha256sum -c` exits non-zero on mismatch.
+          echo "${OPENSSL_SHA256}  openssl.tar.gz" | sha256sum -c -
           tar -xzf openssl.tar.gz
       - uses: Swatinem/rust-cache@v2
       # No stubs. Android's own libssl/libcrypto are BoringSSL, which is not an OpenSSL ABI (the

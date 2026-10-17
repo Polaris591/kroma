@@ -464,6 +464,28 @@
       "exit": 0,
       "log": "logs/t21_trust_root.log",
       "note": "T21: 13 test-channel checks pass (tamper/unknown/rotated/expired/downgrade/no-overwrite); production trust root is empty by design"
+    },
+    {
+      "id": "t22_release_pipeline",
+      "cmd": "node scripts/test-release-pipeline.js",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t22_release_pipeline.log",
+      "note": "T22: 21 checks passed (archive pin before extract, same-commit, quality gates block pack, platform presence, lock pin, rebuild identity, manifest/artifact match, SBOM determinism, action pinning detector)"
+    },
+    {
+      "id": "t22_lock_pin",
+      "cmd": "node scripts/release-gate.js lock",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T22: Cargo.lock matches docs/release/Cargo.lock.sha256"
+    },
+    {
+      "id": "t22_sbom",
+      "cmd": "node scripts/generate-sbom.js --out docs/release/sbom.json",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T22: 124 components, lockfile caa80f28..., sbom 0c866311... (deterministic)"
     }
   ]
 }
