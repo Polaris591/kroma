@@ -131,6 +131,10 @@ pub struct CliArgs {
     pub mcp_servers: Vec<kroma_core::config_file::McpServerConfig>,
     /// F05 (`v1.5.1`): explicit `--max-tokens` run-tree token cap (input + output).
     pub max_tokens: Option<u64>,
+    /// T17 (KR-12): path to a versioned experiment manifest. When given, the manifest is validated and
+    /// its job list is printed (a dry run) before anything else happens; an invalid manifest is
+    /// refused before a provider is ever called.
+    pub experiment: Option<String>,
     /// Gate 6: headless output format (`text` or `jsonl`).
     pub output_format: String,
     /// Gate 6: optional authentication token for `kroma serve`.
@@ -238,6 +242,7 @@ where
     let mut max_subagents_explicit = false;
     // F05 (`v1.5.1`): `--max-tokens` override for the run-tree token cap.
     let mut max_tokens: Option<u64> = None;
+    let mut experiment: Option<String> = None;
     let mut no_subagents = false;
     let mut counterfactual_probe = false;
     let mut tournament_require_verified = true;
@@ -629,6 +634,12 @@ where
                     .map_err(|_| "--max-subagents expects a non-negative integer".to_string())?;
                 max_subagents_explicit = true;
             }
+            "--experiment" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --experiment <path>".to_string())?;
+                experiment = Some(val);
+            }
             "--max-tokens" => {
                 let val = iter
                     .next()
@@ -798,6 +809,7 @@ where
         multi_session,
         mcp_servers,
         max_tokens,
+        experiment,
         output_format,
         auth_token,
         protocol,
@@ -2066,6 +2078,45 @@ async fn main() -> ExitCode {
     };
 
     let state_dir = resolve_default_state_dir();
+
+    // T17 (KR-12): an experiment manifest is validated — and its job list resolved — before any
+    // provider is contacted. `--experiment` on its own is a dry run: it prints the exact jobs the
+    // runner would schedule and exits, so "what would this cost" is answerable without spending.
+    if let Some(path) = cli.experiment.as_deref() {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("error: cannot read experiment manifest {}: {}", path, e);
+                return ExitCode::from(2);
+            }
+        };
+        let resolved = match kroma_core::experiment::ExperimentManifest::from_json(&text) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+        };
+        if !cli.quiet {
+            eprintln!(
+                "experiment {}: {} arms x {} tasks x {} repeats = {} jobs, basis={}, digest={}",
+                resolved.manifest.id,
+                resolved.manifest.arms.len(),
+                resolved.manifest.tasks.len(),
+                resolved.manifest.repeats,
+                resolved.jobs.len(),
+                resolved.decision_basis.as_str(),
+                &resolved.digest[..16]
+            );
+            for line in resolved.job_lines() {
+                eprintln!("  job {}", line);
+            }
+        }
+        // Without a bench/run to attach to, this was the whole request.
+        if matches!(cli.surface, CliSurface::Bench { .. }) || cli.task.is_none() {
+            return ExitCode::SUCCESS;
+        }
+    }
 
     // Item #3 (`v1.4.0`): `kroma bench` is a self-contained measurement command. With the default
     // `--executor synthetic` it never contacts a provider; `--executor provider` loads the same

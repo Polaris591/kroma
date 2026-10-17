@@ -381,6 +381,21 @@
       "exit": 0,
       "log": "logs/test_t16.log",
       "note": "T16: 925 passed / 0 failed"
+    },
+    {
+      "id": "t17_targeted",
+      "cmd": "cargo test -p kroma-core --test t17_experiment_manifest",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T17: 10 passed / 0 failed (ids, holdout, matrix cap, export+hash, unknown fields, dir collisions, baselines, promotion)"
+    },
+    {
+      "id": "t17_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t17.log",
+      "note": "T17: 935 passed / 0 failed"
     }
   ]
 }

@@ -12,6 +12,7 @@ pub mod context_economy;
 pub mod context_projector;
 pub mod env;
 pub mod events;
+pub mod experiment;
 pub mod evidence_store;
 pub mod experience;
 pub mod experience_runtime;
