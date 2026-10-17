@@ -143,17 +143,30 @@ impl RpcDispatcher {
                         // is not an implicit Allow: cancellation or policy reconfiguration may
                         // have invalidated it during the operator's decision.
                         let digest = args_digest.as_deref().ok_or_else(|| {
-                            JsonRpcError::new(JSONRPC_INTERNAL_ERROR, "approval intent has no digest")
-                        })?;
-                        self.inner.policy_engine.consume_grant(&auth_scope, digest).map_err(|rejection| {
                             JsonRpcError::new(
                                 JSONRPC_INTERNAL_ERROR,
-                                format!("session.tournament approval grant rejected: {:?}", rejection),
+                                "approval intent has no digest",
                             )
                         })?;
-                        let current_revision = self.inner.status.lock()
+                        self.inner
+                            .policy_engine
+                            .consume_grant(&auth_scope, digest)
+                            .map_err(|rejection| {
+                                JsonRpcError::new(
+                                    JSONRPC_INTERNAL_ERROR,
+                                    format!(
+                                        "session.tournament approval grant rejected: {:?}",
+                                        rejection
+                                    ),
+                                )
+                            })?;
+                        let current_revision = self
+                            .inner
+                            .status
+                            .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .latest_revision_id.as_deref()
+                            .latest_revision_id
+                            .as_deref()
                             .and_then(|id| RevisionId::parse(id).ok());
                         if current_revision != auth_scope.revision {
                             return Err(JsonRpcError::new(
@@ -224,14 +237,48 @@ impl RpcDispatcher {
         // Fail closed on supplied but mistyped optional parameters. Silent coercion would
         // let the operator approve a different execution scope than the caller requested.
         for (field, valid) in [
-            ("candidates", params.get("candidates").is_none_or(Value::is_u64)),
-            ("max_turns", params.get("max_turns").is_none_or(Value::is_u64)),
-            ("timeout_ms", params.get("timeout_ms").is_none_or(Value::is_u64)),
-            ("disallow_test_tampering", params.get("disallow_test_tampering").is_none_or(Value::is_boolean)),
-            ("strategies", params.get("strategies").is_none_or(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))),
-            ("protected_paths", params.get("protected_paths").is_none_or(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))),
-            ("allowed_paths", params.get("allowed_paths").is_none_or(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))),
-            ("allowed_write_globs", params.get("allowed_write_globs").is_none_or(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))),
+            (
+                "candidates",
+                params.get("candidates").is_none_or(Value::is_u64),
+            ),
+            (
+                "max_turns",
+                params.get("max_turns").is_none_or(Value::is_u64),
+            ),
+            (
+                "timeout_ms",
+                params.get("timeout_ms").is_none_or(Value::is_u64),
+            ),
+            (
+                "disallow_test_tampering",
+                params
+                    .get("disallow_test_tampering")
+                    .is_none_or(Value::is_boolean),
+            ),
+            (
+                "strategies",
+                params
+                    .get("strategies")
+                    .is_none_or(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string))),
+            ),
+            (
+                "protected_paths",
+                params
+                    .get("protected_paths")
+                    .is_none_or(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string))),
+            ),
+            (
+                "allowed_paths",
+                params
+                    .get("allowed_paths")
+                    .is_none_or(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string))),
+            ),
+            (
+                "allowed_write_globs",
+                params
+                    .get("allowed_write_globs")
+                    .is_none_or(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string))),
+            ),
         ] {
             if !valid {
                 return Err(JsonRpcError::new(
@@ -357,7 +404,10 @@ impl RpcDispatcher {
             .ok_or_else(|| JsonRpcError::new(JSONRPC_INVALID_PARAMS, "expected tournament mode"))?;
         let allowed_write_globs = validated.allowed_write_globs;
         if max_turns == Some(0) {
-            return Err(JsonRpcError::new(JSONRPC_INVALID_PARAMS, "max_turns must be > 0"));
+            return Err(JsonRpcError::new(
+                JSONRPC_INVALID_PARAMS,
+                "max_turns must be > 0",
+            ));
         }
         let approved_arguments = serde_json::json!({
             "role": "worker",
@@ -376,7 +426,8 @@ impl RpcDispatcher {
         })
         .to_string();
         // Always resolve and approve first; quota is committed only after successful approval.
-        self.tournament_preflight(count, &approved_arguments).await?;
+        self.tournament_preflight(count, &approved_arguments)
+            .await?;
         {
             let mut status = self.inner.status.lock().unwrap_or_else(|e| e.into_inner());
             status.subagents_spawned = status.subagents_spawned.saturating_add(count);

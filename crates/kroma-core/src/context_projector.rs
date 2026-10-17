@@ -999,6 +999,7 @@ impl ContextProjector {
                             reason: match reason {
                                 CompactionReason::StepDownArchive => "step_down_archive",
                                 CompactionReason::SupersededRead => "superseded_read",
+                                CompactionReason::DeadEnd => "dead_end",
                             }
                             .into(),
                         });

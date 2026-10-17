@@ -617,8 +617,7 @@ impl SessionJournal {
                     && link.tool_name == raw_tr.tool_name
                     && link.call_id == active_tr.call_id.0
                     && link.original_sha256 == sha256_hex64(raw_tr.content.as_bytes())
-                    && link.original_bytes
-                        == raw_tr.content.len() + raw_tr.image_attachment_bytes()
+                    && link.original_bytes == raw_tr.content.len() + raw_tr.image_attachment_bytes()
                     && link.stub_bytes == active_tr.content.len()
                     && link.original_bytes > active_tr.content.len()
             }) else {
@@ -1359,9 +1358,9 @@ fn validate_wal_append_capacity(
     let line_bytes = u64::try_from(serialized_line_with_newline_len).map_err(|_| {
         SessionError::Invalid("session WAL append length does not fit into u64".into())
     })?;
-    let total = pre_write_len.checked_add(line_bytes).ok_or_else(|| {
-        SessionError::Invalid("session WAL append length overflow".into())
-    })?;
+    let total = pre_write_len
+        .checked_add(line_bytes)
+        .ok_or_else(|| SessionError::Invalid("session WAL append length overflow".into()))?;
     if total > max_file_bytes {
         return Err(SessionError::Invalid(format!(
             "session WAL append would exceed the maximum file size of {max_file_bytes} bytes"
@@ -1863,8 +1862,13 @@ mod tests {
         assert_eq!(wal.next_seq, seq_before);
         assert_eq!(wal.last_hash, hash_before);
         // Rejection must not poison the journal or make a following valid append fail.
-        wal.append_item(0, TranscriptItem::User(UserMessage { content: "ok".into() }))
-            .unwrap();
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "ok".into(),
+            }),
+        )
+        .unwrap();
         drop(wal);
         assert!(SessionJournal::open(&path).is_ok());
         let _ = fs::remove_dir_all(dir);
