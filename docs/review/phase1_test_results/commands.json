@@ -591,6 +591,42 @@
       "exit": 0,
       "log": "logs/test_t29.log",
       "note": "T29: 995 passed / 0 failed"
+    },
+    {
+      "id": "t30_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t30_final.log",
+      "note": "T30 sealed tree: 995 passed / 0 failed"
+    },
+    {
+      "id": "t30_clippy",
+      "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T30: 0 warnings"
+    },
+    {
+      "id": "t30_fmt_touched",
+      "cmd": "rustfmt --check --edition 2021 $(git diff --name-only 19723b6..HEAD | grep '\\.rs$')",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T30: 0 diffs across the 95 touched files (whole-tree non-clean count 507 baseline -> 105, all pre-existing)"
+    },
+    {
+      "id": "t30_patch_applies",
+      "cmd": "git apply --check dist-t30/kroma_T00_T30.patch",
+      "cwd": "delivered tree 19723b6",
+      "exit": 0,
+      "note": "T30: patch applies cleanly to the delivered source"
+    },
+    {
+      "id": "t30_node_suites",
+      "cmd": "node scripts/test-kroma-js-upgrade.js; node scripts/test-release-trust-root.js; node scripts/test-release-pipeline.js",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T30: 108 + 13 + 21 checks passed"
     }
   ]
 }
