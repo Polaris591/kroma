@@ -524,6 +524,21 @@
       "exit": 101,
       "log": "logs/test_t25.log",
       "note": "T25: 971 passed / 1 failed (b08c 2.2 documented flake, 5/5 green serially)"
+    },
+    {
+      "id": "t26_targeted",
+      "cmd": "cargo test -p kroma-core --test t26_localization",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T26: 2 passed / 0 failed (5/5 natural-language rank-1 vs 0/5 symbol-name baseline on opaque filenames; truncation fallback works)"
+    },
+    {
+      "id": "t26_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t26.log",
+      "note": "T26: 974 passed / 0 failed"
     }
   ]
 }

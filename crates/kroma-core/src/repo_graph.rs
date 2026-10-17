@@ -50,6 +50,11 @@ const FOCUS_FILE_WEIGHT: f64 = 400.0;
 /// reads as "the file you asked about, then the call chain around it" rather than "the file, then
 /// whichever file the repository mentions most".
 const NEIGHBOUR_WEIGHT: f64 = 30.0;
+/// T26 (KR-31): weight for a file whose *content* tokens (identifiers **and** comment words) contain
+/// a query term. Lower than a symbol definition (an exact name match is stronger evidence than a
+/// mention) but far above noise, because this is what lets a natural-language issue reach a file
+/// whose comment describes the behaviour.
+const CONTENT_MATCH_WEIGHT: f64 = 90.0;
 /// Upper bound on `max_nodes` accepted from the model.
 pub const MAX_MAX_NODES: usize = 40;
 /// Signature lines rendered per ranked file.
@@ -210,6 +215,9 @@ pub struct RepoGraph {
     /// B1 (`v1.4.0`): number of files served from the incremental parse cache instead of being
     /// re-parsed during this build.
     pub cache_hits: usize,
+    /// T26 (KR-31): per-file content tokens (identifiers plus comment words). Kept so a query can
+    /// match what a file *says*, not only what it is named.
+    file_tokens: Vec<BTreeSet<String>>,
     /// T16 (KR-25): `(path, content sha256)` for every file actually indexed, in index order.
     /// Returned with the coverage counters so a caller can tell *which* files a truncated graph
     /// covers instead of only how many.
@@ -586,9 +594,12 @@ impl RepoGraph {
             skipped_files,
             cache_hits: 0,
             file_hashes,
+            // Filled in after edge construction, which borrows the token sets.
+            file_tokens: Vec::new(),
         };
         graph.cache_hits = cache_hits;
         graph.build_edges(&file_symbols, &file_tokens, &file_import_tokens);
+        graph.file_tokens = file_tokens;
         graph
     }
 
@@ -749,6 +760,18 @@ impl RepoGraph {
             });
             if defines_match {
                 mark_seed(&mut personal, &mut seeds, idx, SYMBOL_DEFINITION_WEIGHT);
+                continue;
+            }
+            // T26: the file's own tokens (identifiers + comment words) are weaker evidence than a
+            // definition but are what makes a question like "where is the retry backoff computed"
+            // reachable at all when it names no symbol.
+            let content_match = self
+                .file_tokens
+                .get(idx)
+                .map(|tokens| lowered_terms.iter().any(|t| tokens.contains(t)))
+                .unwrap_or(false);
+            if content_match {
+                mark_seed(&mut personal, &mut seeds, idx, CONTENT_MATCH_WEIGHT);
             }
         }
         for seed in seed_files {
