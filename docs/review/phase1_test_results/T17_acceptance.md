@@ -117,7 +117,7 @@ development 数字只被接收、记录、并排展示，**不参与裁决**。�
 - **没有接线到真实 bench 执行**：`--experiment` 目前做的是校验 + dry run（+ 与 bench 同进程时的前置校验）。
   真正的「按 manifest 调度 provider bench」需要 provider 额度，属于 T24；本项不声称它已跑通，
   台账里 T24 记为待执行。
-- `cli_manifest_roundtrip_reaches_all_runtime_settings` 只覆盖到「manifest → ResolvedExperiment」这一层：
+- `cli_manifest_roundtrip_reaches_all_runtime_settings`（无同名测试）只覆盖到「manifest → ResolvedExperiment」这一层：
   sandbox / oracle / budget 进入了结构与 digest，但还没有逐个落到 `ProviderBenchSettings` 的字段上
   （那一步在 T24 的调度器里）。
 - 矩阵上限 10000 jobs 与每 job 256 tokens 的下限是**保守的估计值**，不是精确成本模型；

@@ -100,7 +100,7 @@
 
 ## 四、边界
 
-- `cost_saving_requires_noninferior_quality_and_complete_usage` 与
+- `cost_saving_requires_noninferior_quality_and_complete_usage`（无同名测试，合并项）与
   `oracle_hash_is_unchanged_after_candidate` 没有单独用例：前者属于 T18 的成本账目（`CostSummary`
   已要求 `incomplete` 时不给结论），后者由 `source_untouched` + 裁判身份覆盖（源树与裁判都未被触碰）。
   这两条记为 T30 台账的合并项，不是遗漏声明。

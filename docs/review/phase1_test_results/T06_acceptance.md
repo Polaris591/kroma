@@ -92,6 +92,6 @@
 - 没有改 `find`/`edit` 的**写出**路径，只改读取。
 - 注册表「超记录数」现在报错而不是截断：这是行为变化，旧 WAL 若真有 65 条会被拒绝加载并
   明确报错，比静默丢掉第 65 条好。已记入 T07（WAL 写入/恢复限制）的输入。
-- `oversized_or_symlink_report_is_refused_before_read` 没有做 host 级测试（`DurableTaskHost::new`
+- `oversized_or_symlink_report_is_refused_before_read`（无同名测试）没有做 host 级测试（`DurableTaskHost::new`
   需要 provider/snapshot store 等一整套夹具），当前由 `secure_fs` 的 symlink/超限单测 +
   `read_report` 的调用点代码共同覆盖；host 级用例留到 T17/T18 建好夹具后补。

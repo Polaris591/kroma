@@ -627,6 +627,13 @@
       "cwd": "patched",
       "exit": 0,
       "note": "T30: 108 + 13 + 21 checks passed"
+    },
+    {
+      "id": "t30_ledger",
+      "cmd": "node scripts/verify-ledger.js",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T30: 32 acceptance docs, 82 commands, 31 task rows; every cited identifier exists or is explicitly marked as not-tested"
     }
   ]
 }

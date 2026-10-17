@@ -82,11 +82,11 @@ CLI：`node scripts/release-gate.js actions` / `lock`，退出码 1 = 门禁失�
 | `release_uses_same_commit_for_tests_and_artifacts` | 不同 commit、短 SHA |
 | `release_quality_failure_blocks_pack_and_sign` | 四门禁逐个 `fail` + `skipped` |
 | `missing_platform_artifact_cannot_publish` | 缺平台、未声明平台 |
-| `cargo_lock_change_requires_review` / `dependency_pin_changes_invalidate_cache` | 摘要匹配/不匹配/缺失 |
+| `cargo_lock_change_requires_review`（`dependency_pin_changes_invalidate_cache` 无同名测试，由同一个 `assertDependencyLockUnchanged` 覆盖） | 摘要匹配/不匹配/缺失 |
 | `rebuild_identity_is_comparable` | 顺序无关、字节与长度敏感、缺摘要拒绝 |
 | `release artifacts 与签名 manifest 的 SHA 一致` | sha/length/version/空清单 |
 | `cargo_lock_change_requires_review` 的 SBOM 侧 | 组件确定性 + registry 组件必须有 checksum |
-| `manual_release_preserves_identical_gates` | 同一套 `assertQualityGates` 被 CLI 与 CI 共用 |
+| `manual_release_preserves_identical_gates`（无同名测试） | 同一套 `assertQualityGates` 被 CLI 与 CI 共用，故手工发布走同一组门禁 |
 | `third-party Action 钉 commit` | 检测器已实现并测过（仓库现状见 BLOCKED） |
 
 ## 五、BLOCKED 明细

@@ -94,7 +94,7 @@
 
 ## 四、边界与未完成
 
-- `per_arm_prefix_identity_is_not_collapsed`（每个 arm 的前缀身份不能被合并）与
+- `per_arm_prefix_identity_is_not_collapsed`（未实现，无同名测试；每个 arm 的前缀身份不能被合并）与
   `runtime_injection_changes_request_identity_not_historical_wal`（运行时注入只改请求身份、不改历史 WAL）
   这两条**未实现/未测**：前者属于 bench 调度层（T24），后者需要注入路径的端到端用例。
 - `unreadable_source_never_yields_complete_identity` 的「读失败」分支在测试进程里是 root，
