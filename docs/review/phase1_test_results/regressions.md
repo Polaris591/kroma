@@ -64,6 +64,12 @@
 复现率：全量跑时出现 1 次，单独重跑该模块 8 次全过。
 分类：**随机不稳定（既有）**，`mcp.rs` 不在本批改动范围内。同一台机器上并发跑全 workspace 时，临时文件/目录的创建与删除存在竞态。
 
+### 2.5 `session_ownership::tests::different_workspaces_are_independent_and_same_workspace_is_exclusive`
+
+失败形态：`session_ownership.rs:419` 的 `unwrap()` 拿到 `WriterConflict { current_owner: "owner-a\t<pid>" }`——测试自己用同一进程的两个 owner 争同一 workspace，期望第二次冲突，但并发跑时抢到了另一个用例/线程持有的锁。
+复现率：全量跑 1 次，单独重跑 6 次全过。
+分类：**测试设计缺陷（既有）**，`session_ownership.rs` 不在本批改动范围。
+
 ## 3. 交接包声称 vs 本环境实测
 
 | 交接包说法 | 本环境实测 |

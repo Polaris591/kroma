@@ -660,6 +660,74 @@ pub fn effective_disallow_test_tampering(host: bool, requested: bool) -> bool {
     host || requested
 }
 
+/// T02 (KR-30): the budget fields a human or hook is asked to approve, in a compact stable form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalTournamentBudget {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_total_tokens: Option<u64>,
+    pub max_model_turns: usize,
+    pub max_model_request_attempts: usize,
+    pub max_tool_calls: usize,
+    pub max_run_duration_ms: u64,
+    pub request_timeout_ms: u64,
+}
+
+impl CanonicalTournamentBudget {
+    pub fn from_config(budget: &crate::budget::BudgetConfig) -> Self {
+        Self {
+            max_total_tokens: budget.max_total_tokens,
+            max_model_turns: budget.max_model_turns,
+            max_model_request_attempts: budget.max_model_request_attempts,
+            max_tool_calls: budget.max_tool_calls,
+            max_run_duration_ms: budget.max_run_duration.as_millis().min(u64::MAX as u128) as u64,
+            request_timeout_ms: budget.request_timeout.as_millis().min(u64::MAX as u128) as u64,
+        }
+    }
+}
+
+/// T02 (KR-30): the exact, normalized tournament request that a hook or a human authorizes.
+///
+/// One intent is built from the resolved host policy plus the caller's arguments, and then used for
+/// three things that must never disagree: the hook/approval payload, the digest that binds the
+/// grant, and the [`TournamentSpec`] that actually runs. It carries every candidate-defining field,
+/// the *expanded* strategy list (defaults included), the effective protection set and the resolved
+/// verification requirement — never a `role=worker` placeholder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalTournamentIntent {
+    pub task: String,
+    pub candidates: usize,
+    pub strategies: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_paths: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+    pub timeout_ms: u64,
+    pub disallow_test_tampering: bool,
+    pub protected_paths: Vec<String>,
+    pub require_verified: bool,
+    pub verification_policy_source: String,
+    pub budget: CanonicalTournamentBudget,
+    pub predictive_check: bool,
+}
+
+impl CanonicalTournamentIntent {
+    /// Stable JSON: object keys are sorted, so two equal intents always serialize identically no
+    /// matter how they were constructed. This is what hooks and approvals see.
+    pub fn canonical_json(&self) -> String {
+        match serde_json::to_value(self) {
+            Ok(value) => crate::tool::policy::canonical_json(&value),
+            // Serialization of plain owned data cannot fail; fail closed with an empty object
+            // rather than an unstable string if it ever does.
+            Err(_) => "{}".to_string(),
+        }
+    }
+
+    /// Digest over the canonical JSON. Only this digest (never the display string) binds a grant.
+    pub fn digest(&self) -> String {
+        crate::prompt::sha256_hex64(self.canonical_json().as_bytes())
+    }
+}
+
 /// Detect a tournament request in `spawn_subagent` arguments.
 ///
 /// Returns `Ok(None)` for a plain fan-out call. A tournament is requested either by

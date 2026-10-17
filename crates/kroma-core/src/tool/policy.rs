@@ -140,10 +140,12 @@ impl GrantTable {
 /// rather than hashed, so a malformed call cannot mint a grant.
 pub fn canonical_arguments_digest(raw_arguments: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(raw_arguments).ok()?;
-    Some(crate::prompt::sha256_hex64(canonical_json(&value).as_bytes()))
+    Some(crate::prompt::sha256_hex64(
+        canonical_json(&value).as_bytes(),
+    ))
 }
 
-fn canonical_json(value: &serde_json::Value) -> String {
+pub(crate) fn canonical_json(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();

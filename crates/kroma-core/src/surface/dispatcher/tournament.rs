@@ -174,6 +174,27 @@ impl RpcDispatcher {
                                 "session.tournament revision changed while approval was pending",
                             ));
                         }
+                        // T02 (KR-30): the approved budget must still be the budget that runs. A
+                        // `/config set max_tokens` (or any other live cap change) during the
+                        // approval wait invalidates the decision instead of silently spending a
+                        // different amount than the operator approved.
+                        // T02 (KR-30): the approved budget must still be the budget that runs. A
+                        // `/config set max_tokens` (or any other live cap change) during the
+                        // approval wait invalidates the decision instead of silently spending a
+                        // different amount than the operator approved.
+                        let approved_max_tokens = serde_json::from_str::<Value>(approved_arguments)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("budget")
+                                    .and_then(|b| b.get("max_total_tokens"))
+                                    .and_then(Value::as_u64)
+                            });
+                        if self.active_max_tokens() != approved_max_tokens {
+                            return Err(JsonRpcError::new(
+                                JSONRPC_INTERNAL_ERROR,
+                                "session.tournament token budget changed while approval was pending",
+                            ));
+                        }
                         Ok(())
                     }
                     ApprovalDecision::Deny => Err(JsonRpcError::new(
@@ -425,23 +446,22 @@ impl RpcDispatcher {
                 "max_turns must be > 0",
             ));
         }
-        let approved_arguments = serde_json::json!({
-            "role": "worker",
-            "mode": "tournament",
-            "task": task,
-            "candidates": count,
-            "strategies": resolved_strategies,
-            "allowed_paths": allowed_write_globs,
-            "max_turns": max_turns,
-            "timeout_ms": timeout_ms,
-            "disallow_test_tampering": disallow_test_tampering,
-            "protected_paths": protected_paths,
-            "require_verified": verification.require_verified,
-            "verification_policy_source": verification.source.as_str(),
-            "budget": approved_budget,
-            "predictive_check": self.inner.config.predictive_check,
-        })
-        .to_string();
+        // T02 (KR-30): one normalized intent feeds the hook, the approval digest and the run.
+        let intent = crate::subagents::CanonicalTournamentIntent {
+            task: task.clone(),
+            candidates: count,
+            strategies: resolved_strategies.clone(),
+            allowed_paths: allowed_write_globs.clone(),
+            max_turns,
+            timeout_ms,
+            disallow_test_tampering,
+            protected_paths: protected_paths.clone(),
+            require_verified: verification.require_verified,
+            verification_policy_source: verification.source.as_str().to_string(),
+            budget: crate::subagents::CanonicalTournamentBudget::from_config(&approved_budget),
+            predictive_check: self.inner.config.predictive_check,
+        };
+        let approved_arguments = intent.canonical_json();
         // Always resolve and approve first; quota is committed only after successful approval.
         self.tournament_preflight(count, &approved_arguments)
             .await?;

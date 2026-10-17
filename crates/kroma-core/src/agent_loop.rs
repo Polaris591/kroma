@@ -3190,18 +3190,6 @@ impl AgentRunner {
             ),
             crate::subagents::VerificationPolicySource::HostStrict => None,
         };
-        if let Some(reason) = audit_reason {
-            let _ = logger.log(EventPayload::PolicyDecision {
-                call_id: call_id.clone(),
-                tool_name: "spawn_subagent".to_string(),
-                decision: "allow".to_string(),
-                reason: Some(format!(
-                    "verification_policy={} {}",
-                    verification.source.as_str(),
-                    reason
-                )),
-            });
-        }
         // T01 (KR-01): host-owned protection wins; task-level arguments can only add to it.
         let disallow_test_tampering = crate::subagents::effective_disallow_test_tampering(
             self.host_disallow_test_tampering,
@@ -3212,19 +3200,95 @@ impl AgentRunner {
             &request.protected_paths,
         );
 
+        // F04: the same clamped budget and timeout are approved and executed.
+        let effective_budget = deadline.map_or_else(
+            || self.config.budget.clone(),
+            |d| {
+                self.config
+                    .budget
+                    .clamped_to_deadline(d, self.config.budget.max_model_request_attempts)
+            },
+        );
+        let effective_timeout_ms = deadline.map_or(request.timeout_ms.max(1), |d| {
+            let remaining_ms = d.remaining().as_millis().min(u64::MAX as u128) as u64;
+            request.timeout_ms.max(1).min(remaining_ms.max(1))
+        });
+
+        // T02 (KR-30): build the one normalized intent that the hook, the audit trail and the run
+        // all share. A hook therefore sees the real task, every expanded candidate strategy, the
+        // effective budget/timeout, the merged protection set and the resolved verification policy
+        // — never a `role=worker` placeholder.
+        let intent = crate::subagents::CanonicalTournamentIntent {
+            task: request.task.clone(),
+            candidates: candidates.len(),
+            strategies: candidates
+                .iter()
+                .filter_map(|c| c.strategy.clone())
+                .collect(),
+            allowed_paths: request.allowed_write_globs.clone(),
+            max_turns: request.max_turns,
+            timeout_ms: effective_timeout_ms,
+            disallow_test_tampering,
+            protected_paths: protected_paths.clone(),
+            require_verified: verification.require_verified,
+            verification_policy_source: verification.source.as_str().to_string(),
+            budget: crate::subagents::CanonicalTournamentBudget::from_config(&effective_budget),
+            predictive_check: self.tool_runtime.predictive_check_enabled(),
+        };
+        let intent_json = intent.canonical_json();
+        let hook_call = crate::messages::ToolCall {
+            call_id: call_id.clone(),
+            name: "spawn_subagent".to_string(),
+            raw_arguments: intent_json,
+        };
+        if let Err((denied, _)) = self
+            .tool_runtime
+            .pre_tool_hook_gate(&hook_call, absolute_turn)
+            .await
+        {
+            return (
+                ToolExecutionOutput::error(
+                    ErrorCode::PolicyDenied,
+                    format!(
+                        "tournament denied by policy hook on the canonical intent: {}",
+                        denied.content
+                    ),
+                    ToolResultMeta::default(),
+                ),
+                "deny_hook".to_string(),
+                false,
+            );
+        }
+        let intent_digest = intent.digest();
+        let _ = logger.log(EventPayload::PolicyDecision {
+            call_id: call_id.clone(),
+            tool_name: "spawn_subagent".to_string(),
+            decision: "allow".to_string(),
+            reason: Some(match &audit_reason {
+                Some(reason) => format!(
+                    "tournament_intent digest={} candidates={} require_verified={} verification_policy={} {}",
+                    intent_digest,
+                    intent.candidates,
+                    intent.require_verified,
+                    verification.source.as_str(),
+                    reason
+                ),
+                None => format!(
+                    "tournament_intent digest={} candidates={} require_verified={} verification_policy={}",
+                    intent_digest,
+                    intent.candidates,
+                    intent.require_verified,
+                    verification.source.as_str()
+                ),
+            }),
+        });
+
         let spec = TournamentSpec {
             candidates,
             worktree_base: self.tool_runtime.env().state_dir().join("worktrees"),
             state_base: self.tool_runtime.env().state_dir().join("subagents"),
             allowed_write_globs: request.allowed_write_globs.clone(),
-            budget: deadline.map_or_else(
-                || self.config.budget.clone(),
-                |d| {
-                    self.config
-                        .budget
-                        .clamped_to_deadline(d, self.config.budget.max_model_request_attempts)
-                },
-            ),
+            budget: effective_budget,
             // F05 (`v1.5.1`): candidates reserve from the same run-tree ledger as the parent and
             // its plain subagents, so a race cannot overspend the remaining budget.
             token_budget: Some(Arc::clone(&self.token_budget)),
@@ -3237,10 +3301,7 @@ impl AgentRunner {
             workspace_skills: self.tool_runtime.registry().skills(),
             predictive_check: self.tool_runtime.predictive_check_enabled(),
             cancel_rx: self.cancel_rx.clone(),
-            timeout_ms: deadline.map_or(request.timeout_ms.max(1), |d| {
-                let remaining_ms = d.remaining().as_millis().min(u64::MAX as u128) as u64;
-                request.timeout_ms.max(1).min(remaining_ms.max(1))
-            }),
+            timeout_ms: effective_timeout_ms,
             // Test path protection remains an independent policy: verified repairs may
             // legitimately add new regression tests. Frozen oracles need their own host-
             // managed protected paths (T19), not a blanket ban on editing tests.
