@@ -27,7 +27,7 @@
 | T19 | AHE 不可自改裁判 | PASS | `t19_ahe_isolation`（9 条，源树指纹前后一致）；基线原地跑变异验证 | 5ac80e1 |
 | T20 | 能力文档与验证索引 | PASS | `t20_capability_manifest`（7 条，清单 vs 仓库证据/CLI 参数/版本一致） | 3b9384e |
 | T21 | 真实发布信任根 | **BLOCKED** | 测试通道 13 项 + 既有 108 项 Node 检查通过；生产信任根为空且 frozen；缺所有者密钥 | 4ee0cd2 |
-| T22 | 发布与供应链闭环 | **PARTIAL** | `test-release-pipeline.js` 21 项；OpenSSL 解包前校验、同 commit、锁钉住、SBOM 124 组件；缺 Action commit 钉住与签名 | 2411bd8 |
+| T22 | 发布与供应链闭环 | **PARTIAL**（仅缺签名） | `test-release-pipeline.js` 21 项 + `release-gate.js actions` 38 处全部 commit 钉住（8 个动作经 GitHub API 解析）；OpenSSL 解包前校验、同 commit、锁钉住、SBOM 124 组件；仅剩签名 manifest（等 T21 密钥） | 2411bd8 + 后续 |
 | T23 | 快照身份与恢复不变量 | PASS | `t23_snapshot_identity`（5 条实测 A→B→A / 崩溃重放 / rename+chmod / 多次 undo）+ ADR-0001 | 0479d71 |
 | T24 | 真实模型冻结基线 | **BLOCKED** | EXP-00 冻结配置 48 jobs / digest `05757bf3`；无费用上限授权，未调付费服务 | b10d23e |
 | T25 | TaskState 与语义压缩 | PASS（EXP-01/02 BLOCKED） | `t25_task_state`（4 条，强制压缩 + WAL resume 后约束逐字不变） | b5c17f2 |
@@ -42,8 +42,8 @@
 | 项 | 缺什么 | 已交付什么 |
 | --- | --- | --- |
 | T21 真实签名链 | 所有者 Ed25519 密钥对、keyId、轮换策略、真实 release manifest | 校验路径的 13 项测试通道证据 + 失败即拒绝的既有 108 项 + 所有者操作清单 |
-| T22 Action 钉 commit | 审核过的 40 位 commit SHA（本机无网络） | 检测器已实现并测试；其余 21 项供应链检查通过 |
-| T22 签名 manifest | 同 T21 | `assertManifestMatchesArtifacts` 已用未签名 manifest 验证产物一致性 |
+| T22 签名 manifest | 同 T21 | 已用未签名 manifest 验证产物一致性（`assertManifestMatchesArtifacts`） |
+
 | T24 真实模型基线 | 明确的费用上限 + provider/模型授权 + 时间窗 | 冻结 manifest（48 jobs，digest 固定）、任务集、价目表、预注册判决规则 |
 | T25/T26/T27/T28/T29 的实验 | 同 T24 的预算 | 机制与离线指标全部就绪并有测试；默认开关保持不变 |
 

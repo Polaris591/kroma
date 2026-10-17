@@ -291,6 +291,26 @@ ok("an unpinned action reference is detected", () => {
     assertActionsPinned(`      - uses: actions/checkout@${"a".repeat(40)}\n`),
     1
   );
+  // The conventional pinned-with-comment form passes: the trailing `# v4` is documentation, not part
+  // of the reference. Treating it as part of the pin would push maintainers to drop the comment.
+  assert.strictEqual(
+    assertActionsPinned(`      - uses: actions/checkout@${"a".repeat(40)} # v4\n`),
+    1
+  );
+  assert.strictEqual(
+    assertActionsPinned(`      - uses: actions/cache@${"b".repeat(40)} # v4.0.2 (node20)\n`),
+    1
+  );
+  // The comment cannot rescue an unpinned reference.
+  refuses(
+    () => assertActionsPinned("      - uses: actions/checkout@v4 # looks pinned\n"),
+    "must be pinned to a 40-character commit sha"
+  );
+  // Nor can a comment hide a short pin.
+  refuses(
+    () => assertActionsPinned(`      - uses: actions/checkout@${"a".repeat(39)} # v4\n`),
+    "must be pinned to a 40-character commit sha"
+  );
 });
 
 // Report (do not fail on) the repository's current pinning state: the owner has to supply the
@@ -302,7 +322,8 @@ ok("the repository's current action pinning state is reported", () => {
   for (const line of workflow.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("- uses:") && !trimmed.startsWith("uses:")) continue;
-    const reference = trimmed.replace(/^(-\s*)?uses:\s*/, "");
+    // Strip a trailing `# v4` comment the same way the gate does, so the report matches reality.
+    const reference = trimmed.replace(/(^|\s)#.*$/, "").replace(/^(-\s*)?uses:\s*/, "").trim();
     if (reference.startsWith("./") || reference.startsWith(".github/")) continue;
     const pin = reference.slice(reference.lastIndexOf("@") + 1);
     if (/^[0-9a-f]{40}$/.test(pin)) pinned += 1;

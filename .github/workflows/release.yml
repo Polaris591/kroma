@@ -32,20 +32,20 @@ jobs:
     name: linux-x64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the pinned Rust toolchain
         run: |
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
           rustup default "$toolchain"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build --release -p kroma-cli
       - run: ./target/release/kroma --version
       # Not a string check and not `--version`: this makes the artifact perform a real HTTPS request
       # and then proves an untrusted certificate is rejected.
       - name: TLS smoke (real HTTPS + untrusted certificate rejected)
         run: scripts/tls-smoke.sh target/release/kroma
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-x64
           path: target/release/kroma
@@ -55,7 +55,7 @@ jobs:
     name: win32-x64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the pinned Rust toolchain
         run: |
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
@@ -63,7 +63,7 @@ jobs:
           rustup default "$toolchain"
       - run: rustup target add x86_64-pc-windows-gnu
       - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build --release --target x86_64-pc-windows-gnu -p kroma-cli
       - name: The Windows binary must not depend on OpenSSL
         run: |
@@ -72,7 +72,7 @@ jobs:
             echo "::error::the Windows binary links an OpenSSL DLL; it should use schannel only"
             exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: win32-x64
           path: target/x86_64-pc-windows-gnu/release/kroma.exe
@@ -82,26 +82,26 @@ jobs:
     name: darwin-arm64 + darwin-x64
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the pinned Rust toolchain
         run: |
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
           rustup default "$toolchain"
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # Both binaries are built in this job, so there is no way for the release to pick up a stale
       # darwin artifact: packaging later consumes exactly what is uploaded here.
       - run: cargo build --release --target aarch64-apple-darwin -p kroma-cli
       - run: cargo build --release --target x86_64-apple-darwin -p kroma-cli
       - run: ./target/aarch64-apple-darwin/release/kroma --version
       - run: ./target/x86_64-apple-darwin/release/kroma --version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: darwin-arm64
           path: target/aarch64-apple-darwin/release/kroma
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: darwin-x64
           path: target/x86_64-apple-darwin/release/kroma
@@ -111,18 +111,18 @@ jobs:
     name: android-arm64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the pinned Rust toolchain
         run: |
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
           rustup default "$toolchain"
       - run: rustup target add aarch64-linux-android
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - name: Install the NDK
         run: sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
       - name: Fetch and verify OpenSSL sources
@@ -139,7 +139,7 @@ jobs:
           # as source. `sha256sum -c` exits non-zero on mismatch.
           echo "${OPENSSL_SHA256}  openssl.tar.gz" | sha256sum -c -
           tar -xzf openssl.tar.gz
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # No stubs. Android's own libssl/libcrypto are BoringSSL, which is not an OpenSSL ABI (the
       # SSL_ctrl family this crate calls for SNI was removed) and is not exported to third-party
       # code by the NDK at all. Link a real static OpenSSL instead.
@@ -179,7 +179,7 @@ jobs:
             echo "::error::the Android binary carries no OpenSSL implementation"
             exit 1
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: android-arm64
           path: target/aarch64-linux-android/release/kroma
@@ -193,7 +193,7 @@ jobs:
       ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
       ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the pinned Rust toolchain
         run: |
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
@@ -215,7 +215,7 @@ jobs:
             || curl -fsSL --retry 3 -o openssl.tar.gz \
             "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
           tar -xzf openssl.tar.gz
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # The arm64 musl binary used to be linked against *stub* SSL symbols, so it had no working
       # TLS at all. Build a real static OpenSSL instead; the script refuses to be a stub.
       - name: Build static OpenSSL for aarch64-musl
@@ -244,7 +244,7 @@ jobs:
       - name: TLS smoke (real HTTPS + untrusted certificate rejected)
         # The same runtime gate as linux-x64, but for the cross-built artifact, executed under qemu.
         run: scripts/tls-smoke.sh target/aarch64-unknown-linux-musl/release/kroma qemu-aarch64-static
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-arm64
           path: target/aarch64-unknown-linux-musl/release/kroma
@@ -255,9 +255,9 @@ jobs:
     needs: [linux, windows, macos, android, musl]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Collect the six binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       - name: Place them where the packaging script expects them
         run: |
           set -euo pipefail
@@ -267,13 +267,13 @@ jobs:
           install -Dm755 android-arm64/kroma target/aarch64-linux-android/release/kroma
           install -Dm755 darwin-arm64/kroma target/aarch64-apple-darwin/release/kroma
           install -Dm755 darwin-x64/kroma  target/x86_64-apple-darwin/release/kroma
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '20' }
       # Refuses to pack a missing target, and refuses to pack an artifact older than the sources it
       # claims to be built from: a silently shipped stale darwin or linux-arm64 binary is worse than
       # a failed release.
       - run: npm/build-npm-packages.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: kroma-cli-tarball
           path: npm/dist/*.tgz

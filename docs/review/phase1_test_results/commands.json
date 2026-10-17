@@ -634,6 +634,13 @@
       "cwd": "patched",
       "exit": 0,
       "note": "T30: 32 acceptance docs, 82 commands, 31 task rows; every cited identifier exists or is explicitly marked as not-tested"
+    },
+    {
+      "id": "t22_action_pins",
+      "cmd": "node scripts/release-gate.js actions",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T22: all 38 uses: entries pinned to 40-char commit SHAs (8 distinct actions resolved via GitHub API); pinned-with-comment form supported"
     }
   ]
 }

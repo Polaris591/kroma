@@ -104,3 +104,29 @@ CLI：`node scripts/release-gate.js actions` / `lock`，退出码 1 = 门禁失�
 - 每平台运行证据表里，android / windows / darwin 明确标为未原生运行（darwin 直接阻断），
   没有把跨编译当成实跑。
 - `dist/` 产物不纳入仓库；SBOM 与锁摘要作为证据放在 `docs/release/`。
+
+## 六、本轮更新：Action 钉住已完成（2026-10-18）
+
+上一轮把「Action 必须钉到 40 位 commit」记为缺件（当时判断本机无外网）。实际 **GitHub REST API 可达**
+（`api.github.com` 返回 200；`raw.githubusercontent.com` 不可达），所以这一项不必等所有者手工抄：
+
+| 动作 | 钉住的 commit |
+| --- | --- |
+| `actions/checkout@v4` | `11d5960a326750d5838078e36cf38b85af677262` |
+| `actions/cache@v4` | `0057852bfaa89a56745cba8c7296529d2fc39830` |
+| `actions/download-artifact@v4` | `d3f86a106a0bac45b974a628896c90dbdf5c8093` |
+| `actions/setup-java@v4` | `cf277c60eb25467037889841efdb72551f06f6c3` |
+| `actions/setup-node@v4` | `49933ea5288caeca8642d1e84afbd3f7d6820020` |
+| `actions/upload-artifact@v4` | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
+| `android-actions/setup-android@v3` | `9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407` |
+| `Swatinem/rust-cache@v2` | `6323deb102c322ba6fcbdcafc7e3dddab59af2b6` |
+
+解析方式：`GET /repos/<owner>/<repo>/commits/<tag>` 取回该 tag 当前指向的 commit（annotated tag 会被解引用）。
+钉住后 `release.yml` 22 处、`ci.yml` 16 处，共 **38 处全部为 40 位**，`node scripts/release-gate.js actions` 通过。
+
+顺带修了门禁本身的一个真问题：它把行尾注释也算进引用，于是业界标准的
+`uses: owner/action@<sha> # v4` 写法会被误判为未钉住——这会把维护者逼成删注释。现在门禁先剥掉
+`# ...` 再校验，并补了 4 条测试（带注释的 40 位通过、带注释的 39 位仍被拒、注释不能救活
+`@v4`、repo 状态报告同步剥离注释后显示 22 pinned / 0 mutable）。
+
+因此 T22 现在只剩**签名 manifest** 一项等 T21 的密钥，其余全部通过。

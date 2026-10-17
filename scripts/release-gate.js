@@ -187,7 +187,10 @@ function assertActionsPinned(workflowText) {
     .filter((line) => line.startsWith("- uses:") || line.startsWith("uses:"));
   const unpinned = [];
   for (const line of usesLines) {
-    const reference = line.replace(/^(-\s*)?uses:\s*/, "").trim();
+    // `owner/action@<sha> # v4` is the conventional pinned form: the comment keeps the human-readable
+    // version and must not be treated as part of the reference.
+    const withoutComment = line.replace(/(^|\s)#.*$/, "");
+    const reference = withoutComment.replace(/^(-\s*)?uses:\s*/, "").trim();
     if (reference.startsWith("./") || reference.startsWith(".github/")) continue;
     const at = reference.lastIndexOf("@");
     if (at < 0) {
