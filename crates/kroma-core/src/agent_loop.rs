@@ -66,6 +66,25 @@ pub(crate) fn approx_tokens(bytes: usize) -> u64 {
 /// single string in the request.
 pub const REQUEST_SERIALIZATION_OVERHEAD_BYTES: usize = 1024;
 
+/// T04 (KR-02): record a settlement that pushed the shared ledger past its limit.
+///
+/// The overrun is *not* truncated to fit the budget: it is charged, labelled with its basis, and
+/// audited. No further request can be reserved afterwards, so the run stops without dispatching
+/// anything else.
+fn audit_token_settlement(logger: &mut EventLogger, record: &crate::budget::SettlementRecord) {
+    if record.budget_overage == 0 {
+        return;
+    }
+    let _ = logger.log(EventPayload::TokenBudgetOverage {
+        settlement: format!("{:?}", record.settlement),
+        reserved: record.reserved,
+        charged: record.charged,
+        spent: record.spent_after,
+        limit: record.spent_after.saturating_sub(record.budget_overage),
+        overage: record.budget_overage,
+    });
+}
+
 /// T03 (KR-03): bytes of the canonical history. On a `--resume` the projector has not yet absorbed
 /// the restored transcript when the pre-send estimate is taken, so summing the canonical items (not
 /// the already-projected ones) is what keeps a resumed run from sending an over-window request.
@@ -1207,7 +1226,7 @@ impl AgentRunner {
             (None, Some(b)) => Some(b),
             (None, None) => None,
         };
-        let max_output_tokens = match allowed {
+        let run_output_allowance = match allowed {
             Some(remaining) if remaining > estimated_input_tokens => {
                 Some(remaining - estimated_input_tokens)
             }
@@ -1226,6 +1245,17 @@ impl AgentRunner {
             }
             None => None,
         };
+        // T04 (KR-02): a request may claim at most a per-request output allowance, never the whole
+        // remaining run allowance. Reserving everything up front is what made a single transient
+        // failure fatal: the retry then had nothing left to reserve even though the failed attempt
+        // had barely consumed anything. `None` (an unbounded run) keeps the historical unbounded
+        // request cap so no existing behaviour changes.
+        let max_output_tokens = run_output_allowance.map(|_| {
+            self.model_capabilities.per_request_output_cap(
+                state.budget_tracker.config().max_output_tokens_per_request,
+                run_output_allowance,
+            )
+        });
         // T03 (KR-07): the window check covers the *whole* request — system prompt, tool schemas,
         // history, images and the output reservation — and runs before anything is transmitted.
         // `bytes / 4` is not a tokenizer, so this uses the conservative estimator (non-ASCII text is
@@ -1344,7 +1374,20 @@ impl AgentRunner {
                 // those reservations are conservatively left un-settled so Drop commits them to
                 // the ledger to keep budget ceilings fail-closed.
                 if err.is_provably_zero_consumption() && wire_attempts.get() == 0 {
-                    token_reservation.settle(0);
+                    // T04 (KR-02): only a request that provably never left the process refunds its
+                    // allowance. `settle_not_dispatched` refuses (and leaves the reservation to be
+                    // charged as unknown) if a wire attempt was in fact transmitted.
+                    match token_reservation.settle_not_dispatched(wire_attempts.get() as u64) {
+                        Ok(record) => audit_token_settlement(&mut logger, &record),
+                        Err(e) => {
+                            let _ = logger.log(EventPayload::PolicyDecision {
+                                call_id: crate::types::ToolCallId::new("token-budget"),
+                                tool_name: "budget".to_string(),
+                                decision: "settlement_refused".to_string(),
+                                reason: Some(e.to_string()),
+                            });
+                        }
+                    }
                     state.budget_tracker.refund_unsent_request_attempt();
                 }
                 // A failed call must still report the attempts it actually transmitted: the summary
@@ -1397,16 +1440,21 @@ impl AgentRunner {
                         .sum::<usize>(),
                 ),
         );
-        let settled_tokens = completion.turn.usage.as_ref().map_or(
-            estimated_input_tokens.saturating_add(estimated_output_tokens),
-            |usage| usage.input_tokens.saturating_add(usage.output_tokens),
-        );
         if completion.attempts_used > 1 {
-            // The first attempt failed with unknown consumption; retain its allowance.
-            // Protocol clients settled the successful retry against its own reservation.
-            drop(token_reservation);
+            // T04 (KR-02): the first attempt failed after transmission, so what it consumed cannot
+            // be proven. Charge the whole reservation as unknown; the protocol client settled the
+            // successful retry against its own reservation.
+            let record = token_reservation.settle_unknown();
+            audit_token_settlement(&mut logger, &record);
+        } else if let Some(usage) = completion.turn.usage.as_ref() {
+            let record =
+                token_reservation.settle_with_usage(usage.input_tokens, usage.output_tokens);
+            audit_token_settlement(&mut logger, &record);
         } else {
-            token_reservation.settle(settled_tokens);
+            // No usage reported: charge the labelled pre-dispatch estimate, never a measured zero.
+            let record =
+                token_reservation.settle_estimate(estimated_input_tokens, estimated_output_tokens);
+            audit_token_settlement(&mut logger, &record);
         }
 
         // Prefer the observed count: a provider that mis-reports `attempts_used` cannot make the

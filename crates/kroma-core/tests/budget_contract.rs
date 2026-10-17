@@ -1,4 +1,12 @@
 //! F05 (`v1.5.1`) budget contract: request and parallel-subtask reservation/settlement.
+// T04 (KR-02) note on the fail-closed assertions below: before T04 a child's first request
+// reserved its *whole* allocation as the output cap, so a post-dispatch 503 charged the entire
+// 64k allocation and any retry was impossible. A request now reserves only a per-request output
+// allowance (`DEFAULT_PER_REQUEST_OUTPUT_TOKENS`), so a post-dispatch failure holds exactly what
+// that request could have consumed and the unused remainder stays available to a retry or sibling.
+// The invariant these tests protect is unchanged: an ambiguous post-dispatch failure is never
+// refunded to zero. The bound is now `>= 8_192` (the per-request output allowance) instead of the
+// whole allocation, and never more than the allocation itself.
 //!
 //! The fix replaces the per-run token counter with one shared [`TokenBudget`] ledger for the whole
 //! run tree. This file pins the three invariants the review asked for, using a counting provider
@@ -215,7 +223,7 @@ impl ModelProvider for CountingProvider {
                     latency_ms: 1,
                     ttft_ms: Some(1),
                     attempts_used: 1,
-                reported_model: None,
+                    reported_model: None,
                 }),
                 Step::AwaitCancel => {
                     let _ = cancel_rx.changed().await;
@@ -519,7 +527,7 @@ fn first_request_503_preserves_ledger_hold_while_reporting_zero_measured_tokens(
     // Because an HTTP 503 is a post-dispatch server/gateway response that cannot prove zero
     // backend consumption, the ledger conservatively withholds the reservation fail-closed.
     assert!(
-        ledger.spent() >= 64_000,
+        ledger.spent() >= 8_192,
         "shared ledger must hold the conservative reservation fail-closed for post-dispatch 503, spent={}",
         ledger.spent()
     );
@@ -560,8 +568,17 @@ fn gateway_errors_500_502_504_preserve_ledger_hold_while_reporting_zero_measured
         );
         assert_eq!(summary.children_input_tokens, 0);
         assert!(
-            ledger.spent() >= 64_000,
-            "502 Bad Gateway cannot prove zero consumption; ledger must withhold reservation"
+            ledger.spent() >= 8_192,
+            "502 Bad Gateway cannot prove zero consumption; ledger must withhold reservation (T04: the failing *request* holds its own reservation, which is at least its per-request output allowance, and is never refunded)",
+            );
+        // T04 (KR-02): the child reserved a per-request allowance rather than its whole
+        // allocation, so a transient failure no longer burns the allocation: the unused
+        // remainder is available to a retry or a sibling. Consumption beyond what the request
+        // reserved was impossible (the provider was given that output cap), so returning the
+        // unused remainder is not an optimistic refund.
+        assert!(
+            ledger.spent() <= 64_000,
+            "the hold must never exceed what the run could have consumed",
         );
     }
 
@@ -595,8 +612,17 @@ fn gateway_errors_500_502_504_preserve_ledger_hold_while_reporting_zero_measured
         );
         assert_eq!(summary.children_input_tokens, 0);
         assert!(
-            ledger.spent() >= 64_000,
-            "504 Gateway Timeout cannot prove zero consumption; ledger must withhold reservation"
+            ledger.spent() >= 8_192,
+            "504 Gateway Timeout cannot prove zero consumption; ledger must withhold reservation (T04: the failing *request* holds its own reservation, which is at least its per-request output allowance, and is never refunded)",
+            );
+        // T04 (KR-02): the child reserved a per-request allowance rather than its whole
+        // allocation, so a transient failure no longer burns the allocation: the unused
+        // remainder is available to a retry or a sibling. Consumption beyond what the request
+        // reserved was impossible (the provider was given that output cap), so returning the
+        // unused remainder is not an optimistic refund.
+        assert!(
+            ledger.spent() <= 64_000,
+            "the hold must never exceed what the run could have consumed",
         );
     }
 }
@@ -642,7 +668,7 @@ fn successful_partial_usage_followed_by_503_reports_measured_and_holds_remaining
     assert_eq!(summary.children_output_tokens, 100);
     // The ledger holds the full 64,000 allocation (2,600 settled for turn 1 + 61,400 conservative hold for turn 2).
     assert!(
-        ledger.spent() >= 64_000,
+        ledger.spent() >= 8_192,
         "shared ledger must hold the 64000 allocation fail-closed including the unverified turn 2 hold, spent={}",
         ledger.spent()
     );
@@ -684,7 +710,7 @@ fn retry_ambiguous_then_rejection_preserves_ledger_hold() {
     assert_eq!(summary.children_input_tokens, 0);
     // Attempt 1 may have consumed tokens before dropping; ledger must conservatively hold allocation.
     assert!(
-        ledger.spent() >= 64_000,
+        ledger.spent() >= 8_192,
         "ledger must retain conservative hold when provider retried an ambiguous attempt before 503, spent={}",
         ledger.spent()
     );
@@ -773,7 +799,7 @@ fn cancellation_after_partial_usage_preserves_remaining_reservation_and_reports_
     assert_eq!(summary.children_input_tokens, 2500);
     assert_eq!(summary.children_output_tokens, 100);
     assert!(
-        ledger.spent() >= 64_000,
+        ledger.spent() >= 8_192,
         "shared ledger must hold the conservative reservation fail-closed for unknown consumption, spent={}",
         ledger.spent()
     );
@@ -929,7 +955,7 @@ fn cancelled_child_spend_is_preserved() {
 
     assert_eq!(summary.terminal_reason, TerminalReason::ModelStop);
     assert!(
-        ledger.spent() >= 64_000,
+        ledger.spent() >= 8_192,
         "a cancelled child's reservation must stay accounted for, spent={}",
         ledger.spent()
     );

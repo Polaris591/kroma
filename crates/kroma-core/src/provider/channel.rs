@@ -15,32 +15,48 @@ static CHANNELS: OnceLock<Mutex<HashMap<EndpointKey, Arc<ChannelGovernor>>>> = O
 // healthy entries may be reclaimed; open breakers survive client reconstruction through cooldown.
 const MAX_CHANNELS: usize = 256;
 
-pub(super) fn shared_channel(endpoint: &ValidatedEndpoint) -> Result<Arc<ChannelGovernor>, ProviderError> {
+pub(super) fn shared_channel(
+    endpoint: &ValidatedEndpoint,
+) -> Result<Arc<ChannelGovernor>, ProviderError> {
     let base = endpoint.base_path.trim_end_matches('/');
-    let base = ["/chat/completions", "/messages", "/responses"].iter()
-        .find_map(|suffix| base.strip_suffix(suffix)).unwrap_or(base);
-    let base = if base.ends_with("/v1") { base.to_string() } else { format!("{base}/v1") };
+    let base = ["/chat/completions", "/messages", "/responses"]
+        .iter()
+        .find_map(|suffix| base.strip_suffix(suffix))
+        .unwrap_or(base);
+    let base = if base.ends_with("/v1") {
+        base.to_string()
+    } else {
+        format!("{base}/v1")
+    };
     // The validated wire authority is also the pool identity. Local aliases must not create a
     // second limiter for the same loopback endpoint.
     let host = endpoint.host.to_ascii_lowercase();
     let host = if matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1") {
         "loopback".to_string()
-    } else { host };
+    } else {
+        host
+    };
     let key = (endpoint.scheme.clone(), host, endpoint.port, base);
-    let mut channels = CHANNELS.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner());
+    let mut channels = CHANNELS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(channel) = channels.get(&key) {
         return Ok(Arc::clone(channel));
     }
     if channels.len() >= MAX_CHANNELS {
         channels.retain(|_, channel| {
             let health = channel.snapshot();
-            Arc::strong_count(channel) > 1 || health.in_flight > 0
+            Arc::strong_count(channel) > 1
+                || health.in_flight > 0
                 || (health.state != "closed" && health.retry_after != Some(Duration::ZERO))
         });
         if channels.len() >= MAX_CHANNELS {
-            return Err(ProviderError::NotDispatched(Box::new(ProviderError::Transport(
-                "process channel registry is full of live or cooling channels".into(),
-            ))));
+            return Err(ProviderError::NotDispatched(Box::new(
+                ProviderError::Transport(
+                    "process channel registry is full of live or cooling channels".into(),
+                ),
+            )));
         }
     }
     // Provider max_retries and the run's remaining attempts remain authoritative. Their existing
@@ -56,8 +72,12 @@ pub(super) fn shared_channel(endpoint: &ValidatedEndpoint) -> Result<Arc<Channel
 
 pub(super) async fn cancelled(cancel: &mut watch::Receiver<bool>) {
     loop {
-        if *cancel.borrow() { return; }
-        if cancel.changed().await.is_err() { std::future::pending::<()>().await; }
+        if *cancel.borrow() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -77,9 +97,13 @@ pub(super) async fn admit<'a>(
             },
         }),
     };
-    result.map_err(|error| if attempts_used == 0 {
-        ProviderError::NotDispatched(Box::new(error))
-    } else { error })
+    result.map_err(|error| {
+        if attempts_used == 0 {
+            ProviderError::NotDispatched(Box::new(error))
+        } else {
+            error
+        }
+    })
 }
 
 pub(super) fn record_outcome(channel: &ChannelGovernor, error: Option<&ProviderError>) {
@@ -87,8 +111,15 @@ pub(super) fn record_outcome(channel: &ChannelGovernor, error: Option<&ProviderE
         None => channel.record_success(),
         // Health failures only. A user cancellation, malformed model content or a per-request
         // authorization rejection must not poison unrelated users' otherwise healthy channel.
-        Some(ProviderError::HttpStatus { status: 429 | 500 | 502 | 503 | 504, .. }
-            | ProviderError::Transport(_) | ProviderError::Timeout | ProviderError::IncompleteStream(_)) => {
+        Some(
+            ProviderError::HttpStatus {
+                status: 429 | 500 | 502 | 503 | 504,
+                ..
+            }
+            | ProviderError::Transport(_)
+            | ProviderError::Timeout
+            | ProviderError::IncompleteStream(_),
+        ) => {
             channel.record_failure();
         }
         Some(ProviderError::HttpStatus { .. } | ProviderError::RedirectBlocked(_)) => {

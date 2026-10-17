@@ -71,6 +71,17 @@ pub enum EventPayload {
         tool_schema_bytes: usize,
         message_count: usize,
     },
+    /// T04 (KR-02): the settled charge pushed the shared ledger past its configured limit. The run
+    /// stops here (no further reservation can succeed, so no further request is dispatched) and the
+    /// overrun is recorded rather than truncated to fit the budget.
+    TokenBudgetOverage {
+        settlement: String,
+        reserved: u64,
+        charged: u64,
+        spent: u64,
+        limit: u64,
+        overage: u64,
+    },
     PolicyDecision {
         call_id: ToolCallId,
         tool_name: String,

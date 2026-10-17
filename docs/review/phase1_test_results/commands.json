@@ -148,6 +148,22 @@
       "exit": 0,
       "log": "logs/test_t03.log",
       "note": "T03: 844 passed / 0 failed"
+    },
+    {
+      "id": "t04_targeted",
+      "cmd": "cargo test -p kroma-core --test t04_budget_lifecycle",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "not archived (inline: 8 passed / 0 failed)",
+      "note": "T04 reservation lifecycle"
+    },
+    {
+      "id": "t04_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t04.log",
+      "note": "T04: 852 passed / 0 failed"
     }
   ]
 }

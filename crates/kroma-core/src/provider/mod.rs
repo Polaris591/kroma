@@ -1,10 +1,10 @@
 pub mod anthropic_messages;
+mod channel;
 pub mod chat_completions;
 pub mod endpoint;
 pub mod openai_responses;
 pub mod sse;
 mod transport;
-mod channel;
 
 use crate::budget::{BudgetConfig, TokenBudget, TokenReservation};
 use crate::messages::{AssistantTurn, CacheBreakpointMarker, FinishReason, TranscriptItem};
@@ -69,7 +69,10 @@ impl ProviderError {
     /// attempts) cannot prove zero backend consumption; those reservations are conservatively left
     /// un-settled so `Drop` commits them to the ledger to keep budget ceilings fail-closed.
     pub fn is_provably_zero_consumption(&self) -> bool {
-        matches!(self, ProviderError::InsecureUrl(_) | ProviderError::NotDispatched(_))
+        matches!(
+            self,
+            ProviderError::InsecureUrl(_) | ProviderError::NotDispatched(_)
+        )
     }
 
     /// Backwards-compatible alias for [`Self::is_provably_zero_consumption`].
@@ -135,7 +138,11 @@ pub struct RetryBudget {
 }
 
 impl RetryBudget {
-    fn reserve(&self) -> Result<TokenReservation, ProviderError> {
+    /// T04 (KR-02): claim this attempt's allowance from the shared ledger.
+    ///
+    /// Public so a deterministic fake transport can exercise the same retry accounting the three
+    /// protocol clients use, without a network.
+    pub fn reserve(&self) -> Result<TokenReservation, ProviderError> {
         if self.per_attempt == 0 {
             return Err(ProviderError::RetryBudgetExhausted);
         }
@@ -153,7 +160,10 @@ fn reserve_retry(
     if attempts_used == 0 {
         Ok(None)
     } else {
-        req.retry_budget.as_ref().map(RetryBudget::reserve).transpose()
+        req.retry_budget
+            .as_ref()
+            .map(RetryBudget::reserve)
+            .transpose()
     }
 }
 
@@ -165,9 +175,16 @@ mod retry_budget_tests {
     fn reported_identity_is_unknown_when_missing_and_conflicts_are_rejected() {
         assert_eq!(model_from_json(r#"{"choices":[]}"#).unwrap(), None);
         assert_eq!(model_from_json(r#"{"model":" "}"#).unwrap(), None);
-        assert_eq!(model_from_json(r#"{"model":"returned-model"}"#).unwrap().as_deref(), Some("returned-model"));
+        assert_eq!(
+            model_from_json(r#"{"model":"returned-model"}"#)
+                .unwrap()
+                .as_deref(),
+            Some("returned-model")
+        );
         let mut model = Some("first".to_string());
-        assert!(capture_reported_model(&mut model, &serde_json::json!({"model":"second"})).is_err());
+        assert!(
+            capture_reported_model(&mut model, &serde_json::json!({"model":"second"})).is_err()
+        );
         assert_eq!(model.as_deref(), Some("first"));
     }
 
@@ -175,10 +192,16 @@ mod retry_budget_tests {
     fn zero_allowance_is_refused_and_dropped_retry_is_unknown() {
         let ledger = Arc::new(TokenBudget::new(Some(200)));
         let mut req = ProviderRequest {
-            retry_budget: Some(RetryBudget { ledger: Arc::clone(&ledger), per_attempt: 0 }),
+            retry_budget: Some(RetryBudget {
+                ledger: Arc::clone(&ledger),
+                per_attempt: 0,
+            }),
             ..ProviderRequest::default()
         };
-        assert!(matches!(reserve_retry(&req, 1), Err(ProviderError::RetryBudgetExhausted)));
+        assert!(matches!(
+            reserve_retry(&req, 1),
+            Err(ProviderError::RetryBudgetExhausted)
+        ));
         req.retry_budget.as_mut().unwrap().per_attempt = 100;
         assert!(reserve_retry(&req, 0).unwrap().is_none());
         let in_flight = reserve_retry(&req, 1).unwrap().unwrap();
@@ -194,28 +217,41 @@ mod retry_budget_tests {
 
 /// Merge repeated stream identity assertions, rejecting conflicting identities instead of silently
 /// attributing usage to whichever chunk happened to arrive last.
-fn capture_reported_model(current: &mut Option<String>, value: &serde_json::Value) -> Result<(), ProviderError> {
-    let Some(model) = value.get("model").and_then(serde_json::Value::as_str)
-        .filter(|model| !model.trim().is_empty()) else { return Ok(()); };
+fn capture_reported_model(
+    current: &mut Option<String>,
+    value: &serde_json::Value,
+) -> Result<(), ProviderError> {
+    let Some(model) = value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+    else {
+        return Ok(());
+    };
     if current.as_deref().is_some_and(|existing| existing != model) {
-        return Err(ProviderError::Transport("response changed its reported model identity".to_string()));
+        return Err(ProviderError::Transport(
+            "response changed its reported model identity".to_string(),
+        ));
     }
     *current = Some(model.to_string());
     Ok(())
 }
 
 fn model_from_json(text: &str) -> Result<Option<String>, ProviderError> {
-    let value = serde_json::from_str(text).map_err(|e| ProviderError::Transport(format!("invalid response identity JSON: {}", e)))?;
+    let value = serde_json::from_str(text)
+        .map_err(|e| ProviderError::Transport(format!("invalid response identity JSON: {}", e)))?;
     let mut model = None;
     capture_reported_model(&mut model, &value)?;
     Ok(model)
 }
 
 fn settle_retry(reservation: Option<TokenReservation>, turn: &AssistantTurn) {
+    // T04 (KR-02): a retry that reported usage is an exact charge; a retry without usage cannot be
+    // proven to be zero, so its reservation drops as unknown rather than settling to a fictional
+    // measured zero.
     if let (Some(reservation), Some(usage)) = (reservation, turn.usage.as_ref()) {
-        reservation.settle(usage.input_tokens.saturating_add(usage.output_tokens));
+        reservation.settle_with_usage(usage.input_tokens, usage.output_tokens);
     }
-    // No usage: the reservation drops as unknown, never a fictional measured zero.
 }
 
 /// Gate 7 (`v1.2.0`): the wire protocol used to talk to a model endpoint.

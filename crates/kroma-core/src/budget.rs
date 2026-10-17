@@ -74,6 +74,9 @@ struct LedgerState {
     spent: u64,
     reserved: u64,
     settled_tokens: u64,
+    /// T04 (KR-02): settled amounts that came from the pre-dispatch estimate because the provider
+    /// reported no usage. Kept apart from measured usage so no report can call them measured.
+    estimated_tokens: u64,
     unknown_tokens: u64,
 }
 
@@ -86,6 +89,8 @@ pub struct TokenAccountingSnapshot {
     pub spent: u64,
     pub reserved: u64,
     pub settled_tokens: u64,
+    /// T04 (KR-02): of `settled_tokens`, how many were the caller's estimate (no provider usage).
+    pub estimated_tokens: u64,
     pub unknown_tokens: u64,
     pub overage_tokens: u64,
 }
@@ -121,6 +126,7 @@ impl TokenBudget {
             spent: state.spent,
             reserved: state.reserved,
             settled_tokens: state.settled_tokens,
+            estimated_tokens: state.estimated_tokens,
             unknown_tokens: state.unknown_tokens,
             overage_tokens: self
                 .limit
@@ -168,16 +174,82 @@ impl TokenBudget {
     /// Release `reserved_amount` tokens and record `actual` as spent in one mutex-guarded
     /// transaction. Both counters are updated before the guard is released, so no observer ever
     /// sees the reservation freed while the corresponding spend is still missing (the P1-1 race).
-    fn settle_transaction(&self, reserved_amount: u64, actual: u64, unknown: bool) {
+    fn settle_transaction(
+        &self,
+        reserved_amount: u64,
+        actual: u64,
+        settlement: Settlement,
+    ) -> SettlementRecord {
         let mut state = self.state();
         state.reserved = state.reserved.saturating_sub(reserved_amount);
         state.spent = state.spent.saturating_add(actual);
-        if unknown {
-            state.unknown_tokens = state.unknown_tokens.saturating_add(actual);
-        } else {
-            state.settled_tokens = state.settled_tokens.saturating_add(actual);
+        match settlement {
+            Settlement::PossiblyDispatchedUnknown => {
+                state.unknown_tokens = state.unknown_tokens.saturating_add(actual);
+            }
+            Settlement::Estimated { .. } => {
+                state.settled_tokens = state.settled_tokens.saturating_add(actual);
+                state.estimated_tokens = state.estimated_tokens.saturating_add(actual);
+            }
+            Settlement::NotDispatched | Settlement::CompletedUsage { .. } => {
+                state.settled_tokens = state.settled_tokens.saturating_add(actual);
+            }
+        }
+        let spent_after = state.spent;
+        let limit = self.limit;
+        drop(state);
+        SettlementRecord {
+            settlement,
+            reserved: reserved_amount,
+            charged: actual,
+            over_reservation: actual.saturating_sub(reserved_amount),
+            budget_overage: limit.map_or(0, |l| spent_after.saturating_sub(l)),
+            spent_after,
+            remaining_after: limit.map(|l| l.saturating_sub(spent_after)),
         }
     }
+}
+
+/// T04 (KR-02): how a reservation was closed out.
+///
+/// The three states exist because "the request did not consume anything" and "we cannot prove what
+/// it consumed" must not be treated the same way. Only [`Settlement::NotDispatched`] returns the
+/// allowance to the ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settlement {
+    /// Provably never transmitted (a pre-dispatch validation failure). Consumption is exactly zero.
+    NotDispatched,
+    /// Transmitted, and the provider reported usage: an exact charge.
+    CompletedUsage { input: u64, output: u64 },
+    /// Transmitted, but the provider omitted usage. The pre-dispatch estimate is charged and
+    /// labelled as an estimate — never presented as measured usage.
+    Estimated { input: u64, output: u64 },
+    /// Transmitted, or possibly transmitted, with unknown consumption (timeout, cancellation,
+    /// dropped retry). The whole reservation is charged and tagged unknown; it is never refunded.
+    PossiblyDispatchedUnknown,
+}
+
+/// T04 (KR-02): what one settlement did to the shared ledger, so callers can audit and tests can
+/// assert conservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementRecord {
+    pub settlement: Settlement,
+    pub reserved: u64,
+    pub charged: u64,
+    /// Charge beyond the reservation itself (the request used more than it reserved).
+    pub over_reservation: u64,
+    /// Charge beyond the configured limit, once the ledger is settled.
+    pub budget_overage: u64,
+    pub spent_after: u64,
+    pub remaining_after: Option<u64>,
+}
+
+/// T04: [`TokenReservation::settle_not_dispatched`] refuses to refund a request that may have
+/// reached the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SettlementError {
+    #[error("cannot refund a reservation after {wire_attempts} wire attempt(s) were transmitted")]
+    AlreadyDispatched { wire_attempts: u64 },
 }
 
 /// A held [`TokenBudget`] reservation.
@@ -221,19 +293,89 @@ impl TokenReservation {
 
     /// Release the reservation and record `actual` tokens as spent in a single transaction, so a
     /// concurrent [`TokenBudget::try_reserve`] can never observe the freed reservation without the
-    /// settled spend that replaces it. `actual` is the provider's reported usage when available;
-    /// otherwise the caller's pre-dispatch estimate.
-    pub fn settle(mut self, actual: u64) {
-        self.budget.settle_transaction(self.amount, actual, false);
+    /// settled spend that replaces it.
+    ///
+    /// This is the legacy entry point used where the caller has already decided the basis; prefer
+    /// the explicit [`settle_not_dispatched`](Self::settle_not_dispatched),
+    /// [`settle_with_usage`](Self::settle_with_usage),
+    /// [`settle_estimate`](Self::settle_estimate) and
+    /// [`settle_unknown`](Self::settle_unknown) so the ledger knows *why*.
+    pub fn settle(mut self, actual: u64) -> SettlementRecord {
+        let record = self.budget.settle_transaction(
+            self.amount,
+            actual,
+            Settlement::CompletedUsage {
+                input: actual,
+                output: 0,
+            },
+        );
         self.settled = true;
+        record
+    }
+
+    /// T04 (KR-02): the request provably never reached the provider, so the allowance goes back.
+    ///
+    /// `wire_attempts` is the count the provider actually transmitted (0 = nothing was sent). A
+    /// non-zero count is refused instead of silently refunding a request that may have been billed.
+    pub fn settle_not_dispatched(
+        mut self,
+        wire_attempts: u64,
+    ) -> Result<SettlementRecord, SettlementError> {
+        if wire_attempts > 0 {
+            // Leave the reservation un-settled so `Drop` charges it as unknown.
+            return Err(SettlementError::AlreadyDispatched { wire_attempts });
+        }
+        let record = self
+            .budget
+            .settle_transaction(self.amount, 0, Settlement::NotDispatched);
+        self.settled = true;
+        Ok(record)
+    }
+
+    /// T04 (KR-02): the provider reported usage for this request — an exact charge.
+    pub fn settle_with_usage(mut self, input: u64, output: u64) -> SettlementRecord {
+        let record = self.budget.settle_transaction(
+            self.amount,
+            input.saturating_add(output),
+            Settlement::CompletedUsage { input, output },
+        );
+        self.settled = true;
+        record
+    }
+
+    /// T04 (KR-02): the request was transmitted but the provider omitted usage, so the pre-dispatch
+    /// estimate is charged and labelled as an estimate.
+    pub fn settle_estimate(mut self, input: u64, output: u64) -> SettlementRecord {
+        let record = self.budget.settle_transaction(
+            self.amount,
+            input.saturating_add(output),
+            Settlement::Estimated { input, output },
+        );
+        self.settled = true;
+        record
+    }
+
+    /// T04 (KR-02): consumption cannot be established (timeout, cancellation, dropped retry). The
+    /// whole reservation is charged and tagged unknown; it is never refunded.
+    pub fn settle_unknown(mut self) -> SettlementRecord {
+        let record = self.budget.settle_transaction(
+            self.amount,
+            self.amount,
+            Settlement::PossiblyDispatchedUnknown,
+        );
+        self.settled = true;
+        record
     }
 }
 
 impl Drop for TokenReservation {
     fn drop(&mut self) {
         if !self.settled {
-            self.budget
-                .settle_transaction(self.amount, self.amount, true);
+            self.budget.settle_transaction(
+                self.amount,
+                self.amount,
+                Settlement::PossiblyDispatchedUnknown,
+            );
         }
     }
 }
@@ -265,6 +407,11 @@ pub struct BudgetConfig {
     pub context_tail_window_bytes: usize,
     pub context_min_tail_turns: usize,
     pub model_context_window_tokens: Option<u64>,
+    /// T04 (KR-02): the most output tokens a single request may claim. `None` uses
+    /// [`DEFAULT_PER_REQUEST_OUTPUT_TOKENS`]. This is a *per-request* cap, distinct from the run
+    /// allowance: it is what makes a retry possible after a transient failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens_per_request: Option<u64>,
     /// F05 (`v1.5.1`): optional total token ceiling (input + output) for one run *tree* — the
     /// parent run and every parallel child subagent it spawns draw from the same
     /// [`TokenBudget`]. `None` means unbounded. This is the single entry the CLI (`--max-tokens`),
@@ -305,6 +452,7 @@ impl Default for BudgetConfig {
             context_tail_window_bytes: 256 * 1024,     // 256 KiB
             context_min_tail_turns: 4,
             model_context_window_tokens: None,
+            max_output_tokens_per_request: None,
             max_total_tokens: None,
             max_total_tool_output_bytes: 4 * 1024 * 1024, // 4 MiB
             max_tool_inline_output_bytes: 64 * 1024,      // 64 KiB
@@ -345,6 +493,9 @@ impl BudgetConfig {
         check_nonzero!(self.connect_timeout.as_nanos(), "connect_timeout");
         check_nonzero!(self.idle_timeout.as_nanos(), "idle_timeout");
         check_nonzero!(self.request_timeout.as_nanos(), "request_timeout");
+        if let Some(cap) = self.max_output_tokens_per_request {
+            check_nonzero!(cap, "max_output_tokens_per_request");
+        }
         check_nonzero!(self.max_static_prefix_bytes, "max_static_prefix_bytes");
         check_nonzero!(
             self.context_high_watermark_bytes,
@@ -707,6 +858,14 @@ impl BudgetTracker {
 /// costs a stub.
 pub const CONSERVATIVE_CONTEXT_WINDOW_TOKENS: u64 = 32_768;
 
+/// T04 (KR-02): the default output allowance one *request* may claim.
+///
+/// Before T04 the first request reserved the whole remaining run allowance as its output cap, so a
+/// single transient failure left nothing for the retry. A request now reserves only what it can
+/// plausibly consume; the run allowance stays available for retries and siblings. An operator can
+/// raise this with [`BudgetConfig::max_output_tokens_per_request`].
+pub const DEFAULT_PER_REQUEST_OUTPUT_TOKENS: u64 = 8_192;
+
 /// T03: where a capability number came from. Reported to the operator instead of pretending every
 /// number is a published spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -771,6 +930,22 @@ impl ModelCapabilities {
     pub fn reserved_output_tokens(&self, requested: Option<u64>) -> u64 {
         let cap = self.max_output_tokens.unwrap_or(u64::MAX);
         requested.unwrap_or(0).min(cap)
+    }
+
+    /// T04 (KR-02): the output allowance one request may claim.
+    ///
+    /// Bounded by the operator's per-request cap and by the provider's own cap. `run_remaining` is
+    /// the *run* allowance; the result is never larger than it, but it is also never the whole of
+    /// it unless the operator asked for that.
+    pub fn per_request_output_cap(&self, host_cap: Option<u64>, run_remaining: Option<u64>) -> u64 {
+        let mut cap = host_cap.unwrap_or(DEFAULT_PER_REQUEST_OUTPUT_TOKENS);
+        if let Some(provider_cap) = self.max_output_tokens {
+            cap = cap.min(provider_cap);
+        }
+        if let Some(remaining) = run_remaining {
+            cap = cap.min(remaining);
+        }
+        cap
     }
 }
 

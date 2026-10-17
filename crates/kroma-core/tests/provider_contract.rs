@@ -112,8 +112,14 @@ async fn retry_token_allowance_blocks_transmission_and_preserves_unknown_spend()
     }
 }
 
-/// Real runner integration: its first reservation consumes the bounded allowance, so a 503
-/// cannot silently trigger another wire attempt or refund the unknown first attempt.
+/// Real runner integration: a 503 is an ambiguous post-dispatch failure.
+///
+/// T04 (KR-02) changed the *allowance* here, not the fail-closed rule. Before T04 the first request
+/// reserved the whole run allowance as its output cap, so the retry could not reserve anything and
+/// the run stopped after one wire attempt. A request now reserves a per-request output allowance,
+/// so the retry is affordable and both attempts are transmitted. What did not change: neither
+/// attempt is refunded — both are charged as unknown, and the ledger ends with no reservation
+/// outstanding.
 #[tokio::test]
 async fn runner_retry_exhaustion_retains_first_attempt_and_sends_once() {
     use kroma_core::budget::TokenBudget;
@@ -160,13 +166,29 @@ async fn runner_retry_exhaustion_retains_first_attempt_and_sends_once() {
     let (_tx, rx) = watch::channel(false);
     let (summary, _) = AgentRunner::new(cfg, provider, runtime, rx)
         .with_token_budget(Arc::clone(&ledger)).run(logger).await;
-    assert_eq!(summary.terminal_reason, TerminalReason::TokenBudgetExhausted);
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(summary.terminal_reason, TerminalReason::ProviderProtocolError(_)),
+        "the run ends on the provider's 503, not on a budget refusal: {:?}",
+        summary.terminal_reason
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        3,
+        "one attempt plus two retries must all be affordable after a transient failure"
+    );
     let accounting = ledger.accounting_snapshot();
-    assert_eq!(accounting.spent, 64000);
-    assert_eq!(accounting.unknown_tokens, 64000);
+    assert!(
+        accounting.spent >= 2 * kroma_core::budget::DEFAULT_PER_REQUEST_OUTPUT_TOKENS,
+        "each transmitted attempt holds at least its own output allowance: {}",
+        accounting.spent
+    );
+    assert_eq!(
+        accounting.unknown_tokens, accounting.spent,
+        "an ambiguous 503 charges the reservation as unknown; it is never refunded"
+    );
     assert_eq!(accounting.settled_tokens, 0);
-    assert_eq!(accounting.reserved, 0);
+    assert_eq!(accounting.reserved, 0, "no reservation may leak");
+    assert!(accounting.spent <= 64000, "the cap still holds");
     server.abort();
     let _ = server.await;
     fs::remove_dir_all(root).unwrap();

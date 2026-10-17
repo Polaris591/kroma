@@ -678,7 +678,11 @@ impl AnthropicMessagesClient {
         }
         let endpoint = validate_base_url(&config.base_url)?;
         let channel = super::channel::shared_channel(&endpoint)?;
-        Ok(Self { config, endpoint, channel })
+        Ok(Self {
+            config,
+            endpoint,
+            channel,
+        })
     }
 
     pub fn endpoint(&self) -> &ValidatedEndpoint {
@@ -728,18 +732,28 @@ impl ModelProvider for AnthropicMessagesClient {
                 max_tokens,
             );
             let request_body_bytes = body_json.len();
-            let max_attempts = self.config.max_retries.saturating_add(1)
-                .min(budget.max_model_request_attempts).min(self.channel.policy().max_attempts);
+            let max_attempts = self
+                .config
+                .max_retries
+                .saturating_add(1)
+                .min(budget.max_model_request_attempts)
+                .min(self.channel.policy().max_attempts);
             if max_attempts == 0 {
-                return Err(ProviderError::NotDispatched(Box::new(ProviderError::MaxAttemptsExhausted)));
+                return Err(ProviderError::NotDispatched(Box::new(
+                    ProviderError::MaxAttemptsExhausted,
+                )));
             }
             let mut attempts_used = 0usize;
 
             loop {
                 let attempt_start = Instant::now();
                 let channel_permit = super::channel::admit(
-                    &self.channel, &mut cancel_rx, budget.request_timeout, attempts_used,
-                ).await?;
+                    &self.channel,
+                    &mut cancel_rx,
+                    budget.request_timeout,
+                    attempts_used,
+                )
+                .await?;
                 let retry_reservation = super::reserve_retry(&req, attempts_used)?;
                 attempts_used += 1;
                 if let Some(wire) = &req.wire_attempts {
@@ -761,7 +775,9 @@ impl ModelProvider for AnthropicMessagesClient {
 
                 match &outcome {
                     Ok(_) => super::channel::record_outcome(&self.channel, None),
-                    Err(AttemptFailure::Fatal(error) | AttemptFailure::Retryable { err: error, .. }) => {
+                    Err(
+                        AttemptFailure::Fatal(error) | AttemptFailure::Retryable { err: error, .. },
+                    ) => {
                         super::channel::record_outcome(&self.channel, Some(error));
                     }
                 }
@@ -784,8 +800,13 @@ impl ModelProvider for AnthropicMessagesClient {
                             return Err(err);
                         }
                         super::channel::backoff(
-                            &self.channel, attempts_used, retry_after, budget.request_timeout, &mut cancel_rx,
-                        ).await?;
+                            &self.channel,
+                            attempts_used,
+                            retry_after,
+                            budget.request_timeout,
+                            &mut cancel_rx,
+                        )
+                        .await?;
                     }
                 }
             }
