@@ -213,6 +213,7 @@ mod tests {
                 TokenRates {
                     uncached_input_nano_usd: 1_000,
                     cached_input_nano_usd: 100,
+                    cache_creation_input_nano_usd: None,
                     output_nano_usd: 3_000,
                 },
             )]),

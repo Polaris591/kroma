@@ -1161,6 +1161,7 @@ fn fixture_price_table() -> kroma_core::usage_cost::PriceTable {
                 kroma_core::usage_cost::TokenRates {
                     uncached_input_nano_usd: 1_000,
                     cached_input_nano_usd: 100,
+                    cache_creation_input_nano_usd: None,
                     output_nano_usd: 3_000,
                 },
             ),
@@ -1169,6 +1170,7 @@ fn fixture_price_table() -> kroma_core::usage_cost::PriceTable {
                 kroma_core::usage_cost::TokenRates {
                     uncached_input_nano_usd: 7_000,
                     cached_input_nano_usd: 7_000,
+                    cache_creation_input_nano_usd: None,
                     output_nano_usd: 7_000,
                 },
             ),

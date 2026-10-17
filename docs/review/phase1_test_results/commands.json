@@ -396,6 +396,28 @@
       "exit": 0,
       "log": "logs/test_t17.log",
       "note": "T17: 935 passed / 0 failed"
+    },
+    {
+      "id": "t18_usage_cost",
+      "cmd": "cargo test -p kroma-core --test t18_usage_cost",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T18: 5 passed / 0 failed (cache-write rate, per-attempt models, estimate vs measured, incomplete totals)"
+    },
+    {
+      "id": "t18_provenance",
+      "cmd": "cargo test -p kroma-core --test t18_provenance_identity",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T18: 7 passed / 0 failed (git timeout, bounded hash read, incomplete identity, mode bits, binary separation, wire request identity)"
+    },
+    {
+      "id": "t18_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t18.log",
+      "note": "T18: 947 passed / 0 failed"
     }
   ]
 }

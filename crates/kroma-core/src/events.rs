@@ -56,6 +56,11 @@ pub enum EventPayload {
         output_tokens: u64,
         reasoning_tokens: Option<u64>,
         prefix_cache_hit_ratio: f64,
+        /// T18 (KR-15): sha256 over the request that was actually transmitted — system prompt, the
+        /// final tool list (including on-demand activations) and the projected messages. Computed
+        /// after assembly, so a report hash always corresponds to a captured wire request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_identity_sha256: Option<String>,
         latency_ms: u64,
         ttft_ms: Option<u64>,
     },

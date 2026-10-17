@@ -1331,6 +1331,13 @@ impl AgentRunner {
                 request_tools.push(definition);
             }
         }
+        // T18 (KR-15): identity of the request as it will be sent, computed after activation so the
+        // tool list in the digest is the one the model actually receives.
+        let request_identity = crate::provenance::request_identity(
+            &state.static_prefix.system_prompt,
+            &request_tools,
+            &projected.messages,
+        );
         let req = ProviderRequest {
             system_prompt: state.static_prefix.system_prompt.clone(),
             tools: request_tools,
@@ -1508,6 +1515,7 @@ impl AgentRunner {
                 output_tokens: usage.output_tokens,
                 reasoning_tokens: usage.reasoning_tokens,
                 prefix_cache_hit_ratio: usage.prefix_cache_hit_ratio(),
+                request_identity_sha256: Some(request_identity.clone()),
                 latency_ms: completion.latency_ms,
                 ttft_ms: completion.ttft_ms,
             }) {
@@ -1544,6 +1552,7 @@ impl AgentRunner {
                 output_tokens: est_output,
                 reasoning_tokens: None,
                 prefix_cache_hit_ratio: 0.0,
+                request_identity_sha256: Some(request_identity.clone()),
                 latency_ms: completion.latency_ms,
                 ttft_ms: completion.ttft_ms,
             }) {

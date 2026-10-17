@@ -13,7 +13,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Directories that are never part of the source identity.
 const EXCLUDED_DIRS: &[&str] = &[
@@ -57,6 +56,18 @@ pub struct SourceFingerprint {
     /// `true` when the source hash stopped at a bound, so it identifies only what was read.
     #[serde(default, skip_serializing_if = "is_false")]
     pub source_hash_capped: bool,
+    /// T18 (KR-23): `true` when a VCS probe hit its wall-clock budget. A timed-out probe is not a
+    /// clean tree and not "no repository" — it is an unknown, and the report has to say so.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub git_probe_timeout: bool,
+    /// T18: `true` when the source identity is knowingly partial (unreadable file, capped walk,
+    /// unreadable dependency manifest). `source_sha256` is still reported, but it does not identify
+    /// the whole tree, so it must not be used as if it did.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub source_identity_incomplete: bool,
+    /// Why the identity is incomplete, for the report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
     /// Hash of the running artifact, when it can be located.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_sha256: Option<String>,
@@ -68,6 +79,101 @@ pub struct SourceFingerprint {
     /// be determined — not that there are no dependencies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependencies_sha256: Option<String>,
+}
+
+/// T18 (KR-23): wall-clock budget for one VCS probe.
+pub const GIT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Outcome of one bounded VCS probe. `timed_out` is distinct from "the command failed": a timeout
+/// means the identity is unknown, while a failure can legitimately mean "not a repository".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitProbe {
+    pub stdout: Option<String>,
+    pub timed_out: bool,
+}
+
+thread_local! {
+    /// Set when a probe in *this thread* timed out, so the fingerprint can report it without threading
+    /// a mutable report through every helper. Thread-local because fingerprints are built per run and
+    /// tests run in parallel.
+    static GIT_PROBE_TIMED_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// T18 (KR-15): sha256 of the request that is about to be transmitted.
+///
+/// Computed *after* assembly — the system prompt, the final tool list (including any on-demand
+/// activations) and the projected messages — so a recorded hash corresponds to the wire request rather
+/// than to the configuration that was meant to produce it. Sensitive content is never included: the
+/// digest is the only thing that leaves this function.
+pub fn request_identity(
+    system_prompt: &str,
+    tools: &[crate::tool::definition::ToolDefinition],
+    messages: &[crate::messages::TranscriptItem],
+) -> String {
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest as _;
+    hasher.update(b"system\0");
+    hasher.update(system_prompt.as_bytes());
+    hasher.update(b"\0tools\0");
+    // Sorted by name so a reordering of the same set does not change the identity.
+    let mut sorted = tools.to_vec();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    for tool in &sorted {
+        hasher.update(tool.name.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(tool.description.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(
+            serde_json::to_string(&tool.parameters)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        hasher.update([0u8]);
+    }
+    hasher.update(b"\0messages\0");
+    for message in messages {
+        hasher.update(
+            serde_json::to_string(message)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        hasher.update([0u8]);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{:02x}", byte));
+    }
+    hex
+}
+
+/// Run one bounded VCS probe.
+///
+/// Exposed so the timeout behaviour can be tested against a deliberately slow program instead of
+/// hoping a real repository is slow enough.
+pub fn git_probe(
+    program: &str,
+    root: &Path,
+    args: &[&str],
+    budget: std::time::Duration,
+) -> GitProbe {
+    let mut argv: Vec<String> = vec!["-C".to_string(), root.display().to_string()];
+    argv.extend(args.iter().map(|a| (*a).to_string()));
+    // A provenance probe must never touch the caller's stdin, take optional locks or run a pager.
+    match crate::sandbox::run_bounded(program, &argv, budget) {
+        Ok(outcome) if outcome.success => GitProbe {
+            stdout: Some(outcome.stdout.trim().to_string()),
+            timed_out: false,
+        },
+        Ok(_) => GitProbe {
+            stdout: None,
+            timed_out: false,
+        },
+        Err(e) => GitProbe {
+            stdout: None,
+            timed_out: e.contains("did not finish"),
+        },
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -133,10 +239,14 @@ pub fn fingerprint(source_root: &Path, binary: Option<&Path>) -> SourceFingerpri
     // The working directory is not necessarily a project: a process started from `/` must not walk
     // the whole filesystem. A tree without VCS metadata can still be fingerprinted explicitly.
     if source_root.join(".git").exists() {
-        let (hash, files, capped) = hash_source_tree(source_root);
+        let (hash, files, capped, incomplete) = hash_source_tree(source_root);
         fingerprint.source_sha256 = hash;
         fingerprint.source_files = files;
         fingerprint.source_hash_capped = capped;
+        if let Some(reason) = incomplete {
+            fingerprint.source_identity_incomplete = true;
+            fingerprint.incomplete_reason = Some(reason);
+        }
     }
     fingerprint
 }
@@ -145,10 +255,21 @@ pub fn fingerprint(source_root: &Path, binary: Option<&Path>) -> SourceFingerpri
 /// (a release tarball, an exported directory, a container build context).
 pub fn fingerprint_explicit(source_root: &Path, binary: Option<&Path>) -> SourceFingerprint {
     let mut fingerprint = fingerprint_metadata(source_root, binary);
-    let (hash, files, capped) = hash_source_tree(source_root);
+    let (hash, files, capped, incomplete) = hash_source_tree(source_root);
     fingerprint.source_sha256 = hash;
     fingerprint.source_files = files;
     fingerprint.source_hash_capped = capped;
+    if let Some(reason) = incomplete {
+        fingerprint.source_identity_incomplete = true;
+        fingerprint.incomplete_reason = Some(reason);
+    }
+    if GIT_PROBE_TIMED_OUT.with(|flag| flag.replace(false)) {
+        fingerprint.git_probe_timeout = true;
+        fingerprint.source_identity_incomplete = true;
+        fingerprint
+            .incomplete_reason
+            .get_or_insert_with(|| "a VCS probe hit its time budget".to_string());
+    }
     fingerprint
 }
 
@@ -180,23 +301,14 @@ pub fn fingerprint_self(source_root: &Path) -> SourceFingerprint {
 }
 
 fn git(source_root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(source_root)
-        .args(args)
-        // A provenance probe must never touch the caller's stdin. Inheriting it would let `git`
-        // consume terminal input from a REPL (and makes the probe hang behind a blocking pipe),
-        // which is exactly the kind of side effect a read-only fingerprint must not have.
-        .stdin(std::process::Stdio::null())
-        // Never take the repository's optional locks or run a pager: provenance is a read.
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_PAGER", "cat")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    // T18 (KR-23): a VCS probe must be bounded. `git status` on a large or network-backed tree can
+    // take minutes, and an unbounded `output()` turns a provenance read into a hang. The failure is
+    // reported as a timeout so the caller can say "unknown" instead of "clean".
+    let probe = git_probe("git", source_root, args, GIT_PROBE_BUDGET);
+    if probe.timed_out {
+        GIT_PROBE_TIMED_OUT.with(|flag| flag.set(true));
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    probe.stdout
 }
 
 /// `(commit, changed_paths)`. `changed_paths` is `None` when the status probe failed, which is
@@ -237,10 +349,10 @@ fn hex(bytes: &[u8]) -> String {
 /// Files are visited in sorted path order and each path is hashed before its bytes, so a rename
 /// changes the result. Symlinks are recorded as their target text and never followed, so the walk
 /// cannot escape the root or loop.
-fn hash_source_tree(root: &Path) -> (Option<String>, Option<usize>, bool) {
+fn hash_source_tree(root: &Path) -> (Option<String>, Option<usize>, bool, Option<String>) {
     use sha2::{Digest, Sha256};
     if !root.is_dir() {
-        return (None, None, false);
+        return (None, None, false, None);
     }
     let started = std::time::Instant::now();
     let mut files: Vec<PathBuf> = Vec::new();
@@ -288,6 +400,7 @@ fn hash_source_tree(root: &Path) -> (Option<String>, Option<usize>, bool) {
     let mut hasher = Sha256::new();
     let mut bytes_read: u64 = 0;
     let mut hashed = 0usize;
+    let mut incomplete: Option<String> = None;
     for path in &files {
         if started.elapsed() > MAX_WALK_TIME {
             capped = true;
@@ -312,18 +425,51 @@ fn hash_source_tree(root: &Path) -> (Option<String>, Option<usize>, bool) {
                 capped = true;
                 break;
             }
-            let Ok(contents) = std::fs::read(path) else {
-                continue;
-            };
-            bytes_read = bytes_read.saturating_add(contents.len() as u64);
-            hasher.update(&contents);
+            // T18 (KR-24): the size check above is a diagnostic. The read itself is bounded to the
+            // remaining budget, so a file that grows after the check cannot blow past it.
+            let remaining = MAX_SOURCE_BYTES.saturating_sub(bytes_read).max(1);
+            match crate::secure_fs::read_bounded_file(
+                path,
+                remaining,
+                crate::secure_fs::Overflow::Refuse,
+            ) {
+                Ok(read) => {
+                    bytes_read = bytes_read.saturating_add(read.bytes.len() as u64);
+                    // T18: the executable bit is part of the artifact's identity — a chmod +x
+                    // changes what the tree builds into, so it has to change the hash.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        hasher.update([(metadata.permissions().mode() & 0o111 != 0) as u8]);
+                    }
+                    hasher.update(&read.bytes);
+                }
+                Err(e) => {
+                    // T18 (KR-24): a file we could not read means this hash does not identify the
+                    // tree. Skipping it silently would produce a "complete" identity that is not.
+                    incomplete = Some(format!(
+                        "could not hash {}: {}",
+                        relative.to_string_lossy(),
+                        e
+                    ));
+                    continue;
+                }
+            }
         } else {
             // Raced into something unreadable between listing and stat: skip, never open it.
             continue;
         }
         hashed += 1;
     }
-    (Some(hex(&hasher.finalize())), Some(hashed), capped)
+    if capped && incomplete.is_none() {
+        incomplete = Some("source walk stopped at a bound".to_string());
+    }
+    (
+        Some(hex(&hasher.finalize())),
+        Some(hashed),
+        capped,
+        incomplete,
+    )
 }
 
 #[cfg(test)]
@@ -338,6 +484,7 @@ mod tests {
     }
 
     fn git_init(root: &Path) {
+        use std::process::Command;
         let run = |args: &[&str]| {
             Command::new("git")
                 .arg("-C")
