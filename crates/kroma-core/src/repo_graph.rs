@@ -210,6 +210,30 @@ pub struct RepoGraph {
     /// B1 (`v1.4.0`): number of files served from the incremental parse cache instead of being
     /// re-parsed during this build.
     pub cache_hits: usize,
+    /// T16 (KR-25): `(path, content sha256)` for every file actually indexed, in index order.
+    /// Returned with the coverage counters so a caller can tell *which* files a truncated graph
+    /// covers instead of only how many.
+    pub file_hashes: Vec<(String, String)>,
+}
+
+/// T16 (KR-25): the budgets a graph build enforces.
+///
+/// Both the cold (parse) and warm (cache hit) branches go through the same limits, so a hot cache can
+/// never index more than a cold one would. Exposed so tests can use a small cap instead of building a
+/// 24 MiB workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphLimits {
+    pub max_files: usize,
+    pub max_total_bytes: usize,
+}
+
+impl Default for GraphLimits {
+    fn default() -> Self {
+        Self {
+            max_files: MAX_GRAPH_FILES,
+            max_total_bytes: MAX_GRAPH_TOTAL_BYTES,
+        }
+    }
 }
 
 /// B1 (`v1.4.0`): the cached parse of a single source file, keyed by path. Reused when the file's
@@ -394,6 +418,24 @@ impl RepoGraph {
         max_files: usize,
         cache: &mut RepoGraphCache,
     ) -> RepoGraph {
+        Self::build_from_workspace_cached_with_limits(
+            cap,
+            GraphLimits {
+                max_files,
+                ..GraphLimits::default()
+            },
+            cache,
+        )
+    }
+
+    /// T16: build with explicit limits (see [`GraphLimits`]).
+    pub fn build_from_workspace_cached_with_limits(
+        cap: &WorkspaceCap,
+        limits: GraphLimits,
+        cache: &mut RepoGraphCache,
+    ) -> RepoGraph {
+        let max_files = limits.max_files;
+        let max_total_bytes = limits.max_total_bytes;
         let ignore_rules = load_workspace_ignore_patterns(cap);
         let mut paths: Vec<std::path::PathBuf> = Vec::new();
         let mut skipped_sensitive = 0usize;
@@ -416,6 +458,7 @@ impl RepoGraph {
         let mut truncated = false;
         let mut total_bytes = 0usize;
         let mut cache_hits = 0usize;
+        let mut file_hashes: Vec<(String, String)> = Vec::new();
 
         for path in paths {
             let rel = path.to_string_lossy().replace('\\', "/");
@@ -459,11 +502,25 @@ impl RepoGraph {
             };
             let content_sha256 = crate::prompt::sha256_hex64(text.as_bytes());
 
-            // B1: reuse the cached parse when the content hash matches, so a cache shared across
-            // builds never serves a stale graph.
-            if let Some(cached) = cache.get_fresh(&rel, len, mtime_ns, &content_sha256) {
+            // T16 (KR-25): the total-bytes budget is checked at the single point both branches pass
+            // through. Previously the cache-hit branch added `cached.byte_len` to `total_bytes`
+            // without checking the cap, so a warm cache could index far past the limit the cold path
+            // enforces — the same workspace, a different declared coverage, just because the cache was
+            // hot.
+            let cached = cache.get_fresh(&rel, len, mtime_ns, &content_sha256);
+            let entry_bytes = match &cached {
+                Some(entry) => entry.byte_len,
+                None => text.len(),
+            };
+            if total_bytes.saturating_add(entry_bytes) > max_total_bytes {
+                truncated = true;
+                break;
+            }
+            total_bytes += entry_bytes;
+            file_hashes.push((rel.clone(), content_sha256.clone()));
+
+            if let Some(cached) = cached {
                 cache_hits += 1;
-                total_bytes = total_bytes.saturating_add(cached.byte_len);
                 let mut indices = Vec::with_capacity(cached.symbols.len());
                 for def in &cached.symbols {
                     indices.push(symbols.len());
@@ -476,12 +533,6 @@ impl RepoGraph {
                 continue;
             }
 
-            if total_bytes.saturating_add(text.len()) > MAX_GRAPH_TOTAL_BYTES {
-                truncated = true;
-                break;
-            }
-            total_bytes += text.len();
-
             let mut defs = Vec::new();
             extract_symbols_from_source(&rel, &text, &mut defs);
             let mut cached_symbols = Vec::with_capacity(defs.len());
@@ -489,7 +540,9 @@ impl RepoGraph {
                 def.file_path = rel.clone();
                 cached_symbols.push(def);
             }
-            let tokens = extract_reference_tokens(&rel, &text);
+            let mut tokens = extract_reference_tokens(&rel, &text);
+            // T16: comments carry the natural-language signal a question can match on.
+            tokens.extend(extract_doc_tokens(&rel, &text));
             let import_tokens = extract_import_tokens(&rel, &text);
 
             let mut indices = Vec::with_capacity(cached_symbols.len());
@@ -532,6 +585,7 @@ impl RepoGraph {
             truncated,
             skipped_files,
             cache_hits: 0,
+            file_hashes,
         };
         graph.cache_hits = cache_hits;
         graph.build_edges(&file_symbols, &file_tokens, &file_import_tokens);
@@ -1219,6 +1273,85 @@ pub fn extract_reference_tokens(rel: &str, content: &str) -> BTreeSet<String> {
     }
     if current.len() >= 3 && !current.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         tokens.insert(current);
+    }
+    tokens
+}
+
+/// T16 (KR-25): natural-language tokens from comments.
+///
+/// [`extract_reference_tokens`] deliberately strips comments and strings, which leaves the index with
+/// symbol names only: a question like "how are errors retried?" can only match if some identifier
+/// happens to be spelled that way. Comments are where the intent is written down, so their words are
+/// indexed too (lower signal than an identifier, but the difference between a corpus that can answer
+/// a question and one that can only be grepped).
+///
+/// This is a heuristic scanner, not a parser: it takes `//`, `#` and `/* ... */` comment bodies and
+/// ignores strings, which is enough for ranking and cannot break correctness.
+pub fn extract_doc_tokens(rel: &str, content: &str) -> BTreeSet<String> {
+    let Some(lang) = lang_of(rel) else {
+        return BTreeSet::new();
+    };
+    // Python-style `#` comments; every other supported language uses `//`.
+    let hash_comments = matches!(lang, Lang::Python);
+    let mut tokens = BTreeSet::new();
+    let mut in_block = false;
+    for line in content.lines() {
+        let mut text = String::new();
+        if in_block {
+            match line.find("*/") {
+                Some(end) => {
+                    text.push_str(&line[..end]);
+                    in_block = false;
+                    text.push_str(&line[end + 2..]);
+                }
+                None => {
+                    text.push_str(line);
+                }
+            }
+        } else {
+            text.push_str(line);
+        }
+        // Strip a trailing line comment, taking the earliest of the markers this language uses.
+        let mut cut = text.len();
+        if let Some(idx) = text.find("//") {
+            cut = cut.min(idx);
+        }
+        if hash_comments {
+            if let Some(idx) = text.find('#') {
+                cut = cut.min(idx);
+            }
+        }
+        if let Some(start) = text.find("/*") {
+            if start < cut {
+                match text[start..].find("*/") {
+                    Some(end) => {
+                        cut = cut.min(start);
+                        // The block closed on this line; whatever follows is code, which is handled by
+                        // the identifier extractor, so it is not indexed here.
+                        let _ = end;
+                    }
+                    None => {
+                        cut = cut.min(start);
+                        in_block = true;
+                    }
+                }
+            }
+        }
+        if cut < text.len() {
+            for word in text[cut..]
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .filter(|w| w.len() >= 4)
+            {
+                let lower = word.to_ascii_lowercase();
+                if lower
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic())
+                {
+                    tokens.insert(lower);
+                }
+            }
+        }
     }
     tokens
 }

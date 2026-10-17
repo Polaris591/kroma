@@ -366,6 +366,21 @@
       "exit": 101,
       "log": "logs/test_t15.log",
       "note": "T15: 921 passed / 1 failed (b08c 2.2 documented flake, 5/5 green serially)"
+    },
+    {
+      "id": "t16_targeted",
+      "cmd": "cargo test -p kroma-core --test t16_repo_graph_budget",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T16: 3 passed / 0 failed (cold/warm same cap, changed-file + cached tail, natural-language corpus)"
+    },
+    {
+      "id": "t16_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t16.log",
+      "note": "T16: 925 passed / 0 failed"
     }
   ]
 }
