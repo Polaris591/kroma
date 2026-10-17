@@ -576,6 +576,21 @@
       "exit": 101,
       "log": "logs/test_t28.log",
       "note": "T28: 988 passed / 2 failed (mcp 2.4 + b08c 2.2 documented flakes; 20/20 and 5/5 green on rerun)"
+    },
+    {
+      "id": "t29_targeted",
+      "cmd": "cargo test -p kroma-core --test t29_harness_evolution",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T29: 5 passed / 0 failed (round declaration, frozen acceptance criteria, component allowlist, promotion gates, negative rounds kept)"
+    },
+    {
+      "id": "t29_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t29.log",
+      "note": "T29: 995 passed / 0 failed"
     }
   ]
 }

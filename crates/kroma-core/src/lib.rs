@@ -15,6 +15,7 @@ pub mod context_projector;
 pub mod env;
 pub mod events;
 pub mod handoff;
+pub mod harness_evolution;
 pub mod experiment;
 pub mod evidence_store;
 pub mod experience;
