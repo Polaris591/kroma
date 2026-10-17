@@ -25,14 +25,20 @@
 //! is refused. The lock file is opened `O_NOFOLLOW` and verified regular-file/owned by `fstat`, so
 //! a planted symlink cannot redirect the lock. The lock is tied to the lease's file descriptor, so
 //! the kernel releases it automatically when the holding process exits — there is no stale-lock
-//! window to reap. The file records the owner id and PID for diagnostics. On non-Unix targets the
-//! advisory lock is skipped and the in-process registry remains the only gate.
+//! window to reap. The file records the owner id and PID for diagnostics.
+//!
+//! T08 (KR-26): Windows has a native equivalent, not a fallback. The lock file is opened with every
+//! share mode allowed and then claimed with `LockFileEx(LOCKFILE_EXCLUSIVE_LOCK |
+//! LOCKFILE_FAIL_IMMEDIATELY)` on byte 0 — `flock(LOCK_EX | LOCK_NB)`'s counterpart. The kernel
+//! drops the range when the handle closes, including on process kill, so a crashed writer never
+//! leaves a stale lease. Lock identity is the canonical workspace path with the `\\?\` verbatim
+//! prefix stripped and the remainder lowercased, so case and prefix aliases share one lock domain.
 
 use std::collections::HashMap;
 use std::fs::File;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::fs::OpenOptions;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -82,7 +88,23 @@ fn registry() -> &'static Mutex<Registry> {
 }
 
 fn canonical_key(workspace_root: &Path) -> PathBuf {
-    std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf())
+    let canonical =
+        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    #[cfg(windows)]
+    {
+        // T08 (KR-26): Windows paths are case-insensitive and `canonicalize` may hand back either the
+        // verbatim `\\?\C:\...` form or a plain one, so `C:\Work\Repo`, `c:\work\repo` and
+        // `\\?\C:\Work\Repo` are three spellings of one workspace. The lock file is keyed by a
+        // hash of this string, so normalising here is what makes those aliases share one lock
+        // domain instead of each getting its own writer slot.
+        let text = canonical.to_string_lossy().into_owned();
+        let stripped = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        return PathBuf::from(stripped.to_lowercase());
+    }
+    #[cfg(not(windows))]
+    {
+        canonical
+    }
 }
 
 /// An exclusive, RAII claim on a workspace's write side.
@@ -193,7 +215,21 @@ pub fn workspace_lock_dir() -> PathBuf {
         let uid = unsafe { libc::getuid() };
         PathBuf::from(format!("/tmp/kroma-writer-locks-{}", uid))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // T08 (KR-26): NOT `temp_dir()`. On Windows that reads TMP/TEMP from the environment, so a
+        // task that overrides them for its children would get a second lock domain for the same
+        // workspace — the exact hole the Unix side avoids by deriving the directory from the uid.
+        // `C:\ProgramData` is machine-wide and is not a per-process temp variable.
+        let machine = PathBuf::from(r"C:\ProgramData");
+        if machine.is_dir() {
+            machine.join("kroma-writer-locks")
+        } else {
+            // Documented fallback for stripped-down images that lack ProgramData.
+            std::env::temp_dir().join("kroma-writer-locks")
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::env::temp_dir().join("kroma-writer-locks")
     }
@@ -238,6 +274,32 @@ fn ensure_lock_dir(dir: &Path) -> Result<(), String> {
     if meta.mode() & 0o777 != 0o700 {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| format!("cannot tighten permissions on {}: {}", dir.display(), e))?;
+    }
+    Ok(())
+}
+
+/// T08 (KR-26): the Windows lock directory has no mode bits, so the checks are reparse point,
+/// directory-ness and (where available) owner. A planted junction cannot redirect the lock.
+#[cfg(windows)]
+fn ensure_lock_dir(dir: &Path) -> Result<(), String> {
+    match std::fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("cannot create {}: {}", dir.display(), e)),
+    }
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("cannot inspect {}: {}", dir.display(), e))?;
+    if crate::workspace::is_windows_reparse_point(&meta) {
+        return Err(format!(
+            "refusing reparse-point writer-lock directory {}",
+            dir.display()
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(format!(
+            "writer-lock path {} is not a directory",
+            dir.display()
+        ));
     }
     Ok(())
 }
@@ -315,7 +377,79 @@ fn acquire_workspace_lock(canonical_root: &Path, owner_id: &str) -> Result<Optio
         let _ = file.sync_all();
         Ok(Some(file))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{
+            ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, FALSE,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            LockFileEx, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+        };
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let dir = workspace_lock_dir();
+        ensure_lock_dir(&dir)?;
+        let path = workspace_lock_path(canonical_root);
+        // Open with every share mode allowed (so a competitor can still *read* who holds it) and
+        // take an exclusive byte-range lock. This is the native counterpart of
+        // `flock(LOCK_EX | LOCK_NB)`: `LOCKFILE_FAIL_IMMEDIATELY` makes it non-blocking, and the
+        // kernel releases the range when the handle closes — including when the process is killed —
+        // so a crashed writer never leaves a stale lease behind.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+            .map_err(|e| format!("cannot open {}: {}", path.display(), e))?;
+        // Verify on the *handle*, not the path: a reparse point or a non-file cannot be a lock.
+        let meta = file
+            .metadata()
+            .map_err(|e| format!("cannot inspect {}: {}", path.display(), e))?;
+        if crate::workspace::is_windows_reparse_point(&meta) {
+            return Err(format!(
+                "refusing reparse-point writer-lock file {}",
+                path.display()
+            ));
+        }
+        if !meta.is_file() {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        // SAFETY: `file` owns a valid handle for the whole call; `overlapped` is a zeroed,
+        // correctly-sized OVERLAPPED that outlives it.
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            LockFileEx(
+                std::os::windows::io::AsRawHandle::as_raw_handle(&file) as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if rc == FALSE {
+            let err = std::io::Error::last_os_error();
+            let code = err.raw_os_error().unwrap_or(0) as u32;
+            if code == ERROR_LOCK_VIOLATION || code == ERROR_SHARING_VIOLATION {
+                return Err(
+                    read_lock_owner(&path).unwrap_or_else(|| "<unknown process>".to_string())
+                );
+            }
+            return Err(format!("writer lock on {} failed: {}", path.display(), err));
+        }
+        // Best-effort diagnostics only: record who holds the lock.
+        let _ = file.set_len(0);
+        let _ = file.seek(SeekFrom::Start(0));
+        let _ = writeln!(file, "{}\t{}", owner_id, std::process::id());
+        let _ = file.sync_all();
+        Ok(Some(file))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (canonical_root, owner_id);
         Ok(None)
@@ -323,7 +457,7 @@ fn acquire_workspace_lock(canonical_root: &Path, owner_id: &str) -> Result<Optio
 }
 
 /// Read the owner id the lock holder recorded, for a conflict message.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_lock_owner(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let mut text = String::new();
@@ -610,6 +744,146 @@ mod tests {
             acquired_text
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- T08 (KR-26): Windows cross-process ownership -------------------------------------------
+
+    /// Lock identity is a *workspace* identity, not a spelling: `.`/`..` components and a trailing
+    /// separator must all resolve to one lock file (the Windows half additionally folds case and the
+    /// verbatim prefix, see `windows_path_aliases_share_lock_domain`).
+    #[test]
+    fn lock_path_is_stable_across_equivalent_spellings() {
+        let root = std::env::temp_dir().join(format!("kroma-alias-{}", uuid::Uuid::new_v4()));
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        let plain = workspace_lock_path(&ws);
+        let dotted = workspace_lock_path(&ws.join("."));
+        let nested = workspace_lock_path(&ws.join("sub").join(".."));
+        assert_eq!(
+            plain, dotted,
+            "a `.` component must not create a new domain"
+        );
+        assert_eq!(
+            plain, nested,
+            "a `..` component must not create a new domain"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Reader/writer compatibility matrix, as implemented:
+    ///
+    /// | holder \ asker | writer | reader |
+    /// | --- | --- | --- |
+    /// | none | allowed | allowed |
+    /// | writer | **refused** | allowed |
+    /// | reader | allowed | allowed |
+    ///
+    /// A reader takes no lease, so it is never blocked — and never blocks. It reads the last
+    /// committed WAL state. That is the documented behaviour rather than an accident, so it is
+    /// pinned here: while a writer lease is held, an unleased reader can still open the workspace.
+    #[test]
+    fn a_reader_is_never_blocked_by_a_writer_lease() {
+        let root = std::env::temp_dir().join(format!("kroma-matrix-{}", uuid::Uuid::new_v4()));
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("file.txt"), b"committed").unwrap();
+
+        let lease = try_acquire_writer(&ws, "writer").unwrap();
+        // A reader path: no lease, plain read of the workspace.
+        assert_eq!(std::fs::read(ws.join("file.txt")).unwrap(), b"committed");
+        // A second writer is refused, naming the holder.
+        let conflict = try_acquire_writer(&ws, "second-writer").unwrap_err();
+        assert_eq!(conflict.current_owner, "writer");
+        drop(lease);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Windows runtime gate — **must run on a real Windows runner**.
+    ///
+    /// Two independent child processes compete for one workspace: the holder takes the lease and
+    /// acknowledges, the parent (a third process) is refused, then the holder is killed and the
+    /// lease is reacquired without any stale-lock window. Compiled for `x86_64-pc-windows-gnu` as
+    /// part of T08; execution is recorded as BLOCKED where no Windows runner is available.
+    #[cfg(windows)]
+    #[test]
+    fn windows_two_processes_same_workspace_have_one_writer() {
+        let root = std::env::temp_dir().join(format!("kroma-win-xproc-{}", uuid::Uuid::new_v4()));
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ack = root.join("holder.ack");
+        let exe = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "session_ownership::tests::windows_lock_holder_child",
+                "--nocapture",
+            ])
+            .env("KROMA_WIN_LOCK_WS", &ws)
+            .env("KROMA_WIN_LOCK_ACK", &ack)
+            .spawn()
+            .expect("spawn the holder process");
+
+        // Wait (bounded) for the child to actually hold the lease.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ack.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the holder never acknowledged"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let conflict = try_acquire_writer(&ws, "parent-process")
+            .expect_err("a second process must not become the writer");
+        assert!(
+            conflict.current_owner.contains("windows-holder"),
+            "the conflict must name the other process, got {:?}",
+            conflict.current_owner
+        );
+
+        // Kill the holder: the OS releases the byte-range lock with the handle, so the workspace is
+        // immediately reclaimable and there is no stale lease to reap.
+        child.kill().expect("kill the holder");
+        let _ = child.wait();
+        let lease = try_acquire_writer(&ws, "parent-process")
+            .expect("a killed writer must release its lease");
+        drop(lease);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Child helper for [`windows_two_processes_same_workspace_have_one_writer`]. A no-op unless the
+    /// parent set `KROMA_WIN_LOCK_WS`; it holds the lease until it is killed.
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_holder_child() {
+        let Ok(ws) = std::env::var("KROMA_WIN_LOCK_WS") else {
+            return;
+        };
+        let ack = std::env::var("KROMA_WIN_LOCK_ACK").expect("ack path");
+        let _lease = try_acquire_writer(Path::new(&ws), "windows-holder")
+            .expect("the holder must acquire the lease");
+        std::fs::write(&ack, b"held").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(120));
+    }
+
+    /// Windows path aliases must land on one lock domain: same directory spelled with different
+    /// case, a trailing separator, or the `\\?\` verbatim prefix.
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_aliases_share_lock_domain() {
+        let root = std::env::temp_dir().join(format!("kroma-win-alias-{}", uuid::Uuid::new_v4()));
+        let ws = root.join("Workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let canonical = workspace_lock_path(&ws);
+        let upper = workspace_lock_path(&PathBuf::from(ws.to_string_lossy().to_uppercase()));
+        let verbatim = workspace_lock_path(&PathBuf::from(format!(r"\\?\{}", ws.display())));
+        let trailing = workspace_lock_path(&PathBuf::from(format!("{}\\", ws.display())));
+        assert_eq!(canonical, upper, "case must not create a second domain");
+        assert_eq!(canonical, verbatim, "the verbatim prefix must not either");
+        assert_eq!(canonical, trailing, "a trailing separator must not either");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

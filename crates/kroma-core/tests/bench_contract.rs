@@ -10,18 +10,16 @@
 //!   the budget is flagged rather than hidden.
 
 use kroma_core::bench::{
-    default_strategy_pair, load_held_out_suite, load_suite, provider_origin_of, suite_fingerprint,
-    BenchExecutor, BenchRunMetadata, BenchRunOptions, run_paired_benchmark, BenchArmResult,
-    BenchComparisonReport,
-    BenchStrategyConfig, BenchTask, ProviderBenchExecutor,
+    default_strategy_pair, load_held_out_suite, load_suite, provider_origin_of,
+    run_paired_benchmark, suite_fingerprint, BenchArmResult, BenchComparisonReport, BenchExecutor,
+    BenchRunMetadata, BenchRunOptions, BenchStrategyConfig, BenchTask, ProviderBenchExecutor,
     ProviderBenchSettings, SyntheticBenchExecutor,
 };
-use kroma_core::messages::{AssistantTurn, FinishReason, TokenUsage, ToolCall};
 use kroma_core::budget::BudgetConfig;
+use kroma_core::messages::{AssistantTurn, FinishReason, TokenUsage, ToolCall};
 use kroma_core::provider::{
     FakeProvider, ModelProvider, ProviderCompletion, ProviderError, ProviderRequest,
 };
-use tokio::sync::watch;
 use kroma_core::tool::policy::PolicyMode;
 use kroma_core::types::ToolCallId;
 use std::future::Future;
@@ -29,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 
 fn temp_root(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -1056,7 +1055,10 @@ async fn provider_report_carries_source_and_binary_provenance() {
         .with_max_model_turns(6)
         .with_max_run_duration(Duration::from_secs(30))
         .with_source_root(&source_root);
-    let executor = ProviderBenchExecutor::new(Arc::new(FakeProvider::new(vec![stop_turn(10, 2)])), settings);
+    let executor = ProviderBenchExecutor::new(
+        Arc::new(FakeProvider::new(vec![stop_turn(10, 2)])),
+        settings,
+    );
 
     let report = run_paired_benchmark(
         "provenance",
@@ -1084,7 +1086,11 @@ async fn provider_report_carries_source_and_binary_provenance() {
         "an untracked file must be reported as a dirty tree: {fingerprint:?}"
     );
     assert!(fingerprint.commit.is_some(), "the commit is still recorded");
-    assert!(fingerprint.summary().contains("tree="), "{}", fingerprint.summary());
+    assert!(
+        fingerprint.summary().contains("tree="),
+        "{}",
+        fingerprint.summary()
+    );
     // The standalone commit field must never disagree with the fingerprint.
     assert_eq!(fingerprint.commit, report.metadata.commit);
 
@@ -1211,7 +1217,10 @@ async fn arm_cost_uses_the_reported_identity_and_the_cached_split() {
         "the cached rate must be used for cached tokens: {result:?}"
     );
     assert!(result.cost_unknown_reason.is_none(), "{result:?}");
-    assert_eq!(report.metadata.price_table_version.as_deref(), Some("fixture-2026-10-16"));
+    assert_eq!(
+        report.metadata.price_table_version.as_deref(),
+        Some("fixture-2026-10-16")
+    );
 
     let rendered = report.render();
     assert!(rendered.contains("pricing:"), "{rendered}");
@@ -1305,6 +1314,11 @@ fn a_held_out_suite_inside_the_workspace_is_refused() {
 
 /// A symlink placed inside the workspace must not smuggle the suite in: the agent could repoint it,
 /// so the path itself is what matters, not only where it currently resolves.
+///
+/// Unix-only: creating a symlink needs `std::os::unix` here. The Windows test binary must still
+/// compile (`cargo check -p kroma-core --tests --target x86_64-pc-windows-gnu`); the Windows
+/// equivalent is a reparse point, which the workspace path check refuses by path as well.
+#[cfg(unix)]
 #[test]
 fn a_held_out_suite_symlinked_into_the_workspace_is_refused() {
     let root = temp_root("held-out-link");
@@ -1321,8 +1335,9 @@ fn a_held_out_suite_symlinked_into_the_workspace_is_refused() {
     if std::os::unix::fs::symlink(&real, &link).is_err() {
         panic!("could not create the symlink this contract depends on");
     }
-    let err = load_held_out_suite(&link, &workspace)
-        .expect_err("a suite path inside the workspace must be refused even if its target is outside");
+    let err = load_held_out_suite(&link, &workspace).expect_err(
+        "a suite path inside the workspace must be refused even if its target is outside",
+    );
     assert!(err.contains("inside the graded workspace"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1382,7 +1397,10 @@ async fn report_renders_the_suite_fingerprint() {
     .await;
 
     let expected = suite_fingerprint(std::slice::from_ref(&task));
-    assert_eq!(report.metadata.suite_sha256.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        report.metadata.suite_sha256.as_deref(),
+        Some(expected.as_str())
+    );
     assert!(
         report.render().contains(&format!("oracles {expected}")),
         "the rendered report must name the oracle fingerprint: {}",
@@ -1446,8 +1464,14 @@ async fn preregistered_thresholds_produce_an_auditable_verdict() {
         "the rationale must quote the preregistered threshold: {delta:?}"
     );
     let rendered = report.render();
-    assert!(rendered.contains("decision: candidate -> accept"), "{rendered}");
-    assert!(rendered.contains("tasks=6"), "the cluster count must be printed: {rendered}");
+    assert!(
+        rendered.contains("decision: candidate -> accept"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("tasks=6"),
+        "the cluster count must be printed: {rendered}"
+    );
 
     // Without declared thresholds the report stays descriptive: no verdict is invented.
     let descriptive = run_paired_benchmark(
@@ -1536,7 +1560,10 @@ async fn estimated_usage_is_labelled_in_the_report() {
 #[test]
 fn benchmark_arms_start_with_every_experimental_mechanism_disabled() {
     let strategies = default_strategy_pair();
-    assert!(strategies.len() >= 2, "the default pair must compare two arms");
+    assert!(
+        strategies.len() >= 2,
+        "the default pair must compare two arms"
+    );
     for strategy in &strategies {
         assert!(
             !strategy.counterfactual_probe,

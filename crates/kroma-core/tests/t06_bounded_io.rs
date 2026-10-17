@@ -9,7 +9,9 @@ use kroma_core::config_file::{KromaConfigFile, MAX_WORKSPACE_CONFIG_BYTES};
 use kroma_core::tools::edit::execute_edit;
 use kroma_core::tools::find::{load_workspace_ignore_patterns, MAX_IGNORE_FILE_BYTES};
 use kroma_core::workspace::{InodeMutationLock, WorkspaceCap};
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -24,6 +26,7 @@ fn workspace_config_path(root: &Path) -> PathBuf {
     KromaConfigFile::workspace_config_path(root)
 }
 
+#[cfg(unix)]
 fn make_fifo(path: &Path) {
     let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
     // SAFETY: `c_path` is a valid NUL-terminated path that outlives the call.
@@ -33,6 +36,11 @@ fn make_fifo(path: &Path) {
 
 /// A FIFO planted as the workspace config must not hang startup. Opening a FIFO for reading blocks
 /// until a writer appears, so this only passes if the read is non-blocking *and* refuses the type.
+///
+/// Unix-only: `mkfifo` is the POSIX way to plant one. On Windows the equivalent hazard is a named
+/// pipe or a reparse point, which `secure_fs` refuses by handle type; that path is compiled for
+/// `x86_64-pc-windows-gnu` but not exercised here.
+#[cfg(unix)]
 #[test]
 fn workspace_config_fifo_never_blocks() {
     let root = scratch("cfg-fifo");
@@ -56,6 +64,7 @@ fn workspace_config_fifo_never_blocks() {
 }
 
 /// A symlink planted as the workspace config is refused rather than followed.
+#[cfg(unix)]
 #[test]
 fn workspace_config_swap_to_symlink_is_refused() {
     let root = scratch("cfg-symlink");

@@ -223,6 +223,30 @@
       "exit": 0,
       "log": "logs/test_t07.log",
       "note": "T07: 879 passed / 0 failed"
+    },
+    {
+      "id": "t08_windows_build",
+      "cmd": "cargo build -p kroma-cli --target x86_64-pc-windows-gnu",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t08_windows_build.log",
+      "note": "T08: kroma.exe 199,409,491 bytes (build, not check)"
+    },
+    {
+      "id": "t08_windows_tests_check",
+      "cmd": "cargo check -p kroma-core --tests --target x86_64-pc-windows-gnu",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t08_windows_tests_check.log",
+      "note": "T08: all test code type-checks on Windows incl. 3 new cfg(windows) cases"
+    },
+    {
+      "id": "t08_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t08.log",
+      "note": "T08: 880 passed / 1 failed (b05 run_deadline_clamps_mcp_timeout, documented flake 2.1, green on rerun)"
     }
   ]
 }

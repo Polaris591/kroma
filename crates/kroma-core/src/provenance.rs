@@ -99,7 +99,11 @@ impl SourceFingerprint {
                 "{} ({} files{})",
                 &hash[..hash.len().min(16)],
                 files,
-                if self.source_hash_capped { ", capped" } else { "" }
+                if self.source_hash_capped {
+                    ", capped"
+                } else {
+                    ""
+                }
             ),
             (Some(hash), None) => hash[..hash.len().min(16)].to_string(),
             _ => "unknown".to_string(),
@@ -164,7 +168,8 @@ fn fingerprint_metadata(source_root: &Path, binary: Option<&Path>) -> SourceFing
         }
     }
     // A Cargo lockfile is the resolved dependency set. Its absence is unknown, not "no deps".
-    fingerprint.dependencies_sha256 = hash_file(&source_root.join("Cargo.lock")).map(|(hash, _)| hash);
+    fingerprint.dependencies_sha256 =
+        hash_file(&source_root.join("Cargo.lock")).map(|(hash, _)| hash);
     fingerprint
 }
 
@@ -326,7 +331,8 @@ mod tests {
     use super::*;
 
     fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kroma-prov-{}-{}", label, uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("kroma-prov-{}-{}", label, uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -417,6 +423,10 @@ mod tests {
     /// A fingerprint must never open a FIFO/socket/device: reading one blocks forever, and the
     /// fingerprint is only a convenience. This is the regression for a process whose working
     /// directory happened to be `/`.
+    ///
+    /// Unix-only: `mkfifo` is the POSIX way to plant a blocking special file, and the Windows test
+    /// binary must still compile (`cargo test --target x86_64-pc-windows-gnu --no-run`).
+    #[cfg(unix)]
     #[test]
     fn special_files_are_never_read_and_cannot_stall_the_walk() {
         let root = temp_dir("fifo");
@@ -438,7 +448,10 @@ mod tests {
             "the walk must not block on a special file, took {:?}",
             started.elapsed()
         );
-        assert!(print.source_sha256.is_some(), "regular files are still hashed");
+        assert!(
+            print.source_sha256.is_some(),
+            "regular files are still hashed"
+        );
         assert_eq!(
             print.source_files,
             Some(1),
@@ -453,7 +466,10 @@ mod tests {
     fn the_filesystem_root_is_not_walked() {
         let started = std::time::Instant::now();
         let print = fingerprint(std::path::Path::new("/"), None);
-        assert!(print.source_sha256.is_none(), "no checkout marker at /: {print:?}");
+        assert!(
+            print.source_sha256.is_none(),
+            "no checkout marker at /: {print:?}"
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
             "refusing must be immediate, took {:?}",
