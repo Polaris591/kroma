@@ -1,0 +1,129 @@
+{
+  "schema": "kroma.phase1.commands.v1",
+  "cwd_patched": "/opt/kroma-p1",
+  "cwd_baseline": "/opt/kroma-orig",
+  "baseline_note": "the baseline tree is built with CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 to fit the disk budget; this changes no test outcome",
+  "commands": [
+    {
+      "id": "check_patched",
+      "cmd": "cargo check --workspace --all-targets",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "not archived (superseded by clippy/test which compile the same targets)",
+      "note": "failed with E0004 before the DeadEnd fix; passes after"
+    },
+    {
+      "id": "fmt_all_patched",
+      "cmd": "cargo fmt --all -- --check",
+      "cwd": "patched",
+      "exit": 1,
+      "log": "logs/fmt_patched.log",
+      "note": "516 hunks; the repository is not rustfmt-clean at the delivered baseline. Per the handoff, no blanket reformat was committed; only the files whose formatting this patch broke were formatted."
+    },
+    {
+      "id": "fmt_patched_files",
+      "cmd": "rustfmt --edition 2021 --check <the 8 patched files>",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/fmt_patched_files.log",
+      "note": "after formatting session.rs, tournament.rs, gate2_evidence_projection.rs (the three files the patch left dirty). agent_loop.rs (10 hunks) and subagents.rs (2 hunks) were already dirty in the reconstructed baseline and were left untouched."
+    },
+    {
+      "id": "clippy_patched",
+      "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/clippy_patched.log",
+      "note": "two patch-introduced lints fixed: needless_range_loop (tournament.rs) and large_enum_variant (TranscriptItem, documented allow)"
+    },
+    {
+      "id": "clippy_baseline",
+      "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
+      "cwd": "baseline",
+      "exit": 0,
+      "log": "not archived (clean, no output)"
+    },
+    {
+      "id": "test_patched",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_patched_full.log",
+      "summary": "820 passed, 1 failed (b05_execution_context::run_deadline_clamps_mcp_timeout)",
+      "note": "the single failure reproduces at 1/10 on the reconstructed baseline as well -> pre-existing flake, see regressions.md"
+    },
+    {
+      "id": "test_baseline",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "baseline",
+      "exit": 0,
+      "log": "logs/test_orig_full.log",
+      "summary": "817 passed, 0 failed",
+      "note": "3 fewer tests than the patched tree: the first-batch patch adds three regression tests (T01 matrix, T05 forged marker, T07 WAL capacity)"
+    },
+    {
+      "id": "b08c_patched_repeat",
+      "cmd": "cargo test -p kroma-core --test b08c_git_metadata  (x20)",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/regression_b08c_patched.txt",
+      "summary": "1 failure in 20 runs"
+    },
+    {
+      "id": "b08c_baseline_repeat",
+      "cmd": "cargo test -p kroma-core --test b08c_git_metadata  (x21)",
+      "cwd": "baseline",
+      "exit": 0,
+      "log": "logs/regression_b08c_baseline.txt",
+      "summary": "0 failures in 21 runs (same test source, same production source -> sampling, not a patch regression)"
+    },
+    {
+      "id": "b05_patched_repeat",
+      "cmd": "cargo test -p kroma-core --test b05_execution_context  (x10)",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/regression_b05_patched.txt",
+      "summary": "1 failure in 10 runs"
+    },
+    {
+      "id": "b05_baseline_repeat",
+      "cmd": "cargo test -p kroma-core --test b05_execution_context  (x10)",
+      "cwd": "baseline",
+      "exit": 101,
+      "log": "logs/regression_b05_baseline.txt",
+      "summary": "1 failure in 10 runs -> pre-existing flake, not caused by the patch"
+    },
+    {
+      "id": "node_patched",
+      "cmd": "node scripts/test-kroma-js-upgrade.js",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/node_patched_1.log",
+      "summary": "108/108 checks passed"
+    },
+    {
+      "id": "node_baseline",
+      "cmd": "node scripts/test-kroma-js-upgrade.js",
+      "cwd": "baseline",
+      "exit": 0,
+      "log": "logs/node_orig_1.log",
+      "summary": "108/108 checks passed"
+    },
+    {
+      "id": "node_patched_repeat",
+      "cmd": "node scripts/test-kroma-js-upgrade.js  (x10)",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/node_patched_repeat.txt",
+      "summary": "0 failures in 10 runs; the ENOENT flake the handoff recorded in the other environment did not reproduce here"
+    },
+    {
+      "id": "release_build_patched",
+      "cmd": "cargo build --workspace --release",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/build_release_patched.log",
+      "summary": "target/release/kroma, 16216200 bytes"
+    }
+  ]
+}

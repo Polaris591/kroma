@@ -1,0 +1,14 @@
+== crates/kroma-core/src/agent_loop.rs
+Diff in /opt/kroma-p1/crates/kroma-core/src/agent_loop.rs:435:
+     }
+ 
+== crates/kroma-core/src/context_projector.rs
+== crates/kroma-core/src/messages.rs
+== crates/kroma-core/src/session.rs
+== crates/kroma-core/src/subagents.rs
+Diff in /opt/kroma-p1/crates/kroma-core/src/subagents.rs:2167:
+     pub winner: bool,
+ }
+== crates/kroma-core/src/surface/dispatcher/tournament.rs
+== crates/kroma-core/tests/frontier_contract.rs
+== crates/kroma-core/tests/gate2_evidence_projection.rs
