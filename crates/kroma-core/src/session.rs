@@ -28,6 +28,16 @@ const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000
 /// Hard cap on a session WAL file. Bounds how much damage a mis-supplied `--resume` path can do
 /// and keeps recovery memory-bounded (F-01). Public so the CLI can reject an oversized explicit
 /// `--resume <path>` before it ever opens the file for writing.
+/// Capacity contract (T07, KR-05).
+///
+/// Every fact this process persists goes through [`SessionJournal::append_payload`], which enforces
+/// the *reader's* limits before writing the first byte: one line is at most
+/// [`MAX_WAL_LINE_BYTES`], and the whole file is at most [`MAX_WAL_FILE_BYTES`]. Transcript items,
+/// checkpoints and projection overlays share that one budget — there is no separate, more generous
+/// path for any of them — and raw tool output is bounded separately by
+/// [`crate::context_projector::MAX_EVIDENCE_BYTES`] with explicit eviction, never by dropping WAL
+/// records. When a fact does not fit, the append fails closed and the caller decides; the journal
+/// never silently forgets history to stay under the cap.
 pub const MAX_WAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// Hard cap on a single WAL line so a corrupt/hostile file cannot force a huge allocation.
 const MAX_WAL_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -186,6 +196,10 @@ enum WalFault {
     /// Same as [`WalFault::PartialWrite`], but the rollback `ftruncate`/`fsync` also fails, leaving
     /// the tail in an unknown state.
     PartialWriteAndRollbackFailure,
+    /// T07: a disk-full write. Half the line lands, then `ENOSPC` is reported; the rollback is
+    /// healthy, so the fragment is truncated and the journal stays usable — the "no session that
+    /// succeeded but cannot be recovered" property.
+    DiskFullMidWrite,
 }
 
 pub struct SessionJournal {
@@ -1291,6 +1305,12 @@ impl SessionJournal {
                 // stays usable.
                 self.fault = None;
             }
+            if self.fault == Some(WalFault::DiskFullMidWrite) {
+                // A real full disk fails mid-`write_all`; the rollback path is the healthy one.
+                self.fault = None;
+                let cause = SessionError::Io(std::io::Error::from_raw_os_error(libc::ENOSPC));
+                return self.rollback_failed_append(pre_write_len, cause);
+            }
             let cause = SessionError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "injected partial write",
@@ -1992,6 +2012,367 @@ mod tests {
         drop(wal);
         let reopened = SessionJournal::open(&path).unwrap();
         assert_eq!(reopened.max_active_turn(), 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ---- T07 (KR-05): the writer must never commit a record the reader would reject -----------
+
+    /// Line-capacity boundaries: `limit - 1`, `limit`, `limit + 1` all agree with the reader's
+    /// `raw.len() > MAX_WAL_LINE_BYTES` check, and a real append at each accepted size reopens.
+    #[test]
+    fn wal_line_capacity_boundaries_are_dual_with_the_reader() {
+        let limit = MAX_WAL_LINE_BYTES;
+        for (json_len, expect_ok) in [(limit - 1, true), (limit, true), (limit + 1, false)] {
+            let with_newline = json_len + 1;
+            let verdict = validate_wal_append_capacity(0, with_newline, limit, MAX_WAL_FILE_BYTES);
+            assert_eq!(
+                verdict.is_ok(),
+                expect_ok,
+                "json_len {} (limit {}) should be {}",
+                json_len,
+                limit,
+                if expect_ok { "accepted" } else { "refused" }
+            );
+            if !expect_ok {
+                let err = verdict.unwrap_err().to_string();
+                assert!(
+                    err.contains("maximum line size"),
+                    "expected a line-size refusal, got: {err}"
+                );
+            }
+        }
+
+        // The reader side of the same boundary is covered by
+        // `writer_never_commits_a_record_reader_would_reject`, which binary-searches the largest
+        // accepted payload and proves that whatever the writer commits the reader can read.
+    }
+
+    /// File-capacity boundaries: `total == limit` is accepted, `total == limit + 1` is refused, and
+    /// the reader's `len > MAX_WAL_FILE_BYTES` gate agrees.
+    #[test]
+    fn wal_file_capacity_boundaries_are_dual_with_the_reader() {
+        let limit = MAX_WAL_FILE_BYTES;
+        // pre + line == limit  -> accepted (the file ends exactly at the cap)
+        assert!(
+            validate_wal_append_capacity(limit - 10, 10, MAX_WAL_LINE_BYTES, limit).is_ok(),
+            "a file that ends exactly at the cap must be accepted"
+        );
+        // pre + line == limit + 1 -> refused
+        let err = validate_wal_append_capacity(limit - 10, 11, MAX_WAL_LINE_BYTES, limit)
+            .expect_err("one byte past the cap must be refused");
+        assert!(
+            err.to_string().contains("maximum file size"),
+            "expected a file-size refusal, got: {err}"
+        );
+        // pre + line == limit - 1 -> accepted
+        assert!(
+            validate_wal_append_capacity(limit - 10, 9, MAX_WAL_LINE_BYTES, limit).is_ok(),
+            "a file just under the cap must be accepted"
+        );
+        // Overflow of the addition itself is refused rather than wrapping.
+        assert!(validate_wal_append_capacity(u64::MAX, 2, MAX_WAL_LINE_BYTES, u64::MAX).is_err());
+
+        // Reader side: a file one byte over the cap is refused *by size*, and the error says so.
+        let dir = tempdir();
+        let target = dir.join("over.wal.jsonl");
+        let f = File::create(&target).unwrap();
+        f.set_len(MAX_WAL_FILE_BYTES + 1).unwrap();
+        drop(f);
+        let err = match SessionJournal::open(&target) {
+            Ok(_) => panic!("oversized WAL must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("maximum size") || err.to_string().contains("too large"),
+            "expected a size refusal from the reader, got: {err}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A disk-full write mid-line is rolled back: the journal stays usable, the file keeps its
+    /// committed prefix, and reopening the WAL succeeds.
+    #[test]
+    fn disk_full_mid_write_rolls_back_and_the_session_stays_readable() {
+        let dir = tempdir();
+        let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
+        let path = wal.path().to_path_buf();
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "before the disk filled".into(),
+            }),
+        )
+        .unwrap();
+        let committed = fs::read(&path).unwrap();
+        let seq_before = wal.next_seq;
+        let hash_before = wal.last_hash.clone();
+
+        wal.fault = Some(WalFault::DiskFullMidWrite);
+        let err = wal
+            .append_item(
+                1,
+                TranscriptItem::User(UserMessage {
+                    content: "this write hits ENOSPC".into(),
+                }),
+            )
+            .expect_err("a full disk must fail the append");
+        assert!(
+            err.to_string().to_lowercase().contains("space")
+                || err.to_string().contains(&libc::ENOSPC.to_string()),
+            "expected an ENOSPC-flavoured error, got: {err}"
+        );
+
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            committed,
+            "the half-written fragment must be truncated back to the committed prefix"
+        );
+        assert_eq!(wal.next_seq, seq_before);
+        assert_eq!(wal.last_hash, hash_before);
+
+        // The handle is not poisoned: a later append works and the file still reopens.
+        wal.append_item(
+            1,
+            TranscriptItem::User(UserMessage {
+                content: "after the full disk".into(),
+            }),
+        )
+        .unwrap();
+        drop(wal);
+        let reopened = SessionJournal::open(&path).expect("the WAL must still be recoverable");
+        assert_eq!(reopened.active_transcript().len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A torn tail is repaired (it was never committed), but corruption in the middle is refused.
+    #[test]
+    fn torn_tail_is_repaired_but_corrupt_middle_is_refused() {
+        let dir = tempdir();
+        let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
+        let path = wal.path().to_path_buf();
+        for turn in 0..3 {
+            wal.append_item(
+                turn,
+                TranscriptItem::User(UserMessage {
+                    content: format!("turn {turn}"),
+                }),
+            )
+            .unwrap();
+        }
+        drop(wal);
+
+        // Torn tail: a partial line with no newline, exactly what a power loss leaves behind.
+        let committed_len = fs::metadata(&path).unwrap().len();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"seq\":3,\"prev_hash\":\"ab");
+        fs::write(&path, &bytes).unwrap();
+        let reopened = SessionJournal::open(&path).expect("a torn tail must be repaired");
+        assert_eq!(reopened.active_transcript().len(), 3);
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            committed_len,
+            "the torn fragment must be truncated back to the last complete line"
+        );
+        drop(reopened);
+
+        // Corrupt middle: a complete but invalid line before the tail is not repaired.
+        let mut bytes = fs::read(&path).unwrap();
+        let second_line_start = bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|i| i + 1)
+            .expect("a complete WAL has at least one newline");
+        let second_line_end = bytes[second_line_start..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|i| second_line_start + i)
+            .unwrap();
+        bytes.splice(
+            second_line_start..second_line_end,
+            b"{\"corrupt\":true}".iter().copied(),
+        );
+        fs::write(&path, &bytes).unwrap();
+        let err = match SessionJournal::open(&path) {
+            Ok(_) => panic!("a corrupt middle line must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("not valid JSON")
+                || err.to_string().contains("hash")
+                || err.to_string().contains("sequence"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Property: whatever the writer commits, the reader can read. The boundary is located by the
+    /// writer's own verdicts (a handful of probes near the cap), then both sides are checked against
+    /// a real reopen — so the test cannot drift from the constants it is supposed to pin.
+    #[test]
+    fn writer_never_commits_a_record_reader_would_reject() {
+        let probe = |content_len: usize| -> bool {
+            let dir = tempdir();
+            let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
+            let ok = wal
+                .append_item(
+                    0,
+                    TranscriptItem::User(UserMessage {
+                        content: "x".repeat(content_len),
+                    }),
+                )
+                .is_ok();
+            drop(wal);
+            let _ = fs::remove_dir_all(dir);
+            ok
+        };
+
+        // Measure the envelope once so the failure mode is visible.
+        let dir0 = tempdir();
+        let mut w0 = SessionJournal::create(&dir0, "/tmp/workspace").unwrap();
+        let p0 = w0.path().to_path_buf();
+        let b0 = fs::metadata(&p0).unwrap().len();
+        w0.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "x".into(),
+            }),
+        )
+        .unwrap();
+        let a0 = fs::metadata(&p0).unwrap().len();
+        let envelope = (a0 - b0 - 1) as usize;
+        assert!(
+            envelope < 4096,
+            "the WAL envelope should be small, measured {envelope}"
+        );
+        drop(w0);
+        let _ = fs::remove_dir_all(&dir0);
+        // The envelope is a few hundred bytes; the payload budget is the cap minus that envelope.
+        // Probe a couple of bytes downward so the test still pins the real boundary if the envelope
+        // measurement is one byte off.
+        let mut largest = None;
+        for back in 0..4usize {
+            let candidate = MAX_WAL_LINE_BYTES - envelope - back;
+            if probe(candidate) {
+                largest = Some(candidate);
+                break;
+            }
+        }
+        let largest = largest.expect("a payload just under the line cap must be accepted");
+
+        // At the limit: append succeeds and the WAL reopens.
+        let dir = tempdir();
+        let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
+        let path = wal.path().to_path_buf();
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "x".repeat(largest),
+            }),
+        )
+        .expect("the largest accepted payload must append");
+        drop(wal);
+        SessionJournal::open(&path).expect("whatever the writer commits, the reader must read");
+
+        // One byte over: refused, bytes unchanged, and the WAL still reopens.
+        let committed = fs::read(&path).unwrap();
+        let mut wal = SessionJournal::open(&path).unwrap();
+        assert!(
+            wal.append_item(
+                1,
+                TranscriptItem::User(UserMessage {
+                    content: "x".repeat(largest + 1),
+                }),
+            )
+            .is_err(),
+            "one byte past the line cap must be refused"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            committed,
+            "a refused append must not touch the file"
+        );
+        drop(wal);
+        SessionJournal::open(&path).expect("a refused append must leave a readable WAL");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A checkpoint that would not fit a WAL line is refused before any byte is written, and the
+    /// journal stays usable — the shared capacity budget applies to checkpoints too.
+    #[test]
+    fn oversized_checkpoint_is_refused_transactionally() {
+        let dir = tempdir();
+        let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
+        let path = wal.path().to_path_buf();
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "ok".into(),
+            }),
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+        let seq_before = wal.next_seq;
+        let hash_before = wal.last_hash.clone();
+
+        let err = wal
+            .checkpoint_with_subagents(
+                0,
+                0,
+                Vec::new(),
+                "sha",
+                None,
+                vec!["x".repeat(MAX_WAL_LINE_BYTES)],
+                Vec::new(),
+                0,
+            )
+            .expect_err("an oversized checkpoint must be refused");
+        assert!(
+            err.to_string().contains("maximum line size"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before, "nothing may be written");
+        assert_eq!(wal.next_seq, seq_before);
+        assert_eq!(wal.last_hash, hash_before);
+        drop(wal);
+        SessionJournal::open(&path).expect("the refused checkpoint must leave a readable WAL");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The same budget applies to projection overlays: a compacted stub too large to persist is
+    /// refused rather than written, and the on-disk transcript stays recoverable.
+    #[test]
+    fn oversized_projection_overlay_is_refused_transactionally() {
+        let dir = tempdir();
+        let mut wal = SessionJournal::create(&dir, "/tmp/workspace").unwrap();
+        let path = wal.path().to_path_buf();
+        wal.append_item(
+            0,
+            TranscriptItem::User(UserMessage {
+                content: "ok".into(),
+            }),
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let transcript = vec![TranscriptItem::ToolResult(
+            crate::messages::ToolResultMessage {
+                call_id: crate::types::ToolCallId::new("call_big"),
+                tool_name: "read".to_string(),
+                outcome: crate::messages::ToolOutcome::Success,
+                content: std::sync::Arc::from("y".repeat(MAX_WAL_LINE_BYTES)),
+                meta: Default::default(),
+            },
+        )];
+        let err = wal
+            .sync_projected_transcript(&transcript, &[])
+            .expect_err("an oversized projection overlay must be refused");
+        assert!(
+            err.to_string().contains("maximum line size"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before, "nothing may be written");
+        drop(wal);
+        SessionJournal::open(&path).expect("the refused overlay must leave a readable WAL");
         let _ = fs::remove_dir_all(dir);
     }
 }

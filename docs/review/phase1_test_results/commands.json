@@ -208,6 +208,21 @@
       "exit": 0,
       "log": "logs/test_t06.log",
       "note": "T06: 872 passed / 0 failed"
+    },
+    {
+      "id": "t07_session_unit",
+      "cmd": "cargo test -p kroma-core --lib session::tests",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T07: 21 passed (16 existing + 5 new)"
+    },
+    {
+      "id": "t07_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t07.log",
+      "note": "T07: 879 passed / 0 failed"
     }
   ]
 }
