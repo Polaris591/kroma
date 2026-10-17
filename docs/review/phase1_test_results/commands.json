@@ -509,6 +509,21 @@
       "exit": 0,
       "log": "logs/t24_exp00_dryrun.log",
       "note": "T24: EXP-00 dry-run, 48 jobs (2 arms x 8 tasks x 3 repeats), basis=holdout, digest 05757bf3fe69c9f9; real model runs BLOCKED (no authorized spend cap)"
+    },
+    {
+      "id": "t25_targeted",
+      "cmd": "cargo test -p kroma-core --test t25_task_state",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T25: 4 passed / 0 failed (constraint survives compaction+resume, mentions are not causes, hypotheses need evidence, compression cost includes rereads)"
+    },
+    {
+      "id": "t25_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t25.log",
+      "note": "T25: 971 passed / 1 failed (b08c 2.2 documented flake, 5/5 green serially)"
     }
   ]
 }

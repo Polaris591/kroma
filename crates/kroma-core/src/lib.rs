@@ -36,6 +36,7 @@ pub mod sensitive_paths;
 pub mod session;
 pub mod session_ownership;
 pub mod subagents;
+pub mod task_state;
 pub mod surface;
 pub mod task_host;
 pub mod theme;
