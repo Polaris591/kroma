@@ -434,9 +434,9 @@ impl RpcDispatcher {
         }
 
         let mut candidates: Vec<crate::subagents::TournamentCandidate> = Vec::with_capacity(count);
-        for index in 0..count {
+        for (index, strategy) in resolved_strategies.iter().enumerate() {
             let label = format!("c{}", index + 1);
-            let strategy = resolved_strategies[index].clone();
+            let strategy = strategy.clone();
             let mut spec = crate::subagents::SubagentSpec::worker(format!(
                 "{}\n\n[TOURNAMENT CANDIDATE {} STRATEGY] {}",
                 task, label, strategy

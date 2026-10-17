@@ -229,6 +229,12 @@ pub mod arc_str_serde {
     }
 }
 
+// The `ToolResult` variant grew past clippy's 200-byte threshold when the typed
+// `ToolResultMeta.compaction` metadata landed (T05/KR-04). Boxing it would touch the 126
+// construction sites and every `TranscriptItem::ToolResult(..)` pattern match, which is out of
+// scope for a correctness patch; the item is moved, not copied, on the hot path. Recorded as a
+// deliberate, scoped exception in docs/review/phase1_test_results/.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum TranscriptItem {
