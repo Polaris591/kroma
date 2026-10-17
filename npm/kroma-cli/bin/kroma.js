@@ -18,13 +18,16 @@ const pkgJson = require("../package.json");
 /**
  * Production release trust root: a map of { [keyId: string]: string (Ed25519 public key) }.
  *
- * EXPLICITLY UNCONFIGURED (empty) until the release operator generates and provisions official
- * production signing keys. When empty, all online self-upgrade and on-demand binary downloads
- * are strictly blocked (fail-closed).
+ * Configured with the release signing key declared in `docs/release/TRUST_ROOT.md`. When a manifest is
+ * signed with any other key (including the test-channel key), verification refuses it by name. When the
+ * map is empty, all online self-upgrade and on-demand binary downloads are strictly blocked
+ * (fail-closed).
  *
  * Native execution of already-installed binaries and `kroma --version` are completely unaffected.
  */
-const PRODUCTION_TRUSTED_KEYS = Object.freeze({});
+const PRODUCTION_TRUSTED_KEYS = Object.freeze({
+  "kroma-release-2026": "2cabb3d0cb06b03ffd478f37e07217e09286a8fa3b6a512c0b4288adc78114bc",
+});
 
 const MIRROR_MANIFEST_URL = "https://cobblemon.asia/kroma-manifest.json";
 const MIRROR_TARBALL_URL = "https://cobblemon.asia/kroma.tgz";

@@ -1,0 +1,39 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/main.rs (target/debug/deps/kroma-b2360c2b39aa59e1)
+
+running 21 tests
+test approval_ui::tests::escapes_bidi_override ... ok
+test approval_ui::tests::escapes_ansi_and_carriage_return_but_keeps_newline_and_tab ... ok
+test approval_ui::tests::cancelled_approval_denies_promptly_without_blocking ... ok
+test tests::test_causal_pruning_flag_is_opt_in ... ok
+test tests::test_gate6_multi_surface_cli_flags_and_serve_security ... ok
+test tests::test_cli_flags_and_policy_modes ... ok
+test tests::test_max_tokens_flag_feeds_the_unified_token_cap ... ok
+test tests::test_completion_gate_selection_honors_shell_authorization ... ok
+test tests::test_mcp_server_flag_parses_into_a_trusted_config ... ok
+test tests::test_no_subagents_outranks_workspace_config ... ok
+test tests::test_restore_rev_records_revision_so_a_following_undo_stays_in_sync ... ok
+test tests::test_reconcile_orphan_snapshot_and_emit_revision_restored_event ... ok
+test tests::test_serve_help_text_and_non_loopback_warning ... ok
+test tests::test_cli_fork_restores_workspace_and_moves_the_leaf ... ok
+test tests::test_subagent_cli_flags_parse ... ok
+test tests::test_restore_rev_recovers_a_pending_merge_before_restoring ... ok
+test tests::test_undo_recovers_a_pending_merge_before_restoring ... ok
+test tests::test_verify_cmd_and_no_verify_flags_parse ... ok
+test tests::test_workspace_revision_management_flags_parse ... ok
+test tests::test_undo_rebinds_the_wal_when_the_undone_revision_shares_the_rewind_leaf ... ok
+test tests::test_headless_mounts_a_trusted_mcp_server ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/crash_recovery_matrix.rs (target/debug/deps/crash_recovery_matrix-9bae1679fb5530ab)
+
+running 9 tests
+test crash_child_entry ... ok
+test crash_before_leaf_move_completes_the_fork_from_its_intent ... ok
+test crash_mid_restore_finishes_the_recorded_restore ... ok
+test crash_before_capture_refuses_to_overwrite_external_bytes ... ok
+test crash_between_snapshot_and_wal_adopts_the_orphan_manifest ... ok
+test crash_mid_wal_append_discards_the_torn_line ... ok
+test crash_with_a_corrupt_manifest_blocks_the_next_mutation ... ok
+test crash_mid_undo_completes_the_rewind_from_its_intent ... ok

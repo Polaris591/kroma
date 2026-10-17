@@ -371,15 +371,40 @@ async function runAll() {
     assert.strictEqual(verified.target, "linux-x64");
   });
 
-  check("fails closed when production trust root is empty / unconfigured", () => {
-    assert.strictEqual(Object.keys(PRODUCTION_TRUSTED_KEYS).length, 0);
+  check("fails closed when the trust root is empty / unconfigured", () => {
+    // The property under test is the fail-closed path, not whether production happens to be empty: an
+    // unconfigured root must block, whatever the reason it is unconfigured.
     assert.throws(
-      () => verifyManifest(validManifestText, { trustedKeys: PRODUCTION_TRUSTED_KEYS }),
+      () => verifyManifest(validManifestText, { trustedKeys: Object.freeze({}) }),
       /Production release trust root is unconfigured; self-upgrade is blocked/
     );
+    // With no `trustedKeys` override the production root applies, and the fixture key is not in it:
+    // that is a different refusal (unknown key) from the unconfigured one, and both must block.
+    assert.throws(() => verifyManifest(validManifestText, {}), /Unknown or untrusted signing key/);
+  });
+
+  check("production trust root binds signatures to the declared release key", () => {
+    assert.ok(Object.isFrozen(PRODUCTION_TRUSTED_KEYS), "must stay frozen");
+    assert.deepStrictEqual(
+      Object.keys(PRODUCTION_TRUSTED_KEYS),
+      ["kroma-release-2026"],
+      "exactly the declared production key, nothing else"
+    );
+    assert.match(
+      PRODUCTION_TRUSTED_KEYS["kroma-release-2026"],
+      /^[0-9a-f]{64}$/,
+      "a raw 32-byte Ed25519 public key"
+    );
+    // The fixture key is not the production key: a manifest that claims the production keyId but is
+    // signed with the fixture key must fail on the signature, which proves the production key is
+    // actually used rather than skipped.
+    const impostor = signManifest(
+      Object.assign({}, validBaseFields, { keyId: "kroma-release-2026" }),
+      fixtureKey.privateKey
+    );
     assert.throws(
-      () => verifyManifest(validManifestText, {}),
-      /Production release trust root is unconfigured; self-upgrade is blocked/
+      () => verifyManifest(serializeManifest(impostor)),
+      /Signature verification failed/
     );
   });
 
@@ -1024,7 +1049,7 @@ async function runAll() {
   await checkAsync("downloadBinaryIfNeeded fails closed when trust root is empty", async () => {
     const missingBin = path.join(tmpDir, "missing-bin-1");
     const res = await downloadBinaryIfNeeded(missingBin, "linux-x64", {
-      trustedKeys: PRODUCTION_TRUSTED_KEYS
+      trustedKeys: Object.freeze({})
     });
     assert.strictEqual(res, false);
     assert.strictEqual(fs.existsSync(missingBin), false);

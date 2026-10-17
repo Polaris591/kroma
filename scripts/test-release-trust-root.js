@@ -8,7 +8,9 @@
  * private key anywhere, never commits one, and never claims to be a production fixture: it exists to
  * pin the *verification* behaviour that must hold once the owner supplies a real key.
  *
- * It also asserts the negative that matters most right now: `PRODUCTION_TRUSTED_KEYS` is empty and
+ * It also asserts the negative that matters most: a test key never appears in `PRODUCTION_TRUSTED_KEYS`,
+ * and the production root declares exactly the release key. (It used to assert the root was empty; that
+ * changed when the release key was provisioned - see docs/release/TRUST_ROOT.md.) The old line began:
  * frozen, so a manifest signed by this test key is refused by the production entry. That is why T21's
  * "real release candidate verifies" acceptance is BLOCKED — see docs/review/phase1_test_results/T21_acceptance.md.
  *
@@ -97,18 +99,17 @@ async function main() {
   const key = testKey("test-channel");
 
   console.log("Trust root state");
-  await ok("production trust root is empty and frozen (no placeholder keys)", () => {
+  await ok("production trust root declares exactly the release key and is frozen", () => {
     assert.ok(Object.isFrozen(PRODUCTION_TRUSTED_KEYS), "PRODUCTION_TRUSTED_KEYS must be frozen");
-    assert.strictEqual(
-      Object.keys(PRODUCTION_TRUSTED_KEYS).length,
-      0,
-      "a placeholder key in the production trust root would be worse than none"
-    );
+    assert.deepStrictEqual(Object.keys(PRODUCTION_TRUSTED_KEYS), ["kroma-release-2026"]);
+    assert.match(PRODUCTION_TRUSTED_KEYS["kroma-release-2026"], /^[0-9a-f]{64}$/);
+    // The test-channel key must never appear here: a test key in production is worse than no key.
+    assert.strictEqual(PRODUCTION_TRUSTED_KEYS["test-channel"], undefined);
   });
 
   await ok("a test-key manifest is refused by the production entry", () => {
     const text = signed(key);
-    throwsWith(() => verifyManifest(text), "trust root is unconfigured");
+    throwsWith(() => verifyManifest(text), "Unknown or untrusted signing key: test-channel");
     // ...and the test key does not accidentally appear in production.
     assert.strictEqual(PRODUCTION_TRUSTED_KEYS[key.keyId], undefined);
   });
@@ -245,12 +246,13 @@ async function main() {
   });
 
   console.log("production_fixture_signed_by_release_key_verifies");
-  await ok("the production entry is fail-closed until the owner installs a key", () => {
-    // This is the honest state: there is no production fixture, so the check that a *real* release
-    // candidate verifies cannot be run. It is recorded as BLOCKED rather than faked with this key.
+  await ok("the production entry refuses the test key and names the trust root it holds", () => {
+    // The production root now holds the real release key (docs/release/TRUST_ROOT.md). A manifest signed
+    // with the test-channel key must be refused by *name*, not silently accepted: that is the check that
+    // the installed key is the one being used.
     const text = signed(key);
-    throwsWith(() => verifyManifest(text), "trust root is unconfigured");
-    assert.strictEqual(Object.keys(PRODUCTION_TRUSTED_KEYS).length, 0);
+    throwsWith(() => verifyManifest(text), "Unknown or untrusted signing key: test-channel");
+    assert.deepStrictEqual(Object.keys(PRODUCTION_TRUSTED_KEYS), ["kroma-release-2026"]);
   });
 
   console.log("");

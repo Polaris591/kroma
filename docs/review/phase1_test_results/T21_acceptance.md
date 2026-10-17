@@ -73,3 +73,51 @@ const PRODUCTION_TRUSTED_KEYS = Object.freeze({});
 - 没有新增占位密钥、没有放宽「未知 keyId / 缺签名 / 降级」的拒绝条件。
 - T22（发布与供应链闭环）依赖本项的真实签名结果，因此它的签名部分同样 BLOCKED；
   SBOM / 哈希清单可复算的部分在 T22 里单独处理。
+
+---
+
+## 本轮更新（2026-10-18）：密钥已就位，链路真实跑通
+
+所有者指示「你自己生成签名」，于是按路线 A 在**本机**生成密钥对，私钥留在服务器、不进仓库：
+
+| 项 | 值 |
+| --- | --- |
+| keyId | `kroma-release-2026` |
+| 公钥 raw hex | `2cabb3d0cb06b03ffd478f37e07217e09286a8fa3b6a512c0b4288adc78114bc` |
+| 私钥 | `/root/kroma-release/kroma-release-key.pem`（600，目录 700），未进仓库/日志/对话 |
+| 安装 | `bin/kroma.js` 与 `npm/kroma-cli/bin/kroma.js` 的 `PRODUCTION_TRUSTED_KEYS`（两份 `cmp` 逐字节一致） |
+
+### 真签名验证（端到端）
+
+对封板源码包（3,056,045 字节）签名并**用生产信任根**（不传任何 override）验证：
+
+- `verifyManifest` 返回 `keyId=kroma-release-2026 / v1.5.1 / linux-x64`，
+  `sha256 = 8ee884cdafe2f8ef087fc4f957fd752cbd68f3000c76cba6af9fa5255ebe4a0c` —— 与随包 `SHA256SUMS` 里
+  `kroma-p1-sealed-source.tar.gz` 的摘要**逐字节相同**；
+- 篡改载荷（sha256 改全 0）→ `Signature verification failed for release manifest`；
+- 用测试通道密钥签的 manifest → `Unknown or untrusted signing key: test-channel`；
+- 冒充生产 keyId 但用别的密钥签 → `Signature verification failed`（证明生产公钥真的被使用，不是被跳过）。
+
+### 测试断言随之更新（不是放松，是转向真实状态）
+
+- 「生产根为空且 frozen」→「生产根**恰好**含 `kroma-release-2026`、frozen、值为 64 位十六进制」；
+- 「生产入口拒绝测试密钥」的期望消息从 `trust root is unconfigured` 改为
+  `Unknown or untrusted signing key: test-channel`；
+- 「不传 trustedKeys 时 fail-closed」拆成两条：空 map 仍是 `unconfigured`（fail-closed 路径保留测试），
+  不传 override 则走生产根并因「未知密钥」被拒；
+- 新增：生产根绑定签名（冒充 keyId 必须因签名失败被拒）。
+
+### 门禁
+
+| 项 | 结果 |
+| --- | --- |
+| `node scripts/test-release-trust-root.js` | **13 / 13** |
+| `node scripts/test-kroma-js-upgrade.js` | **109 / 109**（新增 1 条生产根绑定检查） |
+| `node scripts/generate-release-manifest.js … --key-id kroma-release-2026` | 签名成功 |
+| 生产根验证 + 篡改/冒充/测试密钥三向拒绝 | 通过 |
+
+### 边界
+
+- 私钥由本机生成并保管；**所有者需自行离线备份**（丢失只能按轮换流程换 keyId）。
+- 轮换策略与备份要求写在 `docs/release/TRUST_ROOT.md`。
+- 没有把私钥写进仓库、CI secret 之外的位置，也没有用测试密钥冒充生产密钥。

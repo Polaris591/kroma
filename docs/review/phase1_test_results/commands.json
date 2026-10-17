@@ -641,6 +641,48 @@
       "cwd": "patched",
       "exit": 0,
       "note": "T22: all 38 uses: entries pinned to 40-char commit SHAs (8 distinct actions resolved via GitHub API); pinned-with-comment form supported"
+    },
+    {
+      "id": "t21_keygen",
+      "cmd": "openssl genpkey -algorithm ed25519 -out /root/kroma-release/kroma-release-key.pem && openssl pkey -in … -pubout -outform DER | tail -c 32",
+      "cwd": "host",
+      "exit": 0,
+      "note": "T21: production key pair generated on the host at the owner's instruction; keyId kroma-release-2026; private key 600, never in the repo"
+    },
+    {
+      "id": "t21_trust_root_tests",
+      "cmd": "node scripts/test-release-trust-root.js",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T21: 13 passed (production root declares exactly kroma-release-2026, test key refused, impostor keyId refused)"
+    },
+    {
+      "id": "t21_upgrade_tests",
+      "cmd": "node scripts/test-kroma-js-upgrade.js",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T21/T22: 109 passed (incl. production-root signature binding)"
+    },
+    {
+      "id": "t21_sign_and_verify",
+      "cmd": "node scripts/generate-release-manifest.js --key-id kroma-release-2026 --private-key-file /root/kroma-release/kroma-release-key.pem … && verifyManifest(text)",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T21: real manifest verified with the production root; sha256 matches SHA256SUMS for the sealed tarball; tampered payload refused"
+    },
+    {
+      "id": "t21_sbom_manifest_verify",
+      "cmd": "node -e 'require(\"./bin/kroma.js\").verifyManifest(<signed manifest>)'",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T21: production-root verification of a real signed manifest"
+    },
+    {
+      "id": "t30_release_gate",
+      "cmd": "node scripts/release-gate.js lock && node scripts/release-gate.js actions",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T22/T30: Cargo.lock pinned digest matches; 16 + 22 uses: entries commit-pinned"
     }
   ]
 }

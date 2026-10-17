@@ -130,3 +130,19 @@ CLI：`node scripts/release-gate.js actions` / `lock`，退出码 1 = 门禁失�
 `@v4`、repo 状态报告同步剥离注释后显示 22 pinned / 0 mutable）。
 
 因此 T22 现在只剩**签名 manifest** 一项等 T21 的密钥，其余全部通过。
+
+## 七、签名项现状（2026-10-18 更新）
+
+T21 的生产密钥已就位（`kroma-release-2026`），所以「签名」不再是缺件，而是**链路已证明、只差 CI 上跑一次完整发布**：
+
+| 已完成 | 证据 |
+| --- | --- |
+| 生产密钥生成 + 装入两处入口 | `docs/release/TRUST_ROOT.md`；`cmp` 两份入口逐字节一致 |
+| 真签名 manifest 经生产根验证 | 封板源码包 3,056,045 字节，`sha256=8ee884cd…` 与 `SHA256SUMS` 一致；篡改载荷被拒 |
+| 产物与 manifest 一致性检查 | `assertManifestMatchesArtifacts`（21 项检查中的覆盖点） |
+| Action 全部 commit 钉住 | 38 处，`release-gate.js actions` 通过 |
+| Cargo.lock 钉住 | `release-gate.js lock` 通过 |
+
+**仍未完成（需要 CI runner）**：真实跑一次 `.github/workflows/release.yml`，产出 `artifacts[]` 形态的
+签名 manifest 并让四个平台产物一起过 `assertManifestMatchesArtifacts`。这需要 4 个平台的构建产物
+（本机磁盘 1.3 GB 可用，跑不动全平台构建），因此仍记为 PARTIAL，而不是用单平台结果冒充。
