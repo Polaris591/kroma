@@ -539,6 +539,28 @@
       "exit": 0,
       "log": "logs/test_t26.log",
       "note": "T26: 974 passed / 0 failed"
+    },
+    {
+      "id": "t27_unit",
+      "cmd": "cargo test -p kroma-core --lib control_policy",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T27: 8 passed / 0 failed (deterministic actions, caps, budget floor, isolation stop, multi-candidate gate, loser cost)"
+    },
+    {
+      "id": "t27_targeted",
+      "cmd": "cargo test -p kroma-core --test t27_control_policy",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T27: 3 passed / 0 failed (probe runs on an isolated copy and leaves the parent byte-identical; unauthorized never executes)"
+    },
+    {
+      "id": "t27_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t27.log",
+      "note": "T27: 985 passed / 0 failed"
     }
   ]
 }

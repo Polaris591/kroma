@@ -10,6 +10,7 @@ pub mod completion_gate;
 pub mod capability;
 pub mod config_file;
 pub mod context_economy;
+pub mod control_policy;
 pub mod context_projector;
 pub mod env;
 pub mod events;
