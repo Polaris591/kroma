@@ -7,6 +7,7 @@ pub mod bench;
 pub mod budget;
 pub mod channel_governor;
 pub mod completion_gate;
+pub mod capability;
 pub mod config_file;
 pub mod context_economy;
 pub mod context_projector;

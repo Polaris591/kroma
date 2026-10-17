@@ -433,6 +433,21 @@
       "exit": 101,
       "log": "logs/test_t19.log",
       "note": "T19: 955 passed / 1 failed (b05 agent_runner_real_toolchain_clamps_run_deadline, load-sensitive spawn flake, b05 14/14 green on rerun)"
+    },
+    {
+      "id": "t20_targeted",
+      "cmd": "cargo test -p kroma-core --test t20_capability_manifest",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T20: 7 passed / 0 failed (manifest vs repo, CLI flags, version agreement, old-report gate, doc drift)"
+    },
+    {
+      "id": "t20_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t20.log",
+      "note": "T20: 963 passed / 0 failed"
     }
   ]
 }
