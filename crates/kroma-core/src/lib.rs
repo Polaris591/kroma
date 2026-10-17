@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod ahe;
+pub mod assembly;
 pub mod async_tasks;
 pub mod attribution;
 pub mod bench;

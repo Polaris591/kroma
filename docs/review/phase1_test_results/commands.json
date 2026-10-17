@@ -277,6 +277,21 @@
       "exit": 0,
       "log": "logs/test_t10.log",
       "note": "T10: 898 passed / 0 failed"
+    },
+    {
+      "id": "t11_targeted",
+      "cmd": "cargo test -p kroma-core --test t11_assembly",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T11: 5 passed / 0 failed (cross-surface digest equality, dependency gates, ledger semantics)"
+    },
+    {
+      "id": "t11_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t11.log",
+      "note": "T11: 903 passed / 0 failed"
     }
   ]
 }

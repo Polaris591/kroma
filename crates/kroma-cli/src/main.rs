@@ -1318,6 +1318,22 @@ async fn build_provider_bench_executor(
 
     let overrides = config_overrides_for(cli);
     let resolved = ResolvedConfig::load(&cli.workspace, &overrides)?;
+    // T11 (KR-08): the same assembly path every other door uses. A mechanism that is configured but
+    // cannot run is a configuration error here, before the benchmark spends any money.
+    let run_plan = kroma_core::assembly::RunPlan::from_resolved(
+        &resolved,
+        kroma_core::assembly::Surface::Bench,
+    )
+    .map_err(|e| e.to_string())?;
+    if !cli.quiet {
+        // The digest is what proves this arm ran with the same budget/policy/execution as any other
+        // surface would; it goes into the bench log so the evidence carries it.
+        eprintln!(
+            "kroma bench: plan {} eligible={:?}",
+            &run_plan.digest()[..12],
+            kroma_core::assembly::eligible_features(&run_plan)
+        );
+    }
     let api_key = resolved
         .api_key
         .clone()
@@ -2109,6 +2125,44 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // T11 (KR-08): assemble the shared plan here, once, so a missing feature dependency fails at
+    // start instead of producing a run whose mechanism silently does nothing.
+    let run_plan = match kroma_core::assembly::RunPlan::from_resolved(
+        &resolved_config,
+        kroma_core::assembly::Surface::Cli,
+    ) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    // Seed the run's feature ledger from the plan. `configured` and `eligible` are facts about this
+    // run; `executed` is only ever incremented by the mechanism itself, so a report can never show a
+    // gain that did not happen.
+    let mut feature_ledger = kroma_core::assembly::FeatureLedger::new();
+    for feature in kroma_core::assembly::Feature::all() {
+        let activity = run_plan.features.get(&feature);
+        if activity.is_some_and(|a| a.configured) {
+            feature_ledger.record_configured(feature);
+        }
+        if activity.is_some_and(|a| a.eligible) {
+            feature_ledger.record_eligible(feature);
+        }
+        if let Some(a) = activity {
+            if a.configured && !a.eligible {
+                feature_ledger.record_skipped(feature, a.reason.clone());
+            }
+        }
+    }
+    if !cli.quiet {
+        eprintln!(
+            "kroma: plan {} ({} features eligible)",
+            &run_plan.digest()[..12],
+            kroma_core::assembly::eligible_features(&run_plan).len()
+        );
+        eprint!("kroma: features\n{}", feature_ledger.summary());
+    }
     if resolved_config.workspace_guard_triggered() && !cli.quiet {
         // P5 (`v1.5.0`): the path and rejected key names come from an untrusted workspace file, so
         // they are escaped before reaching stderr. `sanitize_diagnostic_label` also escapes tabs
