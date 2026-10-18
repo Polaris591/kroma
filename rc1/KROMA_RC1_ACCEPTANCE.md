@@ -17,7 +17,7 @@ Result          : RC1_CANDIDATE_BLOCKED
 | 卡 | Implemented | Verified | Gate | 证据 | 阻塞原因 |
 | --- | --- | --- | --- | --- | --- |
 | RC1-00 冻结来源 | 是 | **是** | G0 PASS | `evidence/00_provenance.json`（提交、tar sha、工具链、锁、双入口一致） | — |
-| RC1-01 Node late-open 竞态 | 未改 | `NOT_RUN` | G2 未过 | 任务书 §3 定位已核对（文件/用例/章节都存在） | 需先做事件轨迹复现（100+ 次定向跑），本轮不草率改动 |
+| RC1-01 Node late-open 竞态 | 是 | **是** | G2 PASS | 复现 17/100 → 修复后 **100/100**；两个入口逐字节一致；109/109（`evidence/logs/rc1-01_*.log`） | — |
 | RC1-02 全仓门禁 | 是 | **是** | G1 PASS | fmt 105→0；clippy 0；Rust 全量 + 4 个 Node 套件真跑（`evidence/logs/`） | — |
 | RC1-03 Release DAG 接线 | 是 | 部分 | G4 `PARTIAL` | `quality` job + `pack needs` 含 quality；`release-gate.js dag` 通过并有负向测试 | 需 runner 实跑一次（无权限） |
 | RC1-04 OpenSSL 验真 | 是 | 部分 | G3 `PARTIAL` | 四条路径统一 `scripts/fetch-openssl.sh`；缺/错 pin 一律 fail-closed；`release-gate.js openssl` 通过 | **Digest 值 BLOCKED**：出网不可用，无法独立核对 openssl-3.5.7 官方摘要 |
@@ -32,7 +32,8 @@ Result          : RC1_CANDIDATE_BLOCKED
 | --- | --- | --- |
 | `style(rc1-02)` | `cargo fmt --all`（105 处 → 0），纯格式化 | CI 的 fmt 门禁从必然红变成绿 |
 | `feat(rc1-03,04)` | quality job + DAG gate；四条 OpenSSL 路径统一验真 + openssl gate | 打包不能再绕过质量；未验真的 OpenSSL 不可能被解包 |
-| 本文件所在提交 | 只加 `rc1/` 文档与证据 | 无代码影响 |
+| `fix(rc1-01)` | 归档 finalize 的 settle 语义：await 后复查、文件未创建时不 settle、错误不被覆盖 | 升级失败不再报误导性 ENOENT；flaky 17% → 0% |
+| 本文件所在提交 | `rc1/` 文档与证据 | 无代码影响 |
 
 没有重构大型 Rust 文件，没有改默认策略（仍 `SingleCandidate`），没有动 WAL/CAS/权限/预算内核。
 
@@ -43,7 +44,7 @@ Result          : RC1_CANDIDATE_BLOCKED
 | `cargo fmt --all -- --check` | 0 差异 | — |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 0 warning | — |
 | `cargo test --workspace --no-fail-fast` | 见 `evidence/logs/rc1_full_suite.log` 的 EXIT 与合计行 | 该文件 |
-| `node scripts/test-kroma-js-upgrade.js` | 109 / 109 | `evidence/logs/` |
+| `node scripts/test-kroma-js-upgrade.js` | 109 / 109，且**连续 100 次全过** | `evidence/logs/rc1-01_repro_*.log` |
 | `node scripts/test-release-trust-root.js` | 13 / 13 | 同上 |
 | `node scripts/test-release-pipeline.js` | 24 / 24（新增 3 条 RC1-03/04 检查） | 同上 |
 | `node scripts/verify-ledger.js` | ok（32 文档 / 92+ 命令 / 31 行） | 同上 |

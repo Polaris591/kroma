@@ -837,6 +837,9 @@ function inspectAndExtractTarStream(archivePath, targetSubPath, extractDestPath,
     let outStreamPromise = null;
     let stagePath = null;
     let stageCreated = false;
+    // Resolves when the staging write stream has opened (or failed to). Finalising before the open has
+    // happened is a scheduling event, not evidence that the artifact is missing.
+    let stageOpenPromise = null;
     let deadlineTimer = null;
     let activeDrainStream = null;
     let activeDrainListener = null;
@@ -844,9 +847,14 @@ function inspectAndExtractTarStream(archivePath, targetSubPath, extractDestPath,
     let gunzipEnded = false;
     let peakBufferLength = 0;
 
+    // The first outcome wins. A late ENOENT from the finalize path must never replace the deadline /
+    // abort error that actually caused the run to stop.
+    let settledError = null;
+
     function cleanup(err) {
       if (settled) return;
       settled = true;
+      settledError = err || null;
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (activeDrainStream && activeDrainListener) {
         try {
@@ -1122,6 +1130,11 @@ function inspectAndExtractTarStream(archivePath, targetSubPath, extractDestPath,
               const ws = createWs(stagePath, { flags: "wx", mode: 0o755 });
               outStream = ws;
               ws.on("error", cleanup);
+              stageOpenPromise = new Promise((resolveOpen) => {
+                ws.once("open", resolveOpen);
+                ws.once("error", resolveOpen);
+                ws.once("close", resolveOpen);
+              });
               ws.on("open", () => {
                 stageCreated = true;
                 if (settled) {
@@ -1171,6 +1184,9 @@ function inspectAndExtractTarStream(archivePath, targetSubPath, extractDestPath,
         if (outStreamPromise) {
           await outStreamPromise;
         }
+        // The deadline may have fired while we waited for the write stream: if so, the stage file is
+        // already gone and this function must stop here instead of reporting a misleading ENOENT.
+        if (settled) return;
         if (currentEntry) {
           return cleanup(new Error("Truncated tar archive: unexpected EOF while reading file data"));
         }
@@ -1182,6 +1198,21 @@ function inspectAndExtractTarStream(archivePath, targetSubPath, extractDestPath,
         }
 
         if (stagePath && extractDestPath) {
+          // A stage file that was never created (the stream never opened) or that cleanup already
+          // removed is not "a truncated archive": report the outcome that actually caused it.
+          // The write stream may not have opened yet; wait for it (the deadline timer still wins if it
+          // fires first) instead of declaring the artifact missing.
+          if (!stageCreated && stageOpenPromise) {
+            await stageOpenPromise;
+            if (settled) return;
+          }
+          if (!stageCreated || !fs.existsSync(stagePath)) {
+            // The staging file never appeared (the write stream never opened, or an abort removed it).
+            // That is the abort path, not a bad artifact: leave the outcome to the deadline timer, which
+            // is always armed and will report the real reason. Settling here would replace it with a
+            // misleading "missing artifact" error - the exact defect this fix removes.
+            return;
+          }
           const actualStat = fs.lstatSync(stagePath);
           if (actualStat.isSymbolicLink() || !actualStat.isFile()) {
             return cleanup(new Error("Extracted artifact is not a regular file"));
@@ -1201,7 +1232,7 @@ function inspectAndExtractTarStream(archivePath, targetSubPath, extractDestPath,
           peakBufferLength
         });
       } catch (err) {
-        cleanup(err);
+        cleanup(settledError || err);
       }
     }
 

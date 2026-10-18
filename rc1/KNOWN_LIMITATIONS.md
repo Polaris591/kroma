@@ -27,10 +27,12 @@
 - 缺：`artifacts[]` 层（产物集合）与最终发布产物的签名，需要先冻结最终提交再签。
 - 私钥在 `/root/kroma-release/kroma-release-key.pem`（600）。**未**进仓库/日志/CI；离线备份由所有者负责。
 
-## L5 Node late-open 竞态未复现
+## L5 Node late-open 竞态 — 已修复（保留记录）
 
-`regressions.md §2.3` 的 `ENOENT lstat(...tmp...)` 现象与测试用例位置已核对存在，但本轮**没有**做
-100 次定向复现。修复前必须有确定性事件轨迹，不能用"加大超时"或"吞 ENOENT"糊过去。
+原状态：无复现证据。本轮实测**17/100 失败**（`ENOENT lstat(...tmp...)` 顶掉 deadline 错误）。
+修复：`finishArchive()` 在 `await outStreamPromise` 后复查 `settled`；staging 文件从未创建时**不 settle**，
+把结局留给必然触发的 deadline 计时器；`cleanup` 记录首个错误，后续 `catch` 不得覆盖。
+修复后 **100/100 通过**。两个入口逐字节一致。没有加大超时、没有吞 ENOENT。
 
 ## L6 历史文档
 
