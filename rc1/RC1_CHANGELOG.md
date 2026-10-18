@@ -28,3 +28,16 @@
 ## 默认策略
 
 未变：`SingleCandidate`。T24 仍 `INCONCLUSIVE`，没有因为"看起来更好"改默认值。
+
+## 第二轮（CI 真跑后暴露并修掉的五个问题）
+
+| # | 问题 | 证据 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 两个 workflow 被 GitHub 判无效（每次 run 0 job） | `actionlint` 指出 job 级 `env` 用了 `${{ runner.temp }}` | 改 `${{ github.workspace }}/.zig-cache` |
+| 2 | musl 与 macOS 编译失败 | `cannot find type __rlimit_resource_t in crate libc`（本机用 CI 配方复现） | 按 `target_env` 选 rlimit 资源类型 |
+| 3 | android job 在第三方 setup action 就失败 | 步骤结论显示失败点在该 action | 改用 runner 预装 SDK + 自带 sdkmanager 装 NDK |
+| 4 | 测试 job 缺 `bubblewrap` | t09 断言真隔离，缺工具即失败（设计如此） | CI 装 bwrap，不削弱测试 |
+| 5 | `CI=true` 泄漏进子进程，测试只在 CI 红 | 失败日志 `BASH_OUT\|…\|CI=true`（应为 `CI=unset`） | 把 `CI`/`CONTINUOUS_INTEGRATION`/`NO_COLOR`/`FORCE_COLOR` 加入清理黑名单 |
+
+每条都有「改之前会红、改之后会绿」的对照：第 2 条本机复现，第 5 条用变异验证（删掉 `CI` 那行即回红），
+第 1 条用 actionlint 前后对比。

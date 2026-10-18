@@ -42,7 +42,12 @@ jobs:
           rustup default "$toolchain"
           rustc --version
 
+      # The cache key includes the source hash. Without it the restored `target/` can make cargo believe
+      # a stale test binary is up to date: the suite then runs last commit's code and reports failures
+      # that the current tree does not have (and hides fixes that it does).
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: src-${{ hashFiles('crates/**/*.rs', 'Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
