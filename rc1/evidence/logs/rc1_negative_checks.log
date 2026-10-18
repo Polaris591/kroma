@@ -1,0 +1,12 @@
+# negative checks with the production key (kroma-release-2026), 2026-10-18T06:53:50Z
+# artifacts: the two source artifacts; commits: A=2ca2246bbb1a (attested) B=19723b600000 (signed)
+
+== 1. signature over commit B, attestation says A -> must be refused
+state: RELEASE_BLOCKED
+  - signature covers commit 19723b600000, the artifacts were built from 2ca2246bbb1a
+exit=1
+
+== 2. one byte changed after signing -> must be refused
+error: attestation does not describe this tree:
+  size changed: kroma_RC1.patch (5158467 -> 5158468)
+exit=1

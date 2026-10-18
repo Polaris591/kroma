@@ -5,7 +5,7 @@
 
 ## 1. 发布流水线尚未在 GitHub 上跑通
 
-- `release.yml`（含 quality → 五平台构建 → pack → attest → release-verdict）**从未成功运行过**。
+- `release.yml`（含 quality → 五平台构建 → pack → attest → release-verdict）有 5 次 run 记录，**全部 failure、0 job**；当前版本从未成功跑过。
   它只由 `v*` tag 或 `workflow_dispatch` 触发，而本轮执行环境没有具备 `actions:write` 权限的令牌，
   无法触发；也不允许打 tag。
 - 因此"Release DAG 真实跑通"这一条**没有证据**，状态是 `BLOCKED(需要令牌)`。
@@ -26,7 +26,7 @@
 ## 3. 沙箱隔离在托管 runner 上跑不了
 
 `bwrap` 在 GitHub 托管 runner 上装得上但创建不了命名空间（Ubuntu 24.04 的 AppArmor 限制 + 容器
-seccomp）。处理方式是区分"没能力"与"失败"：本机 `scripts/run-sandbox-tests.sh` → `EXIT=0`（8 passed）；
+seccomp）。处理方式是区分"没能力"与"失败"：本机 `scripts/run-sandbox-tests.sh` → `EXIT=0`（b13 21 passed + t09 8 passed，0 failed）；
 CI 上记为 `HOST_CAPABILITY_BLOCKED` 并阻止 `RELEASE_READY`。**没有任何一处把这个状态写成 PASS。**
 
 ## 4. 签名只覆盖源码包与补丁，不覆盖任何二进制
@@ -36,12 +36,12 @@ CI 上记为 `HOST_CAPABILITY_BLOCKED` 并阻止 `RELEASE_READY`。**没有任�
 - 未签：所有平台二进制。`kroma-linux-x64` 与 `kroma-linux-arm64-musl` 是更早的提交构建的，签它们等于
   声称它们来自封板提交，那是假证据，所以把它们排除在签名集合之外。
 - 未签：CI 各平台产出的二进制。`ci.yml` 不上传 artifact，`release.yml` 从未跑通，没有可下载的字节。
-- `release.yml` 现在已具备"attest 实际字节 → 离线签名 → 用同一 run 的字节验签"的机制与 9 条负向测试
+- `release.yml` 现在已具备"attest 实际字节 → 离线签名 → 用同一 run 的字节验签"的机制与 9 条检查（7 条负向）
   （改动字节 / 多出文件 / 缺失文件 / 错提交 / 沙箱未通过 全部拒绝），但该机制在 GitHub 上尚未实跑。
 
 ## 4.1 `ARTIFACT_SET_VERIFIED` 不等于可发布
 
-本机实跑出的 `ARTIFACT_SET_VERIFIED` 只覆盖三件事：签名精确匹配这四件字节、提交一致、沙箱在本机
+本机实跑出的 `ARTIFACT_SET_VERIFIED` 只覆盖三件事：签名精确匹配这两件字节、提交一致、沙箱在本机
 通过。平台运行证据与 `release.yml` 实跑不在其中。脚本故意不使用 `RELEASE_READY` 这个词。
 
 ## 5. 私有密钥的离线备份仍待所有者完成

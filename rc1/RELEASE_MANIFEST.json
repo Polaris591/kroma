@@ -39,7 +39,7 @@
       "upgrade_flake_repro": "83/100 before fix (17 failures), 100/100 after; the raw before-fix log was overwritten by a second measurement and only the summary is retained"
     },
     "release_gates": {
-      "actions": "ok (25 pinned)",
+      "actions": "ok (49 pinned: 17 in ci.yml + 32 in release.yml)",
       "lock": "ok",
       "openssl": "ok (pin a8c0d28a…98e8, cross-checked against openssl.org .sha256 from an egress-capable host)",
       "dag": "ok (pack needs quality + sandbox; attest -> release-verdict)"
@@ -51,6 +51,10 @@
       "conclusion": "success",
       "jobs": "fmt/clippy/tests + linux-gnu, windows-gnu, macOS native, linux-arm64 musl, android-arm64",
       "separate_job": "sandbox isolation = failure (HOST_CAPABILITY_BLOCKED: the hosted runner cannot create user namespaces)"
+    },
+    "sandbox": {
+      "local": "scripts/run-sandbox-tests.sh EXIT=0, 21 + 8 passed, 0 failed",
+      "ci": "HOST_CAPABILITY_BLOCKED (the hosted runner cannot create user namespaces)"
     }
   },
   "sbom": {
@@ -66,18 +70,18 @@
     "scope": "kroma-rc1-source.tar.gz, kroma_RC1.patch (both rebuilt from the sealed commit)",
     "not_covered": "the five CI platform binaries (ci.yml uploads no artifact and release.yml never ran)",
     "mechanism": "scripts/release-attestation.js attests name/size/sha256/commit/sandbox for the bytes a run produced; the owner signs offline; verification consumes the same run, never a rebuild",
-    "negative_tests": "9 (changed bytes, extra file, missing file, wrong commit, sandbox not passed, missing signature, ...)",
+    "negative_tests": "test-release-attestation.js: 9 checks, 7 of them negative (changed bytes, extra file, missing file, short commit, unknown sandbox status, sandbox not PASS, missing signature) plus a real wrong-commit check run at sealing time",
     "status": "PARTIAL",
     "local_verdict": "ARTIFACT_SET_VERIFIED (attest -> sign -> verdict, exit 0, reasons: [])",
-    "local_verdict_scope": "只证明签名覆盖这四件字节、同一提交、沙箱本机通过；不代表整体可发布",
+    "local_verdict_scope": "只证明签名覆盖这两件字节、同一提交、沙箱本机通过；不代表整体可发布",
     "excluded": "the platform binaries: the two local ones were built from an earlier commit, and CI produces none that can be downloaded, so signing them would misstate their origin"
   },
   "platforms": {
-    "linux-x64": "built and tested natively",
-    "win32-x64": "cross-compiled only (WINDOWS_NATIVE_NOT_RUN)",
-    "darwin-arm64/x64": "NOT_RUN (no SDK)",
-    "linux-arm64-musl": "NOT_RUN this round",
-    "android-arm64": "build only (ANDROID_DEVICE_NOT_RUN)"
+    "linux-x64": "build+link PASS; startup PASS; TLS PASS (real HTTPS + untrusted cert rejected) -- CI run 39103615371",
+    "linux-arm64-musl": "build+link PASS; startup PASS under qemu; TLS PASS under qemu -- same run",
+    "darwin-arm64/x64": "build+link PASS on a native Mac runner; startup PASS (--version both arch); TLS NOT_RUN",
+    "win32-x64": "cross-compiled build+link PASS; static check no OpenSSL dependency PASS; startup/TLS NOT_RUN",
+    "android-arm64": "build+link PASS; static check real OpenSSL PASS; startup/TLS NOT_RUN (no device)"
   },
   "published": false,
   "pushed": false,
@@ -89,9 +93,9 @@
     }
   },
   "release_pipeline": {
-    "release_workflow_run": null,
+    "release_workflow_runs": 5,
     "status": "BLOCKED",
-    "reason": "release.yml is triggered only by a v* tag or workflow_dispatch; this environment has no actions:write token and tags are not allowed",
-    "unblock": "provide an actions:write token, or approve a throwaway rehearsal tag"
+    "reason": "release.yml has 5 recorded runs, all failure with 0 jobs; the current version has never run successfully. It is triggered only by a v* tag or workflow_dispatch, this environment has no actions:write token, and tags are not allowed",
+    "unblock": "provide an actions:write token (two dispatches: produce the candidate, then verify the committed signature against that same run), or approve a throwaway rehearsal tag"
   }
 }

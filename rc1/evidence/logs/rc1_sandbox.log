@@ -1,0 +1,48 @@
+# tree 177db7a360412a6627129346eec17fc1ae5edb2d  2026-10-18T06:53:41Z
+# command: scripts/run-sandbox-tests.sh (bwrap available on this host)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running tests/b13_sandbox_isolation.rs (target/debug/deps/b13_sandbox_isolation-623c8814fcfd99b8)
+
+running 21 tests
+test backend_choice_is_explicit_and_never_falls_back ... ok
+test bwrap_argv_is_whitelisted_and_has_exactly_one_writable_path ... ok
+test bwrap_argv_opts_into_network_only_when_explicit ... ok
+test container_argv_disables_network_and_carries_the_caps ... ok
+test container_argv_is_unaffected_by_rlimits ... ok
+test bench_verify_command_runs_inside_the_sandbox_when_one_is_given ... ok
+test a_normal_task_runs_and_writes_only_inside_the_workspace ... ok
+test container_probe_rejects_a_missing_image_without_running ... ok
+test address_space_limit_stops_an_oversized_allocation ... ok
+test host_secrets_and_home_do_not_exist_inside_the_sandbox ... ok
+test host_toolchain_is_read_only_inside_the_sandbox ... ok
+test invalid_specs_are_refused_before_anything_runs ... ok
+test file_size_limit_stops_an_oversized_write ... ok
+test sandboxed_verify_cannot_read_host_secrets_while_the_host_run_can ... ok
+test network_egress_is_blocked_by_default ... ok
+test symlink_escape_from_the_workspace_does_not_reach_host_files ... ok
+test tmpfs_cap_stops_a_runaway_writer ... ok
+test scored_benchmark_arm_runs_its_verifier_inside_the_sandbox ... ok
+test unusable_container_backend_executes_nothing_on_the_host ... ok
+test container_backend_really_isolates_and_carries_the_caps ... ok
+test cpu_time_limit_terminates_a_spin_loop ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+
+     Running tests/t09_execution_boundary.rs (target/debug/deps/t09_execution_boundary-845ab8c45aee2822)
+
+running 8 tests
+test execution_class_matrix_is_explicit ... ok
+test invalid_execution_boundary_fails_at_start ... ok
+test no_backend_means_refuse_required_execution ... ok
+test host_policy_reports_the_host_backend ... ok
+test workspace_cannot_declare_the_execution_boundary ... ok
+test worker_cannot_write_parent_via_absolute_path ... ok
+test isolated_bash_has_no_network ... ok
+test sandbox_required_covers_agent_bash_not_only_scorer ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+EXIT=0

@@ -69,7 +69,7 @@
   `bwrap cannot create a namespace on this host`。
 - `release.yml` 把同一件事升级成**发布条件**：退出码 2（宿主没能力）记为
   `HOST_CAPABILITY_BLOCKED` 并阻止 `RELEASE_READY` 判定；退出码 1（真的测试失败）直接让发布失败。
-- 本机（有真 bwrap）实跑：`scripts/run-sandbox-tests.sh` → `EXIT=0`，8 passed / 0 failed。
+- 本机（有真 bwrap）实跑：`scripts/run-sandbox-tests.sh` → `EXIT=0`，b13 21 passed + t09 8 passed，0 failed。
 
 因此"安全边界"这一层的真实状态是：**代码能力在本机被证明；在 GitHub 托管 runner 上是
 `HOST_CAPABILITY_BLOCKED`**。这两句必须一起说，单独一句都是失真。

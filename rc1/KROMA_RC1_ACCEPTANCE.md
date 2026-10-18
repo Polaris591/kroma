@@ -6,7 +6,7 @@ RC1-00 input   : kroma-p1-sealed-source.tar.gz（阶段 1 输入包，只用于�
                   与本仓库当时那份 tar 逐字节一致（已核对）
 This delivery   : kroma-rc1-source.tar.gz（本轮 RC1 候选包，由下方提交重新打包）
                   sha256 记录在交付目录的 SHA256SUMS 中；归档无法包含自身摘要
-Git commit      : 见 RELEASE_MANIFEST.json 的 git_commit（本文件随该提交冻结）
+Git commit      : 写在交付目录的 DELIVERY.json（本清单随源码包冻结，无法记录包含它自身的提交号）
 Result          : RC1_CANDIDATE_BLOCKED（G4 未实跑、G5 覆盖不全、G6 运行证据不全）
 ```
 
@@ -23,7 +23,7 @@ Result          : RC1_CANDIDATE_BLOCKED（G4 未实跑、G5 覆盖不全、G6 �
 | RC1-02 全仓门禁 | 是 | **是** | G1 PASS | fmt 105→0；clippy 0；Rust 全量 + 4 个 Node 套件真跑（`evidence/logs/`） | — |
 | RC1-03 Release DAG 接线 | 是 | **否** | G4 `BLOCKED` | `quality` → 五平台 → `pack` → `attest` → `release-verdict` 已接线，`release-gate.js dag` 与 24 条负向测试通过 | **`release.yml` 从未跑通**（只由 tag/dispatch 触发，本环境无 `actions:write` 令牌，且不许打 tag）；绿灯的是 `ci.yml`，不能算作 Release 证据 |
 | RC1-04 OpenSSL 验真 | 是 | **是** | G3 PASS | 四条路径统一 `scripts/fetch-openssl.sh`；pin 已钉 `a8c0d28a529ca480…`（取自国外小鸡实下载 + openssl.org 官方 .sha256，两者一致）；缺/错 pin 仍 fail-closed | — |
-| RC1-05 产物/签名一致性 | 是 | **是**（覆盖已产出产物） | G5 `PARTIAL` | `release-provenance/1` 文档用 `kroma-release-2026` 真签，生产根验签通过；篡改字节/换 keyId/改文档/旧 schema 四向被拒（`test-provenance` 9/9）；新增 attestation 机制（`scripts/release-attestation.js`，9 条负向测试：改字节/多文件/缺文件/错提交/沙箱未过全部拒绝）；私钥不进仓库/日志/CI | 尚未覆盖「CI 产出的五平台发布集」——`ci.yml` 不上传 artifact，`release.yml` 从未跑通，没有可签的字节 |
+| RC1-05 产物/签名一致性 | 是 | **是**（覆盖已产出产物） | G5 `PARTIAL` | `release-provenance/1` 文档用 `kroma-release-2026` 真签，生产根验签通过；篡改字节/换 keyId/改文档/旧 schema 四向被拒（`test-provenance` 9/9）；新增 attestation 机制（`scripts/release-attestation.js`，9 条检查其中 7 条负向：改字节/多文件/缺文件/短提交/未知沙箱/沙箱未过/缺签名全部拒绝；错提交在封板时用真密钥实测被拒）；私钥不进仓库/日志/CI | 尚未覆盖「CI 产出的五平台发布集」——`ci.yml` 不上传 artifact，`release.yml` 从未跑通，没有可签的字节 |
 | RC1-06 跨平台 | 是 | 部分 | G6 `PLATFORM_NOT_VERIFIED` | 五平台**构建/链接**全部真实通过（CI run 39103615371，提交 9c6bec59）；启动：linux-x64、linux-arm64(qemu)、macOS；TLS：linux-x64 与 linux-arm64(qemu) 实跑通过；矩阵见 `CI_AND_PLATFORM_MATRIX.md` | Windows/Android 无运行证据；macOS 无 TLS 证据；安全边界仅在 CI 上 `HOST_CAPABILITY_BLOCKED` |
 | RC1-07 状态账本 | 是 | **是** | G7 PASS | 本文件；历史文档加 `Superseded by` 标注 | — |
 | RC1-08 阶段 2 交接 | 是 | — | — | `PHASE2_BASELINE_HANDOFF.md` | — |
@@ -76,7 +76,7 @@ Result          : RC1_CANDIDATE_BLOCKED（G4 未实跑、G5 覆盖不全、G6 �
 | --- | --- |
 | release/android、release/musl、ci/musl、ci/android | 全部走 `scripts/fetch-openssl.sh`：pin 空/格式错 → 退出；摘要不符 → 退出并打印实际值；只有校验通过才 `tar` |
 | 缓存键 | 已包含 `OPENSSL_SHA256`，换 pin 不会复用旧构建 |
-| Action 钉住 | 25 处，全部 40 位（`release-gate.js actions`） |
+| Action 钉住 | 49 处（ci.yml 17 + release.yml 32），全部 40 位（`release-gate.js actions`） |
 | 锁文件 | `Cargo.lock` 与钉住摘要一致（`release-gate.js lock`） |
 
 **已完成**（2026-10-18）：摘要在国外小鸡上实下载并核对官方 `.sha256`：`a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8`。原计划命令：
@@ -113,8 +113,8 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 | G0 来源可信 | **PASS** | 上传包与本仓库 tar 逐字节一致；提交、锁、双入口摘要齐备 |
 | G1 本地质量 | **PASS** | fmt 0 差异、clippy 0、Rust 全量绿（CI + 本机）；Node 四套 109/13/24/ledger 全绿 |
 | G2 更新可靠性 | **PASS** | 17/100 → 100/100；确定性修复，未加超时、未吞错误 |
-| G3 供应链 | **PASS** | 四条 OpenSSL 路径统一验真；pin 双源核对；Action 25 处钉住；锁钉住 |
-| G4 Release DAG | **BLOCKED** | 结构、静态门禁与负向测试齐备；`release.yml` 从未运行（无 `actions:write` 令牌，不许打 tag） |
+| G3 供应链 | **PASS** | 四条 OpenSSL 路径统一验真；pin 双源核对；Action 49 处钉住（ci 17 + release 32）；锁钉住 |
+| G4 Release DAG | **BLOCKED** | 结构、静态门禁与负向测试齐备；`release.yml` 的 5 次 run 全部 failure、0 job，当前版本从未成功跑过（无 `actions:write` 令牌，不许打 tag） |
 | G5 可信签名 | **PARTIAL** | 已签并验：源码包、补丁（2 件，均从封板提交重建；两个二进制是更早提交的产物，签它们就是假证据，故排除）；attestation + 验签机制已实现并有 9 条负向测试；**未签**：CI 五平台产物集（`ci.yml` 不上传 artifact，`release.yml` 未跑通） |
 | G6 平台声明 | **PARTIAL** | 五平台构建+链接全绿；启动：linux-x64 / linux-arm64(qemu) / macOS；TLS：linux-x64 与 linux-arm64(qemu)；安全边界仅本机 |
 | G7 证据与冻结 | **PASS** | 单一状态表、历史文档已标 Superseded、T24 保持 INCONCLUSIVE |
@@ -153,7 +153,7 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 | 项 | 独立验收的意见 | 本轮处置 |
 | --- | --- | --- |
 | B-01 归档与清单未封板 | 归档 sha 与 manifest/acceptance 写的不是同一个包；包内 `sha256sum -c` 失败；commit 在远端查不到 | 已改：区分"阶段 1 输入包"与"本轮候选包"；提交已推送；封板时先冻结再一次性生成所有摘要，解包后 `sha256sum -c` 必须 100% 通过 |
-| B-02 发布无产物级签名闭环 | `release.yml` 从不调用 sign/verify；签的四件不是交付集 | 已改：新增 `attest`（按字节记 name/size/sha256/commit/sandbox）与 `release-verdict`（对同一 run 的字节验签，重建不算）；新增 9 条负向测试；两遍式流程写在 workflow 注释里 |
+| B-02 发布无产物级签名闭环 | `release.yml` 从不调用 sign/verify；签的四件不是交付集 | 已改：新增 `attest`（按字节记 name/size/sha256/commit/sandbox）与 `release-verdict`（对同一 run 的字节验签，重建不算）；新增 9 条检查（7 条负向）；两遍式流程写在 workflow 注释里 |
 | B-03 质量门禁两套 | `ci.yml` 排除沙箱套件、`release.yml` 全量跑；release 质量从未验证 | 已改：两个 workflow 调用同一个 `scripts/run-workspace-tests.sh`；沙箱套件在 release 里是**阻断条件**（退出码 2 记 `HOST_CAPABILITY_BLOCKED` 并阻止 READY，退出码 1 直接失败） |
 | B-04 CI 失败自动写远端 | 失败时 `git push -f origin HEAD:ci-debug` | 已删：改为 `upload-artifact` 上传日志；workflow 权限降为 `contents: read` |
 | B-05 平台矩阵未对齐 | musl TLS 已跑却写 NOT_RUN；沙箱失败被总 success 掩盖 | 已改：矩阵按 step 结论逐层重写，注明 run 与提交；沙箱状态单列 `HOST_CAPABILITY_BLOCKED` |
