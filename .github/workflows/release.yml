@@ -28,6 +28,45 @@ env:
   ANDROID_NDK_VERSION: '26.3.11579264'
 
 jobs:
+  # RC1-03: a quality job the pack/sign steps cannot bypass. Until this existed, `pack` only needed the
+  # platform builds, so a tag could produce artifacts with fmt/clippy/tests failing.
+  quality:
+    name: quality gate (fmt, clippy, rust tests, node, gates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      # Uses the repository's own rustup recipe (same as ci.yml) instead of a third-party toolchain
+      # action: rust-toolchain.toml stays the single source of truth and no extra action needs pinning.
+      - name: Install the pinned toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '20' }
+      - name: fmt (whole tree)
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests
+        run: cargo test --workspace --no-fail-fast
+      - name: node regressions
+        run: |
+          node scripts/test-kroma-js-upgrade.js
+          node scripts/test-release-trust-root.js
+          node scripts/test-release-pipeline.js
+          node scripts/verify-ledger.js
+      - name: release gates
+        run: |
+          node scripts/release-gate.js actions
+          node scripts/release-gate.js lock
+          node scripts/release-gate.js openssl
+          node scripts/release-gate.js dag
+      - name: entry points are byte-identical
+        run: cmp bin/kroma.js npm/kroma-cli/bin/kroma.js
+
   linux:
     name: linux-x64
     runs-on: ubuntu-latest
@@ -125,20 +164,9 @@ jobs:
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - name: Install the NDK
         run: sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+      # RC1-04: one shared fetch+verify path, so no platform can extract an unverified archive.
       - name: Fetch and verify OpenSSL sources
-        run: |
-          if [ -z "${OPENSSL_SHA256}" ]; then
-            echo "error: OPENSSL_SHA256 is not set; refusing to extract an unverified archive" >&2
-            exit 1
-          fi
-          curl -fsSL --retry 3 -o openssl.tar.gz \
-            "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
-            || curl -fsSL --retry 3 -o openssl.tar.gz \
-            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
-          # T22 (KR-29): verify *before* extract, so a tampered archive never reaches the filesystem
-          # as source. `sha256sum -c` exits non-zero on mismatch.
-          echo "${OPENSSL_SHA256}  openssl.tar.gz" | sha256sum -c -
-          tar -xzf openssl.tar.gz
+        run: scripts/fetch-openssl.sh "${OPENSSL_VERSION}" "${OPENSSL_SHA256}" .
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # No stubs. Android's own libssl/libcrypto are BoringSSL, which is not an OpenSSL ABI (the
       # SSL_ctrl family this crate calls for SNI was removed) and is not exported to third-party
@@ -210,11 +238,7 @@ jobs:
           echo "ZIG=${ZIG}" >> "$GITHUB_ENV"
       - name: Fetch OpenSSL sources
         run: |
-          curl -fsSL --retry 3 -o openssl.tar.gz \
-            "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
-            || curl -fsSL --retry 3 -o openssl.tar.gz \
-            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
-          tar -xzf openssl.tar.gz
+          scripts/fetch-openssl.sh "${OPENSSL_VERSION}" "${OPENSSL_SHA256}" .
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # The arm64 musl binary used to be linked against *stub* SSL symbols, so it had no working
       # TLS at all. Build a real static OpenSSL instead; the script refuses to be a stub.
@@ -252,7 +276,7 @@ jobs:
 
   pack:
     name: pack npm tarball
-    needs: [linux, windows, macos, android, musl]
+    needs: [quality, linux, windows, macos, android, musl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

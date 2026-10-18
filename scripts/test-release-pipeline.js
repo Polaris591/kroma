@@ -16,6 +16,7 @@ const assert = require("node:assert");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 
 const {
   verifyPinnedArchive,
@@ -27,6 +28,8 @@ const {
   rebuildIdentity,
   assertManifestMatchesArtifacts,
   assertActionsPinned,
+  assertOpenSslVerified,
+  assertReleaseDag,
   ReleaseGateError
 } = require(path.join(__dirname, "release-gate.js"));
 const { buildSbom, parseLockfile } = require(path.join(__dirname, "generate-sbom.js"));
@@ -90,17 +93,24 @@ ok("no pin in the repository is a configuration error, not a pass", () => {
   );
 });
 
-ok("the workflow verifies the digest before extracting", () => {
-  const workflow = fs.readFileSync(path.join(ROOT, ".github/workflows/release.yml"), "utf8");
-  const verifyAt = workflow.indexOf("sha256sum -c -");
-  const extractAt = workflow.indexOf("tar -xzf openssl.tar.gz");
-  assert.ok(verifyAt > 0, "the workflow must verify a digest");
-  assert.ok(extractAt > 0, "the workflow must extract the archive");
-  assert.ok(verifyAt < extractAt, "the digest must be verified before extraction");
-  assert.ok(
-    workflow.includes("if [ -z \"${OPENSSL_SHA256}\" ]"),
-    "an unset digest must fail the step instead of skipping verification"
-  );
+ok("every workflow fetches OpenSSL through the verify-before-extract script", () => {
+  // RC1-04: the ordering check now lives inside scripts/fetch-openssl.sh, so the workflow-level
+  // assertion is that no workflow extracts an OpenSSL archive on its own and that the pin is declared.
+  for (const file of [".github/workflows/release.yml", ".github/workflows/ci.yml"]) {
+    const workflow = fs.readFileSync(path.join(ROOT, file), "utf8");
+    assert.ok(
+      workflow.includes("scripts/fetch-openssl.sh"),
+      `${file} must fetch OpenSSL through the shared script`
+    );
+    assert.ok(
+      /^\s*OPENSSL_SHA256:/m.test(workflow),
+      `${file} must declare the pin the script verifies against`
+    );
+    assert.ok(
+      !/^\s*tar\s+-?[a-z]*x[a-z]*f?\s+.*openssl[^ ]*\.tar/m.test(workflow),
+      `${file} must not extract a downloaded OpenSSL archive directly`
+    );
+  }
 });
 
 console.log("release_uses_same_commit_for_tests_and_artifacts");
@@ -333,6 +343,80 @@ ok("the repository's current action pinning state is reported", () => {
     `       release.yml: ${pinned} pinned, ${unpinned} on mutable tags (owner must supply reviewed SHAs)`
   );
   assert.ok(pinned + unpinned > 0, "the workflow should reference at least one action");
+});
+
+console.log("RC1-04: OpenSSL sources are verified before extraction");
+ok("a missing or malformed OpenSSL pin fails closed before any download", () => {
+  const script = path.join(ROOT, "scripts", "fetch-openssl.sh");
+  const run = (args) => {
+    try {
+      execFileSync("bash", [script, ...args], { stdio: "pipe" });
+      return { code: 0, out: "" };
+    } catch (err) {
+      return { code: err.status, out: String(err.stderr || "") };
+    }
+  };
+  const missing = run(["3.5.7", ""]);
+  assert.strictEqual(missing.code, 3);
+  assert.match(missing.out, /OPENSSL_SHA256 is not set/);
+
+  const short = run(["3.5.7", "a".repeat(63)]);
+  assert.strictEqual(short.code, 3);
+  assert.match(short.out, /exactly 64 characters/);
+
+  const notHex = run(["3.5.7", "Z".repeat(64)]);
+  assert.strictEqual(notHex.code, 3);
+  assert.match(notHex.out, /64 lowercase hex/);
+
+  // No version is a usage error, not a silent no-op.
+  assert.strictEqual(run(["", "a".repeat(64)]).code, 2);
+});
+
+ok("a direct extraction of a downloaded OpenSSL archive is refused", () => {
+  const bad = [
+    "      - run: |",
+    "          curl -fsSL -o openssl.tar.gz https://example.invalid/openssl.tar.gz",
+    "          tar -xzf openssl.tar.gz",
+  ].join("\n");
+  refuses(() => assertOpenSslVerified(bad, "fixture.yml"), "directly instead of using scripts/fetch-openssl.sh");
+
+  // The shared path is accepted, and the pin must be declared somewhere in the workflow.
+  const good = [
+    "env:",
+    "  OPENSSL_SHA256: '<pinned>'",
+    "      - run: scripts/fetch-openssl.sh \"${OPENSSL_VERSION}\" \"${OPENSSL_SHA256}\" .",
+  ].join("\n");
+  assert.ok(assertOpenSslVerified(good, "fixture.yml") > 0);
+
+  const noPin = "      - run: scripts/fetch-openssl.sh \"${OPENSSL_VERSION}\" \"${OPENSSL_SHA256}\" .";
+  refuses(() => assertOpenSslVerified(noPin, "fixture.yml"), "never declares OPENSSL_SHA256");
+});
+
+console.log("RC1-03: the release DAG gates artifacts on quality");
+ok("packing without a quality job is refused", () => {
+  const noQuality = [
+    "jobs:",
+    "  pack:",
+    "    needs: [linux, windows]",
+  ].join("\n");
+  refuses(() => assertReleaseDag(noQuality), "no quality job");
+
+  const ungated = [
+    "jobs:",
+    "  quality:",
+    "    runs-on: ubuntu-latest",
+    "  pack:",
+    "    needs: [linux, windows]",
+  ].join("\n");
+  refuses(() => assertReleaseDag(ungated), "pack does not depend on the quality job");
+
+  // The real workflow must pass, so this test cannot drift from the shipped file.
+  const real = fs.readFileSync(path.join(ROOT, ".github/workflows/release.yml"), "utf8");
+  const jobs = assertReleaseDag(real);
+  assert.ok(jobs.includes("quality"));
+  assert.ok(jobs.includes("pack"));
+  // No publish job exists yet, and that is the safe default: publishing is an owner decision.
+  assert.strictEqual(jobs.includes("publish"), false);
 });
 
 console.log("");

@@ -212,6 +212,86 @@ function assertActionsPinned(workflowText) {
 // CLI: run the checks CI can run from a checkout.
 // ---------------------------------------------------------------------------------------------
 
+
+/**
+ * RC1-04: OpenSSL sources must be verified before extraction, on every path.
+ *
+ * Fails when a workflow extracts an openssl archive directly (`tar ... openssl`), or when it fetches
+ * through the shared script without declaring the pin the script will verify against.
+ */
+function assertOpenSslVerified(workflowText, label = "workflow") {
+  const lines = workflowText.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // A direct extraction of a downloaded OpenSSL archive bypasses the digest check.
+    if (/^tar\s+-?[a-z]*x[a-z]*f?\s+.*openssl[^ ]*\.tar/.test(trimmed)) {
+      fail(`${label}: extracts an OpenSSL archive directly instead of using scripts/fetch-openssl.sh`);
+    }
+    // Fetching through the shared script is only meaningful when the pin is *declared* (an interpolated
+    // variable is not a declaration). A declared-but-empty pin still passes this wiring check and fails
+    // closed inside the script at run time; that distinction is reported rather than hidden.
+    if (trimmed.includes("scripts/fetch-openssl.sh")) {
+      const declared = /^\s*OPENSSL_SHA256:\s*(\S.*)?$/m.exec(workflowText);
+      if (!declared) {
+        fail(`${label}: uses scripts/fetch-openssl.sh but never declares OPENSSL_SHA256`);
+      }
+      if (declared && !/^[0-9a-f]{64}$/.test((declared[1] || "").replace(/['"]/g, "").trim())) {
+        console.log(`warn ${label}: OPENSSL_SHA256 is declared but not pinned; downloads will fail closed`);
+      }
+    }
+  }
+  return lines.length;
+}
+
+
+/**
+ * RC1-03: the release DAG must not let packing happen without quality.
+ *
+ * Checks the structure rather than the prose: a `quality` job must exist and every job that produces or
+ * signs artifacts must list it in `needs`. `skipped` is treated as not-success by GitHub once a job is in
+ * `needs`, so this is the wiring half; the actual run evidence needs a runner.
+ */
+function assertReleaseDag(workflowText) {
+  const jobs = new Map();
+  let current = null;
+  let inJobs = false;
+  for (const line of workflowText.split("\n")) {
+    if (/^jobs:\s*$/.test(line)) {
+      inJobs = true;
+      continue;
+    }
+    if (!inJobs) continue;
+    const job = /^ {2}([a-z][a-z0-9_-]*):$/.exec(line);
+    if (job) {
+      current = job[1];
+      jobs.set(current, { needs: [] });
+      continue;
+    }
+    if (!current) continue;
+    const needs = /^ {4}needs:\s*\[([^\]]*)\]/.exec(line);
+    if (needs) {
+      jobs.get(current).needs = needs[1].split(",").map((n) => n.trim()).filter(Boolean);
+    }
+  }
+  if (!jobs.has("quality")) {
+    fail("the release workflow has no quality job; packing would not be gated on fmt/clippy/tests");
+  }
+  const gated = ["pack", "sign", "publish", "release"].filter((j) => jobs.has(j));
+  if (gated.length === 0) {
+    fail("the release workflow has no pack/sign/publish job to gate");
+  }
+  for (const job of gated) {
+    if (!jobs.get(job).needs.includes("quality")) {
+      fail(`${job} does not depend on the quality job`);
+    }
+  }
+  // A publish path must not exist implicitly: publishing is an owner decision, not a side effect of a tag.
+  if (jobs.has("publish") && !/if:\s*.*(manual|dispatch|approval)/i.test(workflowText)) {
+    fail("a publish job exists without an explicit manual/approval condition");
+  }
+  return [...jobs.keys()];
+}
+
 function main(argv) {
   const command = argv[2];
   const root = path.join(__dirname, "..");
@@ -223,6 +303,24 @@ function main(argv) {
         const count = assertActionsPinned(text);
         console.log(`ok  ${file}: ${count} uses: entries are commit-pinned`);
       }
+      return 0;
+    }
+    if (command === "openssl") {
+      // RC1-04: every OpenSSL fetch must go through the shared verify-before-extract script, and the
+      // pin must be declared in the workflow that uses it. A single unverified extract path is enough
+      // to make the whole supply chain untrusted, so this checks all workflows, not one.
+      const files = [".github/workflows/ci.yml", ".github/workflows/release.yml"];
+      for (const file of files) {
+        const text = fs.readFileSync(path.join(root, file), "utf8");
+        assertOpenSslVerified(text, file);
+      }
+      console.log(`ok  every OpenSSL fetch in ${files.length} workflows is verified before extraction`);
+      return 0;
+    }
+    if (command === "dag") {
+      const text = fs.readFileSync(path.join(root, ".github/workflows/release.yml"), "utf8");
+      const jobs = assertReleaseDag(text);
+      console.log(`ok  release DAG gates artifacts on quality (jobs: ${jobs.join(", ")})`);
       return 0;
     }
     if (command === "lock") {
@@ -255,7 +353,9 @@ module.exports = {
   assertDependencyLockUnchanged,
   rebuildIdentity,
   assertManifestMatchesArtifacts,
-  assertActionsPinned
+  assertActionsPinned,
+  assertOpenSslVerified,
+  assertReleaseDag
 };
 
 if (require.main === module) {

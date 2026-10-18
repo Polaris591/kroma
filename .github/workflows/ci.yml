@@ -18,6 +18,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   OPENSSL_VERSION: '3.5.7'
+  # RC1-04: the pin the shared fetch script verifies against. Empty here means every CI job that builds
+  # against OpenSSL fails closed with an explicit message instead of extracting an unverified archive.
+  OPENSSL_SHA256: ''
   ANDROID_NDK_VERSION: '26.3.11579264'
 
 jobs:
@@ -144,15 +147,11 @@ jobs:
         id: openssl-cache
         with:
           path: openssl-musl
-          key: openssl-musl-${{ env.OPENSSL_VERSION }}
+          key: openssl-musl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}
       - name: Fetch OpenSSL sources
         if: steps.openssl-cache.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL --retry 3 -o openssl.tar.gz \
-            "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
-            || curl -fsSL --retry 3 -o openssl.tar.gz \
-            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
-          tar -xzf openssl.tar.gz
+          scripts/fetch-openssl.sh "${OPENSSL_VERSION}" "${OPENSSL_SHA256}" .
       - name: Build static OpenSSL for aarch64-musl
         if: steps.openssl-cache.outputs.cache-hit != 'true'
         run: scripts/build-musl-openssl.sh "openssl-${OPENSSL_VERSION}" "$PWD/openssl-musl"
@@ -200,15 +199,11 @@ jobs:
         id: openssl-cache
         with:
           path: openssl-android
-          key: openssl-android-${{ env.OPENSSL_VERSION }}-${{ env.ANDROID_NDK_VERSION }}
+          key: openssl-android-${{ env.OPENSSL_VERSION }}-${{ env.ANDROID_NDK_VERSION }}-${{ env.OPENSSL_SHA256 }}
       - name: Fetch OpenSSL sources
         if: steps.openssl-cache.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL --retry 3 -o openssl.tar.gz \
-            "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
-            || curl -fsSL --retry 3 -o openssl.tar.gz \
-            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
-          tar -xzf openssl.tar.gz
+          scripts/fetch-openssl.sh "${OPENSSL_VERSION}" "${OPENSSL_SHA256}" .
       - name: Build static OpenSSL for aarch64-linux-android
         if: steps.openssl-cache.outputs.cache-hit != 'true'
         run: |
