@@ -1,5 +1,8 @@
 # T22 · 发布与供应链闭环 — 部分完成 / **BLOCKED（签名与 Action 钉 commit）**
 
+> **Superseded by `rc1/KROMA_RC1_ACCEPTANCE.md`（2026-10-18，提交 `2259f91`）。**
+> 本文是当时那一刻的真实记录，保留原文不改；**当前状态以 RC1 验收文档为准**。
+
 阶段 RELEASE-BLOCKER｜依赖 T00, T21｜关联 KR-28, KR-29
 
 ## 一、结论

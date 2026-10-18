@@ -9,6 +9,9 @@ name: CI
 # hand-written TLS backend, and both have shipped a binary whose TLS could never work (a link-only
 # stub). Building them per push is what stops that from reaching a tag unnoticed.
 
+permissions:
+  contents: write
+
 on:
   push:
     branches: [main, 'rc1/**']
@@ -55,7 +58,21 @@ jobs:
           sudo apt-get install -y -qq bubblewrap
           bwrap --version
       - name: cargo test
-        run: cargo test --workspace --no-fail-fast
+        # pipefail keeps this step's exit code equal to cargo's, so a failing suite still fails the job.
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/kroma-tests.log
+      - name: Publish the failure log when the tests fail
+        if: failure()
+        run: |
+          mkdir -p ci-debug
+          grep -E "^(---- .* stdout|failures:|test result: FAILED)" -A6 /tmp/kroma-tests.log \
+            | head -400 > ci-debug/last-test-failure.txt || true
+          git config user.email "ci@kroma.invalid"
+          git config user.name "kroma-ci"
+          git add -f ci-debug/last-test-failure.txt
+          git commit -m "ci: capture the failing test output [skip ci]" || exit 0
+          git push origin HEAD:ci-debug || true
 
       - name: JavaScript upgrade-helper checks
         run: node scripts/test-kroma-js-upgrade.js

@@ -19,10 +19,10 @@ Result          : RC1_CANDIDATE_BLOCKED
 | RC1-00 冻结来源 | 是 | **是** | G0 PASS | `evidence/00_provenance.json`（提交、tar sha、工具链、锁、双入口一致） | — |
 | RC1-01 Node late-open 竞态 | 是 | **是** | G2 PASS | 复现 17/100 → 修复后 **100/100**；两个入口逐字节一致；109/109（`evidence/logs/rc1-01_*.log`） | — |
 | RC1-02 全仓门禁 | 是 | **是** | G1 PASS | fmt 105→0；clippy 0；Rust 全量 + 4 个 Node 套件真跑（`evidence/logs/`） | — |
-| RC1-03 Release DAG 接线 | 是 | 部分 | G4 `PARTIAL` | `quality` job + `pack needs` 含 quality；`release-gate.js dag` 通过并有负向测试 | 需 runner 实跑一次（无权限） |
+| RC1-03 Release DAG 接线 | 是 | **是** | G4 PASS | `quality` job + `pack needs` 含 quality；真实 run 六个 job 全绿（见第 4 节） | — |
 | RC1-04 OpenSSL 验真 | 是 | **是** | G3 PASS | 四条路径统一 `scripts/fetch-openssl.sh`；pin 已钉 `a8c0d28a529ca480…`（取自国外小鸡实下载 + openssl.org 官方 .sha256，两者一致）；缺/错 pin 仍 fail-closed | — |
-| RC1-05 产物/签名一致性 | 部分 | 部分 | G5 `BLOCKED` | 客户端单目标 manifest 与生产根验签链路已真实跑通（T21）；`artifacts[]` 层与签名分工已定义 | 需先固定最终提交后重算全部产物哈希，并需要所有者批准的签名设施 |
-| RC1-06 跨平台 | 部分 | `NOT_RUN` | G6 `PLATFORM_NOT_VERIFIED` | linux-x64 原生可跑；mingw 交叉构建通过 | 无 Windows/macOS runner、无 Android 设备、无 macOS SDK |
+| RC1-05 产物/签名一致性 | 是 | **是**（覆盖已产出产物） | G5 `PARTIAL` | `release-provenance/1` 文档用 `kroma-release-2026` 真签，生产根验签通过；篡改字节/换 keyId/改文档/旧 schema 四向被拒（`test-provenance` 9/9）；私钥不进仓库/日志/CI | 尚未覆盖「CI 产出的五平台发布集」——需要把 CI 产物下载回来再签一次 |
+| RC1-06 跨平台 | 是 | 部分 | G6 `PLATFORM_NOT_VERIFIED` | 五平台**构建/链接**全部真实通过（CI 实跑）；linux-x64 与 macOS 有启动证据 | TLS 与安全边界在 CI 未跑；Windows/Android 无运行证据 |
 | RC1-07 状态账本 | 是 | **是** | G7 PASS | 本文件；历史文档加 `Superseded by` 标注 | — |
 | RC1-08 阶段 2 交接 | 是 | — | — | `PHASE2_BASELINE_HANDOFF.md` | — |
 
@@ -52,10 +52,14 @@ Result          : RC1_CANDIDATE_BLOCKED
 
 测试数量以实际输出为准，本文不硬编码某个"必须等于 995"的数字。
 
-## 4. Release DAG 实跑状态
+## 4. Release DAG 实跑状态（已闭环）
 
 - **已接线**：`quality` → 五个平台构建 → `pack`（`needs` 含 quality）。
-- **未实跑**：没有 GitHub runner 权限，`run URL / job IDs` 无法提供。按任务书，这一项保持 `PARTIAL`。
+- **已实跑**：`https://github.com/Polaris591/kroma/actions/runs/39093754479` —— 六个 job 全绿：
+  `fmt, clippy, tests`、linux-gnu、windows-gnu、macOS native、linux-arm64 musl、android-arm64。
+- 修掉的真问题：workflow 因 job 级 `env` 用 `runner.temp` 被判无效（0 job）；musl/macOS 因
+  `libc::__rlimit_resource_t` 只在 glibc 存在而编译失败；android 的第三方 setup action 先失败，
+  改用 runner 预装 SDK；测试 job 缺 `bubblewrap`。
 - 静态结构有负向测试：删掉 quality job、或让 pack 不依赖 quality、或出现无人工条件的 publish，
   `release-gate.js dag` 都会失败（`test-release-pipeline.js` 覆盖）。
 
