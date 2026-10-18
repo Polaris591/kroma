@@ -35,7 +35,7 @@
     "release_gates": {
       "actions": "ok (25 pinned)",
       "lock": "ok",
-      "openssl": "ok (four paths, pin empty -> fail closed)",
+      "openssl": "ok (pin a8c0d28a…98e8, verified against openssl.org .sha256 from an egress-capable host)",
       "dag": "ok (pack needs quality)"
     },
     "rc1_01": "PASS"
@@ -58,5 +58,12 @@
     "android-arm64": "build only (ANDROID_DEVICE_NOT_RUN)"
   },
   "published": false,
-  "pushed": false
+  "pushed": false,
+  "supply_chain": {
+    "openssl": {
+      "version": "3.5.7",
+      "sha256": "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
+      "verified_against": "openssl.org official .sha256 and an actual download on the owner's overseas VPS (both agree)"
+    }
+  }
 }

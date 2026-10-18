@@ -24,7 +24,7 @@ env:
   # T22 (KR-29): the digest of openssl-${OPENSSL_VERSION}.tar.gz. It is verified before extraction;
   # an empty value fails the step instead of silently extracting an unverified archive. Record the
   # value the owner verified (see docs/release/README.md) rather than a digest copied from a mirror.
-  OPENSSL_SHA256: ''
+  OPENSSL_SHA256: 'a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8'
   ANDROID_NDK_VERSION: '26.3.11579264'
 
 jobs:

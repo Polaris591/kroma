@@ -20,7 +20,7 @@ env:
   OPENSSL_VERSION: '3.5.7'
   # RC1-04: the pin the shared fetch script verifies against. Empty here means every CI job that builds
   # against OpenSSL fails closed with an explicit message instead of extracting an unverified archive.
-  OPENSSL_SHA256: ''
+  OPENSSL_SHA256: 'a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8'
   ANDROID_NDK_VERSION: '26.3.11579264'
 
 jobs:

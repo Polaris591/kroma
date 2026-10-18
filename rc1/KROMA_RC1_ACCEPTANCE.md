@@ -20,7 +20,7 @@ Result          : RC1_CANDIDATE_BLOCKED
 | RC1-01 Node late-open 竞态 | 是 | **是** | G2 PASS | 复现 17/100 → 修复后 **100/100**；两个入口逐字节一致；109/109（`evidence/logs/rc1-01_*.log`） | — |
 | RC1-02 全仓门禁 | 是 | **是** | G1 PASS | fmt 105→0；clippy 0；Rust 全量 + 4 个 Node 套件真跑（`evidence/logs/`） | — |
 | RC1-03 Release DAG 接线 | 是 | 部分 | G4 `PARTIAL` | `quality` job + `pack needs` 含 quality；`release-gate.js dag` 通过并有负向测试 | 需 runner 实跑一次（无权限） |
-| RC1-04 OpenSSL 验真 | 是 | 部分 | G3 `PARTIAL` | 四条路径统一 `scripts/fetch-openssl.sh`；缺/错 pin 一律 fail-closed；`release-gate.js openssl` 通过 | **Digest 值 BLOCKED**：出网不可用，无法独立核对 openssl-3.5.7 官方摘要 |
+| RC1-04 OpenSSL 验真 | 是 | **是** | G3 PASS | 四条路径统一 `scripts/fetch-openssl.sh`；pin 已钉 `a8c0d28a529ca480…`（取自国外小鸡实下载 + openssl.org 官方 .sha256，两者一致）；缺/错 pin 仍 fail-closed | — |
 | RC1-05 产物/签名一致性 | 部分 | 部分 | G5 `BLOCKED` | 客户端单目标 manifest 与生产根验签链路已真实跑通（T21）；`artifacts[]` 层与签名分工已定义 | 需先固定最终提交后重算全部产物哈希，并需要所有者批准的签名设施 |
 | RC1-06 跨平台 | 部分 | `NOT_RUN` | G6 `PLATFORM_NOT_VERIFIED` | linux-x64 原生可跑；mingw 交叉构建通过 | 无 Windows/macOS runner、无 Android 设备、无 macOS SDK |
 | RC1-07 状态账本 | 是 | **是** | G7 PASS | 本文件；历史文档加 `Superseded by` 标注 | — |
@@ -68,7 +68,7 @@ Result          : RC1_CANDIDATE_BLOCKED
 | Action 钉住 | 25 处，全部 40 位（`release-gate.js actions`） |
 | 锁文件 | `Cargo.lock` 与钉住摘要一致（`release-gate.js lock`） |
 
-**未完成**：摘要值本身。所有者需在能出网的机器上跑：
+**已完成**（2026-10-18）：摘要在国外小鸡上实下载并核对官方 `.sha256`：`a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8`。原计划命令：
 
 ```
 curl -fsSL -O https://www.openssl.org/source/openssl-3.5.7.tar.gz && sha256sum openssl-3.5.7.tar.gz

@@ -11,10 +11,10 @@
 | linux arm64 musl | 历史有 qemu+TLS 证据，本轮未复跑 | 本机可复跑：qemu-aarch64 + 真实 HTTPS 请求 |
 | Android arm64 | 仅构建与链接桩；无设备/模拟器 | 需模拟器或真机做 HTTPS 与工作区约束验证 |
 
-## L2 供应链：OpenSSL 摘要未钉住
+## L2 供应链 — 已解决（保留记录）
 
-四条下载路径已统一验真，但 `OPENSSL_SHA256` 为空 → 现在 CI/release 只要涉及 OpenSSL 就会**失败关闭**。
-本机出网到 openssl.org 与 GitHub releases 均不可用，无法独立获取并核对摘要，按任务书不编造。
+摘要已钉住：`a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8`。取法：在国外小鸡（199.188.100.236）实下载 `openssl-3.5.7.tar.gz` 并比对 openssl.org 官方
+`.sha256` 文件，两者一致；此前本地那份 Debian orig 源码包摘要也相同。四条下载路径仍统一走验真脚本。
 
 ## L3 Release DAG 只有结构证据
 
