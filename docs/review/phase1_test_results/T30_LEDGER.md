@@ -29,7 +29,7 @@
 | T21 | 真实发布信任根 | **PASS** | 生产密钥已在所有者指示下生成并装入两处入口（`kroma-release-2026`）；真签名 manifest 经生产根验证通过、篡改/冒充/测试密钥三向被拒；`test-release-trust-root` 13/13、`test-kroma-js-upgrade` 109/109 | 4ee0cd2 + 本轮 |
 | T22 | 发布与供应链闭环 | **PARTIAL** | 21 项检查 + 38 处动作钉住 + `release-gate.js lock` + 真签名 manifest 经生产根验证（payload 篡改被拒）；缺口：需 CI runner 跑一次完整 release 工作流，产出 `artifacts[]` 形态的签名 manifest（本机磁盘不足以做 4 平台构建，不用单平台冒充） | 2411bd8 + 后续 |
 | T23 | 快照身份与恢复不变量 | PASS | `t23_snapshot_identity`（5 条实测 A→B→A / 崩溃重放 / rename+chmod / 多次 undo）+ ADR-0001 | 0479d71 |
-| T24 | 真实模型冻结基线 | **BLOCKED** | EXP-00 冻结配置 48 jobs / digest `05757bf3`；无费用上限授权，未调付费服务 | b10d23e |
+| T24 | 真实模型冻结基线 | **PASS（结论 Inconclusive）** | 所有者授权后真跑 28 个 run / 8.77M token（≈$1.45）：留出集 3 次重复 = 单代理 5/6 vs 锦标赛 6/6，配对差 +16.7% CI [0%,+33.3%]，按预注册规则判 Inconclusive，默认值未改；另修掉 3 个"拿实现细节当验收"的判定缺陷 | b10d23e + 本轮 |
 | T25 | TaskState 与语义压缩 | PASS（EXP-01/02 BLOCKED） | `t25_task_state`（4 条，强制压缩 + WAL resume 后约束逐字不变） | b5c17f2 |
 | T26 | 代码定位模型适配 | PARTIAL（EXP-03 BLOCKED） | `t26_localization`（2 条：5/5 vs 0/5 符号基线，变异 3/5）+ 语言矩阵 | 42e12df |
 | T27 | 自适应执行与反事实验证 | PASS（EXP-04 BLOCKED） | `control_policy` 8 条 + `t27_control_policy` 3 条（探针只在副本、父工作区字节不变） | 1fd23e4 |
@@ -44,7 +44,7 @@
 
 
 
-| T24 真实模型基线 | 明确的费用上限 + provider/模型授权 + 时间窗 | 冻结 manifest（48 jobs，digest 固定）、任务集、价目表、预注册判决规则 |
+
 | T25/T26/T27/T28/T29 的实验 | 同 T24 的预算 | 机制与离线指标全部就绪并有测试；默认开关保持不变 |
 
 ## 既有 flake（与本次改动无关，已在 `regressions.md` 记录）

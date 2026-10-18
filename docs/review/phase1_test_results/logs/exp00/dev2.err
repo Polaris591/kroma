@@ -1,0 +1,4 @@
+kroma bench: plan e125aa38145d eligible={SnapshotStore, ToolDiscovery}
+[kroma] bench executor: provider model=gemini-3.8-flash-high protocol=chat-completions
+[kroma] bench endpoint: https://cobblemon.asia
+DEV2_EXIT=0

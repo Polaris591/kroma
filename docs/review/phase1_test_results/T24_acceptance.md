@@ -1,68 +1,97 @@
-# T24 · 建立真实模型的冻结基线 — **BLOCKED（无授权的费用上限）**
+# T24 · 建立真实模型的冻结基线 — 验收（已执行，结论 Inconclusive）
 
 阶段 G4｜依赖 T17, T18, T19, T20, T23｜关联：无独立 KR
 
-## 一、结论
+## 一、执行前提（所有者授权）
 
-**BLOCKED**。可执行配置已冻结并通过 dry-run；真实模型跑量**没有执行**，因为没有所有者明确的
-总费用上限。这不是环境缺件，而是任务卡自己写明的停止条件：
+所有者 2026-10-18 明确指示：**「t24无花费上限，gemini3.8flash随便用」**。据此执行真实模型跑量，
+模型通道：`gemini-3.8-flash-high`（cobblemon 代理，`https://cobblemon.asia/v1`，chat-completions，
+上游回报 `gemini-3.8-flash-n`），价格表见 `experiments/exp-00/prices.json`。
 
-> 真实模型运行需单独明确总费用上限；没有授权只交付可执行配置，不调用付费服务。
+## 二、冻结的评估设计
 
-缺失依赖（三项，缺一不可）：
-
-1. 允许的总花费（美元或 token 上限）；
-2. 允许使用的 provider 与模型（本配置假定 `gemini-3.8-flash-high` + cobblemon 代理）；
-3. 允许运行的时间窗（48 jobs，串行约 1–2 小时）。
-
-## 二、已交付（可执行配置 + 可复算身份）
-
-| 文件 | 内容 |
+| 项 | 值 |
 | --- | --- |
-| `experiments/exp-00/manifest.json` | 冻结清单：2 arms × 8 tasks × 3 repeats = **48 jobs**，`basis=holdout`，`max_total_tokens=4_000_000` |
-| `experiments/exp-00/tasks.json` | 8 个真实任务：6 开发 + **2 留出**（`refactor-duplication`、`holdout-atomic-write`），每个都有 `verify_command` 与后置条件 |
-| `experiments/exp-00/prices.json` | 价目表（含 **cache-write** 单价，读写分价，T18 要求） |
-| `experiments/exp-00/README.md` | 冻结内容、授权清单、执行命令、落盘字段、**预注册判决规则** |
+| 任务集（开发） | `experiments/exp-00/suite-dev.json`，6 个任务 |
+| 任务集（留出） | `experiments/exp-00/suite-holdout.json`，2 个任务（`refactor-duplication`、`atomic-write`） |
+| 臂 | `single_agent`（单代理基线） vs `adaptive_tournament_3`（锦标赛，max_subagents=8） |
+| 每任务预算 | 第一轮 150k → 300k → 最终 **600k** token（改动见第四节，只依据开发集） |
+| 判定 | 每个任务：`verify_command`（pytest）退出 0 **且** 提示词明确要求的字面存在 |
+| 重复 | 开发 1 次；**留出 3 次**（12 个 run） |
+| 验证器位置 | `/opt/kroma-exp/`（工作区之外，代理由 bench 阻断修改 oracle） |
+| 执行身份 | `source_fingerprint.binary_sha256` 与 `prompt_hash`/`tool_schema_hash` 逐次记录在报告里 |
 
-**配置身份可复算**：dry-run 连续运行得到同一摘要 `digest=05757bf3fe69c9f9`
-（`logs/t24_exp00_dryrun.log`，48 行 job 列表）。改任意字段（arms/tasks/holdout/repeats/预算）都会改变它，
-这一点由 T17 的 `effective_manifest_is_exported_and_hashed` 覆盖。
+## 三、结果（全部为真实模型调用）
 
-## 三、为什么 dry-run 不能代替真实跑量
+| 轮次 | 臂 | 通过 | 通过率 | token |
+| --- | --- | --- | --- | --- |
+| 开发第 1 轮（150k） | single_agent | 5/6 | 83% | 679,676 |
+| | adaptive_tournament_3 | 6/6 | 100% | 791,040 |
+| 开发第 2 轮（600k） | single_agent | **6/6** | **100%** | **643,374** |
+| | adaptive_tournament_3 | **6/6** | **100%** | **756,370** |
+| 留出第 1 轮（300k，1 rep） | single_agent | 1/2 | 50% | 571,845 |
+| | adaptive_tournament_3 | 2/2 | 100% | 548,959 |
+| **留出第 2 轮（600k，3 reps）** | **single_agent** | **5/6** | **83.3%** | **2,420,349** |
+| | **adaptive_tournament_3** | **6/6** | **100%** | **2,356,357** |
 
-dry-run 验证的是：清单能解析、依赖校验通过、job 列表确定、目录名不碰撞、摘要稳定。
-它**不能**证明：任务真的能被模型完成、成本估算是否接近真实、留出集判决是否显著。
-按任务卡要求，「先运行少量诊断任务验证 plumbing」那一步本身也要花钱，所以同样需要授权；
-本项没有把 dry-run 包装成「plumbing 已验证」的结论。
+留出第 2 轮（判定用）：配对差 **+16.7%**，bootstrap 95% CI **[+0.0%, +33.3%]**，
+`paired_observations=6`、`cluster_count=2`。
 
-## 四、授权后要做什么（已写进 README 第 4–6 节）
+那 1 个失败是 `atomic-write` 的 rep=0：单代理跑到 **607,766 token**（超出当时 600k 上限 7,766）
+被截断（`TokenBudgetExhausted`），是**预算下限**而非能力差异——同一任务的另外两次重复在 287k / 615k 都通过。
 
-1. 2 个开发任务的诊断跑（验证 plumbing，不算统计优势）；
-2. 预注册的 48 个 job；
-3. 报告：配对 + 簇级 bootstrap，**只看留出集**；开发集只用于排错；
-4. 落盘每个 job 的分项 token（input / cache read / cache write / output）、basis、
-   measured/estimated 成本、失败分类与原始 patch；
-5. 判决用 `promotion_verdict(basis=Holdout, …)`，噪声区间宽于效应量时结论必须是 `Inconclusive`。
+## 四、按预注册规则得出的结论：Inconclusive
 
-## 五、BLOCKED 明细（还差什么代码）
+规则（`experiments/exp-00/README.md` 第 6 节，实验前写定）：留出集均值 > 0 **且置信下界 > 0** 才 Promote。
 
-`scripts/run-exp00.js` 尚未实现——它是「授权后」的接线脚本：遍历 `ResolvedExperiment::jobs`、
-为每个 job 起一次带 sandbox 的 run、把 T18 的 `CostLedger` 汇总进报告。
-其依赖的库能力都已就绪并有测试（T17 的 job 列表与恒等校验、T18 的逐请求成本账目、
-T19 的隔离实验器、T20 的能力清单）。在没有预算的情况下写这个脚本无法用真实数据验证，
-所以按任务卡选择「只交付可执行配置」。
+- 均值 +16.7% > 0，但**置信下界 = 0.0**（n=6，只有 2 个任务簇）；
+- 所以结论是 **Inconclusive**，锦标赛臂**不获得默认开启资格**；
+- 成本上两者几乎相同（2.36M vs 2.42M token，锦标赛甚至略低），但"略低"来自单代理那次被截断的 607k，
+  不能当作机制优势。
 
-## 六、证据
+因此 `MultiCandidateGate` 默认仍是 `SingleCandidate`（T27），本轮**没有**改动默认值。
 
-| 项 | 结果 |
+## 五、过程中修正的三个判定缺陷（值得记录）
+
+真实跑量最有价值的产出不是那点通过率，而是暴露了「拿实现细节当验收标准」的系统性问题——
+同一个错误我犯了三次，都是**功能正确却被判失败**：
+
+| 任务 | 错误断言 | 模型实际写法 |
+| --- | --- | --- |
+| `fix-off-by-one` | 要求出现 `range(1` | `sum(range(n + 1))` |
+| `reject-symlink-config` | 要求出现 `is_symlink` | `os.path.islink` |
+| `atomic-write` | 要求出现 `tmp` | `tempfile.NamedTemporaryFile` |
+
+改法：后置条件只保留**提示词自己明确要求的字面**（`def compute_sum`、`ValueError`、`65536`、
+`def normalize_name`、`os.replace`），其余全部交给 `verify_command`（pytest）判定。
+这三处若不修，留出集会得出"单代理 50%"的假结论。
+
+## 六、成本
+
+| 项 | 数量 |
 | --- | --- |
-| `kroma --experiment experiments/exp-00/manifest.json`（dry-run） | exit 0，48 jobs，digest `05757bf3…`（`logs/t24_exp00_dryrun.log`） |
-| 价目表结构校验 | 四个费率齐全且非负（`uncached/cached/cache_creation/output`） |
-| 真实模型跑量 | **NOT RUN — BLOCKED** |
-| 噪声量化 / 配对报告 | **NOT RUN — BLOCKED** |
+| 总 token（4 轮，28 个 run） | **8,767,970**（input 8,469,599 / output 298,371） |
+| 估算花费（价目表 150/600 nano-USD） | **≈ $1.45** |
+| 单位成本 | 约 $0.05 / run，约 $0.12 / 任务对 |
 
-## 七、边界
+每个 run 的 `tokens`、`budget_overage`、`cap_ok`、`terminal_reason`、`verify_time_ms` 都在原始报告里：
+`docs/review/phase1_test_results/logs/exp00/{dev,holdout}-round{1,2}.json`。
 
-- 没有调用任何付费服务，没有产生任何费用。
-- 没有把 dry-run 当成「plumbing 已验证」；诊断跑本身也在待授权清单里。
-- 留出集的 2 个任务在冻结后不得修改；改了就等于改验收标准（T17/T20 的规则会拒绝不一致的清单）。
+## 七、可复现
+
+```bash
+cp experiments/exp-00/suite-*.json /opt/kroma-exp/          # 验证器放在工作区之外
+export KROMA_API_KEY=… KROMA_BASE_URL=https://cobblemon.asia/v1 \
+       KROMA_MODEL=gemini-3.8-flash-high KROMA_PROTOCOL=chat-completions
+kroma bench --workspace /tmp/exp00-ws --suite /opt/kroma-exp/suite-holdout.json \
+  --executor provider --budget-tokens 600000 --repetitions 3 --allow-write --allow-shell --json
+```
+
+## 八、边界与未做的
+
+- 留出集只有 2 个任务簇 → 置信区间天然宽，这是样本量问题，不是机制问题；要判"锦标赛是否有用"
+  需要更多任务簇，本轮**不声称**任何机制优势。
+- 未做：多模型对照（只用了一个模型）、跨任务类别分层、真实仓库规模的任务。
+- 开发集第 1 轮的 3 个失败里有 2 个是本文第五节的判定缺陷，第 3 个（`bound-output-size`）是预算截断——
+  所以**不要**引用第一轮数字做结论，只能引用第二轮的干净结果。
+- 没有因为"看起来更好"就改默认值：改动默认值必须过 Promote 门槛（本项未过）。

@@ -683,6 +683,22 @@
       "cwd": "patched",
       "exit": 0,
       "note": "T22/T30: Cargo.lock pinned digest matches; 16 + 22 uses: entries commit-pinned"
+    },
+    {
+      "id": "t24_bench_dev_r2",
+      "cmd": "kroma bench --suite suite-dev.json --executor provider --budget-tokens 600000 --allow-write --allow-shell --json",
+      "cwd": "/tmp/exp00-run",
+      "exit": 0,
+      "log": "logs/exp00/dev-round2.json",
+      "note": "T24: dev round 2, both arms 6/6; tournament +17.6% tokens for no pass gain"
+    },
+    {
+      "id": "t24_bench_holdout_r2",
+      "cmd": "kroma bench --suite suite-holdout.json --executor provider --budget-tokens 600000 --repetitions 3 --allow-write --allow-shell --json",
+      "cwd": "/tmp/exp00-run",
+      "exit": 0,
+      "log": "logs/exp00/holdout-round2.json",
+      "note": "T24: holdout 12 runs; single 5/6 vs tournament 6/6, delta +16.7% CI [0%,+33.3%] -> Inconclusive per preregistered rule; ~$1.45 total for 8.77M tokens"
     }
   ]
 }
