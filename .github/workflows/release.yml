@@ -17,6 +17,18 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      # Two-pass signing: pass 1 builds and attests the candidate; the owner signs those exact bytes
+      # offline; pass 2 points at pass 1's artifact bundle and verifies the signature over it. A rebuild
+      # would produce different bytes, so verification must consume the same run, never a fresh build.
+      candidate_run:
+        description: 'Run id of the pass that produced the release-candidate artifact (empty = build only)'
+        required: false
+        default: ''
+      provenance:
+        description: 'Path to the signed provenance document to verify against that candidate'
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -50,13 +62,16 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: tests
-        run: cargo test --workspace --no-fail-fast
+      # B-03: identical to ci.yml, by construction: both call the same script.
+      - name: tests (sandbox-dependent suites run separately)
+        run: scripts/run-workspace-tests.sh
       - name: node regressions
         run: |
           node scripts/test-kroma-js-upgrade.js
           node scripts/test-release-trust-root.js
           node scripts/test-release-pipeline.js
+          node scripts/test-provenance.js
+          node scripts/test-release-attestation.js
           node scripts/verify-ledger.js
       - name: release gates
         run: |
@@ -66,6 +81,52 @@ jobs:
           node scripts/release-gate.js dag
       - name: entry points are byte-identical
         run: cmp bin/kroma.js npm/kroma-cli/bin/kroma.js
+
+  # B-03: the sandbox suites are a real release condition, not a warning. A hosted runner cannot create
+  # unprivileged user namespaces, so "unavailable" is distinguished from "failed": exit 2 means the host
+  # lacks the capability and is recorded as HOST_CAPABILITY_BLOCKED, which the final verdict refuses to
+  # accept as a pass. A genuine test failure (exit 1) fails the release outright.
+  sandbox:
+    name: sandbox isolation (real bwrap)
+    runs-on: ubuntu-latest
+    needs: [quality]
+    outputs:
+      status: ${{ steps.run.outputs.status }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install bubblewrap and relax the user-namespace restriction
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          if [ -w /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns >/dev/null
+          fi
+          if [ -w /proc/sys/kernel/unprivileged_userns_clone ]; then
+            echo 1 | sudo tee /proc/sys/kernel/unprivileged_userns_clone >/dev/null
+          fi
+      - name: Run the isolation suites
+        id: run
+        run: |
+          set +e
+          scripts/run-sandbox-tests.sh 2>&1 | tee /tmp/sandbox.log
+          code="${PIPESTATUS[0]}"
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "status=PASS" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -eq 2 ]; then
+            echo "::warning::the runner cannot host a sandbox; recorded as HOST_CAPABILITY_BLOCKED"
+            echo "status=HOST_CAPABILITY_BLOCKED" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::sandbox isolation tests failed"
+            echo "status=FAIL" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
   linux:
     name: linux-x64
@@ -276,7 +337,7 @@ jobs:
 
   pack:
     name: pack npm tarball
-    needs: [quality, linux, windows, macos, android, musl]
+    needs: [quality, sandbox, linux, windows, macos, android, musl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -302,6 +363,65 @@ jobs:
           name: kroma-cli-tarball
           path: npm/dist/*.tgz
           if-no-files-found: error
+
+  # B-02: the artifact set that a release run actually produced, described by bytes rather than by intent.
+  # The signed provenance document must cover exactly this set, from exactly this commit.
+  attest:
+    name: attest the candidate artifact set
+    runs-on: ubuntu-latest
+    needs: [pack, sandbox]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Collect everything the run produced
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: candidate
+          merge-multiple: true
+      - name: Describe the bytes
+        run: |
+          set -euo pipefail
+          ls -l candidate
+          node scripts/release-attestation.js build \
+            --root candidate \
+            --commit "${{ github.sha }}" \
+            --sandbox "${{ needs.sandbox.outputs.status }}" \
+            --out release-attestation.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate
+          path: |
+            candidate/**
+            release-attestation.json
+          if-no-files-found: error
+
+  # B-02: verification consumes the *same* bytes that were attested, never a rebuild. Pass 1 uploads the
+  # candidate; the owner signs it offline; pass 2 names that run id and this job proves the signature covers
+  # those bytes, from that commit, with a sandbox that really passed. Anything less is RELEASE_BLOCKED.
+  release-verdict:
+    name: release verdict (signature over the attested bytes)
+    runs-on: ubuntu-latest
+    needs: [attest, sandbox]
+    if: inputs.candidate_run != '' && inputs.provenance != ''
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Fetch the candidate from the run that produced it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.candidate_run }}" -n release-candidate -D dist
+          ls -l dist
+      - name: Verify the signature over these exact bytes
+        run: |
+          set -euo pipefail
+          node scripts/release-attestation.js verdict dist/release-attestation.json \
+            --provenance "${{ inputs.provenance }}" --root dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: release-verdict
+          path: release-verdict.json
+          if-no-files-found: warn
 
 # Known limits (do not read as "verified"):
 #   - android-arm64 is verified by static inspection of the artifact. Running it needs a real

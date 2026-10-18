@@ -10,7 +10,7 @@ name: CI
 # stub). Building them per push is what stops that from reaching a tag unnoticed.
 
 permissions:
-  contents: write
+  contents: read
 
 on:
   push:
@@ -93,31 +93,31 @@ jobs:
           # suites are excluded by running the binaries explicitly. They refuse to pass without a real
           # sandbox backend (correct), and a hosted runner cannot provide one; the separate
           # `sandbox-isolation` job runs them and reports the outcome.
-          cargo test --workspace --no-run --message-format=json 2>/dev/null \
-            | grep -o '"executable":"[^"]*"' | sed 's/"executable":"//; s/"$//' \
-            | grep -v -e b13_sandbox_isolation -e t09_execution_boundary \
-            > /tmp/kroma-test-bins.txt
-          echo "running $(wc -l < /tmp/kroma-test-bins.txt) test binaries (2 sandbox suites excluded)"
-          fail=0
-          while read -r bin; do
-            echo "== $(basename "$bin")"
-            "$bin" || fail=1
-          done < /tmp/kroma-test-bins.txt
-          exit "$fail"
-      - name: Publish the failure log when the tests fail
+          scripts/run-workspace-tests.sh 2>&1 | tee /tmp/kroma-test-output.log
+      # B-04: a failing build must not write to the repository. The log is uploaded as an artifact
+      # instead, which needs no write permission and leaves no branch behind.
+      - name: Upload the test log when the job fails
         if: failure()
-        run: |
-          mkdir -p ci-debug
-          grep -E "^(---- .* stdout|failures:|test result: FAILED)" -A6 /tmp/kroma-tests.log \
-            | head -400 > ci-debug/last-test-failure.txt || true
-          git config user.email "ci@kroma.invalid"
-          git config user.name "kroma-ci"
-          git add -f ci-debug/last-test-failure.txt
-          git commit -m "ci: capture the failing test output [skip ci]" || exit 0
-          git push -f origin HEAD:ci-debug || true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-failure-log
+          path: /tmp/kroma-test-output.log
+          if-no-files-found: warn
 
-      - name: JavaScript upgrade-helper checks
-        run: node scripts/test-kroma-js-upgrade.js
+      # The same gate set release.yml runs, so a green CI result and a green release result mean the same
+      # thing. B-03: the two workflows previously tested differently, and only CI was ever exercised.
+      - name: Node suites and release gates
+        run: |
+          node scripts/test-kroma-js-upgrade.js
+          node scripts/test-release-trust-root.js
+          node scripts/test-release-pipeline.js
+          node scripts/test-provenance.js
+          node scripts/test-release-attestation.js
+          node scripts/verify-ledger.js
+          node scripts/release-gate.js actions
+          node scripts/release-gate.js lock
+          node scripts/release-gate.js openssl
+          node scripts/release-gate.js dag
 
       - name: The two bin/kroma.js copies must stay identical
         run: |
@@ -153,7 +153,7 @@ jobs:
       - name: Sandbox isolation suites
         run: |
           set -o pipefail
-          cargo test -p kroma-core --test b13_sandbox_isolation --test t09_execution_boundary 2>&1 | tee /tmp/sandbox.log
+          scripts/run-sandbox-tests.sh 2>&1 | tee /tmp/sandbox.log
       - name: Report the outcome either way
         if: always()
         run: |
@@ -161,7 +161,7 @@ jobs:
             echo "sandbox isolation: PASS on this runner"
           else
             echo "::warning::sandbox isolation could not run here (no user namespaces); it is proven locally"
-            grep -E "bwrap is required|test result" /tmp/sandbox.log | head -5 || true
+            grep -E "bwrap is required|bwrap cannot|test result" /tmp/sandbox.log | head -5 || true
           fi
 
   build-linux:

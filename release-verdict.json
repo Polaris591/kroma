@@ -1,0 +1,8 @@
+{
+  "schema": "kroma-release-verdict/1",
+  "git_commit": "0123456789abcdef0123456789abcdef01234567",
+  "state": "RELEASE_BLOCKED",
+  "reasons": [
+    "signature does not verify over these bytes: ENOENT: no such file or directory, open '/tmp/kroma-attest-doc-emQjH3/absent.json'"
+  ]
+}
