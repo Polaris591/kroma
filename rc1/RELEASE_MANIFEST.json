@@ -1,12 +1,12 @@
 {
   "schema": "kroma-rc1-release-manifest/1",
-  "generated_at_utc": "2026-10-18T02:15:34+00:00",
+  "generated_at_utc": "2026-10-18T02:15:48+00:00",
   "result": "RC1_CANDIDATE_BLOCKED",
   "source": {
     "archive": "kroma-p1-sealed-source.tar.gz",
     "archive_sha256": "e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b",
     "archive_matches_owner_upload": true,
-    "git_commit": "6f1fb14b1f0813ecab2e97d9d8d030c0d666dbaa",
+    "git_commit": "141f5ab41d2f0bfa96455aa83244e33b1b4aa0f7",
     "cargo_lock_sha256": "caa80f28083d1243d9c8e2d0e873404620cd9adf0a052159d286536ccf713f8c",
     "rust_toolchain": "1.85.1",
     "node": "v24.21.0"
@@ -30,7 +30,7 @@
       "release_pipeline": 24,
       "ledger": "ok",
       "log": "rc1/evidence/logs/rc1_node_gates.log",
-      "upgrade_flake_repro": "17/100 before fix, 100/100 after"
+      "upgrade_flake_repro": "83/100 before fix (17 failures), 100/100 after; the raw before-fix log was overwritten by a second measurement and only the summary is retained"
     },
     "release_gates": {
       "actions": "ok (25 pinned)",
@@ -38,7 +38,7 @@
       "openssl": "ok (four paths, pin empty -> fail closed)",
       "dag": "ok (pack needs quality)"
     },
-    "rc1_01": "PASS (deadline no longer replaced by a late ENOENT)"
+    "rc1_01": "PASS"
   },
   "sbom": {
     "path": "docs/release/sbom.json",
