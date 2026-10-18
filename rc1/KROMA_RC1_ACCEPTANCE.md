@@ -1,11 +1,13 @@
 # Kroma RC1 收口验收
 
 ```
-Source snapshot : kroma-p1-sealed-source.tar.gz
+RC1-00 input   : kroma-p1-sealed-source.tar.gz（阶段 1 输入包，只用于来源冻结）
                   sha256 e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b
-                  (与所有者本轮上传的封板包逐字节一致，已核对)
+                  与本仓库当时那份 tar 逐字节一致（已核对）
+This delivery   : kroma-rc1-source.tar.gz（本轮 RC1 候选包，由下方提交重新打包）
+                  sha256 记录在交付目录的 SHA256SUMS 中；归档无法包含自身摘要
 Git commit      : 见 RELEASE_MANIFEST.json 的 git_commit（本文件随该提交冻结）
-Result          : RC1_CANDIDATE_BLOCKED（G5/G6 未满：五平台产物集未签、Windows/Android 无运行证据）
+Result          : RC1_CANDIDATE_BLOCKED（G4 未实跑、G5 覆盖不全、G6 运行证据不全）
 ```
 
 `RC1_CANDIDATE_BLOCKED` 的含义：源码与所有本地可执行门禁真实通过；真实签名（需要所有者批准）、
@@ -19,10 +21,10 @@ Result          : RC1_CANDIDATE_BLOCKED（G5/G6 未满：五平台产物集未�
 | RC1-00 冻结来源 | 是 | **是** | G0 PASS | `evidence/00_provenance.json`（提交、tar sha、工具链、锁、双入口一致） | — |
 | RC1-01 Node late-open 竞态 | 是 | **是** | G2 PASS | 复现 17/100 → 修复后 **100/100**；两个入口逐字节一致；109/109（`evidence/logs/rc1-01_*.log`） | — |
 | RC1-02 全仓门禁 | 是 | **是** | G1 PASS | fmt 105→0；clippy 0；Rust 全量 + 4 个 Node 套件真跑（`evidence/logs/`） | — |
-| RC1-03 Release DAG 接线 | 是 | **是** | G4 PASS | `quality` job + `pack needs` 含 quality；真实 run 六个 job 全绿（见第 4 节） | — |
+| RC1-03 Release DAG 接线 | 是 | **否** | G4 `BLOCKED` | `quality` → 五平台 → `pack` → `attest` → `release-verdict` 已接线，`release-gate.js dag` 与 24 条负向测试通过 | **`release.yml` 从未跑通**（只由 tag/dispatch 触发，本环境无 `actions:write` 令牌，且不许打 tag）；绿灯的是 `ci.yml`，不能算作 Release 证据 |
 | RC1-04 OpenSSL 验真 | 是 | **是** | G3 PASS | 四条路径统一 `scripts/fetch-openssl.sh`；pin 已钉 `a8c0d28a529ca480…`（取自国外小鸡实下载 + openssl.org 官方 .sha256，两者一致）；缺/错 pin 仍 fail-closed | — |
-| RC1-05 产物/签名一致性 | 是 | **是**（覆盖已产出产物） | G5 `PARTIAL` | `release-provenance/1` 文档用 `kroma-release-2026` 真签，生产根验签通过；篡改字节/换 keyId/改文档/旧 schema 四向被拒（`test-provenance` 9/9）；私钥不进仓库/日志/CI | 尚未覆盖「CI 产出的五平台发布集」——需要把 CI 产物下载回来再签一次 |
-| RC1-06 跨平台 | 是 | 部分 | G6 `PLATFORM_NOT_VERIFIED` | 五平台**构建/链接**全部真实通过（CI run 39099518753）；linux-x64 与 macOS 有启动证据；矩阵见 `CI_AND_PLATFORM_MATRIX.md` | TLS 与安全边界在 CI 未跑；Windows/Android 无运行证据 |
+| RC1-05 产物/签名一致性 | 是 | **是**（覆盖已产出产物） | G5 `PARTIAL` | `release-provenance/1` 文档用 `kroma-release-2026` 真签，生产根验签通过；篡改字节/换 keyId/改文档/旧 schema 四向被拒（`test-provenance` 9/9）；新增 attestation 机制（`scripts/release-attestation.js`，9 条负向测试：改字节/多文件/缺文件/错提交/沙箱未过全部拒绝）；私钥不进仓库/日志/CI | 尚未覆盖「CI 产出的五平台发布集」——`ci.yml` 不上传 artifact，`release.yml` 从未跑通，没有可签的字节 |
+| RC1-06 跨平台 | 是 | 部分 | G6 `PLATFORM_NOT_VERIFIED` | 五平台**构建/链接**全部真实通过（CI run 39103615371，提交 9c6bec59）；启动：linux-x64、linux-arm64(qemu)、macOS；TLS：linux-x64 与 linux-arm64(qemu) 实跑通过；矩阵见 `CI_AND_PLATFORM_MATRIX.md` | Windows/Android 无运行证据；macOS 无 TLS 证据；安全边界仅在 CI 上 `HOST_CAPABILITY_BLOCKED` |
 | RC1-07 状态账本 | 是 | **是** | G7 PASS | 本文件；历史文档加 `Superseded by` 标注 | — |
 | RC1-08 阶段 2 交接 | 是 | — | — | `PHASE2_BASELINE_HANDOFF.md` | — |
 
@@ -52,11 +54,16 @@ Result          : RC1_CANDIDATE_BLOCKED（G5/G6 未满：五平台产物集未�
 
 测试数量以实际输出为准，本文不硬编码某个"必须等于 995"的数字。
 
-## 4. Release DAG 实跑状态（已闭环）
+## 4. Release DAG 实跑状态（**未闭环**）
 
-- **已接线**：`quality` → 五个平台构建 → `pack`（`needs` 含 quality）。
-- **已实跑并全绿**：`https://github.com/Polaris591/kroma/actions/runs/39099518753`（提交 `de3ab851`）——
-  `fmt, clippy, tests`、linux-gnu、windows-gnu、macOS native、linux-arm64 musl、android-arm64 全部 success。
+- **已接线**：`quality` → `sandbox` → 五个平台构建 → `pack` → `attest` → `release-verdict`；
+  `pack` 的 `needs` 含 `quality` 与 `sandbox`，`release-verdict` 在签名或沙箱不满足时给出 `RELEASE_BLOCKED`。
+- **未实跑**：`release.yml` 只由 `v*` tag 或 `workflow_dispatch` 触发；本环境没有 `actions:write` 令牌，
+  也不允许打 tag，所以**这条流水线一次都没跑过**。此前把 `ci.yml` 的全绿写成"Release DAG 实跑全绿"
+  是高估，已更正。
+- **有证据的是 CI**：`https://github.com/Polaris591/kroma/actions/runs/39103615371`（提交 `9c6bec59`）——
+  `fmt, clippy, tests` 与五个平台构建 success；独立 `sandbox isolation` job failure（宿主无用户命名空间）。
+- 解除路径：给一个 `actions:write` 令牌，或批准打一个跑完即删的预演 tag。
 - 修掉的真问题：workflow 因 job 级 `env` 用 `runner.temp` 被判无效（0 job）；musl/macOS 因
   `libc::__rlimit_resource_t` 只在 glibc 存在而编译失败；android 的第三方 setup action 先失败，
   改用 runner 预装 SDK；测试 job 缺 `bubblewrap`。
@@ -107,16 +114,29 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 | G1 本地质量 | **PASS** | fmt 0 差异、clippy 0、Rust 全量绿（CI + 本机）；Node 四套 109/13/24/ledger 全绿 |
 | G2 更新可靠性 | **PASS** | 17/100 → 100/100；确定性修复，未加超时、未吞错误 |
 | G3 供应链 | **PASS** | 四条 OpenSSL 路径统一验真；pin 双源核对；Action 25 处钉住；锁钉住 |
-| G4 Release DAG | **PASS** | 真实 run 全绿，quality 为 pack 的前置 |
-| G5 可信签名 | **PARTIAL** | 已签并验：源码包、补丁、linux-x64、arm64-musl（4 件）；**未签**：CI 五平台产物集（下载需令牌） |
-| G6 平台声明 | **PARTIAL** | 五平台构建全绿；运行/TLS/安全仅 linux-x64 与 macOS 有证据 |
+| G4 Release DAG | **BLOCKED** | 结构、静态门禁与负向测试齐备；`release.yml` 从未运行（无 `actions:write` 令牌，不许打 tag） |
+| G5 可信签名 | **PARTIAL** | 已签并验：源码包、补丁、linux-x64、arm64-musl（4 件）；attestation + 验签机制已实现并有 9 条负向测试；**未签**：CI 五平台产物集（`ci.yml` 不上传 artifact，`release.yml` 未跑通） |
+| G6 平台声明 | **PARTIAL** | 五平台构建+链接全绿；启动：linux-x64 / linux-arm64(qemu) / macOS；TLS：linux-x64 与 linux-arm64(qemu)；安全边界仅本机 |
 | G7 证据与冻结 | **PASS** | 单一状态表、历史文档已标 Superseded、T24 保持 INCONCLUSIVE |
 
 **总状态 = `RC1_CANDIDATE_BLOCKED`**：不是能力问题，是 G5/G6 各差一块需要令牌或真机的证据。
-解除路径只有两条：
+解除路径三条（互相独立，做一条通一条）：
 
-1. 给一个有 `actions:read` 的令牌（或把 CI 产物下载到本机），我把五平台产物一起签进 provenance；
-2. 给 Windows runner / Android 设备，补齐运行与 TLS 证据。
+1. **G4**：给一个 `actions:write` 令牌让我 `workflow_dispatch` 跑 `release.yml`（两次：产出候选 + 验签出
+   verdict），或批准打一个跑完即删的预演 tag。
+2. **G5**：G4 跑通后才有 CI 产物字节可签——`ci.yml` 不上传 artifact，所以"下载 CI 产物"这条老路径是错的，
+   必须先让 `release.yml` 产出 `release-candidate`。
+3. **G6**：给 Windows runner / Android 设备，补齐启动与 TLS 证据。
+
+## 8.6 独立验收意见的闭环情况（B-01 … B-05）
+
+| 项 | 独立验收的意见 | 本轮处置 |
+| --- | --- | --- |
+| B-01 归档与清单未封板 | 归档 sha 与 manifest/acceptance 写的不是同一个包；包内 `sha256sum -c` 失败；commit 在远端查不到 | 已改：区分"阶段 1 输入包"与"本轮候选包"；提交已推送；封板时先冻结再一次性生成所有摘要，解包后 `sha256sum -c` 必须 100% 通过 |
+| B-02 发布无产物级签名闭环 | `release.yml` 从不调用 sign/verify；签的四件不是交付集 | 已改：新增 `attest`（按字节记 name/size/sha256/commit/sandbox）与 `release-verdict`（对同一 run 的字节验签，重建不算）；新增 9 条负向测试；两遍式流程写在 workflow 注释里 |
+| B-03 质量门禁两套 | `ci.yml` 排除沙箱套件、`release.yml` 全量跑；release 质量从未验证 | 已改：两个 workflow 调用同一个 `scripts/run-workspace-tests.sh`；沙箱套件在 release 里是**阻断条件**（退出码 2 记 `HOST_CAPABILITY_BLOCKED` 并阻止 READY，退出码 1 直接失败） |
+| B-04 CI 失败自动写远端 | 失败时 `git push -f origin HEAD:ci-debug` | 已删：改为 `upload-artifact` 上传日志；workflow 权限降为 `contents: read` |
+| B-05 平台矩阵未对齐 | musl TLS 已跑却写 NOT_RUN；沙箱失败被总 success 掩盖 | 已改：矩阵按 step 结论逐层重写，注明 run 与提交；沙箱状态单列 `HOST_CAPABILITY_BLOCKED` |
 
 ## 9. 需要所有者批准/提供的最小清单
 

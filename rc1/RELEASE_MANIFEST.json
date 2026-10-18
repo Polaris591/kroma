@@ -1,19 +1,23 @@
 {
   "schema": "kroma-rc1-release-manifest/1",
-  "generated_at_utc": "2026-10-18T05:22:01+00:00",
+  "generated_at_utc": "2026-10-18T06:25:15+00:00",
   "result": "RC1_CANDIDATE_BLOCKED",
   "source": {
-    "archive": "kroma-p1-sealed-source.tar.gz",
-    "archive_sha256": "0fa8c1211a129c024184d032d395cdad75ddadb8d4b532d42d5cf659d1ddadf7",
-    "archive_matches_owner_upload": true,
-    "git_commit": "58f5bc209fe8443422161350637e9893c5d5f5be",
+    "stage1_input_archive": "kroma-p1-sealed-source.tar.gz",
+    "stage1_input_sha256": "e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b",
+    "stage1_input_note": "阶段 1 的来源输入包，只用于 RC1-00 冻结；它不是本轮交付包",
+    "this_archive": "kroma-rc1-source.tar.gz",
+    "this_archive_sha256": null,
+    "this_archive_note": "归档不能包含自身摘要：真实值记录在交付目录的 SHA256SUMS 中",
+    "git_commit": "9c6bec591941004bb9a42840aacac999a8add8bf",
+    "git_commit_note": "封板提交；该提交必须已推送到 origin/rc1/closure 才可核对",
     "cargo_lock_sha256": "caa80f28083d1243d9c8e2d0e873404620cd9adf0a052159d286536ccf713f8c",
     "rust_toolchain": "1.85.1",
     "node": "v24.21.0"
   },
   "entry_points": {
-    "bin/kroma.js": "af49503398e9c07653107df0bec8d9d170d8e1728e26bbfc9a406feaec433b79",
-    "npm/kroma-cli/bin/kroma.js": "af49503398e9c07653107df0bec8d9d170d8e1728e26bbfc9a406feaec433b79",
+    "bin/kroma.js": "41e9d7b592a9606b600af060ebf7d7d825772d043d56e1bc24e83a8ddabd3536",
+    "npm/kroma-cli/bin/kroma.js": "41e9d7b592a9606b600af060ebf7d7d825772d043d56e1bc24e83a8ddabd3536",
     "identical": true
   },
   "quality_gates": {
@@ -28,6 +32,8 @@
       "upgrade": 109,
       "trust_root": 13,
       "release_pipeline": 24,
+      "provenance": 9,
+      "attestation": 9,
       "ledger": "ok",
       "log": "rc1/evidence/logs/rc1_node_gates.log",
       "upgrade_flake_repro": "83/100 before fix (17 failures), 100/100 after; the raw before-fix log was overwritten by a second measurement and only the summary is retained"
@@ -35,14 +41,16 @@
     "release_gates": {
       "actions": "ok (25 pinned)",
       "lock": "ok",
-      "openssl": "ok (pin a8c0d28a…98e8, verified against openssl.org .sha256 from an egress-capable host)",
-      "dag": "ok (pack needs quality)"
+      "openssl": "ok (pin a8c0d28a…98e8, cross-checked against openssl.org .sha256 from an egress-capable host)",
+      "dag": "ok (pack needs quality + sandbox; attest -> release-verdict)"
     },
     "rc1_01": "PASS",
     "ci": {
-      "run": "https://github.com/Polaris591/kroma/actions/runs/39099518753",
+      "run": "https://github.com/Polaris591/kroma/actions/runs/39103615371",
+      "head_sha": "9c6bec59",
       "conclusion": "success",
-      "jobs": "fmt/clippy/tests + linux-gnu, windows-gnu, macOS native, linux-arm64 musl, android-arm64"
+      "jobs": "fmt/clippy/tests + linux-gnu, windows-gnu, macOS native, linux-arm64 musl, android-arm64",
+      "separate_job": "sandbox isolation = failure (HOST_CAPABILITY_BLOCKED: the hosted runner cannot create user namespaces)"
     }
   },
   "sbom": {
@@ -55,9 +63,11 @@
     "key_id": "kroma-release-2026",
     "verified_with": "bin/kroma.js PRODUCTION_TRUSTED_KEYS",
     "artifacts_signed": 4,
-    "scope": "source tarball, patch, linux-x64 binary, linux-arm64-musl binary",
-    "not_covered": "the five CI platform artifacts (downloading them needs an authenticated token); no publish",
-    "status": "SIGNED_AND_VERIFIED"
+    "scope": "kroma-linux-x64, kroma-linux-arm64-musl, kroma-rc1-source.tar.gz, kroma_RC1.patch",
+    "not_covered": "the five CI platform binaries (ci.yml uploads no artifact and release.yml never ran)",
+    "mechanism": "scripts/release-attestation.js attests name/size/sha256/commit/sandbox for the bytes a run produced; the owner signs offline; verification consumes the same run, never a rebuild",
+    "negative_tests": "9 (changed bytes, extra file, missing file, wrong commit, sandbox not passed, missing signature, ...)",
+    "status": "PARTIAL"
   },
   "platforms": {
     "linux-x64": "built and tested natively",
@@ -74,5 +84,11 @@
       "sha256": "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
       "verified_against": "openssl.org official .sha256 and an actual download on the owner's overseas VPS (both agree)"
     }
+  },
+  "release_pipeline": {
+    "release_workflow_run": null,
+    "status": "BLOCKED",
+    "reason": "release.yml is triggered only by a v* tag or workflow_dispatch; this environment has no actions:write token and tags are not allowed",
+    "unblock": "provide an actions:write token, or approve a throwaway rehearsal tag"
   }
 }

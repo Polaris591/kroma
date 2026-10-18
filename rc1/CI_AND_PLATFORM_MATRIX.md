@@ -1,52 +1,84 @@
-# CI 与跨平台矩阵（五层证据）
+# Kroma RC1 平台矩阵（逐层，按 CI 步骤结果对齐）
 
-规则：**交叉编译不能冒充原生运行**。每一层只有两种合法取值：`PASS`（有真实证据 + 链接）或
-`NOT_RUN`（写明缺什么、怎么解除）。`BLOCKED` 只用于缺外部设施。
+证据来源：CI 运行 `39103615371`（提交 `9c6bec59`），`conclusion = success`。
+<https://github.com/Polaris591/kroma/actions/runs/39103615371>
 
-## 1. CI 运行记录（真实 run）
+矩阵只写该 run 的**具体 step 结论**。跨平台构建**不等于**原生运行验证，交叉编译通过也不证明
+运行时行为；每一层单独判定，任何一层没有证据就写 `NOT_RUN`。
 
-| run | 结论 | 说明 |
-| --- | --- | --- |
-| [39090210718](https://github.com/Polaris591/kroma/actions/runs/39090210718) | failure（0 job） | workflow 被 GitHub 判无效：job 级 `env` 用了 `runner.temp` |
-| [39091293298](https://github.com/Polaris591/kroma/actions/runs/39091293298) | failure | 首次真正跑起来：linux/windows 绿，musl/android/macOS 红 |
-| [39092543677](https://github.com/Polaris591/kroma/actions/runs/39092543677) | failure | **五个平台构建全绿**；`cargo test` 红（缺 bwrap） |
-| [39092921914](https://github.com/Polaris591/kroma/actions/runs/39092921914) | failure | 装了 bwrap 后 **五个平台仍全绿**，`cargo test` 仍红 → 另有原因，待定位 |
-| [39098134524](https://github.com/Polaris591/kroma/actions/runs/39098134524) | failure | 定位到根因：`CI=true` 泄漏进子进程；沙箱套件需要真 bwrap |
-| [39099518753](https://github.com/Polaris591/kroma/actions/runs/39099518753) | **success** | **六个 job 全绿**：fmt/clippy/tests + 五个平台构建；沙箱套件单独 job（托管 runner 不支持用户命名空间，如实报红、不阻塞） |
+## 1. 五层判定
 
-## 2. 逐平台五层
-
-| 平台 | 编译 | 链接 | 启动 | TLS | 安全边界 |
+| 层 | linux-x64 (gnu) | linux-arm64 (musl) | macOS (arm64 + x64) | Windows (x86_64-gnu) | Android (arm64) |
 | --- | --- | --- | --- | --- | --- |
-| linux-x86_64 (gnu) | **PASS** 本机原生 `cargo build --release`；CI `linux-gnu` 绿 | **PASS** 动态链接 glibc/OpenSSL 系统库 | **PASS** `kroma --version` → `kroma 1.5.0` | **NOT_RUN** 本机无出网；CI 只构建不联外网 | **PASS** bwrap 真隔离 + docker 容器测试在本机全过 |
-| linux-arm64 (musl) | **PASS** 本机 + CI 均绿（修掉 `__rlimit_resource_t` 后） | **PASS** 纯静态，含真 OpenSSL（`strings` 命中 `OpenSSL 3`） | **PASS** `qemu-aarch64 kroma --version` → `kroma 1.5.0` | **NOT_RUN** 无出网；历史上曾用 qemu + 真 HTTPS 验过，本轮未复跑 | **NOT_RUN** 未在 arm64 上跑沙箱测试 |
-| windows-x86_64 (gnu) | **PASS** mingw 交叉构建 + CI `windows-gnu` 绿 | **PASS** PE32+，导入表无 libssl（用 Windows 原生加密） | **NOT_RUN** 无 Windows runner/机器 | **NOT_RUN** 同上 | **NOT_RUN** 同上 |
-| macOS arm64 / x64 | **PASS** CI `macos-latest` 原生构建两个 target | **PASS** 链接 Security.framework/CoreFoundation（真 SDK） | **PASS** CI 里执行 `--version` 两个产物 | **NOT_RUN** CI 未联外网 | **NOT_RUN** 未在 macOS 上跑沙箱测试 |
-| android-arm64 | **PASS** CI 用 runner 预装 SDK + NDK 构建 | **PASS** 静态链接真 OpenSSL（CI 用 llvm-readelf 断言无 libssl NEEDED） | **NOT_RUN** 无设备/模拟器 | **NOT_RUN** 无设备 | **NOT_RUN** 无设备 |
+| 编译 | PASS | PASS | PASS | PASS | PASS |
+| 链接 | PASS | PASS | PASS | PASS | PASS |
+| 启动 | PASS | PASS（qemu） | PASS（原生） | NOT_RUN | NOT_RUN |
+| TLS 运行 | PASS（真 HTTPS） | PASS（qemu 真 HTTPS） | NOT_RUN | NOT_RUN | NOT_RUN |
+| 安全边界 | PASS（本机 bwrap） | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN |
 
-## 3. 每个 NOT_RUN 的解除条件
+## 2. 每条判定的依据
 
-| 项 | 缺什么 | 解除方式 |
-| --- | --- | --- |
-| linux-x64 TLS | 出网 | 在能出网的机器上跑 `KROMA_*` 指向真实 provider，执行一次真实请求 + 一次自签证书拒绝 |
-| musl TLS | 出网 + qemu | `qemu-aarch64` 跑二进制，对真实 https 端点发请求；对自签证书断言拒绝 |
-| musl 安全边界 | arm64 机器或 qemu+bwrap | qemu 下跑 t09 子集（bwrap 在 qemu 用户态受限，需真机更稳） |
-| windows 启动/TLS/安全 | Windows runner | 加 `windows-latest` job，跑 `cargo test -p kroma-core --lib session_ownership --target x86_64-pc-windows-msvc` 与一次 HTTPS |
-| macOS TLS/安全 | macOS runner + 出网 | 在 macos-latest 上加一步真实 HTTPS 与自签拒绝 |
-| android 运行 | 模拟器/真机 | 用 `reactivecircus/android-emulator-runner` 或真机跑 `kroma --version` 与 HTTPS |
+### linux-x64（gnu）
 
-## 3.1 沙箱套件（b13 / t09）的处置
+- 编译 / 链接：`release build (linux-gnu)` job success。
+- 启动：该 job 内的二进制由后续 TLS smoke 实际执行。
+- TLS：step `TLS smoke (real HTTPS + untrusted certificate rejected)` = **success**。这条 step 会发起
+  一次真实 HTTPS 请求，并用一个不受信任的证书验证客户端**拒绝**握手。
+- 安全边界：`b13_sandbox_isolation` 与 `t09_execution_boundary` 在本机（有可用 bwrap）**全部通过**；
+  CI 的托管 runner 无法创建用户命名空间，见第 3 节。
 
-托管 runner 不允许创建非特权用户命名空间，`bwrap` 装得上但用不了。因此：
+### linux-arm64（musl）
 
-- 主测试 job **按二进制名排除**这两个套件，并在注释里写明原因（不是静默跳过）；
-- 独立 job `sandbox isolation (needs user namespaces)` 专门跑它们，结果为 `failure` 时以
-  `::warning::` 显示，不阻塞工作流；
-- 这两个套件在本机（有真 bwrap）**全部通过**，是 T09/B13 隔离的证据来源。
+- 编译 / 链接：`release build (linux-arm64 musl)` job success，静态链接，产物含真实 OpenSSL。
+- 启动 + TLS：step `TLS smoke under qemu (real HTTPS + untrusted certificate rejected)` = **success**，
+  用 `qemu-aarch64-static` 执行同一个 smoke 脚本。
+- 注意：qemu 下通过证明的是**该二进制在 qemu 用户态模拟里能完成真实 TLS 握手**，不等于在真 ARM
+  硬件上验证过。这一区别保留在此，不合并成"PASS"。
+
+### macOS（arm64 + x86_64）
+
+- 编译 / 链接：两个 target 各自 `cargo build --release --target ...` = success（真 Mac runner）。
+- 启动：`--version` 两个架构各执行一次 = success。
+- TLS / 安全边界：**NOT_RUN**。macOS 走 native-tls（Security.framework），在 runner 上没有做真实
+  HTTPS 往返，也没有做隔离验证。解除条件：在真机上跑 `scripts/tls-smoke.sh` 与沙箱套件。
+
+### Windows（x86_64-pc-windows-gnu）
+
+- 编译 / 链接：mingw 交叉 `cargo build --release --target x86_64-pc-windows-gnu` = success。
+- 静态检查：step `Windows binary must not depend on OpenSSL` = success（导入表里没有 libssl/libcrypto）。
+- 启动 / TLS / 安全边界：**NOT_RUN**。没有 Windows 主机或 runner 执行过这个 PE 文件。
+  解除条件：`windows-latest` runner 上跑 `--version` + TLS smoke，或真机执行。
+
+### Android（aarch64-linux-android）
+
+- 编译 / 链接：`Build` = success；`The Android binary must carry real OpenSSL, not link-only stubs` =
+  success（检查 EVP_ 等真实符号，防止当年"空桩链接"事故重演）。
+- 说明：该 run 里 `Fetch OpenSSL sources` 与 `Build static OpenSSL` 两步是 **skipped**，用的是缓存里的
+  静态 OpenSSL；这不是跳过验证，静态检查那一步仍然实跑并通过。
+- 启动 / TLS / 安全边界：**NOT_RUN**。没有设备或模拟器。解除条件：`adb push` 后跑真实 HTTPS 请求，
+  再用不受信任 CA 重复一次，应当失败。
+
+## 3. 沙箱套件在 CI 上的真实状态
+
+托管 runner 不允许创建非特权用户命名空间，`bwrap` 装得上但用不了。处理方式是把"没能力"和"失败"
+分开：
+
+- `ci.yml` 主测试 job 通过 `scripts/run-workspace-tests.sh` **按二进制名**排除这两个套件（不是静默
+  跳过：脚本里写着排除了哪两个、为什么）。
+- 独立 job `sandbox isolation (needs user namespaces)` 实跑它们，本 run 结果 = **failure**，原因是
+  `bwrap cannot create a namespace on this host`。
+- `release.yml` 把同一件事升级成**发布条件**：退出码 2（宿主没能力）记为
+  `HOST_CAPABILITY_BLOCKED` 并阻止 `RELEASE_READY` 判定；退出码 1（真的测试失败）直接让发布失败。
+- 本机（有真 bwrap）实跑：`scripts/run-sandbox-tests.sh` → `EXIT=0`，8 passed / 0 failed。
+
+因此"安全边界"这一层的真实状态是：**代码能力在本机被证明；在 GitHub 托管 runner 上是
+`HOST_CAPABILITY_BLOCKED`**。这两句必须一起说，单独一句都是失真。
 
 ## 4. 结论
 
-- **构建层面五个平台全部真实通过**（不是 check，是 `cargo build` + 链接 + 可执行断言）。
-- **运行层面只有 linux-x64 与 macOS 有启动证据**；TLS 与安全边界在 CI 里都未跑，标 `NOT_RUN`。
-- 因此平台声明只能是「linux-x64 可运行；其余平台构建可用、运行未验证」，
-  不允许写成「五平台发布就绪」。
+- 五平台**编译 + 链接**：全部有真实 CI 证据（同一 run、同一提交）。
+- **启动**：linux-x64、linux-arm64（qemu）、macOS 有证据；Windows、Android 没有。
+- **TLS 运行**：linux-x64 与 linux-arm64（qemu）有证据；macOS、Windows、Android 没有。
+- **安全边界**：本机 linux-x64 有证据；其余全部 `NOT_RUN` 或 `HOST_CAPABILITY_BLOCKED`。
+
+"支持五个平台的安全发布"这句话在本轮证据下**不成立**，能成立的是"五个平台都能构建并链接"。
