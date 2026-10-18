@@ -1,12 +1,12 @@
 {
   "schema": "kroma-rc1-release-manifest/1",
-  "generated_at_utc": "2026-10-18T02:15:48+00:00",
+  "generated_at_utc": "2026-10-18T05:22:01+00:00",
   "result": "RC1_CANDIDATE_BLOCKED",
   "source": {
     "archive": "kroma-p1-sealed-source.tar.gz",
-    "archive_sha256": "e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b",
+    "archive_sha256": "0fa8c1211a129c024184d032d395cdad75ddadb8d4b532d42d5cf659d1ddadf7",
     "archive_matches_owner_upload": true,
-    "git_commit": "141f5ab41d2f0bfa96455aa83244e33b1b4aa0f7",
+    "git_commit": "58f5bc209fe8443422161350637e9893c5d5f5be",
     "cargo_lock_sha256": "caa80f28083d1243d9c8e2d0e873404620cd9adf0a052159d286536ccf713f8c",
     "rust_toolchain": "1.85.1",
     "node": "v24.21.0"
@@ -38,7 +38,12 @@
       "openssl": "ok (pin a8c0d28a…98e8, verified against openssl.org .sha256 from an egress-capable host)",
       "dag": "ok (pack needs quality)"
     },
-    "rc1_01": "PASS"
+    "rc1_01": "PASS",
+    "ci": {
+      "run": "https://github.com/Polaris591/kroma/actions/runs/39099518753",
+      "conclusion": "success",
+      "jobs": "fmt/clippy/tests + linux-gnu, windows-gnu, macOS native, linux-arm64 musl, android-arm64"
+    }
   },
   "sbom": {
     "path": "docs/release/sbom.json",
@@ -46,9 +51,13 @@
     "sha256": "0c866311393db336305011e714ded35fc5208455b00259347f9b40efd9b63bd9"
   },
   "signing": {
-    "client_upgrade_manifest": "verified end-to-end with the production key (kroma-release-2026)",
-    "artifacts_manifest": "NOT PRODUCED - requires a frozen commit plus owner-approved signing",
-    "status": "BLOCKED"
+    "provenance_document": "rc1/artifacts/RELEASE_PROVENANCE.json",
+    "key_id": "kroma-release-2026",
+    "verified_with": "bin/kroma.js PRODUCTION_TRUSTED_KEYS",
+    "artifacts_signed": 4,
+    "scope": "source tarball, patch, linux-x64 binary, linux-arm64-musl binary",
+    "not_covered": "the five CI platform artifacts (downloading them needs an authenticated token); no publish",
+    "status": "SIGNED_AND_VERIFIED"
   },
   "platforms": {
     "linux-x64": "built and tested natively",

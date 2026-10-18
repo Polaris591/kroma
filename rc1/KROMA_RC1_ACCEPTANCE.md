@@ -5,7 +5,7 @@ Source snapshot : kroma-p1-sealed-source.tar.gz
                   sha256 e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b
                   (与所有者本轮上传的封板包逐字节一致，已核对)
 Git commit      : 见 RELEASE_MANIFEST.json 的 git_commit（本文件随该提交冻结）
-Result          : RC1_CANDIDATE_BLOCKED
+Result          : RC1_CANDIDATE_BLOCKED（G5/G6 未满：五平台产物集未签、Windows/Android 无运行证据）
 ```
 
 `RC1_CANDIDATE_BLOCKED` 的含义：源码与所有本地可执行门禁真实通过；真实签名（需要所有者批准）、
@@ -22,7 +22,7 @@ Result          : RC1_CANDIDATE_BLOCKED
 | RC1-03 Release DAG 接线 | 是 | **是** | G4 PASS | `quality` job + `pack needs` 含 quality；真实 run 六个 job 全绿（见第 4 节） | — |
 | RC1-04 OpenSSL 验真 | 是 | **是** | G3 PASS | 四条路径统一 `scripts/fetch-openssl.sh`；pin 已钉 `a8c0d28a529ca480…`（取自国外小鸡实下载 + openssl.org 官方 .sha256，两者一致）；缺/错 pin 仍 fail-closed | — |
 | RC1-05 产物/签名一致性 | 是 | **是**（覆盖已产出产物） | G5 `PARTIAL` | `release-provenance/1` 文档用 `kroma-release-2026` 真签，生产根验签通过；篡改字节/换 keyId/改文档/旧 schema 四向被拒（`test-provenance` 9/9）；私钥不进仓库/日志/CI | 尚未覆盖「CI 产出的五平台发布集」——需要把 CI 产物下载回来再签一次 |
-| RC1-06 跨平台 | 是 | 部分 | G6 `PLATFORM_NOT_VERIFIED` | 五平台**构建/链接**全部真实通过（CI 实跑）；linux-x64 与 macOS 有启动证据 | TLS 与安全边界在 CI 未跑；Windows/Android 无运行证据 |
+| RC1-06 跨平台 | 是 | 部分 | G6 `PLATFORM_NOT_VERIFIED` | 五平台**构建/链接**全部真实通过（CI run 39099518753）；linux-x64 与 macOS 有启动证据；矩阵见 `CI_AND_PLATFORM_MATRIX.md` | TLS 与安全边界在 CI 未跑；Windows/Android 无运行证据 |
 | RC1-07 状态账本 | 是 | **是** | G7 PASS | 本文件；历史文档加 `Superseded by` 标注 | — |
 | RC1-08 阶段 2 交接 | 是 | — | — | `PHASE2_BASELINE_HANDOFF.md` | — |
 
@@ -98,6 +98,25 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 
 见 `RELEASE_MANIFEST.json`、`RELEASE_SHA256SUMS`、`TEST_EVIDENCE_INDEX.md`、
 `KNOWN_LIMITATIONS.md`、`PHASE2_BASELINE_HANDOFF.md`、`RC1_CHANGELOG.md`，以及 `evidence/`。
+
+## 8.5 终态判定（本轮结束）
+
+| Gate | 状态 | 依据 |
+| --- | --- | --- |
+| G0 来源可信 | **PASS** | 上传包与本仓库 tar 逐字节一致；提交、锁、双入口摘要齐备 |
+| G1 本地质量 | **PASS** | fmt 0 差异、clippy 0、Rust 全量绿（CI + 本机）；Node 四套 109/13/24/ledger 全绿 |
+| G2 更新可靠性 | **PASS** | 17/100 → 100/100；确定性修复，未加超时、未吞错误 |
+| G3 供应链 | **PASS** | 四条 OpenSSL 路径统一验真；pin 双源核对；Action 25 处钉住；锁钉住 |
+| G4 Release DAG | **PASS** | 真实 run 全绿，quality 为 pack 的前置 |
+| G5 可信签名 | **PARTIAL** | 已签并验：源码包、补丁、linux-x64、arm64-musl（4 件）；**未签**：CI 五平台产物集（下载需令牌） |
+| G6 平台声明 | **PARTIAL** | 五平台构建全绿；运行/TLS/安全仅 linux-x64 与 macOS 有证据 |
+| G7 证据与冻结 | **PASS** | 单一状态表、历史文档已标 Superseded、T24 保持 INCONCLUSIVE |
+
+**总状态 = `RC1_CANDIDATE_BLOCKED`**：不是能力问题，是 G5/G6 各差一块需要令牌或真机的证据。
+解除路径只有两条：
+
+1. 给一个有 `actions:read` 的令牌（或把 CI 产物下载到本机），我把五平台产物一起签进 provenance；
+2. 给 Windows runner / Android 设备，补齐运行与 TLS 证据。
 
 ## 9. 需要所有者批准/提供的最小清单
 

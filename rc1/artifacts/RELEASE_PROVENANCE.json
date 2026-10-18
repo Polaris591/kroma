@@ -1,8 +1,8 @@
 {
   "schema": "kroma-release-provenance/1",
   "version": "1.5.0",
-  "git_commit": "37c1ef683a0c33e12e3fd8ff2413dbfd1d5f3a2d",
-  "issued_at": "2026-10-18T03:24:04Z",
+  "git_commit": "58f5bc209fe8443422161350637e9893c5d5f5be",
+  "issued_at": "2026-10-18T05:21:06Z",
   "artifacts": [
     {
       "name": "kroma-linux-x64",
@@ -16,8 +16,8 @@
     },
     {
       "name": "kroma-rc1-source.tar.gz",
-      "length": 3192038,
-      "sha256": "be8c6d065adc39445ea4b1c51eb61573b3ceaaf97ebbd3994f71116d4b5e60e6"
+      "length": 3200861,
+      "sha256": "0fa8c1211a129c024184d032d395cdad75ddadb8d4b532d42d5cf659d1ddadf7"
     },
     {
       "name": "kroma-rc1.patch",
@@ -27,5 +27,5 @@
   ],
   "quality": {},
   "key_id": "kroma-release-2026",
-  "signature": "cZTSp20Y2+pIZUuu3fZH/XEe3EqqHSLDGYxRjwRHs5OOg5IN+nPs6Zuiy9G4sQJp7IciApUahFsDBB69O1LDDQ=="
+  "signature": "zfNPVkA6AZuUcI5oyliEK9IHsibkKAB7ploc++u4u6eJr48L8RTdSLvpTe/dqWK+k+Q5c4x1/kBEDLxaR4GKBA=="
 }
