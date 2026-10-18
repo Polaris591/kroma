@@ -21,6 +21,10 @@ on:
       # Two-pass signing: pass 1 builds and attests the candidate; the owner signs those exact bytes
       # offline; pass 2 points at pass 1's artifact bundle and verifies the signature over it. A rebuild
       # would produce different bytes, so verification must consume the same run, never a fresh build.
+      runner:
+        description: 'Runner label for the sandbox job; the verdict needs a host that can create user namespaces'
+        required: false
+        default: 'ubuntu-latest'
       candidate_run:
         description: 'Run id of the pass that produced the release-candidate artifact (empty = build only)'
         required: false
@@ -88,7 +92,9 @@ jobs:
   # accept as a pass. A genuine test failure (exit 1) fails the release outright.
   sandbox:
     name: sandbox isolation (real bwrap)
-    runs-on: ubuntu-latest
+    # A hosted runner cannot create user namespaces, so it reports HOST_CAPABILITY_BLOCKED and the verdict
+    # stays blocked by design. Pass a self-hosted label (or a runner with userns enabled) to obtain PASS.
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     needs: [quality]
     outputs:
       status: ${{ steps.run.outputs.status }}

@@ -9,10 +9,15 @@
   它只由 `v*` tag 或 `workflow_dispatch` 触发，而本轮执行环境没有具备 `actions:write` 权限的令牌，
   无法触发；也不允许打 tag。
 - 因此"Release DAG 真实跑通"这一条**没有证据**，状态是 `BLOCKED(需要令牌)`。
-- 解除路径（任选一条）：
-  1. 提供一个 `actions:write` + `contents:read` 的细粒度令牌，我用 `workflow_dispatch` 跑两次
-     （pass 1 产出候选 + attestation，我离线签名，pass 2 验签出 verdict）；
-  2. 所有者本人批准打一个**不发布的**预演 tag（例如 `v1.5.0-rc1-verify`），跑完即删。
+- **还有第二个前提**：`release.yml` 的 `sandbox` job 默认跑在 `ubuntu-latest`，那里拿不到用户命名空间，
+  会记 `HOST_CAPABILITY_BLOCKED`；而 `verdict` 要求 `sandbox_status == PASS` 才给正向判定。所以光有令牌
+  或 tag 仍然只会得到 `RELEASE_BLOCKED`。workflow 已加 `runner` 输入，可指定自托管或有用户命名空间的 runner。
+- 解除路径（三条都要，缺一不可）：
+  1. 一个 `actions:write` + `contents:read` 的细粒度令牌（或用所有者批准、跑完即删的预演 tag）；
+  2. 一个有用户命名空间的 runner（`workflow_dispatch` 的 `runner` 输入），否则沙箱状态永远是 BLOCKED；
+  3. 我离线签名的 `RELEASE_PROVENANCE.json` 提交进仓库，pass 2 用它验同一 run 的字节。
+- 换句话说：**当前 workflow 在 `ubuntu-latest` 上永远拿不到 `ARTIFACT_SET_VERIFIED`，这是设计如此**，
+  不是待修的缺陷——除非换 runner。
 - CI 的 `ci.yml` 是绿的（run `39103615371`，提交 `9c6bec59`），但那是 CI，**不是** Release。
 
 ## 2. 五平台只有"构建 + 链接"全覆盖

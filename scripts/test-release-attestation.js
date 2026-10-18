@@ -109,7 +109,7 @@ check("verdict is RELEASE_BLOCKED when the sandbox did not pass", () => {
   const root = fixture();
   const doc = docPath(root);
   run(["build", "--root", root, "--commit", COMMIT, "--sandbox", "HOST_CAPABILITY_BLOCKED", "--out", doc]);
-  const err = run(["verdict", doc, "--provenance", docPath(root, "nope.json"), "--root", root], true);
+  const err = run(["verdict", doc, "--provenance", docPath(root, "nope.json"), "--root", root, "--out", docPath(root, "v.json")], true);
   assert.match(err, /sandbox isolation is HOST_CAPABILITY_BLOCKED/);
   assert.match(err, /signature does not verify/);
 });
@@ -118,7 +118,7 @@ check("verdict is RELEASE_BLOCKED without a signature document", () => {
   const root = fixture();
   const doc = docPath(root);
   run(["build", "--root", root, "--commit", COMMIT, "--sandbox", "PASS", "--out", doc]);
-  const err = run(["verdict", doc, "--provenance", docPath(root, "absent.json"), "--root", root], true);
+  const err = run(["verdict", doc, "--provenance", docPath(root, "absent.json"), "--root", root, "--out", docPath(root, "v.json")], true);
   assert.match(err, /RELEASE_BLOCKED|state: RELEASE_BLOCKED/);
 });
 

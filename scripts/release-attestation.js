@@ -97,7 +97,7 @@ function verify({ document, root }) {
   return doc;
 }
 
-function verdict({ document, provenance, root }) {
+function verdict({ document, provenance, root, out = "release-verdict.json" }) {
   const attestation = verify({ document, root });
   const reasons = [];
   let signedCommit = null;
@@ -138,7 +138,9 @@ function verdict({ document, provenance, root }) {
     state: ready ? "ARTIFACT_SET_VERIFIED" : "RELEASE_BLOCKED",
     reasons
   };
-  fs.writeFileSync("release-verdict.json", `${JSON.stringify(result, null, 2)}\n`);
+  // Written where the caller says: a test that writes into the repository root would otherwise leak a
+  // verdict file into the source archive.
+  fs.writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`);
   console.log(`state: ${result.state}`);
   for (const reason of reasons) console.log(`  - ${reason}`);
   return ready ? 0 : 1;

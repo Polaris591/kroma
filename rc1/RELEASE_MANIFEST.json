@@ -96,6 +96,6 @@
     "release_workflow_runs": 5,
     "status": "BLOCKED",
     "reason": "release.yml has 5 recorded runs, all failure with 0 jobs; the current version has never run successfully. It is triggered only by a v* tag or workflow_dispatch, this environment has no actions:write token, and tags are not allowed",
-    "unblock": "provide an actions:write token (two dispatches: produce the candidate, then verify the committed signature against that same run), or approve a throwaway rehearsal tag"
+    "unblock": "three things, all required: (1) an actions:write token, or an approved throwaway rehearsal tag; (2) a runner with user namespaces via the workflow_dispatch \"runner\" input -- on ubuntu-latest the sandbox job reports HOST_CAPABILITY_BLOCKED and the verdict stays RELEASE_BLOCKED by design; (3) the offline-signed RELEASE_PROVENANCE.json committed so pass 2 can verify the same run's bytes"
   }
 }

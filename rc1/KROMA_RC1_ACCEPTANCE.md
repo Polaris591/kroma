@@ -21,7 +21,7 @@ Result          : RC1_CANDIDATE_BLOCKED（G4 未实跑、G5 覆盖不全、G6 �
 | RC1-00 冻结来源 | 是 | **是** | G0 PASS | `evidence/00_provenance.json`（提交、tar sha、工具链、锁、双入口一致） | — |
 | RC1-01 Node late-open 竞态 | 是 | **是** | G2 PASS | 复现 17/100 → 修复后 **100/100**；两个入口逐字节一致；109/109（`evidence/logs/rc1-01_*.log`） | — |
 | RC1-02 全仓门禁 | 是 | **是** | G1 PASS | fmt 105→0；clippy 0；Rust 全量 + 4 个 Node 套件真跑（`evidence/logs/`） | — |
-| RC1-03 Release DAG 接线 | 是 | **否** | G4 `BLOCKED` | `quality` → 五平台 → `pack` → `attest` → `release-verdict` 已接线，`release-gate.js dag` 与 24 条负向测试通过 | **`release.yml` 从未跑通**（只由 tag/dispatch 触发，本环境无 `actions:write` 令牌，且不许打 tag）；绿灯的是 `ci.yml`，不能算作 Release 证据 |
+| RC1-03 Release DAG 接线 | 是 | **否** | G4 `BLOCKED` | `quality` → 五平台 → `pack` → `attest` → `release-verdict` 已接线，`release-gate.js dag` 通过，`test-release-pipeline.js` 24 条检查（其中多条为负向：删 quality、pack 不依赖 quality、无人工条件的 publish 均被拒） | **`release.yml` 从未跑通**（只由 tag/dispatch 触发，本环境无 `actions:write` 令牌，且不许打 tag）；绿灯的是 `ci.yml`，不能算作 Release 证据 |
 | RC1-04 OpenSSL 验真 | 是 | **是** | G3 PASS | 四条路径统一 `scripts/fetch-openssl.sh`；pin 已钉 `a8c0d28a529ca480…`（取自国外小鸡实下载 + openssl.org 官方 .sha256，两者一致）；缺/错 pin 仍 fail-closed | — |
 | RC1-05 产物/签名一致性 | 是 | **是**（覆盖已产出产物） | G5 `PARTIAL` | `release-provenance/1` 文档用 `kroma-release-2026` 真签，生产根验签通过；篡改字节/换 keyId/改文档/旧 schema 四向被拒（`test-provenance` 9/9）；新增 attestation 机制（`scripts/release-attestation.js`，9 条检查其中 7 条负向：改字节/多文件/缺文件/短提交/未知沙箱/沙箱未过/缺签名全部拒绝；错提交在封板时用真密钥实测被拒）；私钥不进仓库/日志/CI | 尚未覆盖「CI 产出的五平台发布集」——`ci.yml` 不上传 artifact，`release.yml` 从未跑通，没有可签的字节 |
 | RC1-06 跨平台 | 是 | 部分 | G6 `PLATFORM_NOT_VERIFIED` | 五平台**构建/链接**全部真实通过（CI run 39103615371，提交 9c6bec59）；启动：linux-x64、linux-arm64(qemu)、macOS；TLS：linux-x64 与 linux-arm64(qemu) 实跑通过；矩阵见 `CI_AND_PLATFORM_MATRIX.md` | Windows/Android 无运行证据；macOS 无 TLS 证据；安全边界仅在 CI 上 `HOST_CAPABILITY_BLOCKED` |
@@ -115,7 +115,7 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 | G2 更新可靠性 | **PASS** | 17/100 → 100/100；确定性修复，未加超时、未吞错误 |
 | G3 供应链 | **PASS** | 四条 OpenSSL 路径统一验真；pin 双源核对；Action 49 处钉住（ci 17 + release 32）；锁钉住 |
 | G4 Release DAG | **BLOCKED** | 结构、静态门禁与负向测试齐备；`release.yml` 的 5 次 run 全部 failure、0 job，当前版本从未成功跑过（无 `actions:write` 令牌，不许打 tag） |
-| G5 可信签名 | **PARTIAL** | 已签并验：源码包、补丁（2 件，均从封板提交重建；两个二进制是更早提交的产物，签它们就是假证据，故排除）；attestation + 验签机制已实现并有 9 条负向测试；**未签**：CI 五平台产物集（`ci.yml` 不上传 artifact，`release.yml` 未跑通） |
+| G5 可信签名 | **PARTIAL** | 已签并验：源码包、补丁（2 件，均从封板提交重建；两个二进制是更早提交的产物，签它们就是假证据，故排除）；attestation + 验签机制已实现，`test-release-attestation.js` 9 条检查其中 7 条负向；**未签**：CI 五平台产物集（`ci.yml` 不上传 artifact，`release.yml` 未跑通） |
 | G6 平台声明 | **PARTIAL** | 五平台构建+链接全绿；启动：linux-x64 / linux-arm64(qemu) / macOS；TLS：linux-x64 与 linux-arm64(qemu)；安全边界仅本机 |
 | G7 证据与冻结 | **PASS** | 单一状态表、历史文档已标 Superseded、T24 保持 INCONCLUSIVE |
 
@@ -145,8 +145,10 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 它**不**代表整个 RC1 可发布——平台运行证据（Windows/Android 启动与 TLS）与 `release.yml` 实跑
 都不在这个脚本的视野里，所以总状态仍然是 `RC1_CANDIDATE_BLOCKED`。脚本刻意不叫 `RELEASE_READY`。
 
-同一条链路的负向测试共 9 条（`scripts/test-release-attestation.js`）：改动字节、多出文件、缺失文件、
-短提交、未知沙箱状态、沙箱未通过、缺签名文档——全部拒绝。
+同一条链路的检查共 9 条（`scripts/test-release-attestation.js`），其中 7 条负向：改动字节、多出文件、
+缺失文件、短提交、未知沙箱状态、沙箱未通过、缺签名文档——全部拒绝；另 2 条是正向（构建确定性、
+正常树通过）。"签名覆盖错提交"这条不在单元测试里，而是封板时用生产密钥实测：
+`evidence/logs/rc1_negative_checks.log`。
 
 ## 8.6 独立验收意见的闭环情况（B-01 … B-05）
 

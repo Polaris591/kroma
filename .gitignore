@@ -7,3 +7,5 @@ dist-t30/
 rc1/artifacts/kroma-*
 rc1/artifacts/*.tar.gz
 rc1/artifacts/*.patch
+# signing scratch space: never part of the source archive
+rc1/artifacts/
