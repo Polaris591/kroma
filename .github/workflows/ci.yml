@@ -192,9 +192,25 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-      - name: Install the NDK
-        run: sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+      # The runner image already ships the Android SDK; the third-party setup action was failing
+      # before it installed anything, and it is not needed for a build-only job. Use the preinstalled
+      # SDK and install just the pinned NDK through its sdkmanager.
+      - name: Locate the preinstalled Android SDK
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          test -d "$sdk" || { echo "::error::no Android SDK at $sdk"; exit 1; }
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          if [ -x "$sdk/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "SDKMANAGER=$sdk/cmdline-tools/latest/bin/sdkmanager" >> "$GITHUB_ENV"
+          else
+            echo "SDKMANAGER=$(command -v sdkmanager)" >> "$GITHUB_ENV"
+          fi
+      - name: Install the pinned NDK
+        run: |
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install "ndk;${ANDROID_NDK_VERSION}"
+          test -d "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" || { echo "::error::NDK not installed"; exit 1; }
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         id: openssl-cache
         with:
