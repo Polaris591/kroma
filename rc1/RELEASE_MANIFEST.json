@@ -1,0 +1,60 @@
+{
+  "schema": "kroma-rc1-release-manifest/1",
+  "generated_at_utc": "2026-10-18T02:02:10+00:00",
+  "result": "RC1_CANDIDATE_BLOCKED",
+  "source": {
+    "archive": "kroma-p1-sealed-source.tar.gz",
+    "archive_sha256": "e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b",
+    "archive_matches_owner_upload": true,
+    "git_commit": "675fd0f0abb5a9424f204915c9a8ab8441fd3795",
+    "cargo_lock_sha256": "caa80f28083d1243d9c8e2d0e873404620cd9adf0a052159d286536ccf713f8c",
+    "rust_toolchain": "1.85.1",
+    "node": "v24.21.0"
+  },
+  "entry_points": {
+    "bin/kroma.js": "af49503398e9c07653107df0bec8d9d170d8e1728e26bbfc9a406feaec433b79",
+    "npm/kroma-cli/bin/kroma.js": "af49503398e9c07653107df0bec8d9d170d8e1728e26bbfc9a406feaec433b79",
+    "identical": true
+  },
+  "quality_gates": {
+    "fmt": "pass (0 diffs, cargo fmt --all -- --check)",
+    "clippy": "pass (0 warnings, -D warnings)",
+    "rust_tests": {
+      "passed": 995,
+      "failed": 0,
+      "log": "rc1/evidence/logs/rc1_full_suite.log"
+    },
+    "node": {
+      "upgrade": 109,
+      "trust_root": 13,
+      "release_pipeline": 24,
+      "ledger": "ok",
+      "log": "rc1/evidence/logs/rc1_node_gates.log"
+    },
+    "release_gates": {
+      "actions": "ok (25 pinned)",
+      "lock": "ok",
+      "openssl": "ok (four paths, pin empty -> fail closed)",
+      "dag": "ok (pack needs quality)"
+    }
+  },
+  "sbom": {
+    "path": "docs/release/sbom.json",
+    "components": 124,
+    "sha256": "0c866311393db336305011e714ded35fc5208455b00259347f9b40efd9b63bd9"
+  },
+  "signing": {
+    "client_upgrade_manifest": "verified end-to-end with the production key (kroma-release-2026)",
+    "artifacts_manifest": "NOT PRODUCED - requires a frozen commit plus owner-approved signing",
+    "status": "BLOCKED"
+  },
+  "platforms": {
+    "linux-x64": "built and tested natively",
+    "win32-x64": "cross-compiled only (WINDOWS_NATIVE_NOT_RUN)",
+    "darwin-arm64/x64": "NOT_RUN (no SDK)",
+    "linux-arm64-musl": "NOT_RUN this round",
+    "android-arm64": "build only (ANDROID_DEVICE_NOT_RUN)"
+  },
+  "published": false,
+  "pushed": false
+}
