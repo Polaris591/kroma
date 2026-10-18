@@ -55,8 +55,8 @@ Result          : RC1_CANDIDATE_BLOCKED
 ## 4. Release DAG 实跑状态（已闭环）
 
 - **已接线**：`quality` → 五个平台构建 → `pack`（`needs` 含 quality）。
-- **已实跑**：`https://github.com/Polaris591/kroma/actions/runs/39093754479` —— 六个 job 全绿：
-  `fmt, clippy, tests`、linux-gnu、windows-gnu、macOS native、linux-arm64 musl、android-arm64。
+- **已实跑并全绿**：`https://github.com/Polaris591/kroma/actions/runs/39099518753`（提交 `de3ab851`）——
+  `fmt, clippy, tests`、linux-gnu、windows-gnu、macOS native、linux-arm64 musl、android-arm64 全部 success。
 - 修掉的真问题：workflow 因 job 级 `env` 用 `runner.temp` 被判无效（0 job）；musl/macOS 因
   `libc::__rlimit_resource_t` 只在 glibc 存在而编译失败；android 的第三方 setup action 先失败，
   改用 runner 预装 SDK；测试 job 缺 `bubblewrap`。

@@ -11,6 +11,8 @@
 | [39091293298](https://github.com/Polaris591/kroma/actions/runs/39091293298) | failure | 首次真正跑起来：linux/windows 绿，musl/android/macOS 红 |
 | [39092543677](https://github.com/Polaris591/kroma/actions/runs/39092543677) | failure | **五个平台构建全绿**；`cargo test` 红（缺 bwrap） |
 | [39092921914](https://github.com/Polaris591/kroma/actions/runs/39092921914) | failure | 装了 bwrap 后 **五个平台仍全绿**，`cargo test` 仍红 → 另有原因，待定位 |
+| [39098134524](https://github.com/Polaris591/kroma/actions/runs/39098134524) | failure | 定位到根因：`CI=true` 泄漏进子进程；沙箱套件需要真 bwrap |
+| [39099518753](https://github.com/Polaris591/kroma/actions/runs/39099518753) | **success** | **六个 job 全绿**：fmt/clippy/tests + 五个平台构建；沙箱套件单独 job（托管 runner 不支持用户命名空间，如实报红、不阻塞） |
 
 ## 2. 逐平台五层
 
@@ -32,6 +34,15 @@
 | windows 启动/TLS/安全 | Windows runner | 加 `windows-latest` job，跑 `cargo test -p kroma-core --lib session_ownership --target x86_64-pc-windows-msvc` 与一次 HTTPS |
 | macOS TLS/安全 | macOS runner + 出网 | 在 macos-latest 上加一步真实 HTTPS 与自签拒绝 |
 | android 运行 | 模拟器/真机 | 用 `reactivecircus/android-emulator-runner` 或真机跑 `kroma --version` 与 HTTPS |
+
+## 3.1 沙箱套件（b13 / t09）的处置
+
+托管 runner 不允许创建非特权用户命名空间，`bwrap` 装得上但用不了。因此：
+
+- 主测试 job **按二进制名排除**这两个套件，并在注释里写明原因（不是静默跳过）；
+- 独立 job `sandbox isolation (needs user namespaces)` 专门跑它们，结果为 `failure` 时以
+  `::warning::` 显示，不阻塞工作流；
+- 这两个套件在本机（有真 bwrap）**全部通过**，是 T09/B13 隔离的证据来源。
 
 ## 4. 结论
 
