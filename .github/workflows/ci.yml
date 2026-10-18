@@ -11,7 +11,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'rc1/**']
   pull_request:
   workflow_dispatch:
 
@@ -128,8 +128,8 @@ jobs:
     name: release build (linux-arm64 musl)
     runs-on: ubuntu-latest
     env:
-      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
-      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the pinned Rust toolchain
