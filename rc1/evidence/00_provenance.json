@@ -1,0 +1,29 @@
+{
+  "task_id": "RC1-00",
+  "source_commit": "a795add1e1442f817ee557236a9086ca145c019c",
+  "source_archive": "dist-t30/kroma-p1-sealed-source.tar.gz",
+  "source_archive_sha256": "e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b",
+  "user_uploaded_archive_sha256": "e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b",
+  "archives_identical": true,
+  "timestamp_utc": "2026-10-18T02:00:18+00:00",
+  "host_os": "linux (Ubuntu)",
+  "arch": "x86_64",
+  "tool_versions": {
+    "rustc": "rustc 1.85.1 (4eb161250 2025-03-15)",
+    "cargo": "cargo 1.85.1 (d73d2caf9 2024-12-31)",
+    "node": "v24.21.0"
+  },
+  "pinned_toolchain": "1.85.1 (rust-toolchain.toml)",
+  "cargo_lock_sha256": "caa80f28083d1243d9c8e2d0e873404620cd9adf0a052159d286536ccf713f8c",
+  "entry_points_identical": true,
+  "entry_point_sha256": "af49503398e9c07653107df0bec8d9d170d8e1728e26bbfc9a406feaec433b79",
+  "git_history": {
+    "present": true,
+    "remote": "(none)"
+  },
+  "result": "PASS",
+  "limitations": [
+    "the archive is a source snapshot: the signed manifest from T21 covers an earlier packing of the same tree, not this byte sequence"
+  ],
+  "reproduction_steps": "sha256sum dist-t30/kroma-p1-sealed-source.tar.gz; git rev-parse HEAD"
+}
