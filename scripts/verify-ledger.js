@@ -82,6 +82,16 @@ function main() {
     // The point is that the log records an outcome, not that it uses one particular wording: the T00
     // logs record counts ("patched b08c failures: 1/20"), cargo logs end with "Finished", and the fmt
     // log lists diffs. A missing marker means the file is a truncated or empty capture.
+    // A bench/experiment report is JSON, not log text: a parseable report with a `results` array is a
+    // complete outcome record, so it counts as a result marker.
+    if (entry.log.endsWith(".json")) {
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed.results) && parsed.results.length > 0) continue;
+      } catch {
+        // fall through to the text markers
+      }
+    }
     const markers = [
       /^EXIT=/m,
       /test result:/m,
