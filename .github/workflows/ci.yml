@@ -47,8 +47,15 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Install the sandbox tooling the tests exercise
+        # t09 asserts real bwrap isolation and fails when the binary is missing, which is the correct
+        # behaviour. Install the tool instead of weakening the test.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          bwrap --version
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       - name: JavaScript upgrade-helper checks
         run: node scripts/test-kroma-js-upgrade.js
