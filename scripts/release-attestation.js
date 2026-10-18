@@ -9,6 +9,10 @@
  *   node scripts/release-attestation.js verify <attestation.json> --root <dir>
  *   node scripts/release-attestation.js verdict <attestation.json> --provenance <doc> --root <dir>
  *
+ * `verdict` prints ARTIFACT_SET_VERIFIED when the signature covers exactly the attested bytes from the
+ * attested commit and the sandbox status is PASS; otherwise RELEASE_BLOCKED with the reasons. It never
+ * claims the whole release is ready -- platform runtime evidence is not something it can see.
+ *
  * The point of a separate attestation is that the signature must cover *these bytes*, produced by *this
  * commit*, on *this run*. A signature over a hand-picked file set proves the signing code works; it does not
  * prove the artifact set is the one being released.
@@ -128,7 +132,10 @@ function verdict({ document, provenance, root }) {
   const result = {
     schema: "kroma-release-verdict/1",
     git_commit: attestation.git_commit,
-    state: ready ? "RELEASE_READY" : "RELEASE_BLOCKED",
+    // Deliberately not called RELEASE_READY: this verdict only says the signature covers exactly these
+    // bytes from this commit and the sandbox really passed. Whether the *release* may proceed also depends
+    // on platform runtime evidence, which no script here can decide.
+    state: ready ? "ARTIFACT_SET_VERIFIED" : "RELEASE_BLOCKED",
     reasons
   };
   fs.writeFileSync("release-verdict.json", `${JSON.stringify(result, null, 2)}\n`);

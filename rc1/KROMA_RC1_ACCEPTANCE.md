@@ -128,6 +128,25 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
    必须先让 `release.yml` 产出 `release-candidate`。
 3. **G6**：给 Windows runner / Android 设备，补齐启动与 TLS 证据。
 
+## 8.55 签名机制的端到端实跑（本机，不是 CI）
+
+用本轮真实交付的四个字节文件跑完整链路：
+
+1. `scripts/release-attestation.js build` —— 记录 `name / size / sha256 / git_commit / sandbox_status`，
+   确定性输出（无时间戳，两次构建逐字节相同）；
+2. 用 `kroma-release-2026` 私钥离线签名成 `RELEASE_PROVENANCE.json`；
+3. `scripts/release-attestation.js verdict` —— 用生产信任根验签，并核对签名集合与 attestation 集合
+   完全一致、提交一致、沙箱 `PASS`。
+
+结果：`state: ARTIFACT_SET_VERIFIED`，退出码 0，`reasons: []`。
+
+**这个词的含义要看清**：它只说明"签名精确覆盖了这四件字节、来自同一提交、沙箱在本机真的通过"。
+它**不**代表整个 RC1 可发布——平台运行证据（Windows/Android 启动与 TLS）与 `release.yml` 实跑
+都不在这个脚本的视野里，所以总状态仍然是 `RC1_CANDIDATE_BLOCKED`。脚本刻意不叫 `RELEASE_READY`。
+
+同一条链路的负向测试共 9 条（`scripts/test-release-attestation.js`）：改动字节、多出文件、缺失文件、
+短提交、未知沙箱状态、沙箱未通过、缺签名文档——全部拒绝。
+
 ## 8.6 独立验收意见的闭环情况（B-01 … B-05）
 
 | 项 | 独立验收的意见 | 本轮处置 |

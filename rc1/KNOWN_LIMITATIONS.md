@@ -37,6 +37,11 @@ CI 上记为 `HOST_CAPABILITY_BLOCKED` 并阻止 `RELEASE_READY`。**没有任�
 - `release.yml` 现在已具备"attest 实际字节 → 离线签名 → 用同一 run 的字节验签"的机制与 9 条负向测试
   （改动字节 / 多出文件 / 缺失文件 / 错提交 / 沙箱未通过 全部拒绝），但该机制在 GitHub 上尚未实跑。
 
+## 4.1 `ARTIFACT_SET_VERIFIED` 不等于可发布
+
+本机实跑出的 `ARTIFACT_SET_VERIFIED` 只覆盖三件事：签名精确匹配这四件字节、提交一致、沙箱在本机
+通过。平台运行证据与 `release.yml` 实跑不在其中。脚本故意不使用 `RELEASE_READY` 这个词。
+
 ## 5. 私有密钥的离线备份仍待所有者完成
 
 `/root/kroma-release/kroma-release-key.pem`（600，目录 700）只存在于这台服务器。丢失后只能换 `keyId`，
