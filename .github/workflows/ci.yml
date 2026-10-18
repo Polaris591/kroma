@@ -64,8 +64,13 @@ jobs:
           bwrap --version
       - name: cargo test
         # pipefail keeps this step's exit code equal to cargo's, so a failing suite still fails the job.
+        #
+        # `cargo clean -p kroma-core` first: rust-cache's key only *adds* a component, so a miss still
+        # restores an older target/ through restore-keys, and cargo can then decide a stale test binary is
+        # up to date. That is how this job kept reporting a failure that the pushed tree does not have.
         run: |
           set -o pipefail
+          cargo clean -p kroma-core
           cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/kroma-tests.log
       - name: Publish the failure log when the tests fail
         if: failure()
@@ -77,7 +82,7 @@ jobs:
           git config user.name "kroma-ci"
           git add -f ci-debug/last-test-failure.txt
           git commit -m "ci: capture the failing test output [skip ci]" || exit 0
-          git push origin HEAD:ci-debug || true
+          git push -f origin HEAD:ci-debug || true
 
       - name: JavaScript upgrade-helper checks
         run: node scripts/test-kroma-js-upgrade.js
