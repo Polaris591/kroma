@@ -4,3 +4,6 @@
 /npm/cli-*/bin/kroma*
 __pycache__/
 dist-t30/
+rc1/artifacts/kroma-*
+rc1/artifacts/*.tar.gz
+rc1/artifacts/*.patch
