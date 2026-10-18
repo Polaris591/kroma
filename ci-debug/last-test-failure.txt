@@ -1,0 +1,109 @@
+failures:
+
+---- bench_verify_command_runs_inside_the_sandbox_when_one_is_given stdout ----
+
+thread 'bench_verify_command_runs_inside_the_sandbox_when_one_is_given' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_normal_task_runs_and_writes_only_inside_the_workspace stdout ----
+
+thread 'a_normal_task_runs_and_writes_only_inside_the_workspace' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- address_space_limit_stops_an_oversized_allocation stdout ----
+
+thread 'address_space_limit_stops_an_oversized_allocation' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- cpu_time_limit_terminates_a_spin_loop stdout ----
+
+thread 'cpu_time_limit_terminates_a_spin_loop' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- file_size_limit_stops_an_oversized_write stdout ----
+
+thread 'file_size_limit_stops_an_oversized_write' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- host_secrets_and_home_do_not_exist_inside_the_sandbox stdout ----
+
+thread 'host_secrets_and_home_do_not_exist_inside_the_sandbox' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- host_toolchain_is_read_only_inside_the_sandbox stdout ----
+
+thread 'host_toolchain_is_read_only_inside_the_sandbox' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- network_egress_is_blocked_by_default stdout ----
+
+thread 'network_egress_is_blocked_by_default' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- sandboxed_verify_cannot_read_host_secrets_while_the_host_run_can stdout ----
+
+thread 'sandboxed_verify_cannot_read_host_secrets_while_the_host_run_can' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- symlink_escape_from_the_workspace_does_not_reach_host_files stdout ----
+
+thread 'symlink_escape_from_the_workspace_does_not_reach_host_files' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- scored_benchmark_arm_runs_its_verifier_inside_the_sandbox stdout ----
+
+thread 'scored_benchmark_arm_runs_its_verifier_inside_the_sandbox' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+---- tmpfs_cap_stops_a_runaway_writer stdout ----
+
+thread 'tmpfs_cap_stops_a_runaway_writer' panicked at crates/kroma-core/tests/b13_sandbox_isolation.rs:44:9:
+bwrap is required to prove B13 isolation and is not usable on this host
+
+
+failures:
+    a_normal_task_runs_and_writes_only_inside_the_workspace
+    address_space_limit_stops_an_oversized_allocation
+    bench_verify_command_runs_inside_the_sandbox_when_one_is_given
+    cpu_time_limit_terminates_a_spin_loop
+    file_size_limit_stops_an_oversized_write
+    host_secrets_and_home_do_not_exist_inside_the_sandbox
+--
+test result: FAILED. 9 passed; 12 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+[1m[31merror[0m[1m:[0m test failed, to rerun pass `-p kroma-core --test b13_sandbox_isolation`
+[1m[32m     Running[0m tests/b17_suite_contract.rs (target/debug/deps/b17_suite_contract-a2e6aaead696e9e5)
+
+running 4 tests
+test every_task_declares_a_reference_solution ... ok
+--
+failures:
+
+---- isolated_bash_has_no_network stdout ----
+
+thread 'isolated_bash_has_no_network' panicked at crates/kroma-core/tests/t09_execution_boundary.rs:170:5:
+assertion `left == right` failed
+  left: Some("none:refused")
+ right: Some("bwrap")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+--
+---- sandbox_required_covers_agent_bash_not_only_scorer stdout ----
+
+thread 'sandbox_required_covers_agent_bash_not_only_scorer' panicked at crates/kroma-core/tests/t09_execution_boundary.rs:105:5:
+assertion `left == right` failed: a write inside the workspace must work: "SANDBOX_UNAVAILABLE: refusing to run bash: sandbox backend is installed but cannot isolate (bwrap cannot create a namespace: bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted); refusing to run unsandboxed"
+  left: Error { code: SandboxUnavailable }
+ right: Success
+
+--
+failures:
+    isolated_bash_has_no_network
+    sandbox_required_covers_agent_bash_not_only_scorer
+
+test result: FAILED. 6 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+[1m[31merror[0m[1m:[0m test failed, to rerun pass `-p kroma-core --test t09_execution_boundary`
+[1m[32m     Running[0m tests/t10_container_lifecycle.rs (target/debug/deps/t10_container_lifecycle-b2a8a2622279c1fa)
+
+running 9 tests
+test cleanup_failure_retains_container_id ... ok
