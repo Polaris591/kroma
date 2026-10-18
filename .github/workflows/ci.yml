@@ -89,11 +89,21 @@ jobs:
         run: |
           set -o pipefail
           cargo clean -p kroma-core
-          # b13_sandbox_isolation and t09_execution_boundary refuse to pass without a real sandbox
-          # backend, which is correct. A hosted runner cannot provide one, so they are named here and
-          # exercised by the separate `sandbox-isolation` job rather than silently weakened.
-          cargo test --workspace --no-fail-fast -- \
-            --skip b13_sandbox_isolation --skip t09_execution_boundary 2>&1 | tee /tmp/kroma-tests.log
+          # `cargo test -- --skip NAME` filters test *names*, not binaries, so the two sandbox-dependent
+          # suites are excluded by running the binaries explicitly. They refuse to pass without a real
+          # sandbox backend (correct), and a hosted runner cannot provide one; the separate
+          # `sandbox-isolation` job runs them and reports the outcome.
+          cargo test --workspace --no-run --message-format=json 2>/dev/null \
+            | grep -o '"executable":"[^"]*"' | sed 's/"executable":"//; s/"$//' \
+            | grep -v -e b13_sandbox_isolation -e t09_execution_boundary \
+            > /tmp/kroma-test-bins.txt
+          echo "running $(wc -l < /tmp/kroma-test-bins.txt) test binaries (2 sandbox suites excluded)"
+          fail=0
+          while read -r bin; do
+            echo "== $(basename "$bin")"
+            "$bin" || fail=1
+          done < /tmp/kroma-test-bins.txt
+          exit "$fail"
       - name: Publish the failure log when the tests fail
         if: failure()
         run: |
