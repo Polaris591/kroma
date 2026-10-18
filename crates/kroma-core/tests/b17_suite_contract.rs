@@ -13,9 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use kroma_core::bench::{
-    load_held_out_suite, BenchTask, VerifyCommandLimits,
-};
+use kroma_core::bench::{load_held_out_suite, BenchTask, VerifyCommandLimits};
 
 const SUITE: &str = "tests/fixtures/bench/smoke_suite.json";
 const SOLUTIONS: &str = "tests/fixtures/bench/smoke_solutions.json";
@@ -70,7 +68,11 @@ fn every_task_has_a_unique_id_and_a_non_vacuous_oracle() {
     );
     let mut seen = std::collections::BTreeSet::new();
     for task in &tasks {
-        assert!(seen.insert(task.id.clone()), "duplicate task id {}", task.id);
+        assert!(
+            seen.insert(task.id.clone()),
+            "duplicate task id {}",
+            task.id
+        );
         let has_static = !task.expect_contains.is_empty() || !task.expect_absent.is_empty();
         let has_command = task
             .verify_command
@@ -81,7 +83,11 @@ fn every_task_has_a_unique_id_and_a_non_vacuous_oracle() {
             "task {} has no oracle at all, so it would resolve for free",
             task.id
         );
-        assert!(!task.prompt.trim().is_empty(), "task {} has no prompt", task.id);
+        assert!(
+            !task.prompt.trim().is_empty(),
+            "task {} has no prompt",
+            task.id
+        );
     }
 }
 

@@ -100,7 +100,10 @@ async fn category_approval_does_not_leak_across_runs() {
     let (out_a, label_a, _) = runtime
         .execute_call_with_context(&call_a, 0, &ctx_for(RunId::new(), &rx))
         .await;
-    assert_eq!(label_a, "ask_approved", "first run must prompt and be approved");
+    assert_eq!(
+        label_a, "ask_approved",
+        "first run must prompt and be approved"
+    );
     assert_eq!(out_a.outcome, ToolOutcome::Success);
 
     let call_b = ToolCall {

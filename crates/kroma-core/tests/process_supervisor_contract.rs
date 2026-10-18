@@ -38,10 +38,7 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
-    fn set(
-        key: impl Into<std::ffi::OsString>,
-        value: impl Into<std::ffi::OsString>,
-    ) -> Self {
+    fn set(key: impl Into<std::ffi::OsString>, value: impl Into<std::ffi::OsString>) -> Self {
         let key = key.into();
         let previous = std::env::var_os(&key);
         std::env::set_var(&key, value.into());
@@ -194,7 +191,7 @@ async fn test_contract_output_flood_cap_combined_limit_terminates_group() {
     fs::create_dir_all(&tmp_ws).unwrap();
 
     let flood_cap = 64 * 1024; // 64 KiB
-    // Bounded 2 MiB payload (> 64 KiB cap) ensures finite execution and prevents memory exhaustion
+                               // Bounded 2 MiB payload (> 64 KiB cap) ensures finite execution and prevents memory exhaustion
     let spec = OneShotCommandSpec::new(
         vec![
             "/bin/sh".to_string(),
@@ -401,7 +398,8 @@ async fn test_contract_sanitized_environment_and_authorized_override() {
         "Sensitive variable must be sanitized"
     );
     assert!(
-        res.stdout.contains("EXPLICIT_AUTHORIZED_OVERRIDE=authorized_value"),
+        res.stdout
+            .contains("EXPLICIT_AUTHORIZED_OVERRIDE=authorized_value"),
         "Explicit authorized override must be present"
     );
     assert!(
@@ -671,7 +669,11 @@ async fn test_contract_non_utf8_environment_does_not_panic() {
     let _guard = EnvGuard::set(key, value);
 
     let spec = OneShotCommandSpec::new(
-        vec!["/bin/sh".to_string(), "-c".to_string(), "exit 0".to_string()],
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "exit 0".to_string(),
+        ],
         &tmp_ws,
     );
 

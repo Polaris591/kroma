@@ -33,7 +33,10 @@ async fn tokio_containment_failure_stops_and_reaps_child() {
 
     let result =
         ChildProcessGroup::try_from_tokio_child(&mut child, Containment::ForceAttachFailure);
-    assert!(result.is_err(), "a failed containment attach must return Err");
+    assert!(
+        result.is_err(),
+        "a failed containment attach must return Err"
+    );
     assert!(
         !ChildProcessGroup::is_process_alive(pid),
         "the uncontained child must be stopped and reaped, not left running (pid {pid})"
@@ -53,7 +56,10 @@ fn std_containment_failure_stops_and_reaps_child() {
     let pid = child.id() as i32;
 
     let result = ChildProcessGroup::try_from_std_child(&mut child, Containment::ForceAttachFailure);
-    assert!(result.is_err(), "a failed containment attach must return Err");
+    assert!(
+        result.is_err(),
+        "a failed containment attach must return Err"
+    );
     assert!(
         !ChildProcessGroup::is_process_alive(pid),
         "the uncontained child must be stopped and reaped, not left running (pid {pid})"
@@ -87,7 +93,10 @@ async fn process_launch_returns_contained_group_on_success() {
     let (mut child, group) = ProcessLaunch::new("sh", vec!["-c".to_string(), "exit 0".to_string()])
         .spawn_tokio()
         .expect("launch must succeed");
-    assert!(group.pgid() > 0, "launch must return a process-group handle");
+    assert!(
+        group.pgid() > 0,
+        "launch must return a process-group handle"
+    );
     let status = child.wait().await.expect("wait");
     assert_eq!(status.code(), Some(0));
     group.cleanup_after_exit().await;

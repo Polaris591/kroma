@@ -145,10 +145,7 @@ async fn b07_verify_command_cleans_grandchild_on_normal_exit() {
 async fn b07_verify_command_env_is_sanitized() {
     let _guard = EnvGuard::set("KROMA_BENCH_SENTINEL_SECRET", "leaked-credential");
     let ws = temp_workspace("env");
-    let task = task_with_verify(
-        "env",
-        sh("test -z \"$KROMA_BENCH_SENTINEL_SECRET\""),
-    );
+    let task = task_with_verify("env", sh("test -z \"$KROMA_BENCH_SENTINEL_SECRET\""));
 
     let verdict = task.evaluate(&ws).await;
     assert!(
@@ -201,7 +198,10 @@ async fn b07_verify_command_flood_cap_rejects_incomplete_capture() {
     );
 
     let verdict = task
-        .evaluate_with_limits(&ws, &VerifyCommandLimits::new(Duration::from_secs(30), 64 * 1024))
+        .evaluate_with_limits(
+            &ws,
+            &VerifyCommandLimits::new(Duration::from_secs(30), 64 * 1024),
+        )
         .await;
 
     assert!(

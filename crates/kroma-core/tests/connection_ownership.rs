@@ -58,7 +58,7 @@ fn completion() -> ProviderCompletion {
         latency_ms: 0,
         ttft_ms: None,
         attempts_used: 1,
-                reported_model: None,
+        reported_model: None,
     }
 }
 
@@ -1125,7 +1125,8 @@ async fn single_dispatcher_non_acp_ask_owner_disconnect_permits_subsequent_appro
             req: ProviderRequest,
             _budget: &'a BudgetConfig,
             mut cancel_rx: watch::Receiver<bool>,
-        ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>>
+        {
             let gate = Arc::clone(&self.gate);
             Box::pin(async move {
                 let last_user_prompt = req.messages.iter().rev().find_map(|m| match m {
@@ -1141,7 +1142,11 @@ async fn single_dispatcher_non_acp_ask_owner_disconnect_permits_subsequent_appro
                         _ = gate.release.notified() => Ok(completion()),
                         _ = cancel_rx.changed() => Err(ProviderError::Cancelled),
                     }
-                } else if req.messages.iter().any(|m| matches!(m, TranscriptItem::ToolResult(_))) {
+                } else if req
+                    .messages
+                    .iter()
+                    .any(|m| matches!(m, TranscriptItem::ToolResult(_)))
+                {
                     Ok(completion())
                 } else {
                     let turn = AssistantTurn {
@@ -1150,7 +1155,8 @@ async fn single_dispatcher_non_acp_ask_owner_disconnect_permits_subsequent_appro
                         tool_calls: vec![ToolCall {
                             call_id: ToolCallId::new("call_f1_write"),
                             name: "write".to_string(),
-                            raw_arguments: json!({ "path": "approved_f1.txt", "content": "f1_ok" }).to_string(),
+                            raw_arguments: json!({ "path": "approved_f1.txt", "content": "f1_ok" })
+                                .to_string(),
                         }],
                         finish_reason: FinishReason::ToolCalls,
                         usage: None,
@@ -1161,20 +1167,28 @@ async fn single_dispatcher_non_acp_ask_owner_disconnect_permits_subsequent_appro
                         latency_ms: 0,
                         ttft_ms: None,
                         attempts_used: 1,
-                reported_model: None,
+                        reported_model: None,
                     })
                 }
             })
         }
     }
 
-    let dispatcher = RpcDispatcher::new(cfg, Arc::new(F1Provider { gate: Arc::clone(&gate) })).unwrap();
+    let dispatcher = RpcDispatcher::new(
+        cfg,
+        Arc::new(F1Provider {
+            gate: Arc::clone(&gate),
+        }),
+    )
+    .unwrap();
     let running = start_single(dispatcher).await;
 
     // 1. Connection A starts an in-flight run
     let mut conn_a = Client::connect(running.addr).await;
     conn_a.authenticate(TOKEN).await;
-    let _prompt_a = conn_a.send("session.prompt", json!({ "prompt": "slow_run_a" })).await;
+    let _prompt_a = conn_a
+        .send("session.prompt", json!({ "prompt": "slow_run_a" }))
+        .await;
     gate.wait_entered("conn_a run start").await;
 
     // 2. Connection A disconnects while in-flight (triggers end_connection_run -> broker.close())
@@ -1185,7 +1199,12 @@ async fn single_dispatcher_non_acp_ask_owner_disconnect_permits_subsequent_appro
     // 3. Connection B connects, authenticates, and starts a prompt requiring approval
     let mut conn_b = Client::connect(running.addr).await;
     conn_b.authenticate(TOKEN).await;
-    let prompt_b = conn_b.send("session.prompt", json!({ "prompt": "run_b_needs_approval" })).await;
+    let prompt_b = conn_b
+        .send(
+            "session.prompt",
+            json!({ "prompt": "run_b_needs_approval" }),
+        )
+        .await;
 
     // 4. B receives approval/requested
     let request_id = loop {
@@ -1203,19 +1222,32 @@ async fn single_dispatcher_non_acp_ask_owner_disconnect_permits_subsequent_appro
     };
 
     // 5. B approves
-    let respond_id = conn_b.send("approval.respond", json!({
-        "request_id": request_id,
-        "decision": "approve_once",
-        "auth_token": TOKEN
-    })).await;
+    let respond_id = conn_b
+        .send(
+            "approval.respond",
+            json!({
+                "request_id": request_id,
+                "decision": "approve_once",
+                "auth_token": TOKEN
+            }),
+        )
+        .await;
     let respond_resp = conn_b.recv_response(respond_id, "approval.respond").await;
-    assert!(respond_resp.get("error").is_none(), "approval.respond failed: {respond_resp}");
+    assert!(
+        respond_resp.get("error").is_none(),
+        "approval.respond failed: {respond_resp}"
+    );
 
     // 6. Run B finishes successfully and tool writes file
-    let resp_b = conn_b.recv_response(prompt_b, "conn_b prompt response").await;
+    let resp_b = conn_b
+        .recv_response(prompt_b, "conn_b prompt response")
+        .await;
     assert!(resp_b.get("error").is_none(), "prompt B failed: {resp_b}");
     assert_eq!(resp_b["result"]["status"], json!("completed"), "{resp_b}");
-    assert!(ws.join("approved_f1.txt").exists(), "approved write tool was executed");
+    assert!(
+        ws.join("approved_f1.txt").exists(),
+        "approved write tool was executed"
+    );
 
     running.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
@@ -1243,9 +1275,14 @@ async fn acp_permission_response_requires_authenticated_owner() {
             req: ProviderRequest,
             _budget: &'a BudgetConfig,
             _cancel_rx: watch::Receiver<bool>,
-        ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>>
+        {
             Box::pin(async move {
-                if req.messages.iter().any(|m| matches!(m, TranscriptItem::ToolResult(_))) {
+                if req
+                    .messages
+                    .iter()
+                    .any(|m| matches!(m, TranscriptItem::ToolResult(_)))
+                {
                     Ok(completion())
                 } else {
                     let turn = AssistantTurn {
@@ -1254,7 +1291,8 @@ async fn acp_permission_response_requires_authenticated_owner() {
                         tool_calls: vec![ToolCall {
                             call_id: ToolCallId::new("call_f4_write"),
                             name: "write".to_string(),
-                            raw_arguments: json!({ "path": "f4_done.txt", "content": "f4_ok" }).to_string(),
+                            raw_arguments: json!({ "path": "f4_done.txt", "content": "f4_ok" })
+                                .to_string(),
                         }],
                         finish_reason: FinishReason::ToolCalls,
                         usage: None,
@@ -1265,7 +1303,7 @@ async fn acp_permission_response_requires_authenticated_owner() {
                         latency_ms: 0,
                         ttft_ms: None,
                         attempts_used: 1,
-                reported_model: None,
+                        reported_model: None,
                     })
                 }
             })
@@ -1278,7 +1316,9 @@ async fn acp_permission_response_requires_authenticated_owner() {
     // 1. Owner connection authenticates and initiates the run
     let mut owner = Client::connect(running.addr).await;
     owner.authenticate(TOKEN).await;
-    let prompt_id = owner.send("session.prompt", json!({ "prompt": "trigger_acp" })).await;
+    let prompt_id = owner
+        .send("session.prompt", json!({ "prompt": "trigger_acp" }))
+        .await;
 
     // 2. Owner waits for session/request_permission
     let req_id = loop {
@@ -1287,7 +1327,10 @@ async fn acp_permission_response_requires_authenticated_owner() {
             panic!("prompt completed before permission was requested: {frame}");
         }
         if frame.get("method").and_then(Value::as_str) == Some("session/request_permission") {
-            break frame["id"].as_str().expect("acp permission request id").to_string();
+            break frame["id"]
+                .as_str()
+                .expect("acp permission request id")
+                .to_string();
         }
     };
 
@@ -1298,7 +1341,9 @@ async fn acp_permission_response_requires_authenticated_owner() {
         "id": req_id,
         "result": { "outcome": { "outcome": "selected", "optionId": "reject_once" } }
     });
-    stranger.send_raw(&format!("{forged_response_stranger}\n")).await;
+    stranger
+        .send_raw(&format!("{forged_response_stranger}\n"))
+        .await;
     let stranger_line = tokio::time::timeout(Duration::from_millis(500), stranger.read_line())
         .await
         .expect("unauthorized stranger response must be answered immediately")
@@ -1319,7 +1364,9 @@ async fn acp_permission_response_requires_authenticated_owner() {
         "id": req_id,
         "result": { "outcome": { "outcome": "selected", "optionId": "reject_once" } }
     });
-    observer.send_raw(&format!("{forged_response_observer}\n")).await;
+    observer
+        .send_raw(&format!("{forged_response_observer}\n"))
+        .await;
     let observer_line = tokio::time::timeout(Duration::from_millis(500), observer.read_line())
         .await
         .expect("wrong-owner observer response must be answered immediately")
@@ -1340,10 +1387,15 @@ async fn acp_permission_response_requires_authenticated_owner() {
     });
     owner.send_raw(&format!("{legitimate_response}\n")).await;
 
-    let resp = owner.recv_response(prompt_id, "acp owner prompt response").await;
+    let resp = owner
+        .recv_response(prompt_id, "acp owner prompt response")
+        .await;
     assert!(resp.get("error").is_none(), "owner run failed: {resp}");
     assert_eq!(resp["result"]["status"], json!("completed"), "{resp}");
-    assert!(ws.join("f4_done.txt").exists(), "approved write was executed");
+    assert!(
+        ws.join("f4_done.txt").exists(),
+        "approved write was executed"
+    );
 
     running.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
@@ -1402,9 +1454,7 @@ async fn b02_idle_connection_eof_reclaims_stream_cleanly() {
     let (c_read, mut c_write) = tokio::io::split(client_io);
 
     let mgr = manager.clone();
-    let server_task = tokio::spawn(async move {
-        mgr.serve_stream(s_read, s_write).await
-    });
+    let server_task = tokio::spawn(async move { mgr.serve_stream(s_read, s_write).await });
 
     let mut client_lines = BufReader::new(c_read).lines();
 
@@ -1575,15 +1625,22 @@ async fn b02_null_params_normalizes_to_target_session() {
     reader.read_line(&mut line).await.unwrap();
 
     // Create session 2 on this raw connection
-    w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.new\",\"params\":{}}\n").await.unwrap();
+    w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.new\",\"params\":{}}\n")
+        .await
+        .unwrap();
     line.clear();
     reader.read_line(&mut line).await.unwrap();
     let s2_created: Value = serde_json::from_str(&line).unwrap();
-    let raw_s2_id = s2_created["result"]["session_id"].as_str().unwrap().to_string();
+    let raw_s2_id = s2_created["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Now send params: null for session.status
     let raw_null = r#"{"jsonrpc":"2.0","id":42,"method":"session.status","params":null}"#;
-    w.write_all(format!("{}\n", raw_null).as_bytes()).await.unwrap();
+    w.write_all(format!("{}\n", raw_null).as_bytes())
+        .await
+        .unwrap();
     line.clear();
     reader.read_line(&mut line).await.unwrap();
     let status_resp: Value = serde_json::from_str(&line).unwrap();
@@ -1610,10 +1667,15 @@ async fn b02_session_close_primary_rejected() {
     client.authenticate(TOKEN).await;
 
     let initial_status = client.request("session.status", json!({})).await;
-    let primary_id = initial_status["result"]["session_id"].as_str().unwrap().to_string();
+    let primary_id = initial_status["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Attempting to close the primary session explicitly must be rejected with an error
-    let close_resp = client.request("session.close", json!({ "session_id": primary_id })).await;
+    let close_resp = client
+        .request("session.close", json!({ "session_id": primary_id }))
+        .await;
     assert!(
         close_resp.get("error").is_some(),
         "closing daemon primary session must be rejected with an error"
@@ -1644,7 +1706,9 @@ async fn b02_invalid_params_rejected_deterministically() {
 
     // Send array params
     let raw_arr = r#"{"jsonrpc":"2.0","id":99,"method":"session.status","params":[1,2,3]}"#;
-    w.write_all(format!("{}\n", raw_arr).as_bytes()).await.unwrap();
+    w.write_all(format!("{}\n", raw_arr).as_bytes())
+        .await
+        .unwrap();
     line.clear();
     reader.read_line(&mut line).await.unwrap();
     let resp: Value = serde_json::from_str(&line).unwrap();
@@ -1721,10 +1785,7 @@ async fn b02_active_run_connection_is_not_killed_by_idle_check() {
 
     // Start a prompt that is gated (stays active in flight)
     let prompt_id = client
-        .send(
-            "session.prompt",
-            json!({ "prompt": "slow" }),
-        )
+        .send("session.prompt", json!({ "prompt": "slow" }))
         .await;
     gate.wait_entered("active run started").await;
 
@@ -1754,9 +1815,7 @@ async fn b02_half_frame_preserved_across_run_join_cancellation() {
     let (c_read, mut c_write) = tokio::io::split(client_io);
 
     let mgr = manager.clone();
-    let server_task = tokio::spawn(async move {
-        mgr.serve_stream(s_read, s_write).await
-    });
+    let server_task = tokio::spawn(async move { mgr.serve_stream(s_read, s_write).await });
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut client_lines = BufReader::new(c_read).lines();
@@ -1790,15 +1849,25 @@ async fn b02_half_frame_preserved_across_run_join_cancellation() {
     // 4. Release the gate so the background prompt finishes and joins
     gate.release();
 
-    async fn read_until_id<R: AsyncBufReadExt + Unpin>(lines: &mut tokio::io::Lines<R>, id: i64) -> Value {
+    async fn read_until_id<R: AsyncBufReadExt + Unpin>(
+        lines: &mut tokio::io::Lines<R>,
+        id: i64,
+    ) -> Value {
         loop {
-            let line = lines.next_line().await.unwrap().expect("stream closed unexpectedly");
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("stream closed unexpectedly");
             let v: Value = serde_json::from_str(&line).unwrap();
             if v.get("id").and_then(Value::as_i64) == Some(id) {
                 return v;
             }
             if v.get("id").is_none() && v.get("error").is_some() {
-                panic!("received unexpected JSON-RPC parse error indicating prefix frame loss: {}", v);
+                panic!(
+                    "received unexpected JSON-RPC parse error indicating prefix frame loss: {}",
+                    v
+                );
             }
         }
     }
@@ -1851,15 +1920,17 @@ async fn b02_auth_absolute_deadline_enforces_timeout_even_with_slow_partial_fram
     };
 
     let mgr = manager.clone();
-    let server_task = tokio::spawn(async move {
-        mgr.serve_stream_with_config(s_read, s_write, config).await
-    });
+    let server_task =
+        tokio::spawn(async move { mgr.serve_stream_with_config(s_read, s_write, config).await });
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut client_lines = BufReader::new(c_read).lines();
 
     // Send partial frame without completing it
-    c_write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1").await.unwrap();
+    c_write
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1")
+        .await
+        .unwrap();
     c_write.flush().await.unwrap();
 
     // Sleep past auth_handshake_timeout (80ms)
@@ -1872,15 +1943,25 @@ async fn b02_auth_absolute_deadline_enforces_timeout_even_with_slow_partial_fram
         .expect("read timeout")
         .expect("must receive terminal auth error response");
     let resp: Value = serde_json::from_str(&first).expect("valid JSON error response");
-    assert_eq!(resp["error"]["code"].as_i64(), Some(-32001), "expected JSONRPC_UNAUTHORIZED");
+    assert_eq!(
+        resp["error"]["code"].as_i64(),
+        Some(-32001),
+        "expected JSONRPC_UNAUTHORIZED"
+    );
     assert!(
-        resp["error"]["message"].as_str().unwrap().contains("authentication handshake timed out"),
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("authentication handshake timed out"),
         "error message must mention auth handshake timeout: {}",
         resp
     );
 
     let second = client_lines.next_line().await.expect("read timeout");
-    assert!(second.is_none(), "stream must be closed after terminal auth error");
+    assert!(
+        second.is_none(),
+        "stream must be closed after terminal auth error"
+    );
 
     let _ = server_task.await;
     let _ = std::fs::remove_dir_all(root);
@@ -1906,9 +1987,8 @@ async fn b02_idle_timeout_terminates_quiet_connection_without_active_run() {
     };
 
     let mgr = manager.clone();
-    let server_task = tokio::spawn(async move {
-        mgr.serve_stream_with_config(s_read, s_write, config).await
-    });
+    let server_task =
+        tokio::spawn(async move { mgr.serve_stream_with_config(s_read, s_write, config).await });
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut client_lines = BufReader::new(c_read).lines();
@@ -1927,7 +2007,10 @@ async fn b02_idle_timeout_terminates_quiet_connection_without_active_run() {
 
     // Server must terminate idle connection
     let eof = client_lines.next_line().await.unwrap();
-    assert!(eof.is_none(), "idle connection without active run must be terminated on idle timeout");
+    assert!(
+        eof.is_none(),
+        "idle connection without active run must be terminated on idle timeout"
+    );
 
     let _ = server_task.await;
     let _ = std::fs::remove_dir_all(root);
@@ -1953,9 +2036,8 @@ async fn b02_idle_timeout_immune_during_active_run_with_injected_short_timeout()
     };
 
     let mgr = manager.clone();
-    let server_task = tokio::spawn(async move {
-        mgr.serve_stream_with_config(s_read, s_write, config).await
-    });
+    let server_task =
+        tokio::spawn(async move { mgr.serve_stream_with_config(s_read, s_write, config).await });
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut client_lines = BufReader::new(c_read).lines();
@@ -1984,7 +2066,11 @@ async fn b02_idle_timeout_immune_during_active_run_with_injected_short_timeout()
 
     // Connection must NOT have been killed by idle timeout; response arrives cleanly
     loop {
-        let line = client_lines.next_line().await.unwrap().expect("stream must not be closed during active run");
+        let line = client_lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("stream must not be closed during active run");
         let v: Value = serde_json::from_str(&line).unwrap();
         if v.get("id").and_then(Value::as_i64) == Some(10) {
             assert!(v.get("result").is_some());
@@ -2060,7 +2146,7 @@ impl ModelProvider for ApprovalProvider {
                     latency_ms: 0,
                     ttft_ms: None,
                     attempts_used: 1,
-                reported_model: None,
+                    reported_model: None,
                 })
             }
         })
@@ -2120,7 +2206,9 @@ async fn observer_cancel_is_refused_and_the_owners_approval_survives() {
         "observer cancel cleared the owner's pending approval: {approve_resp}"
     );
 
-    let resp = owner.recv_response(prompt_id, "owner prompt response").await;
+    let resp = owner
+        .recv_response(prompt_id, "owner prompt response")
+        .await;
     assert!(resp.get("error").is_none(), "owner run failed: {resp}");
     assert_eq!(
         resp["result"]["status"],
@@ -2161,13 +2249,17 @@ async fn observer_cancel_is_refused_for_every_request_alias() {
     let mut observer = Client::connect(running.addr).await;
     observer.authenticate(TOKEN).await;
     for method in ["session.cancel", "session/cancel", "acp.cancel"] {
-        let id = observer.send(method, json!({ "session_id": session })).await;
+        let id = observer
+            .send(method, json!({ "session_id": session }))
+            .await;
         let resp = observer.recv_response(id, method).await;
         assert_not_owner(&resp, method);
     }
 
     gate.release();
-    let resp = owner.recv_response(prompt_id, "owner prompt response").await;
+    let resp = owner
+        .recv_response(prompt_id, "owner prompt response")
+        .await;
     assert!(resp.get("error").is_none(), "owner run failed: {resp}");
     assert_ne!(
         resp["result"]["status"],
@@ -2205,18 +2297,22 @@ async fn owner_cancel_reaches_its_own_run() {
     gate.wait_entered("owner run start").await;
 
     let cancel_id = owner.send("session.cancel", json!({})).await;
-    let cancel_resp = owner
-        .recv_response(cancel_id, "owner session.cancel")
-        .await;
+    let cancel_resp = owner.recv_response(cancel_id, "owner session.cancel").await;
     assert!(cancel_resp.get("error").is_none(), "{cancel_resp}");
     assert_eq!(
         cancel_resp["result"]["cancelled"],
         json!(true),
         "the owner's own cancel must be admitted: {cancel_resp}"
     );
-    assert_eq!(cancel_resp["result"]["was_in_flight"], json!(true), "{cancel_resp}");
+    assert_eq!(
+        cancel_resp["result"]["was_in_flight"],
+        json!(true),
+        "{cancel_resp}"
+    );
 
-    let resp = owner.recv_response(prompt_id, "owner prompt response").await;
+    let resp = owner
+        .recv_response(prompt_id, "owner prompt response")
+        .await;
     assert_eq!(
         resp["result"]["status"],
         json!("cancelled"),
@@ -2280,7 +2376,9 @@ async fn previous_owner_cannot_cancel_a_newer_connections_run() {
     let stale_cancel = first
         .send("session.cancel", json!({ "session_id": session }))
         .await;
-    let stale_resp = first.recv_response(stale_cancel, "stale owner cancel").await;
+    let stale_resp = first
+        .recv_response(stale_cancel, "stale owner cancel")
+        .await;
     assert_not_owner(&stale_resp, "stale owner cancel");
 
     gate.release();
@@ -2341,10 +2439,15 @@ async fn acp_observer_cancel_notification_does_not_stop_the_owner_run() {
     observer.send_raw(&format!("{notif}\n")).await;
     // Barrier: this request is only answered after the notification ahead of it was processed.
     let probe = observer.request("session.status", json!({})).await;
-    assert!(probe.get("error").is_none(), "observer probe failed: {probe}");
+    assert!(
+        probe.get("error").is_none(),
+        "observer probe failed: {probe}"
+    );
 
     gate.release();
-    let resp = owner.recv_response(prompt_id, "owner prompt response").await;
+    let resp = owner
+        .recv_response(prompt_id, "owner prompt response")
+        .await;
     assert!(resp.get("error").is_none(), "owner run failed: {resp}");
     assert_ne!(
         resp["result"]["status"],
@@ -2394,7 +2497,9 @@ async fn unauthenticated_cancel_is_refused_and_the_owner_run_survives() {
     );
 
     gate.release();
-    let resp = owner.recv_response(prompt_id, "owner prompt response").await;
+    let resp = owner
+        .recv_response(prompt_id, "owner prompt response")
+        .await;
     assert!(resp.get("error").is_none(), "owner run failed: {resp}");
     assert_ne!(
         resp["result"]["status"],
@@ -2485,10 +2590,7 @@ async fn remote_task_control_mutations_are_refused_but_reads_and_local_control_w
             "acknowledge",
             json!({ "action": "acknowledge", "task_id": "task-1" }),
         ),
-        (
-            "accept",
-            json!({ "action": "accept", "task_id": "task-1" }),
-        ),
+        ("accept", json!({ "action": "accept", "task_id": "task-1" })),
         (
             "reconcile",
             json!({ "action": "reconcile", "task_id": "task-1",
@@ -2619,10 +2721,7 @@ async fn multi_session_remote_task_control_is_refused() {
             "acknowledge",
             json!({ "action": "acknowledge", "task_id": "task-1" }),
         ),
-        (
-            "accept",
-            json!({ "action": "accept", "task_id": "task-1" }),
-        ),
+        ("accept", json!({ "action": "accept", "task_id": "task-1" })),
         (
             "reconcile",
             json!({ "action": "reconcile", "task_id": "task-1",

@@ -1,0 +1,27 @@
+== pwd ==
+/opt/kroma-p1
+== git ==
+?? rc1/
+065dbdd978d3231816fcb2af60bbb7b4ffb06635
+/opt/kroma-p1
+065dbdd978d3231816fcb2af60bbb7b4ffb06635
+2026-10-18T09:32:20+08:00
+test(t30): let the ledger verifier accept a JSON experiment report as evidence
+== toolchain ==
+# Pinned on purpose: `cargo fmt --check` output is toolchain-specific. A floating `stable` moved
+# rustfmt style (chain/line-breaking rules), so the same tree that was formatted on one machine
+# failed the fmt gate on another. Bumping this line is a deliberate change: run `cargo fmt --all`
+# with the new toolchain and commit the reformat in the same commit.
+[toolchain]
+channel = "1.85.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+v24.21.0
+rustc 1.85.1 (4eb161250 2025-03-15)
+cargo 1.85.1 (d73d2caf9 2024-12-31)
+== archive ==
+e34ac0c1dc505dd8b0877749f1c6e88fd5441857e489ef98dcd2e4cae353e23b  dist-t30/kroma-p1-sealed-source.tar.gz
+== lock ==
+caa80f28083d1243d9c8e2d0e873404620cd9adf0a052159d286536ccf713f8c  Cargo.lock
+== js parity ==
+IDENTICAL

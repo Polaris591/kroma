@@ -22,8 +22,8 @@ use kroma_core::surface::{
 };
 use kroma_core::tool::policy::PolicyMode;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
 use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -197,7 +197,11 @@ async fn failed_index_write_reports_error_and_leaves_no_ghost_session() {
         before_ids,
         "a failed open must not leave a live session behind"
     );
-    assert_eq!(manager.len(), before_len, "the live runtime count is unchanged");
+    assert_eq!(
+        manager.len(),
+        before_len,
+        "the live runtime count is unchanged"
+    );
 
     // The daemon is still usable: once the obstruction is gone the same open succeeds.
     std::fs::remove_dir(&idx).unwrap();
@@ -417,7 +421,9 @@ async fn generation_is_advanced_only_by_a_committed_write() {
     let idx = index_path(&root);
 
     let first: Value = serde_json::from_slice(&std::fs::read(&idx).unwrap()).unwrap();
-    let generation_first = first["generation"].as_u64().expect("a generation is persisted");
+    let generation_first = first["generation"]
+        .as_u64()
+        .expect("a generation is persisted");
     assert!(generation_first >= 1);
     assert!(first["entries"].is_array());
     drop(manager);
@@ -450,7 +456,10 @@ async fn a_leftover_temp_file_does_not_corrupt_recovery() {
     drop(manager);
 
     // A crash between the temp write and the rename leaves the temp file and the old index.
-    let stale = idx.parent().unwrap().join(".daemon-sessions.json.tmp-stale");
+    let stale = idx
+        .parent()
+        .unwrap()
+        .join(".daemon-sessions.json.tmp-stale");
     std::fs::write(&stale, b"{ this is not a valid index").unwrap();
 
     let manager2 = open_manager(&factory, &root, 4, &ws);
@@ -522,9 +531,8 @@ async fn a_panicking_build_releases_its_capacity_reservation() {
     .unwrap();
 
     // The first build panics; the reservation must be released during unwinding.
-    let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        manager.open_session(Some(&ws1), None)
-    }));
+    let caught =
+        std::panic::catch_unwind(AssertUnwindSafe(|| manager.open_session(Some(&ws1), None)));
     assert!(caught.is_err(), "the injected build panic must propagate");
     assert_eq!(
         manager.len(),
