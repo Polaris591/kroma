@@ -148,7 +148,15 @@ impl ResourceLimits {
     /// `setrlimit` is async-signal-safe, so this is safe to call from a `pre_exec` hook.
     #[cfg(unix)]
     fn apply_to_current_process(&self) -> io::Result<()> {
-        fn set(resource: libc::__rlimit_resource_t, value: u64) -> io::Result<()> {
+        // glibc declares `setrlimit` with `__rlimit_resource_t` (a u32 alias that exists only in
+        // glibc); musl and macOS declare it with `c_int`. Naming the glibc type unconditionally is
+        // what broke the arm64-musl and macOS builds: `cannot find type __rlimit_resource_t`.
+        #[cfg(any(target_env = "gnu", target_env = "uclibc"))]
+        type RlimitResource = libc::__rlimit_resource_t;
+        #[cfg(not(any(target_env = "gnu", target_env = "uclibc")))]
+        type RlimitResource = libc::c_int;
+
+        fn set(resource: RlimitResource, value: u64) -> io::Result<()> {
             let limit = libc::rlimit {
                 rlim_cur: value as libc::rlim_t,
                 rlim_max: value as libc::rlim_t,
@@ -160,16 +168,16 @@ impl ResourceLimits {
             Ok(())
         }
         if let Some(bytes) = self.address_space_bytes {
-            set(libc::RLIMIT_AS, bytes)?;
+            set(libc::RLIMIT_AS as RlimitResource, bytes)?;
         }
         if let Some(seconds) = self.cpu_seconds {
-            set(libc::RLIMIT_CPU, seconds)?;
+            set(libc::RLIMIT_CPU as RlimitResource, seconds)?;
         }
         if let Some(bytes) = self.file_bytes {
-            set(libc::RLIMIT_FSIZE, bytes)?;
+            set(libc::RLIMIT_FSIZE as RlimitResource, bytes)?;
         }
         if let Some(files) = self.open_files {
-            set(libc::RLIMIT_NOFILE, files)?;
+            set(libc::RLIMIT_NOFILE as RlimitResource, files)?;
         }
         Ok(())
     }
