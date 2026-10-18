@@ -59,7 +59,7 @@
     "sha256": "0c866311393db336305011e714ded35fc5208455b00259347f9b40efd9b63bd9"
   },
   "signing": {
-    "provenance_document": "rc1/artifacts/RELEASE_PROVENANCE.json",
+    "provenance_document": "RELEASE_PROVENANCE.json (交付目录根；仓库内 rc1/artifacts/ 是签名工作副本，不随源码包分发)",
     "key_id": "kroma-release-2026",
     "verified_with": "bin/kroma.js PRODUCTION_TRUSTED_KEYS",
     "artifacts_signed": 2,
