@@ -62,14 +62,15 @@
     "provenance_document": "rc1/artifacts/RELEASE_PROVENANCE.json",
     "key_id": "kroma-release-2026",
     "verified_with": "bin/kroma.js PRODUCTION_TRUSTED_KEYS",
-    "artifacts_signed": 4,
-    "scope": "kroma-linux-x64, kroma-linux-arm64-musl, kroma-rc1-source.tar.gz, kroma_RC1.patch",
+    "artifacts_signed": 2,
+    "scope": "kroma-rc1-source.tar.gz, kroma_RC1.patch (both rebuilt from the sealed commit)",
     "not_covered": "the five CI platform binaries (ci.yml uploads no artifact and release.yml never ran)",
     "mechanism": "scripts/release-attestation.js attests name/size/sha256/commit/sandbox for the bytes a run produced; the owner signs offline; verification consumes the same run, never a rebuild",
     "negative_tests": "9 (changed bytes, extra file, missing file, wrong commit, sandbox not passed, missing signature, ...)",
     "status": "PARTIAL",
     "local_verdict": "ARTIFACT_SET_VERIFIED (attest -> sign -> verdict, exit 0, reasons: [])",
-    "local_verdict_scope": "只证明签名覆盖这四件字节、同一提交、沙箱本机通过；不代表整体可发布"
+    "local_verdict_scope": "只证明签名覆盖这四件字节、同一提交、沙箱本机通过；不代表整体可发布",
+    "excluded": "the platform binaries: the two local ones were built from an earlier commit, and CI produces none that can be downloaded, so signing them would misstate their origin"
   },
   "platforms": {
     "linux-x64": "built and tested natively",

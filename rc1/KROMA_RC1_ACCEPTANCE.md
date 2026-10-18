@@ -115,7 +115,7 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 | G2 更新可靠性 | **PASS** | 17/100 → 100/100；确定性修复，未加超时、未吞错误 |
 | G3 供应链 | **PASS** | 四条 OpenSSL 路径统一验真；pin 双源核对；Action 25 处钉住；锁钉住 |
 | G4 Release DAG | **BLOCKED** | 结构、静态门禁与负向测试齐备；`release.yml` 从未运行（无 `actions:write` 令牌，不许打 tag） |
-| G5 可信签名 | **PARTIAL** | 已签并验：源码包、补丁、linux-x64、arm64-musl（4 件）；attestation + 验签机制已实现并有 9 条负向测试；**未签**：CI 五平台产物集（`ci.yml` 不上传 artifact，`release.yml` 未跑通） |
+| G5 可信签名 | **PARTIAL** | 已签并验：源码包、补丁（2 件，均从封板提交重建；两个二进制是更早提交的产物，签它们就是假证据，故排除）；attestation + 验签机制已实现并有 9 条负向测试；**未签**：CI 五平台产物集（`ci.yml` 不上传 artifact，`release.yml` 未跑通） |
 | G6 平台声明 | **PARTIAL** | 五平台构建+链接全绿；启动：linux-x64 / linux-arm64(qemu) / macOS；TLS：linux-x64 与 linux-arm64(qemu)；安全边界仅本机 |
 | G7 证据与冻结 | **PASS** | 单一状态表、历史文档已标 Superseded、T24 保持 INCONCLUSIVE |
 
@@ -130,7 +130,8 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 
 ## 8.55 签名机制的端到端实跑（本机，不是 CI）
 
-用本轮真实交付的四个字节文件跑完整链路：
+用本轮真实交付的两件源码产物（`kroma-rc1-source.tar.gz`、`kroma_RC1.patch`）跑完整链路。
+二进制不在签名集合内，理由见 `KNOWN_LIMITATIONS.md` 第 4 节——它们是更早提交构建的：
 
 1. `scripts/release-attestation.js build` —— 记录 `name / size / sha256 / git_commit / sandbox_status`，
    确定性输出（无时间戳，两次构建逐字节相同）；
@@ -140,7 +141,7 @@ T24 保持 **INCONCLUSIVE**：28 次真实运行 / 8.77M token / 留出集仅 2 
 
 结果：`state: ARTIFACT_SET_VERIFIED`，退出码 0，`reasons: []`。
 
-**这个词的含义要看清**：它只说明"签名精确覆盖了这四件字节、来自同一提交、沙箱在本机真的通过"。
+**这个词的含义要看清**：它只说明"签名精确覆盖了这两件字节、来自同一提交、沙箱在本机真的通过"。
 它**不**代表整个 RC1 可发布——平台运行证据（Windows/Android 启动与 TLS）与 `release.yml` 实跑
 都不在这个脚本的视野里，所以总状态仍然是 `RC1_CANDIDATE_BLOCKED`。脚本刻意不叫 `RELEASE_READY`。
 

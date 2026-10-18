@@ -29,11 +29,13 @@
 seccomp）。处理方式是区分"没能力"与"失败"：本机 `scripts/run-sandbox-tests.sh` → `EXIT=0`（8 passed）；
 CI 上记为 `HOST_CAPABILITY_BLOCKED` 并阻止 `RELEASE_READY`。**没有任何一处把这个状态写成 PASS。**
 
-## 4. 签名覆盖的是本地构建的四件产物，不是 CI 五平台产物集
+## 4. 签名只覆盖源码包与补丁，不覆盖任何二进制
 
-- 已签并验：`kroma-linux-x64`、`kroma-linux-arm64-musl`、`kroma-rc1-source.tar.gz`、`kroma_RC1.patch`。
-- 未签：CI 各平台产出的二进制。原因是 `ci.yml` 不上传 artifact（`release.yml` 上传但从未跑通），
-  没有可下载的字节。
+- 已签并验：`kroma-rc1-source.tar.gz`、`kroma_RC1.patch`——这两件**都是从封板提交重新构建的**，
+  签名里的提交号与它们的内容对得上。
+- 未签：所有平台二进制。`kroma-linux-x64` 与 `kroma-linux-arm64-musl` 是更早的提交构建的，签它们等于
+  声称它们来自封板提交，那是假证据，所以把它们排除在签名集合之外。
+- 未签：CI 各平台产出的二进制。`ci.yml` 不上传 artifact，`release.yml` 从未跑通，没有可下载的字节。
 - `release.yml` 现在已具备"attest 实际字节 → 离线签名 → 用同一 run 的字节验签"的机制与 9 条负向测试
   （改动字节 / 多出文件 / 缺失文件 / 错提交 / 沙箱未通过 全部拒绝），但该机制在 GitHub 上尚未实跑。
 
