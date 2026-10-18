@@ -42,6 +42,15 @@ pub fn is_blacklisted_env_var(name: &str) -> bool {
         || upper == "PASSWORD"
         || upper.contains("_CREDENTIAL")
         || upper.starts_with("CREDENTIAL")
+        // Build/CI markers are scrubbed as well: a supervised child must behave the same whether kroma
+        // runs on a laptop or on a CI runner. npm, pytest and friends change behaviour when they see
+        // `CI`, and `NO_COLOR` would change output that the harness parses. Leaking them makes the
+        // child's behaviour depend on where the agent happens to run - and made this suite fail only in
+        // CI, which is exactly the class of bug a scrub is supposed to prevent.
+        || upper == "CI"
+        || upper == "CONTINUOUS_INTEGRATION"
+        || upper == "NO_COLOR"
+        || upper == "FORCE_COLOR"
 }
 
 pub fn collect_sanitized_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
