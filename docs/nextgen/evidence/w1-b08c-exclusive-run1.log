@@ -1,0 +1,13 @@
+   Compiling kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.37s
+     Running tests/b08c_git_metadata.rs (target/debug/deps/b08c_git_metadata-fc08dacb9709b6d9)
+
+running 5 tests
+test a_flooding_git_is_capped_and_yields_no_metadata ... ok
+test a_stalling_git_times_out_and_yields_no_metadata ... ok
+test carries_a_sha1_commit_through ... ok
+test carries_a_sha256_commit_through ... ok
+test rejects_values_that_are_not_a_full_object_id ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s
+

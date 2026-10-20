@@ -76,9 +76,22 @@ impl std::fmt::Display for WriterConflict {
 
 impl std::error::Error for WriterConflict {}
 
+/// One live write claim on a workspace.
+///
+/// `leases` counts every `WriterLease` handed out to the same owner, so a nested (re-entrant)
+/// acquire cannot be released out from under its parent: dropping one lease decrements the count
+/// and only the last drop removes the claim and closes the file (which is what releases the
+/// cross-process `flock`).
+struct WriterEntry {
+    owner_id: String,
+    leases: usize,
+    /// Shared with the registry and with every lease of this owner.
+    lock_file: Option<std::sync::Arc<File>>,
+}
+
 #[derive(Default)]
 struct Registry {
-    writers: HashMap<PathBuf, String>,
+    writers: HashMap<PathBuf, WriterEntry>,
     routes: HashMap<String, SessionRoute>,
 }
 
@@ -88,8 +101,14 @@ fn registry() -> &'static Mutex<Registry> {
 }
 
 fn canonical_key(workspace_root: &Path) -> PathBuf {
-    let canonical =
-        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    // KR-D02: `canonicalize` needs the path to exist. A workspace that has not been created yet (a
+    // `--resume` into a fresh directory, a lock taken before `mkdir`) would otherwise fall back to
+    // the caller's literal spelling, so `ws`, `./ws`, `ws/` and an absolute form of the same
+    // directory could each get their own writer slot -- two writers, one workspace.
+    let canonical = match std::fs::canonicalize(workspace_root) {
+        Ok(path) => path,
+        Err(_) => lexical_normalize(workspace_root),
+    };
     #[cfg(windows)]
     {
         // T08 (KR-26): Windows paths are case-insensitive and `canonicalize` may hand back either the
@@ -107,6 +126,49 @@ fn canonical_key(workspace_root: &Path) -> PathBuf {
     }
 }
 
+/// Make a not-yet-existing path absolute and lexically clean.
+///
+/// This deliberately does **not** resolve symlinks -- it cannot, the path may not exist -- so it is
+/// only the fallback for paths `canonicalize` refused. Its job is the weaker but still load-bearing
+/// guarantee: one spelling per path, so an alias cannot manufacture a second writer slot.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+
+    let mut out: Vec<Component> = Vec::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Pop a real directory name; never pop above the root.
+                match out.last() {
+                    Some(Component::Normal(_)) => {
+                        out.pop();
+                    }
+                    Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                    _ => out.push(component),
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    let normalized: PathBuf = out.iter().collect();
+    // A trailing separator must not be a separate spelling.
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+    } else {
+        normalized
+    }
+}
+
 /// An exclusive, RAII claim on a workspace's write side.
 ///
 /// Dropping the lease releases the claim; holding it across an `.await` is intended (a run spans
@@ -116,10 +178,10 @@ fn canonical_key(workspace_root: &Path) -> PathBuf {
 pub struct WriterLease {
     workspace_root: PathBuf,
     owner_id: String,
-    /// Held (unlocked explicitly, released on drop) only by the lease that acquired the file lock.
-    /// A same-owner re-claim returns a lease with `None` so a nested acquire cannot double-unlock.
+    /// Shared with the registry and every sibling lease of the same owner. The descriptor is closed
+    /// only when the last holder drops, so a nested acquire never releases the parent's `flock`.
     #[allow(dead_code)]
-    lock_file: Option<File>,
+    lock_file: Option<std::sync::Arc<File>>,
 }
 
 impl WriterLease {
@@ -135,8 +197,14 @@ impl WriterLease {
 impl Drop for WriterLease {
     fn drop(&mut self) {
         let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-        if reg.writers.get(&self.workspace_root).map(String::as_str) == Some(self.owner_id.as_str())
-        {
+        let Some(entry) = reg.writers.get_mut(&self.workspace_root) else {
+            return;
+        };
+        if entry.owner_id != self.owner_id {
+            return;
+        }
+        entry.leases = entry.leases.saturating_sub(1);
+        if entry.leases == 0 {
             reg.writers.remove(&self.workspace_root);
         }
     }
@@ -156,34 +224,40 @@ pub fn try_acquire_writer(
 ) -> Result<WriterLease, WriterConflict> {
     let key = canonical_key(workspace_root);
     let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-    let already_owned_here = reg
-        .writers
-        .get(&key)
-        .map(String::as_str)
-        .is_some_and(|current| current == owner_id);
-    if let Some(current) = reg.writers.get(&key) {
-        if current != owner_id {
+    // A same-owner re-claim shares the existing entry *and* its file lock. Returning early here is
+    // what makes the nesting safe: the parent's claim survives until the last lease drops.
+    if let Some(entry) = reg.writers.get_mut(&key) {
+        if entry.owner_id != owner_id {
             return Err(WriterConflict {
                 workspace_root: key,
-                current_owner: current.clone(),
+                current_owner: entry.owner_id.clone(),
             });
         }
+        entry.leases += 1;
+        let lock_file = entry.lock_file.clone();
+        return Ok(WriterLease {
+            workspace_root: key,
+            owner_id: owner_id.to_string(),
+            lock_file,
+        });
     }
-    // A same-owner re-claim shares the file lock the first lease already holds.
-    let lock_file = if already_owned_here {
-        None
-    } else {
-        match acquire_workspace_lock(&key, owner_id) {
-            Ok(file) => file,
-            Err(current_owner) => {
-                return Err(WriterConflict {
-                    workspace_root: key,
-                    current_owner,
-                });
-            }
+    let lock_file = match acquire_workspace_lock(&key, owner_id) {
+        Ok(file) => file.map(std::sync::Arc::new),
+        Err(current_owner) => {
+            return Err(WriterConflict {
+                workspace_root: key,
+                current_owner,
+            });
         }
     };
-    reg.writers.insert(key.clone(), owner_id.to_string());
+    reg.writers.insert(
+        key.clone(),
+        WriterEntry {
+            owner_id: owner_id.to_string(),
+            leases: 1,
+            lock_file: lock_file.clone(),
+        },
+    );
     Ok(WriterLease {
         workspace_root: key,
         owner_id: owner_id.to_string(),
@@ -199,7 +273,7 @@ pub fn current_writer(workspace_root: &Path) -> Option<String> {
         .unwrap_or_else(|e| e.into_inner())
         .writers
         .get(&key)
-        .cloned()
+        .map(|entry| entry.owner_id.clone())
 }
 
 /// Stable directory holding the cross-process writer lock files.
@@ -546,9 +620,18 @@ mod tests {
         assert_eq!(current_writer(&a).as_deref(), Some("owner-a"));
 
         // Same-owner re-claim is idempotent, not a conflict.
-        let _again = try_acquire_writer(&a, "owner-a").unwrap();
+        let again = try_acquire_writer(&a, "owner-a").unwrap();
 
+        // KR-D01: dropping the *outer* lease while the re-entrant one is still alive must not
+        // release the claim. The registry is refcounted and the file lock is shared, so a third
+        // owner is still refused and the cross-process flock is still held.
         drop(lease_a);
+        assert_eq!(current_writer(&a).as_deref(), Some("owner-a"));
+        let conflict = try_acquire_writer(&a, "owner-c").unwrap_err();
+        assert_eq!(conflict.current_owner, "owner-a");
+
+        // Only the last lease of the owner releases the workspace.
+        drop(again);
         assert_eq!(current_writer(&a), None);
         let lease_c = try_acquire_writer(&a, "owner-c").unwrap();
         drop(lease_c);
@@ -884,6 +967,144 @@ mod tests {
         assert_eq!(canonical, upper, "case must not create a second domain");
         assert_eq!(canonical, verbatim, "the verbatim prefix must not either");
         assert_eq!(canonical, trailing, "a trailing separator must not either");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// KR-D01: a re-entrant lease is a real lease. While it is alive the workspace still has a
+    /// writer, so a third owner must be refused and the file lock must still be held.
+    #[test]
+    fn a_reentrant_lease_keeps_the_workspace_claimed() {
+        let root = std::env::temp_dir().join(format!("kroma-reent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outer = try_acquire_writer(&root, "owner-a").unwrap();
+        let inner = try_acquire_writer(&root, "owner-a").unwrap();
+        assert_eq!(current_writer(&root).as_deref(), Some("owner-a"));
+
+        drop(outer);
+        assert_eq!(
+            current_writer(&root).as_deref(),
+            Some("owner-a"),
+            "the inner lease is still alive, so the workspace is still claimed"
+        );
+        let conflict = try_acquire_writer(&root, "owner-b").unwrap_err();
+        assert_eq!(conflict.current_owner, "owner-a");
+
+        drop(inner);
+        assert_eq!(current_writer(&root), None);
+        // After the last lease is gone the workspace is genuinely free.
+        let other = try_acquire_writer(&root, "owner-b").unwrap();
+        assert_eq!(other.owner_id(), "owner-b");
+        drop(other);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// KR-D01: dropping the inner lease first must leave the outer claim intact, and a further
+    /// same-owner acquire must still succeed.
+    #[test]
+    fn dropping_the_inner_lease_first_keeps_the_outer_claim() {
+        let root = std::env::temp_dir().join(format!("kroma-reent2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outer = try_acquire_writer(&root, "owner-a").unwrap();
+        let inner = try_acquire_writer(&root, "owner-a").unwrap();
+        drop(inner);
+
+        assert_eq!(current_writer(&root).as_deref(), Some("owner-a"));
+        assert!(
+            try_acquire_writer(&root, "owner-b").is_err(),
+            "the outer claim must survive the inner drop"
+        );
+        let third = try_acquire_writer(&root, "owner-a").unwrap();
+        assert_eq!(third.owner_id(), "owner-a");
+        drop(third);
+        assert_eq!(current_writer(&root).as_deref(), Some("owner-a"));
+        drop(outer);
+        assert_eq!(current_writer(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// KR-D01: an unwinding panic must release every lease it drops, and must not release a claim
+    /// it never owned.
+    #[test]
+    fn a_panicking_scope_releases_its_lease() {
+        let root = std::env::temp_dir().join(format!("kroma-panic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let result = std::panic::catch_unwind(|| {
+            let _lease = try_acquire_writer(&root, "owner-panic").unwrap();
+            panic!("boom");
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            current_writer(&root),
+            None,
+            "the lease must be released while unwinding"
+        );
+        let after = try_acquire_writer(&root, "owner-b").unwrap();
+        drop(after);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// KR-D02: a workspace that does not exist yet must still have exactly one writer slot.
+    /// `canonicalize` fails on a missing path, so the lexical fallback has to remove the aliases.
+    #[test]
+    fn a_missing_workspace_still_has_one_identity_per_path() {
+        let root = std::env::temp_dir().join(format!("kroma-alias-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("not-created-yet");
+
+        let absolute = canonical_key(&missing);
+        let with_dot = canonical_key(&root.join(".").join("not-created-yet"));
+        let with_parent = canonical_key(&root.join("sub").join("..").join("not-created-yet"));
+        let trailing = canonical_key(&PathBuf::from(format!("{}/", missing.display())));
+
+        assert_eq!(absolute, with_dot, "a `.` component is not a new workspace");
+        assert_eq!(
+            absolute, with_parent,
+            "a `..` component is not a new workspace"
+        );
+        assert_eq!(
+            absolute, trailing,
+            "a trailing separator is not a new workspace"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// KR-D02: a relative spelling resolves against the cwd, not to its own slot.
+    ///
+    /// This exercises `lexical_normalize` directly rather than calling `set_current_dir`: that is
+    /// process-global state and mutating it from a test breaks every other test running in parallel.
+    #[test]
+    fn a_relative_spelling_resolves_against_the_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let relative = lexical_normalize(Path::new("some/rel/ws"));
+        let absolute = lexical_normalize(&cwd.join("some/rel/ws"));
+        assert_eq!(
+            relative, absolute,
+            "a relative spelling must resolve against the cwd"
+        );
+    }
+
+    /// KR-D02: two spellings of the same existing directory (a symlink and the real path) must
+    /// share one writer slot, so a symlink cannot be used to get a second writer.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_spelling_shares_the_writers_slot() {
+        let root = std::env::temp_dir().join(format!("kroma-link-{}", uuid::Uuid::new_v4()));
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let lease = try_acquire_writer(&link, "owner-a").unwrap();
+        let conflict = try_acquire_writer(&real, "owner-b").unwrap_err();
+        assert_eq!(
+            conflict.current_owner, "owner-a",
+            "the real path must not be a second writer slot"
+        );
+        drop(lease);
+        assert_eq!(current_writer(&real), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
