@@ -1065,3 +1065,51 @@ async fn activated_tool_schema_is_measured_before_the_request_is_sent() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------------------------
+// KR-B02: the outbound request is sealed by identity.
+//
+// The runner recomputes the identity from the actual `ProviderRequest` and refuses to transmit a
+// request that differs from the one it budgeted for. That seal is only meaningful if the identity
+// is sensitive to every wire-relevant field, which is what this pins down.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn request_identity_changes_when_the_tool_schema_changes() {
+    use kroma_core::provenance::request_identity;
+    use kroma_core::tool::definition::ToolDefinition;
+
+    let base_tool = ToolDefinition {
+        name: "probe".to_string(),
+        description: "original".to_string(),
+        parameters: serde_json::json!({"type": "object"}),
+    };
+    let base = request_identity("sys", std::slice::from_ref(&base_tool), &[]);
+
+    let mut changed_description = base_tool.clone();
+    changed_description.description = "original ".to_string();
+    assert_ne!(
+        base,
+        request_identity("sys", &[changed_description], &[]),
+        "a changed tool description must change the identity"
+    );
+
+    let mut changed_parameters = base_tool.clone();
+    changed_parameters.parameters = serde_json::json!({"type": "object", "required": ["x"]});
+    assert_ne!(
+        base,
+        request_identity("sys", &[changed_parameters], &[]),
+        "changed tool parameters must change the identity"
+    );
+
+    let other = ToolDefinition {
+        name: "a".to_string(),
+        description: "x".to_string(),
+        parameters: serde_json::json!({}),
+    };
+    assert_eq!(
+        request_identity("s", &[base_tool.clone(), other.clone()], &[]),
+        request_identity("s", &[other, base_tool], &[]),
+        "reordering the same tool set must not change the identity"
+    );
+}

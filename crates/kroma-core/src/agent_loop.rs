@@ -99,13 +99,6 @@ fn canonical_history_bytes(items: &[TranscriptItem]) -> usize {
     items.iter().map(TranscriptItem::estimated_bytes).sum()
 }
 
-pub(crate) fn estimate_prompt_input_tokens(
-    static_prefix_bytes: usize,
-    message_history_bytes: usize,
-) -> u64 {
-    approx_tokens(static_prefix_bytes.saturating_add(message_history_bytes))
-}
-
 /// Account for wire attempts that were actually transmitted. The first attempt is recorded before
 /// dispatch, so only the remainder is added here; a saturated cap simply stops recording.
 fn record_wire_attempts(tracker: &mut crate::budget::BudgetTracker, attempts: usize) {
@@ -1472,13 +1465,16 @@ impl AgentRunner {
         // `static_prefix_bytes` already includes `system_prompt.len()` (see
         // `prompt.rs::build_static_prefix`), so it must not be added again here. The static tool
         // schema is swapped for the final one so activation is reflected in the estimate.
-        let static_non_tool_bytes = state
-            .static_prefix
-            .static_prefix_bytes
-            .saturating_sub(state.static_prefix.tools_json.len());
-        let estimated_input_tokens = estimate_prompt_input_tokens(
-            static_non_tool_bytes.saturating_add(final_tool_schema_bytes),
-            projected.message_history_bytes,
+        // KR-B03: one estimate, not three. `estimate_prompt_input_tokens` divides bytes by four,
+        // which under-counts CJK by up to 2x relative to the conservative estimator the window check
+        // used, so the reserve and the check disagreed about the same request. Both now consume this
+        // single value, which covers the system prompt, the final tool schema, every message and the
+        // serialization overhead.
+        let estimated_input_tokens = crate::budget::conservative_request_tokens(
+            &state.static_prefix.system_prompt,
+            &projected.messages,
+            final_tool_schema_bytes,
+            REQUEST_SERIALIZATION_OVERHEAD_BYTES,
         );
         // F05 (`v1.5.1`): the token cap is enforced through the shared [`TokenBudget`], not a
         // per-run counter, so the parent and every concurrent child subagent draw from the same
@@ -1533,12 +1529,8 @@ impl AgentRunner {
         // path with no whole-request check at all. `Unbounded` is excluded by construction: its
         // `context_window_tokens` is `None`, which the pattern below already rejects.
         if let Some(window) = self.model_capabilities.context_window_tokens {
-            let estimated_input = crate::budget::conservative_request_tokens(
-                &state.static_prefix.system_prompt,
-                &projected.messages,
-                final_tool_schema_bytes,
-                REQUEST_SERIALIZATION_OVERHEAD_BYTES,
-            );
+            // KR-B03: reuse the single estimate instead of recomputing it here.
+            let estimated_input = estimated_input_tokens;
             let reserved_output = self
                 .model_capabilities
                 .reserved_output_tokens(max_output_tokens);
@@ -1618,6 +1610,32 @@ impl AgentRunner {
             }),
             wire_attempts: Some(wire_attempts.clone()),
         };
+
+        // KR-B02: seal the outbound request with the identity that was budgeted for. The identity is
+        // recomputed from the actual `ProviderRequest` rather than trusted from the earlier
+        // computation, so a tool schema or message mutated after activation cannot reach the
+        // provider under an identity that was never measured.
+        let outbound_identity =
+            crate::provenance::request_identity(&req.system_prompt, &req.tools, &req.messages);
+        if outbound_identity != request_identity {
+            if let Ok(record) = token_reservation.settle_not_dispatched(0) {
+                audit_token_settlement(&mut logger, &record);
+            }
+            state.budget_tracker.refund_unsent_request_attempt();
+            return Err(self.finish_run(
+                TerminalReason::ProviderProtocolError(
+                    "outbound request differs from the frozen request identity".to_string(),
+                ),
+                &state.budget_tracker,
+                &state.projector,
+                std::mem::take(&mut state.modified_files_set)
+                    .into_iter()
+                    .collect(),
+                state.last_assistant_text.take(),
+                std::mem::take(&mut state.transcript),
+                logger,
+            ));
+        }
 
         let composition = state.request_observer.observe(&req);
         if let Err(error) = logger.log(EventPayload::RequestCompositionObserved {
@@ -5559,12 +5577,14 @@ pub fn build_runtime_with_registry(
 
 #[cfg(test)]
 mod budget_estimation_tests {
-    use super::{approx_tokens, estimate_prompt_input_tokens};
+    use super::REQUEST_SERIALIZATION_OVERHEAD_BYTES;
+    use crate::budget::{conservative_request_tokens, conservative_text_tokens};
     use crate::prompt::PromptBuilder;
 
-    /// BUG-09: the request-input estimate must count the system prompt exactly once. It is already
-    /// part of `static_prefix_bytes`, so adding `system_prompt.len()` again would inflate the
-    /// estimate and trip `max_total_tokens` early on a long system prompt.
+    /// BUG-09, restated for KR-B03: the request-input estimate must count the system prompt exactly
+    /// once. The estimate is now `conservative_request_tokens`, which takes the system prompt and the
+    /// messages as separate inputs -- that signature is what makes double counting impossible, since
+    /// `static_prefix_bytes` is no longer an input at all.
     #[test]
     fn test_bug09_input_estimate_does_not_double_count_the_system_prompt() {
         let system_prompt = "S".repeat(40_000);
@@ -5574,16 +5594,27 @@ mod budget_estimation_tests {
             "static_prefix_bytes must already include the system prompt"
         );
 
-        let history = 5_000usize;
-        let estimate = estimate_prompt_input_tokens(prefix.static_prefix_bytes, history);
+        let estimate = conservative_request_tokens(
+            &system_prompt,
+            &[],
+            0,
+            REQUEST_SERIALIZATION_OVERHEAD_BYTES,
+        );
         assert_eq!(
             estimate,
-            approx_tokens(prefix.static_prefix_bytes + history)
+            conservative_text_tokens(&system_prompt)
+                + (REQUEST_SERIALIZATION_OVERHEAD_BYTES as u64 + 3) / 4,
+            "the system prompt is counted once, through the explicit parameter"
         );
-        assert_ne!(
+        assert_eq!(
             estimate,
-            approx_tokens(prefix.static_prefix_bytes + history + system_prompt.len()),
-            "the system prompt must not be counted twice"
+            conservative_request_tokens(
+                &system_prompt,
+                &[],
+                0,
+                REQUEST_SERIALIZATION_OVERHEAD_BYTES
+            ),
+            "the same request must estimate the same way twice"
         );
     }
 }

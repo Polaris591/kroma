@@ -118,12 +118,24 @@
       "decision": null
     },
     "KR-B01": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "1faf6fb",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --test t03_context_budget --locked",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "841088dacad32ed3663f3868d7b99904e3dff36c1f051a628e04df633c9054da",
+          "source_tree_sha256": "419a42c1b67408a0168c1ce401a0a24b29a8fa7ba0a2000efb96b8c4550f0259",
+          "completed_utc": "2026-10-20T23:14:10Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1283
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "tool set is built and frozen before measurement; one serialized byte count feeds both estimate and window check"
     },
     "KR-B02": {
       "status": "TODO",
@@ -142,12 +154,24 @@
       "decision": null
     },
     "KR-B04": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "IMPLEMENTED_UNVERIFIED",
+      "attempts": 1,
+      "commit": "1faf6fb",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --test t03_context_budget --locked",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "841088dacad32ed3663f3868d7b99904e3dff36c1f051a628e04df633c9054da",
+          "source_tree_sha256": "419a42c1b67408a0168c1ce401a0a24b29a8fa7ba0a2000efb96b8c4550f0259",
+          "completed_utc": "2026-10-20T23:14:10Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1283
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "code and red-first test done; stays unverified until KR-B02 (its declared dependency) lands"
     },
     "KR-B05": {
       "status": "TODO",
