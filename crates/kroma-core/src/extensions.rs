@@ -1084,6 +1084,18 @@ pub struct HookEvaluation {
     pub outcome: String,
     pub duration_ms: u64,
     pub message: Option<String>,
+    /// T09 (KR-18) style: which backend actually ran this hook.
+    ///
+    /// Hooks launch through `ProcessLaunch` on the host -- the sandbox covers the `AgentBash`
+    /// execution class only (see docs/CAPABILITIES.md) -- so this is `"host"`. The field exists so a
+    /// receipt can never be read as "this hook was isolated" just because the run had a sandbox
+    /// policy configured. Defaults to `"host"` when reading logs written before the field existed.
+    #[serde(default = "host_backend")]
+    pub execution_backend: String,
+}
+
+fn host_backend() -> String {
+    "host".to_string()
 }
 
 impl HookEvaluation {
@@ -1102,6 +1114,7 @@ impl HookEvaluation {
             outcome: outcome.to_string(),
             duration_ms,
             message,
+            execution_backend: host_backend(),
         }
     }
 }

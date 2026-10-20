@@ -647,6 +647,17 @@ async fn test_policy_hook_fails_closed_on_deny_error_and_timeout() {
         .evaluations()
         .iter()
         .any(|e| e.outcome == "timeout" && e.hook_kind == "policy"));
+    // KR-C02: every hook receipt must state the backend it actually ran on. Hooks are not wrapped
+    // in an ExecutionPolicy today, so the receipt has to say "host" rather than leave the reader to
+    // assume the run's sandbox covered them.
+    assert!(
+        outcome
+            .evaluations()
+            .iter()
+            .all(|e| e.execution_backend == "host"),
+        "hook receipts must record the actual backend: {:?}",
+        outcome.evaluations()
+    );
 
     // (e) command hook exits non-zero
     let registry = ToolRegistry::new(None);

@@ -1,15 +1,3 @@
-    Checking serde v1.0.229
-    Checking tokio v1.53.2
-    Checking thiserror v2.0.21
-    Checking ref-cast v1.0.27
-    Checking strum v0.28.0
-    Checking uuid v1.15.1
-    Checking ahash v0.8.12
-    Checking fluent-uri v0.4.1
-    Checking email_address v0.2.9
-    Checking jsonschema-value v0.58.6
-    Checking referencing v0.58.6
-    Checking jsonschema v0.58.6
     Checking kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)
     Checking kroma-cli v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-cli)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.23s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.87s

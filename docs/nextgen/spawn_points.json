@@ -1,0 +1,292 @@
+{
+  "task": "KR-C01",
+  "spawn_points": 28,
+  "classified": 28,
+  "unclassified": {},
+  "by_class": {
+    "AgentBash": [
+      "crates/kroma-core/src/tool/codemode.rs",
+      "crates/kroma-core/src/tools/bash.rs"
+    ],
+    "Hook": [
+      "crates/kroma-core/src/extensions.rs"
+    ],
+    "McpServer": [
+      "crates/kroma-core/src/mcp.rs"
+    ],
+    "Probe": [
+      "crates/kroma-core/src/provenance.rs"
+    ],
+    "Verifier": [
+      "crates/kroma-core/src/completion_gate.rs"
+    ],
+    "Worker": [
+      "crates/kroma-core/src/job_scope.rs",
+      "crates/kroma-core/src/process_launch.rs",
+      "crates/kroma-core/src/process_supervisor.rs",
+      "crates/kroma-core/src/sandbox.rs",
+      "crates/kroma-core/src/session_ownership.rs"
+    ]
+  },
+  "classes_without_isolation": [
+    "Hook",
+    "McpServer",
+    "Worker"
+  ],
+  "gate_passed": true,
+  "note": "Classes listed in classes_without_isolation run on the host today. That is a stated boundary, not an accident: docs/CAPABILITIES.md says the sandbox covers the bash execution class only. KR-C02 is the task that decides whether hooks need wrapping.",
+  "rows": [
+    {
+      "file": "crates/kroma-core/src/completion_gate.rs",
+      "line": 202,
+      "class": "Verifier",
+      "policy": "ExecutionPolicy (probe + wrap_argv)",
+      "owner": "verification step; bounded by the gate deadline",
+      "evidence": "t35_surface_execution_boundary, t36_external_verifier_delivery",
+      "snippet": "let (mut child, proc_group) = match ProcessLaunch::new(program, program_args)"
+    },
+    {
+      "file": "crates/kroma-core/src/extensions.rs",
+      "line": 1222,
+      "class": "Hook",
+      "policy": "none (ProcessLaunch only: credential scrub + process group)",
+      "owner": "hook invocation; bounded by the shared hard-stop deadline",
+      "evidence": "none for isolation -- see KR-C02",
+      "snippet": "let (mut child, proc_group) = crate::process_launch::ProcessLaunch::new("
+    },
+    {
+      "file": "crates/kroma-core/src/job_scope.rs",
+      "line": 486,
+      "class": "Worker",
+      "policy": "none (process-group bookkeeping for children the caller already owns)",
+      "owner": "job scope; reclaims recorded groups",
+      "evidence": "job_scope unit tests",
+      "snippet": "let mut first = Command::new(\"sleep\");"
+    },
+    {
+      "file": "crates/kroma-core/src/job_scope.rs",
+      "line": 497,
+      "class": "Worker",
+      "policy": "none (process-group bookkeeping for children the caller already owns)",
+      "owner": "job scope; reclaims recorded groups",
+      "evidence": "job_scope unit tests",
+      "snippet": "scope.spawn(Command::new(\"true\")).err(),"
+    },
+    {
+      "file": "crates/kroma-core/src/job_scope.rs",
+      "line": 538,
+      "class": "Worker",
+      "policy": "none (process-group bookkeeping for children the caller already owns)",
+      "owner": "job scope; reclaims recorded groups",
+      "evidence": "job_scope unit tests",
+      "snippet": "let mut sleeper = Command::new(\"sleep\");"
+    },
+    {
+      "file": "crates/kroma-core/src/job_scope.rs",
+      "line": 557,
+      "class": "Worker",
+      "policy": "none (process-group bookkeeping for children the caller already owns)",
+      "owner": "job scope; reclaims recorded groups",
+      "evidence": "job_scope unit tests",
+      "snippet": "let mut orphan = std::process::Command::new(\"sleep\")"
+    },
+    {
+      "file": "crates/kroma-core/src/mcp.rs",
+      "line": 287,
+      "class": "McpServer",
+      "policy": "none (ProcessLaunch; sidecars are operator-configured infrastructure)",
+      "owner": "MCP host lifetime; torn down on unmount",
+      "evidence": "test-mcp-*, t21/t22 protocol fixtures",
+      "snippet": "let (mut child, group) = ProcessLaunch::new(program, args.to_vec())"
+    },
+    {
+      "file": "crates/kroma-core/src/mcp.rs",
+      "line": 1678,
+      "class": "McpServer",
+      "policy": "none (ProcessLaunch; sidecars are operator-configured infrastructure)",
+      "owner": "MCP host lifetime; torn down on unmount",
+      "evidence": "test-mcp-*, t21/t22 protocol fixtures",
+      "snippet": "let mut bystander_cmd = std::process::Command::new(\"sleep\");"
+    },
+    {
+      "file": "crates/kroma-core/src/mcp.rs",
+      "line": 2003,
+      "class": "McpServer",
+      "policy": "none (ProcessLaunch; sidecars are operator-configured infrastructure)",
+      "owner": "MCP host lifetime; torn down on unmount",
+      "evidence": "test-mcp-*, t21/t22 protocol fixtures",
+      "snippet": "child: tokio::process::Command::new(\"true\").spawn().unwrap(),"
+    },
+    {
+      "file": "crates/kroma-core/src/mcp.rs",
+      "line": 2004,
+      "class": "McpServer",
+      "policy": "none (ProcessLaunch; sidecars are operator-configured infrastructure)",
+      "owner": "MCP host lifetime; torn down on unmount",
+      "evidence": "test-mcp-*, t21/t22 protocol fixtures",
+      "snippet": "stdin: tokio::process::Command::new(\"true\")"
+    },
+    {
+      "file": "crates/kroma-core/src/mcp.rs",
+      "line": 2012,
+      "class": "McpServer",
+      "policy": "none (ProcessLaunch; sidecars are operator-configured infrastructure)",
+      "owner": "MCP host lifetime; torn down on unmount",
+      "evidence": "test-mcp-*, t21/t22 protocol fixtures",
+      "snippet": "tokio::process::Command::new(\"true\")"
+    },
+    {
+      "file": "crates/kroma-core/src/mcp.rs",
+      "line": 2021,
+      "class": "McpServer",
+      "policy": "none (ProcessLaunch; sidecars are operator-configured infrastructure)",
+      "owner": "MCP host lifetime; torn down on unmount",
+      "evidence": "test-mcp-*, t21/t22 protocol fixtures",
+      "snippet": "&tokio::process::Command::new(\"true\").spawn().unwrap(),"
+    },
+    {
+      "file": "crates/kroma-core/src/process_launch.rs",
+      "line": 308,
+      "class": "Worker",
+      "policy": "none (shared launch seam: scrub, group, fail-closed containment)",
+      "owner": "caller-owned",
+      "evidence": "process_launch unit tests",
+      "snippet": "let mut cmd = tokio::process::Command::new(&self.program);"
+    },
+    {
+      "file": "crates/kroma-core/src/process_launch.rs",
+      "line": 321,
+      "class": "Worker",
+      "policy": "none (shared launch seam: scrub, group, fail-closed containment)",
+      "owner": "caller-owned",
+      "evidence": "process_launch unit tests",
+      "snippet": "let mut cmd = std::process::Command::new(&self.program);"
+    },
+    {
+      "file": "crates/kroma-core/src/process_launch.rs",
+      "line": 337,
+      "class": "Worker",
+      "policy": "none (shared launch seam: scrub, group, fail-closed containment)",
+      "owner": "caller-owned",
+      "evidence": "process_launch unit tests",
+      "snippet": "let mut cmd = std::process::Command::new(\"/bin/true\");"
+    },
+    {
+      "file": "crates/kroma-core/src/process_launch.rs",
+      "line": 371,
+      "class": "Worker",
+      "policy": "none (shared launch seam: scrub, group, fail-closed containment)",
+      "owner": "caller-owned",
+      "evidence": "process_launch unit tests",
+      "snippet": "ProcessLaunch::new(\"/bin/true\", Vec::<String>::new()).env_policy("
+    },
+    {
+      "file": "crates/kroma-core/src/process_launch.rs",
+      "line": 385,
+      "class": "Worker",
+      "policy": "none (shared launch seam: scrub, group, fail-closed containment)",
+      "owner": "caller-owned",
+      "evidence": "process_launch unit tests",
+      "snippet": "ProcessLaunch::new(\"/bin/true\", Vec::<String>::new()).env_policy("
+    },
+    {
+      "file": "crates/kroma-core/src/process_launch.rs",
+      "line": 399,
+      "class": "Worker",
+      "policy": "none (shared launch seam: scrub, group, fail-closed containment)",
+      "owner": "caller-owned",
+      "evidence": "process_launch unit tests",
+      "snippet": "ProcessLaunch::new(\"/bin/true\", Vec::<String>::new())"
+    },
+    {
+      "file": "crates/kroma-core/src/process_launch.rs",
+      "line": 409,
+      "class": "Worker",
+      "policy": "none (shared launch seam: scrub, group, fail-closed containment)",
+      "owner": "caller-owned",
+      "evidence": "process_launch unit tests",
+      "snippet": "ProcessLaunch::new(\"/bin/true\", Vec::<String>::new())"
+    },
+    {
+      "file": "crates/kroma-core/src/process_launch.rs",
+      "line": 419,
+      "class": "Worker",
+      "policy": "none (shared launch seam: scrub, group, fail-closed containment)",
+      "owner": "caller-owned",
+      "evidence": "process_launch unit tests",
+      "snippet": "ProcessLaunch::new(\"/bin/true\", Vec::<String>::new())"
+    },
+    {
+      "file": "crates/kroma-core/src/process_supervisor.rs",
+      "line": 297,
+      "class": "Worker",
+      "policy": "none (supervision layer used by every caller above)",
+      "owner": "caller-owned; deadline + output budget enforced here",
+      "evidence": "process_supervisor unit tests",
+      "snippet": "let launch = ProcessLaunch::new(spec.argv[0].clone(), spec.argv[1..].to_vec())"
+    },
+    {
+      "file": "crates/kroma-core/src/provenance.rs",
+      "line": 489,
+      "class": "Probe",
+      "policy": "sandbox::run_bounded (deadline + output budget)",
+      "owner": "single bounded VCS probe",
+      "evidence": "b08c_git_metadata",
+      "snippet": "Command::new(\"git\")"
+    },
+    {
+      "file": "crates/kroma-core/src/sandbox.rs",
+      "line": 176,
+      "class": "Worker",
+      "policy": "n/a (this *is* the policy/backend)",
+      "owner": "n/a",
+      "evidence": "b13_sandbox_isolation",
+      "snippet": "let mut command = std::process::Command::new(program);"
+    },
+    {
+      "file": "crates/kroma-core/src/session_ownership.rs",
+      "line": 782,
+      "class": "Worker",
+      "policy": "none (cross-process lock holder probe)",
+      "owner": "lock test child",
+      "evidence": "session_ownership unit tests",
+      "snippet": "let mut cmd = std::process::Command::new(&exe);"
+    },
+    {
+      "file": "crates/kroma-core/src/session_ownership.rs",
+      "line": 900,
+      "class": "Worker",
+      "policy": "none (cross-process lock holder probe)",
+      "owner": "lock test child",
+      "evidence": "session_ownership unit tests",
+      "snippet": "let mut child = std::process::Command::new(&exe)"
+    },
+    {
+      "file": "crates/kroma-core/src/tool/codemode.rs",
+      "line": 147,
+      "class": "AgentBash",
+      "policy": "ExecutionPolicy (code mode runs through the supervised bash tool)",
+      "owner": "run-scoped",
+      "evidence": "t31_codemode_execution",
+      "snippet": "Command::new(\"python3\")"
+    },
+    {
+      "file": "crates/kroma-core/src/tool/codemode.rs",
+      "line": 236,
+      "class": "AgentBash",
+      "policy": "ExecutionPolicy (code mode runs through the supervised bash tool)",
+      "owner": "run-scoped",
+      "evidence": "t31_codemode_execution",
+      "snippet": "let out = Command::new(\"/bin/sh\")"
+    },
+    {
+      "file": "crates/kroma-core/src/tools/bash.rs",
+      "line": 288,
+      "class": "AgentBash",
+      "policy": "ExecutionPolicy (guest workspace root, opt-in)",
+      "owner": "run-scoped; cancelled by the run's watch channel",
+      "evidence": "t09_execution_boundary, t31_codemode_execution, b13_sandbox_isolation",
+      "snippet": "let mut launch = ProcessLaunch::new(prepared.program, prepared.args).cwd(workspace_root);"
+    }
+  ]
+}
