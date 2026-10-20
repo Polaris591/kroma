@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "FOUNDATION-01-SYNTHETIC-SMOKE",
+  "arms": [
+    {"id": "single_agent", "kind": "baseline", "model": "demo-only-model", "price_table": "demonstration-rates-not-for-billing"},
+    {"id": "adaptive_tournament_3", "kind": "candidate", "model": "demo-only-model", "price_table": "demonstration-rates-not-for-billing"}
+  ],
+  "tasks": [
+    {"id": "fixable-smoke-one", "source": "suite.json#0"},
+    {"id": "stall-smoke-two", "source": "suite.json#1"},
+    {"id": "fixable-smoke-three", "source": "suite.json#2"},
+    {"id": "stall-smoke-four", "source": "suite.json#3"},
+    {"id": "fixable-smoke-five", "source": "suite.json#4"},
+    {"id": "stall-smoke-six", "source": "suite.json#5"}
+  ],
+  "holdout": ["fixable-smoke-five", "stall-smoke-six"],
+  "repeats": 2,
+  "sandbox": "synthetic-only-no-execution-isolation-claim",
+  "oracle": "BenchTask::evaluate:v1",
+  "max_total_tokens": 240000
+}

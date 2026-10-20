@@ -1,0 +1,58 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "E08",
+  "title": "有界自治与配置演进",
+  "hypothesis": "H4",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": "needs a frozen dev/holdout suite, a verifier outside the workspace and a provider run; preregistration lands first so the run cannot be shaped after seeing results",
+  "task_cluster_definition": {
+    "cluster": "fixed profile vs rule routing vs offline search",
+    "independence": "task is the sampling unit; tasks sharing a repository are resampled at cluster level",
+    "dev_suite": "experiments/exp-00/suite-dev.json",
+    "holdout_suite": "experiments/exp-00/suite-holdout.json"
+  },
+  "model_identity_observability": {
+    "requested": "gemini-3.8-flash (registry cobblemon/gemini-3.8-flash-high); backend revision not observable",
+    "observable": [
+      "requested model string",
+      "adapter version",
+      "usage totals"
+    ],
+    "not_observable": [
+      "backend revision",
+      "weight identity"
+    ],
+    "claim_limit": "same public label in the same window; no claim of identical weights"
+  },
+  "quality_margin": {
+    "primary_metric": "research_cost_usd",
+    "delta": "5 percentage points",
+    "rule": "a win needs fewer human interventions without a regression above 5pp"
+  },
+  "noise_and_power_plan": {
+    "plan": "9 runs; every controller turn counted",
+    "interval": "95% cluster bootstrap"
+  },
+  "cache_order_design": {
+    "order": "randomized within blocks; cache state recorded per run",
+    "warmup": "one discarded warmup per arm"
+  },
+  "budget": {
+    "plan": "9 runs, 1.5M tokens",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop after 9 runs or when the budget is exhausted",
+  "holdout_policy": {
+    "queries": 1,
+    "retire_after": "one confirmatory pass",
+    "retirement_action": "the holdout becomes validation and a new one must be frozen before another confirmatory claim",
+    "verifier_path": "/opt/kroma-exp/verifier.py"
+  },
+  "metrics": [
+    "research_cost_usd",
+    "human_interventions",
+    "regression_rate",
+    "routing_switch_count"
+  ]
+}

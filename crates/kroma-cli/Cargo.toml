@@ -1,0 +1,20 @@
+[package]
+name = "kroma-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kroma"
+path = "src/main.rs"
+
+[dependencies]
+kroma-core = { path = "../kroma-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

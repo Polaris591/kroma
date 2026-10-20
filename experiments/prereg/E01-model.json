@@ -1,0 +1,46 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "E01-model",
+  "title": "E01 模型半：工具 schema 的存在税（全量 vs 最小工具集）",
+  "hypothesis": "只挂核心工具 schema 的臂，在质量非劣的前提下降低每任务 token 与首 token 延迟",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": "preregistration lands before the paid run so the exposure pair and the rule cannot be chosen after seeing results",
+  "task_cluster_definition": {
+    "cluster": "full tool schema vs minimal tool set (read,edit,write,bash); one factor differs",
+    "independence": "task is the sampling unit; tasks sharing a repository are resampled at cluster level",
+    "dev_suite": "experiments/exp-00/suite-dev.json",
+    "holdout_suite": "experiments/exp-00/suite-holdout.json"
+  },
+  "model_identity_observability": {
+    "requested": "gpt-6-luna (cobblemon endpoint, chat-completions); backend revision not observable",
+    "observable": ["requested model string", "adapter version", "usage totals"],
+    "not_observable": ["backend revision", "weight identity"],
+    "claim_limit": "same public label in the same window; the schema set is the only controlled difference"
+  },
+  "quality_margin": {
+    "primary_metric": "quality_pass_rate",
+    "delta": "5 percentage points",
+    "rule": "non-inferiority on quality with delta = 5 percentage points; cost compared only when quality is non-inferior"
+  },
+  "noise_and_power_plan": {
+    "plan": "12 paired runs (6 tasks x 2 arms), cluster bootstrap over tasks",
+    "interval": "95% cluster bootstrap"
+  },
+  "cache_order_design": {
+    "order": "randomized within blocks; cache state recorded per run",
+    "warmup": "none"
+  },
+  "budget": {
+    "plan": "12 runs, 1M tokens, gpt-6-luna",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized for the cobblemon endpoint"
+  },
+  "stopping_rule": "stop at 12 runs; do not rerun to chase a direction",
+  "holdout_policy": {
+    "queries": 0,
+    "retire_after": "not used: calibration-style measurement",
+    "retirement_action": "holdout untouched",
+    "verifier_path": "/opt/kroma-exp/verifier.py"
+  },
+  "metrics": ["quality_pass_rate", "total_tokens", "ttft_ms", "wall_ms"]
+}

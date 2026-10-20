@@ -1,0 +1,126 @@
+[
+  {
+    "id": "fix-off-by-one",
+    "prompt": "tests/test_calc.py fails: total(3) returns 3, expected 6. Fix src/calc.py so the test passes. Do not edit the test file.",
+    "files": {
+      "src/calc.py": "def total(n):\n    return sum(range(n))\n",
+      "tests/test_calc.py": "from src.calc import total\n\n\ndef test_total():\n    assert total(3) == 6\n    assert total(0) == 0\n"
+    },
+    "expect_contains": [],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "/tmp/kv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/"
+    ]
+  },
+  {
+    "id": "add-guard-clause",
+    "prompt": "src/parse.py raises KeyError for a missing field. Make it raise ValueError with the message 'missing field' instead, keeping the existing tests passing.",
+    "files": {
+      "src/parse.py": "def get(obj, key):\n    return obj[key]\n",
+      "tests/test_parse.py": "import pytest\nfrom src.parse import get\n\n\ndef test_present():\n    assert get({'a': 1}, 'a') == 1\n\n\ndef test_missing_raises():\n    with pytest.raises(ValueError, match='missing field'):\n        get({}, 'a')\n"
+    },
+    "expect_contains": [
+      [
+        "src/parse.py",
+        "ValueError"
+      ]
+    ],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "/tmp/kv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/"
+    ]
+  },
+  {
+    "id": "rename-and-update-callsites",
+    "prompt": "Rename compute_total to compute_sum in src/lib.py and update every call site in the repository. Behaviour must not change.",
+    "files": {
+      "src/lib.py": "def compute_total(values):\n    return sum(values)\n",
+      "src/app.py": "from src.lib import compute_total\n\n\ndef run():\n    return compute_total([1, 2, 3])\n",
+      "tests/test_app.py": "from src.app import run\nfrom src.lib import compute_sum\n\n\ndef test_run():\n    assert run() == 6\n    assert compute_sum([1]) == 1\n"
+    },
+    "expect_contains": [
+      [
+        "src/lib.py",
+        "def compute_sum"
+      ]
+    ],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "/tmp/kv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/"
+    ]
+  },
+  {
+    "id": "add-missing-test-case",
+    "prompt": "tests/test_edge.py has no case for empty input. Add exactly one test that asserts total([]) == 0. Do not change production code.",
+    "files": {
+      "src/calc.py": "def total(values):\n    return sum(values)\n",
+      "tests/test_edge.py": "from src.calc import total\n\n\ndef test_single():\n    assert total([1]) == 1\n"
+    },
+    "expect_contains": [],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "/tmp/kv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/"
+    ]
+  },
+  {
+    "id": "bound-output-size",
+    "prompt": "src/report.py builds an unbounded string. Bound it to 65536 bytes and make the truncation explicit with the marker '...truncated' in the output.",
+    "files": {
+      "src/report.py": "def render(rows):\n    return ''.join(rows)\n",
+      "tests/test_report.py": "from src.report import render\n\n\ndef test_small():\n    assert render(['a', 'b']) == 'ab'\n\n\ndef test_large_is_bounded():\n    out = render(['x' * 1000] * 200)\n    assert len(out.encode()) <= 65536 + 20\n    assert out.endswith('...truncated')\n"
+    },
+    "expect_contains": [
+      [
+        "src/report.py",
+        "65536"
+      ]
+    ],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "/tmp/kv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/"
+    ]
+  },
+  {
+    "id": "reject-symlink-config",
+    "prompt": "src/loader.py follows symlinks when loading a config file. Make it refuse a symlinked path, raising ValueError, and keep the existing test passing.",
+    "files": {
+      "src/loader.py": "def load(path):\n    with open(path, 'r') as f:\n        return f.read()\n",
+      "tests/test_loader.py": "import os\nimport pytest\nfrom src.loader import load\n\n\ndef test_plain(tmp_path):\n    p = tmp_path / 'c.txt'\n    p.write_text('hi')\n    assert load(str(p)) == 'hi'\n\n\ndef test_symlink_refused(tmp_path):\n    p = tmp_path / 'c.txt'\n    p.write_text('hi')\n    link = tmp_path / 'l.txt'\n    os.symlink(p, link)\n    with pytest.raises(ValueError):\n        load(str(link))\n"
+    },
+    "expect_contains": [],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "/tmp/kv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/"
+    ]
+  }
+]

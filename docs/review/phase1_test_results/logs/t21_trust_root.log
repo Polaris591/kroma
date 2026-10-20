@@ -1,0 +1,24 @@
+Trust root state
+  ok  production trust root is empty and frozen (no placeholder keys)
+  ok  a test-key manifest is refused by the production entry
+manifest_binds_platform_version_and_artifact_hash
+  ok  the test-channel manifest verifies with the test key
+  ok  every bound field invalidates the signature when changed
+unknown_rotated_revoked_expired_key_is_rejected
+  ok  an unknown keyId is refused
+  ok  a revoked key (removed from the trusted map) is refused
+  ok  an expired manifest is refused
+  ok  a manifest for another target is refused
+  ok  a downgrade below the antirollback floor is refused
+signature_failure_never_overwrites_existing_binary
+  ok  an existing binary is never replaced by a download attempt
+[kroma] Fetching verified native pre-built binary for cli...
+[kroma] verification or extraction failed: Signature verification failed for release manifest
+  ok  a failed verification creates no file at all
+[kroma] production release trust root is unconfigured; on-demand binary download for cli is blocked.
+  ok  an unconfigured trust root refuses before touching the disk
+production_fixture_signed_by_release_key_verifies
+  ok  the production entry is fail-closed until the owner installs a key
+
+all 13 checks passed (test channel; no production key was used)
+EXIT=0

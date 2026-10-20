@@ -1,0 +1,139 @@
+{
+  "project": "Kroma Harness",
+  "source_commit": "e95845b688729abc9b7f9ef2c0b824feda1ef7e7",
+  "date": "2026-10-20",
+  "scope": [
+    "tool_system",
+    "cache_system",
+    "context_compaction"
+  ],
+  "status_notice": "Only KH-001 draft patch is prepared; no Rust compilation/live provider tests were run",
+  "tasks": [
+    {
+      "id": "KH-001",
+      "priority": "P0",
+      "title": "OpenAI cache write telemetry + honest RunEconomy",
+      "source_locations": [
+        "crates/kroma-core/src/provider/openai_responses.rs",
+        "crates/kroma-core/src/context_economy.rs"
+      ],
+      "acceptance": "Provider fixture tests, compile+clippy, old/new usage, real canary",
+      "status_as_of_2026_10_20": "P0 patch prepared; needs Rust tests"
+    },
+    {
+      "id": "KH-002",
+      "priority": "P0",
+      "title": "ProviderCapabilities + explicit GPT-5.6+/GPT-6 cache modes",
+      "source_locations": [
+        "crates/kroma-core/src/provider/openai_responses.rs"
+      ],
+      "acceptance": "Model feature matrix; explicit input breakpoint; tool/schema compatibility; wire golden fixtures",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-003",
+      "priority": "P0",
+      "title": "Stable prefix + native tool discovery integration",
+      "source_locations": [
+        "crates/kroma-core/src/agent_loop.rs",
+        "crates/kroma-core/src/tool/activation.rs"
+      ],
+      "acceptance": "Provider cache diagnostics show no avoidable tools_changed; host permission unchanged",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-004",
+      "priority": "P0",
+      "title": "MCP 2026-07-28 dual adapter and scoped catalog cache",
+      "source_locations": [
+        "crates/kroma-core/src/mcp.rs"
+      ],
+      "acceptance": "Legacy/new conformance; cacheScope/ttlMs; header/body and auth fuzz",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-005",
+      "priority": "P0",
+      "title": "Real-provider paired A/B benchmark infrastructure",
+      "source_locations": [
+        "crates/kroma-core/src/bench.rs"
+      ],
+      "acceptance": "Budget-matched live task scoring; signed raw usage and experiment identity",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-006",
+      "priority": "P1",
+      "title": "OpenAI/Claude tool_search and deferred tools",
+      "source_locations": [
+        "crates/kroma-core/src/provider/openai_responses.rs",
+        "crates/kroma-core/src/provider/anthropic_messages.rs"
+      ],
+      "acceptance": "Provider-specific native protocol and fallback; task noninferiority",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-007",
+      "priority": "P1",
+      "title": "Read-only programmatic tool aggregation",
+      "source_locations": [
+        "crates/kroma-core/src/tool/runtime.rs"
+      ],
+      "acceptance": "Strict cap; auth; call_id/caller lineage; no side effects",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-008",
+      "priority": "P1",
+      "title": "Provider cache miss observation",
+      "source_locations": [
+        "crates/kroma-core/src/request_observation.rs"
+      ],
+      "acceptance": "No PII; separate logical identical from actual provider hits and cache-miss reason",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-009",
+      "priority": "P1",
+      "title": "Cache-aware safe compaction planner",
+      "source_locations": [
+        "crates/kroma-core/src/context_projector.rs",
+        "crates/kroma-core/src/task_state.rs"
+      ],
+      "acceptance": "Preserves all hard constraints and tool pairing, stale evidence marking, rollback",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-010",
+      "priority": "P1",
+      "title": "Schema-constrained semantic compaction held-out gate",
+      "source_locations": [
+        "crates/kroma-core/src/task_state.rs"
+      ],
+      "acceptance": "Provenance linked fact checking, long horizon task pass, flag stays off until noninferiority",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-011",
+      "priority": "P2",
+      "title": "Provider-native compaction optional branch",
+      "source_locations": [
+        "crates/kroma-core/src/provider/openai_responses.rs",
+        "crates/kroma-core/src/provider/anthropic_messages.rs"
+      ],
+      "acceptance": "Opaque compaction replay + keep-tail, WAL independent, no tool-pair split",
+      "status_as_of_2026_10_20": "Not started"
+    },
+    {
+      "id": "KH-012",
+      "priority": "P2",
+      "title": "Tenant-scoped content/version read cache",
+      "source_locations": [
+        "crates/kroma-core/src/evidence_store.rs",
+        "crates/kroma-core/src/read_dedup.rs"
+      ],
+      "acceptance": "Write invalidation, permissions, deterministic-only, integrity and crash recovery",
+      "status_as_of_2026_10_20": "Not started"
+    }
+  ]
+}

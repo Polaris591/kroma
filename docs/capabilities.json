@@ -1,0 +1,470 @@
+{
+  "schema_version": 1,
+  "package_version": "1.5.0",
+  "safety_capabilities": [
+    "host_verification_policy",
+    "host_budget_ceiling",
+    "request_budget_lifecycle",
+    "bounded_io",
+    "wal_capacity",
+    "windows_writer_ownership",
+    "execution_boundary",
+    "container_lifecycle",
+    "mcp_handshake",
+    "provenance_identity",
+    "ahe_isolation"
+  ],
+  "capabilities": [
+    {
+      "id": "host_verification_policy",
+      "summary": "The host, not the RPC caller, decides whether a tournament candidate must be verified; protected paths and tamper policy are operator-owned.",
+      "implemented": true,
+      "wired": [
+        "rpc"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "t01_rpc_tournament_follows_the_host_verification_policy"
+        ],
+        "task": "T01"
+      },
+      "limits": []
+    },
+    {
+      "id": "canonical_tournament_intent",
+      "summary": "One canonical, hashed intent covers every tournament field; a one-shot grant cannot be replayed or retargeted, and the revision and live token cap are re-checked after approval.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [
+        "--counterfactual-probe"
+      ],
+      "evidence": {
+        "tests": [
+          "one_shot_tournament_grant_cannot_be_replayed_or_retargeted"
+        ],
+        "task": "T02"
+      },
+      "limits": []
+    },
+    {
+      "id": "host_budget_ceiling",
+      "summary": "A workspace may lower but never raise the operator's token, concurrency and model-window ceilings; every clamp is reported, and a request that cannot fit the window is never sent.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc",
+        "bench"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [
+        "--max-tokens"
+      ],
+      "evidence": {
+        "tests": [
+          "workspace_cannot_raise_host_token_ceiling"
+        ],
+        "task": "T03"
+      },
+      "limits": [
+        "Without an operator-configured window the context check is a conservative report, not a hard refusal."
+      ]
+    },
+    {
+      "id": "request_budget_lifecycle",
+      "summary": "Each request reserves only a per-request output allowance, so retries and sibling children stay affordable; settlement is explicit (not dispatched / measured / estimated / unknown) and overage is audited.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "per_request_output_does_not_consume_entire_run_allowance"
+        ],
+        "task": "T04"
+      },
+      "limits": []
+    },
+    {
+      "id": "typed_compaction_metadata",
+      "summary": "Compaction identity lives in host-written typed metadata, not in tool text; a forged marker grants nothing and a stub says whether its raw bytes are still available.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc",
+        "resume"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [
+        "--causal-pruning"
+      ],
+      "evidence": {
+        "tests": [
+          "forged_stub_without_overlay_is_untrusted"
+        ],
+        "task": "T05"
+      },
+      "limits": []
+    },
+    {
+      "id": "bounded_io",
+      "summary": "Every untrusted read opens with O_NOFOLLOW|O_NONBLOCK, verifies the type with fstat on the handle and streams at most limit+1 bytes; UTF-8 is validated after the size check.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc",
+        "bench",
+        "worker"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "workspace_config_fifo_never_blocks"
+        ],
+        "task": "T06"
+      },
+      "limits": [
+        "Windows has no O_NONBLOCK equivalent; the type check carries that case."
+      ]
+    },
+    {
+      "id": "wal_capacity",
+      "summary": "The writer checks the reader's line and file limits before the first byte, so a committed session is always resumable; disk-full and torn tails are handled transactionally.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc",
+        "resume"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "writer_never_commits_a_record_reader_would_reject"
+        ],
+        "task": "T07"
+      },
+      "limits": [
+        "No segmented WAL or rotation: the format fails closed at 8 MiB per line / 64 MiB per file."
+      ]
+    },
+    {
+      "id": "windows_writer_ownership",
+      "summary": "Windows takes a native exclusive byte-range lock (LockFileEx) on a lock file keyed by the normalised workspace path, so two processes cannot own the same workspace.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "lock_path_is_stable_across_equivalent_spellings"
+        ],
+        "task": "T08"
+      },
+      "limits": [
+        "Cross-process runtime cases are compiled for x86_64-pc-windows-gnu but NOT executed: no Windows runner is available in this environment (recorded BLOCKED in T08)."
+      ]
+    },
+    {
+      "id": "execution_boundary",
+      "summary": "A per-run execution policy decides, per spawn class, whether the sandbox is required and whether the network is allowed; a required backend that is unavailable refuses the command instead of running it on the host.",
+      "implemented": true,
+      "wired": [
+        "cli"
+      ],
+      "contract_tested": true,
+      "live_tested": true,
+      "default_on": false,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "sandbox_required_covers_agent_bash_not_only_scorer"
+        ],
+        "live": [
+          "bubblewrap namespace run in tests/t09_execution_boundary.rs"
+        ],
+        "task": "T09"
+      },
+      "limits": [
+        "Only the agent's bash goes through the policy today; verifier/probe/hook spawns are not yet wired (T11 residual).",
+        "Default is host mode; isolation is opt-in via execution_sandbox = bwrap | container:<runtime>:<image>."
+      ]
+    },
+    {
+      "id": "container_lifecycle",
+      "summary": "Containers are named and tracked by a cidfile in the trusted state area; cancellation stops, removes and verifies the workload, and a failed cleanup reports RecoveryRequired with the retained id.",
+      "implemented": true,
+      "wired": [
+        "cli"
+      ],
+      "contract_tested": true,
+      "live_tested": true,
+      "default_on": false,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "cancel_leaves_no_live_container_or_grandchild"
+        ],
+        "live": [
+          "real docker 26.1.5 with alpine:3.20 in tests/t10_container_lifecycle.rs"
+        ],
+        "task": "T10"
+      },
+      "limits": [
+        "Podman compatibility is not claimed: only a docker-compatible CLI was exercised."
+      ]
+    },
+    {
+      "id": "run_plan_assembly",
+      "summary": "One plan derived from the resolved configuration gives every surface the same budget, policy, execution boundary and feature eligibility; a mechanism whose dependency is missing fails at start.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "bench"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "feature_matrix_covers_cli_rpc_bench_worker_resume"
+        ],
+        "task": "T11"
+      },
+      "limits": [
+        "The RPC, worker and resume doors do not call RunPlan yet; equality is proven at the plan level, not at each door.",
+        "Mechanisms do not increment the executed counter in production, so a run reports 0 executions rather than a fabricated gain."
+      ]
+    },
+    {
+      "id": "tool_discovery_activation",
+      "summary": "discover_tools can activate a schema for the next request (policy-checked, budgeted, ordered), so a provider that only permits declared tools can call what it discovered; unmount removes schema and dispatch.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": false,
+      "cli_flags": [
+        "--on-demand-tools"
+      ],
+      "evidence": {
+        "tests": [
+          "strict_provider_can_call_newly_discovered_tool"
+        ],
+        "task": "T12"
+      },
+      "limits": [
+        "Activation is per run and not carried across --resume."
+      ]
+    },
+    {
+      "id": "mcp_handshake",
+      "summary": "The client implements 2024-11-05 only: an unknown negotiated version is refused before notifications/initialized, tools/list is required to declare the capability, and the catalog is paginated with page/tool/schema/cursor bounds.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [
+        "--mcp-server"
+      ],
+      "evidence": {
+        "tests": [
+          "mcp_tools_pagination_is_complete_and_bounded"
+        ],
+        "task": "T13"
+      },
+      "limits": [
+        "stdio transport only; resources, prompts, sampling and remote transports are not claimed.",
+        "Server-to-client requests are not answered (they are not faked either)."
+      ]
+    },
+    {
+      "id": "cache_breakpoints",
+      "summary": "The wire cache breakpoint follows the growing stable history instead of sitting at the frozen baseline, and cache writes are accounted separately from reads.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "pre_compaction_history_breakpoint_advances"
+        ],
+        "task": "T14"
+      },
+      "limits": [
+        "No real-network cache canary has been run (NOT_RUN: needs budget and credentials)."
+      ]
+    },
+    {
+      "id": "evidence_store",
+      "summary": "Memory eviction is not deletion: evicted evidence is written to a keyed artifact (session/branch/event/hash) and reads verify the hash and directory privacy, reporting Available/Gone/Corrupt/Forbidden.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc",
+        "resume"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "evicted_text_can_be_loaded_by_trusted_artifact_ref"
+        ],
+        "task": "T15"
+      },
+      "limits": [
+        "32 MiB per artifact; GC is explicit (by manifest reference), not scheduled."
+      ]
+    },
+    {
+      "id": "repo_graph_budget",
+      "summary": "A warm cache obeys the same file and byte budgets as a cold build, and the index carries comment words so a natural-language question can reach a file.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "rpc"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "cached_and_uncached_graph_obey_same_total_cap"
+        ],
+        "task": "T16"
+      },
+      "limits": [
+        "Comment indexing is a heuristic scanner, not a parser."
+      ]
+    },
+    {
+      "id": "experiment_manifest",
+      "summary": "A versioned manifest freezes arms, models, prices, sandbox, oracle, repeats and the holdout; duplicate ids, an empty or unknown holdout, an oversized matrix and an unknown field are all refused before any provider call.",
+      "implemented": true,
+      "wired": [
+        "cli"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": false,
+      "cli_flags": [
+        "--experiment"
+      ],
+      "evidence": {
+        "tests": [
+          "declared_but_empty_holdout_never_accepts"
+        ],
+        "task": "T17"
+      },
+      "limits": [
+        "--experiment validates and dry-runs; manifest-driven provider bench execution is not wired (T24)."
+      ]
+    },
+    {
+      "id": "usage_cost_ledger",
+      "summary": "Every attempt is priced on the model it reported, cache writes and reads have distinct rates, and an estimate or missing usage makes the total explicitly incomplete instead of a number.",
+      "implemented": true,
+      "wired": [],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": false,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "mixed_returned_models_are_priced_per_attempt"
+        ],
+        "task": "T18"
+      },
+      "limits": [
+        "Library-level: not yet consumed by the bench report or CLI output (T24)."
+      ]
+    },
+    {
+      "id": "provenance_identity",
+      "summary": "The VCS probe is bounded and reports a timeout distinctly, the source hash reads through the bounded reader, unreadable input makes the identity incomplete, and the executable bit is part of it.",
+      "implemented": true,
+      "wired": [
+        "cli",
+        "bench"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "git_probe_timeout_is_observable"
+        ],
+        "task": "T18"
+      },
+      "limits": [
+        "The read-error branch is exercised through the size bound, because the test process runs as root."
+      ]
+    },
+    {
+      "id": "ahe_isolation",
+      "summary": "The self-repair experimenter runs baseline and candidate from frozen copies, protects the judge (scorer, completion gate, AHE policy, trusted tests), splits prediction/validity/improvement/promotion, and never promotes by itself.",
+      "implemented": true,
+      "wired": [
+        "cli"
+      ],
+      "contract_tested": true,
+      "live_tested": false,
+      "default_on": true,
+      "cli_flags": [],
+      "evidence": {
+        "tests": [
+          "predicting_existing_failure_is_not_promotion"
+        ],
+        "task": "T19"
+      },
+      "limits": [
+        "Produces a candidate patch and a report only; promotion requires human approval after an independent regression."
+      ]
+    }
+  ]
+}

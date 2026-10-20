@@ -1,0 +1,65 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "E03",
+  "title": "E03 revision-bound knowledge: does a run notice that a fact it read has gone stale?",
+  "hypothesis": "Both arms can re-read a mutated file, so the question is not whether staleness is survivable but what it costs. With `ctx.taskstate.v1` the projection drops facts whose file revision is no longer current, so the run should touch the mutated file more often and pass at least as often; the legacy profile keeps the stale text and should pass less often without saving work.",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": null,
+  "disclosure": "A smoke run of the legacy arm (1 repetition, both tasks, both passed, 178 100 and 104 854 tokens) preceded this file because the harness itself needed to be proven end to end; it is excluded from every number below. The suite and the harness were frozen before that smoke run, only the preregistration was late.",
+  "task_cluster_definition": {
+    "cluster": "one task is one cluster; each task rewrites the file it told the agent to read, twice, mid-run",
+    "dev_suite": "/opt/kroma-exp/suite-dev.json",
+    "dev_suite_note": "unrelated static suite; not used here",
+    "holdout_suite": "/opt/kroma-exp/suite-revision.json",
+    "suite_sha256": "ea5337ba48492273f5ab01c8b59f4b40851ce43d6217df4d4820a5f957ca9cf7",
+    "tasks": [
+      "follow-the-config",
+      "renamed-setting"
+    ],
+    "revision_plan": "each task rewrites its config module at t=25 s and again at t=55 s; the graded contract is the post-revision state",
+    "arms": [
+      "legacy (p2, no candidate)",
+      "taskstate (ctx.taskstate.v1)"
+    ],
+    "runs": "2 tasks x 2 arms x 2 repetitions = 8",
+    "fairness_check": "each task graded unsolved (exit 1) and with a reference solution (exit 0) after the final revision, before any run",
+    "harness": "scripts/run-revision-experiment.py - runs kroma directly, applies the revisions on a timer, then grades with the out-of-workspace verifier"
+  },
+  "model_identity_observability": {
+    "reported_model_required_in_report": true,
+    "note": "same model both arms; absolute token claims carry the model identity"
+  },
+  "quality_margin": {
+    "primary_metric": "fix_success_rate",
+    "delta": "5 percentage points",
+    "rule": "quality non-inferior within 5pp before any cost claim"
+  },
+  "noise_and_power_plan": {
+    "plan": "8 runs; same model, fixed revision offsets, arm order alternated",
+    "interval": "95% cluster bootstrap over tasks, resamples 4000",
+    "statement": "2 clusters cannot establish a distribution; the report states direction and whether the interval crosses zero, and nothing stronger"
+  },
+  "cache_order_design": {
+    "order": "arm order alternated by task",
+    "cache": "provider-side cache state is not controllable and is not claimed"
+  },
+  "budget": {
+    "plan": "8 runs, 3 000k tokens",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop after 8 runs or 3 000k tokens, whichever comes first",
+  "holdout_policy": {
+    "queries": 1,
+    "retire_after": "one pass",
+    "retirement_action": "this suite becomes validation; a new one must be frozen before another claim",
+    "verifier_path": "/opt/kroma-exp/verifier.py",
+    "prior_use": "none"
+  },
+  "metrics": [
+    "fix_success_rate",
+    "tokens_per_success",
+    "tool_calls_on_mutated",
+    "revisions_applied"
+  ]
+}

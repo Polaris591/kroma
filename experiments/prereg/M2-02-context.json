@@ -1,0 +1,46 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "M2-02-context",
+  "title": "自身消融：上下文单因素（p2 vs p2+因果剪枝）",
+  "hypothesis": "causal pruning 在质量非劣的前提下降低同 run 的 token 用量",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": "preregistration lands before the paid run so the arms and the rule cannot be chosen after seeing results",
+  "task_cluster_definition": {
+    "cluster": "p2 with fixed tools vs p2 with causal_pruning; one factor differs",
+    "independence": "task is the sampling unit; tasks sharing a repository are resampled at cluster level",
+    "dev_suite": "experiments/exp-00/suite-dev.json",
+    "holdout_suite": "experiments/exp-00/suite-holdout.json"
+  },
+  "model_identity_observability": {
+    "requested": "gemini-3.8-flash (registry cobblemon/gemini-3.8-flash-high); backend revision not observable",
+    "observable": ["requested model string", "adapter version", "usage totals"],
+    "not_observable": ["backend revision", "weight identity"],
+    "claim_limit": "same public label in the same window; no claim of identical weights"
+  },
+  "quality_margin": {
+    "primary_metric": "quality_pass_rate",
+    "delta": "5 percentage points",
+    "rule": "non-inferiority on quality with delta = 5 percentage points; cost compared only when quality is non-inferior"
+  },
+  "noise_and_power_plan": {
+    "plan": "12 paired runs (6 tasks x 2 arms), cluster bootstrap over tasks",
+    "interval": "95% cluster bootstrap"
+  },
+  "cache_order_design": {
+    "order": "randomized within blocks; cache state recorded per run",
+    "warmup": "none: cache state is reported, not controlled"
+  },
+  "budget": {
+    "plan": "12 runs, 2M tokens, gemini-3.8-flash",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop at 12 runs; if the quality CI lower bound is below -5pp, stop and record rejection",
+  "holdout_policy": {
+    "queries": 1,
+    "retire_after": "one confirmatory pass",
+    "retirement_action": "the holdout becomes validation and a new one must be frozen before another confirmatory claim",
+    "verifier_path": "/opt/kroma-exp/verifier.py"
+  },
+  "metrics": ["quality_pass_rate", "total_tokens", "cache_hit_ratio", "ttft_ms"]
+}

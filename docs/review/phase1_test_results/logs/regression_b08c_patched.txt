@@ -1,0 +1,5 @@
+run 3 FAILED
+thread 'carries_a_sha256_commit_through' panicked at crates/kroma-core/tests/b08c_git_metadata.rs:112:5:
+  left: None
+ right: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+patched b08c failures: 1/20

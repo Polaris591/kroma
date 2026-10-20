@@ -1,0 +1,21 @@
+{
+  "name": "kroma",
+  "version": "1.5.0",
+  "description": "Kroma — Next-Generation Prismatic Microkernel Coding Agent Harness in Rust",
+  "license": "MIT",
+  "homepage": "https://github.com/Polaris591/kroma",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Polaris591/kroma.git"
+  },
+  "bin": {
+    "kroma": "bin/kroma.js"
+  },
+  "scripts": {
+    "pack:npm": "./npm/build-npm-packages.sh",
+    "test:bench": "node --test scripts/test-bench-foundation.js scripts/test-bench-phase2.js scripts/test-bench-isolation.js scripts/test-bench-sandbox-supervisor.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

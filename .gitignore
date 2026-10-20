@@ -1,0 +1,19 @@
+/target
+
+/npm/dist/
+/npm/cli-*/bin/kroma*
+__pycache__/
+dist-t30/
+rc1/artifacts/kroma-*
+rc1/artifacts/*.tar.gz
+rc1/artifacts/*.patch
+
+# Release rehearsal material is never source or a signing authority.
+/candidate/
+/raw-artifacts/
+/source-run.json
+/source-jobs.json
+/source-artifacts.json
+/release-attestation.json
+/release-verdict.json
+/signed-provenance.json

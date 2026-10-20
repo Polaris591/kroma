@@ -1,0 +1,26 @@
+[
+  {
+    "id": "fixable-smoke-one", "prompt": "For this smoke task, replace TODO with fixed in src/one.txt.",
+    "files": {"src/one.txt": "TODO\n"}, "expect_contains": [["src/one.txt", "fixed"]], "regression_guard": true
+  },
+  {
+    "id": "stall-smoke-two", "prompt": "For this smoke task, replace TODO with fixed in src/two.txt.",
+    "files": {"src/two.txt": "TODO\n"}, "expect_contains": [["src/two.txt", "fixed"]]
+  },
+  {
+    "id": "fixable-smoke-three", "prompt": "For this smoke task, replace TODO with fixed in src/three.txt.",
+    "files": {"src/three.txt": "TODO\n"}, "expect_contains": [["src/three.txt", "fixed"]]
+  },
+  {
+    "id": "stall-smoke-four", "prompt": "For this smoke task, replace TODO with fixed in src/four.txt.",
+    "files": {"src/four.txt": "TODO\n"}, "expect_contains": [["src/four.txt", "fixed"]]
+  },
+  {
+    "id": "fixable-smoke-five", "prompt": "For this smoke task, replace TODO with fixed in src/five.txt.",
+    "files": {"src/five.txt": "TODO\n"}, "expect_contains": [["src/five.txt", "fixed"]]
+  },
+  {
+    "id": "stall-smoke-six", "prompt": "For this smoke task, replace TODO with fixed in src/six.txt.",
+    "files": {"src/six.txt": "TODO\n"}, "expect_contains": [["src/six.txt", "fixed"]]
+  }
+]

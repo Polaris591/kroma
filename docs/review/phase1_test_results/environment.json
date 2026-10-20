@@ -1,0 +1,33 @@
+{
+  "schema": "kroma.phase1.environment.v1",
+  "recorded_at": "2026-10-17T16:55+08:00",
+  "os": "Debian GNU/Linux 13 (trixie)",
+  "kernel": "6.12.95+deb13-amd64",
+  "arch": "x86_64",
+  "toolchain": {
+    "rustc": "rustc 1.85.1 (4eb161250 2025-03-15)",
+    "cargo": "cargo 1.85.1 (d73d2caf9 2024-12-31)",
+    "rustfmt": "rustfmt 1.8.0-stable (4eb161250e 2025-03-15)",
+    "clippy": "clippy 0.1.85 (4eb161250e 2025-03-15)",
+    "toolchain_pin": "rust-toolchain.toml -> channel 1.85.1, components rustfmt+clippy",
+    "node": "v24.21.0"
+  },
+  "source": {
+    "delivered_archive": "Kroma_修改源码_第一批.tar.gz",
+    "delivered_archive_sha256": "0bf8e517bcd4ae2f9369f84925332bcc0e3fcd0d2d2f6cd807efa9102a1fd86a",
+    "upstream_original_archive": "Kroma-源码-20261017.tar.gz",
+    "upstream_original_sha256": "73adf8a6d5afccde8d7cfbe5ff75b6afb597889f19685a180c937513537896ee",
+    "original_archive_available_locally": false,
+    "original_baseline_reconstruction": "patch -R applied to the delivered tree; reverse apply touched exactly the 8 patched files, so the reconstructed baseline is byte-identical to the original for everything the patch did not touch",
+    "worktree": "/opt/kroma-p1",
+    "reconstructed_baseline_worktree": "/opt/kroma-orig",
+    "cargo_lock_sha256": "caa80f28083d1243d9c8e2d0e873404620cd9adf0a052159d286536ccf713f8c",
+    "git_commit_at_record": "7973e36561a220b59d4431970543e98de3e2c4b2",
+    "git_tree": "3292fbb6e7909761e19693e019c2e05d87814156",
+    "crate_version": "1.5.0"
+  },
+  "notes": [
+    "The worktree is a fresh git repo created for this review; it does not share history with the owner's GitHub repository.",
+    "The delivered tree did not compile at all before this review (E0004 in context_projector.rs)."
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "format": "kroma.goal.envelope/1",
+  "owner": "2452448276",
+  "granted_at": "2026-10-18T15:35:00Z",
+  "basis": "owner confirmation during /goal: 32 packages + 8 experiments, no controller, gemini-3.8-flash unlimited",
+  "operations": {
+    "local_work": {
+      "decision": "allowed",
+      "scope": "/opt/kroma-v4/source on branch integration/v4",
+      "limits": {
+        "max_worker_repair_attempts": 2,
+        "product_release": false
+      }
+    },
+    "paid_provider": {
+      "decision": "allowed",
+      "model_label": "gemini-3.8-flash",
+      "registry_model": "cobblemon/gemini-3.8-flash-high",
+      "cash_cap_usd": null,
+      "cash_cap_basis": "explicit unlimited authorization from owner",
+      "requires_preregistration": true,
+      "note": "each experiment writes its preregistration before the first paid request; token and cash spend are recorded in the run ledger"
+    },
+    "production_key": {
+      "decision": "refused",
+      "reason": "production signing keys stay offline; the operator never reads, copies or signs with them in this goal"
+    },
+    "release": {
+      "decision": "refused",
+      "reason": "formal release and public artifacts need a separate owner authorization"
+    },
+    "push_protected": {
+      "decision": "refused",
+      "reason": "no remote is configured for this tree; pushing a protected branch is out of scope"
+    },
+    "ci_artifact_read": {
+      "decision": "blocked",
+      "blocked_reason": "no GitHub token in the environment; artifact download needs actions:read, and the latest observed run has zero artifacts",
+      "unblock": "export GITHUB_TOKEN with actions:read on Polaris591/kroma, then re-run `goal-interface.py probe --ci`"
+    }
+  }
+}

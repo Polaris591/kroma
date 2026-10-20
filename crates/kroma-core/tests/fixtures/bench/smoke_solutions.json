@@ -1,0 +1,76 @@
+{
+ "py-off-by-one": {
+  "src/calc.py": "def total(n):\n    return sum(range(1, n + 1))\n"
+ },
+ "py-guard-division": {
+  "src/guard.py": "def ratio(a, b):\n    if b == 0:\n        raise ValueError('b must not be zero')\n    return a / b\n"
+ },
+ "py-missing-key": {
+  "src/store.py": "def get(mapping, key):\n    return mapping.get(key)\n"
+ },
+ "py-csv-parse": {
+  "src/rows.py": "def parse(line):\n    return [field.strip() for field in line.split(',')]\n"
+ },
+ "py-clamp": {
+  "src/clamp.py": "def clamp(value, low, high):\n    return max(low, min(high, value))\n"
+ },
+ "py-safe-join": {
+  "src/paths.py": "import os\n\ndef safe_join(base, name):\n    if os.path.isabs(name):\n        raise ValueError('absolute paths are not allowed')\n    target = os.path.normpath(os.path.join(base, name))\n    root = os.path.normpath(base)\n    if target != root and not target.startswith(root + os.sep):\n        raise ValueError('path escapes the base directory')\n    return target\n"
+ },
+ "py-sql-parameters": {
+  "src/query.py": "def user_query(cursor, name):\n    return cursor.execute('SELECT * FROM users WHERE name = ?', (name,))\n"
+ },
+ "py-public-api": {
+  "src/api.py": "def parse(text, *, strict=False):\n    if strict and text != text.strip():\n        raise ValueError('unexpected whitespace')\n    return text.strip()\n"
+ },
+ "meta-json-config": {
+  "config/app.json": "{\n  \"retries\": 3,\n  \"timeout_ms\": 500\n}\n"
+ },
+ "multi-file-consistency": {
+  "src/version.py": "VERSION = '2.1.0'\n",
+  "README.md": "# Demo\nVersion: 2.1.0\n",
+  "config/app.json": "{\n  \"version\": \"2.1.0\"\n}\n"
+ },
+ "docs-return-type": {
+  "src/parse.py": "def parse(text):\n    \"\"\"Split text and return a list of fields.\"\"\"\n    return text.split()\n"
+ },
+ "delete-oracle-is-not-a-pass": {
+  "src/check.py": "def check(value):\n    return isinstance(value, int) and not isinstance(value, bool) and value > 0\n"
+ },
+ "py-dedupe-order": {
+  "src/uniq.py": "def unique(items):\n    seen = set()\n    out = []\n    for item in items:\n        if item not in seen:\n            seen.add(item)\n            out.append(item)\n    return out\n"
+ },
+ "py-duration-parse": {
+  "src/duration.py": "UNITS = {'s': 1, 'm': 60, 'h': 3600}\n\ndef parse_duration(text):\n    if not text or text[-1] not in UNITS:\n        raise ValueError('unknown duration unit: ' + repr(text))\n    return int(text[:-1]) * UNITS[text[-1]]\n"
+ },
+ "py-range-overlap": {
+  "src/range_overlap.py": "def overlaps(a_start, a_end, b_start, b_end):\n    return a_start <= b_end and b_start <= a_end\n"
+ },
+ "py-slugify": {
+  "src/slug.py": "import re\n\ndef slugify(text):\n    lowered = text.lower()\n    slug = re.sub(r'[^a-z0-9]+', '-', lowered)\n    return slug.strip('-')\n"
+ },
+ "py-parse-bool": {
+  "src/flag.py": "TRUTHY = {'yes', 'true'}\nFALSY = {'no', 'false'}\n\ndef to_bool(text):\n    key = text.strip().lower()\n    if key in TRUTHY:\n        return True\n    if key in FALSY:\n        return False\n    raise ValueError('not a boolean: ' + repr(text))\n"
+ },
+ "py-deep-merge": {
+  "src/merge.py": "import copy\n\ndef merge(base, override):\n    result = copy.deepcopy(base)\n    for key, value in override.items():\n        if isinstance(value, dict) and isinstance(result.get(key), dict):\n            result[key] = merge(result[key], value)\n        else:\n            result[key] = copy.deepcopy(value)\n    return result\n"
+ },
+ "py-human-bytes": {
+  "src/bytes.py": "UNITS = ('B', 'KiB', 'MiB', 'GiB')\n\ndef human_bytes(n):\n    value = float(n)\n    index = 0\n    while value >= 1024 and index < len(UNITS) - 1:\n        value /= 1024\n        index += 1\n    if index == 0:\n        return '%d %s' % (int(value), UNITS[index])\n    return '%.1f %s' % (value, UNITS[index])\n"
+ },
+ "py-percent-format": {
+  "src/pct.py": "def format_percent(fraction):\n    return '%.1f%%' % (fraction * 100)\n"
+ },
+ "py-no-shell": {
+  "src/report.py": "import subprocess\n\ndef run_report(args):\n    return subprocess.run(list(args), shell=False, capture_output=True)\n"
+ },
+ "py-utf8-roundtrip": {
+  "src/textio.py": "def write_text(path, text):\n    with open(path, 'w', encoding='utf-8') as handle:\n        handle.write(text)\n\ndef read_text(path):\n    with open(path, encoding='utf-8') as handle:\n        return handle.read()\n"
+ },
+ "py-chunk-list": {
+  "src/chunk.py": "def chunks(items, size):\n    if size <= 0:\n        raise ValueError('size must be positive')\n    return [list(items[i:i + size]) for i in range(0, len(items), size)]\n"
+ },
+ "py-validate-id": {
+  "src/ids.py": "import re\n\nPATTERN = re.compile(r'^[A-Z]{2,5}-[0-9]{3}$')\n\ndef is_valid_id(text):\n    return bool(PATTERN.match(text))\n"
+ }
+}

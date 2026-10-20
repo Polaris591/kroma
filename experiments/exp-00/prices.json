@@ -1,0 +1,12 @@
+{
+  "version": "operator-cobblemon-2026-10",
+  "source": "operator-supplied estimate for the cobblemon proxy; NOT an upstream invoice",
+  "models": {
+    "gemini-3.8-flash-high": {
+      "uncached_input_nano_usd": 150,
+      "cached_input_nano_usd": 37,
+      "cache_creation_input_nano_usd": 187,
+      "output_nano_usd": 600
+    }
+  }
+}

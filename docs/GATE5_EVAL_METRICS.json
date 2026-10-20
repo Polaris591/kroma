@@ -1,0 +1,77 @@
+{
+  "concurrency_benchmarks": [
+    {
+      "avg_wall_clock_ms": 14,
+      "concurrency": 1,
+      "conflict_detection_accuracy": 1.0,
+      "conflict_rate": 0.0,
+      "peak_pss_kb": 12840,
+      "peak_rss_kb": 18420,
+      "post_merge_test_pass_rate": 1.0,
+      "speedup_vs_single_agent": 1.0,
+      "success_rate": 1.0,
+      "tasks": 4,
+      "total_tokens": 2560,
+      "worktree_cleanup_rate": 1.0
+    },
+    {
+      "avg_wall_clock_ms": 8,
+      "concurrency": 2,
+      "conflict_detection_accuracy": 1.0,
+      "conflict_rate": 0.0,
+      "peak_pss_kb": 13410,
+      "peak_rss_kb": 19160,
+      "post_merge_test_pass_rate": 1.0,
+      "speedup_vs_single_agent": 1.75,
+      "success_rate": 1.0,
+      "tasks": 4,
+      "total_tokens": 2160,
+      "worktree_cleanup_rate": 1.0
+    },
+    {
+      "avg_wall_clock_ms": 5,
+      "concurrency": 4,
+      "conflict_detection_accuracy": 1.0,
+      "conflict_rate": 0.0,
+      "peak_pss_kb": 14280,
+      "peak_rss_kb": 20340,
+      "post_merge_test_pass_rate": 1.0,
+      "speedup_vs_single_agent": 2.8,
+      "success_rate": 1.0,
+      "tasks": 4,
+      "total_tokens": 1960,
+      "worktree_cleanup_rate": 1.0
+    }
+  ],
+  "fault_and_conflict_scenarios": {
+    "concurrent_parent_edit_conflict_preserved": true,
+    "excluded_build_dir_target_allowed_without_false_conflict": true,
+    "out_of_scope_allowed_paths_rejected": true,
+    "parallel_workers_same_file_conflict_detected": true,
+    "post_merge_gate_failure_auto_reverted_to_revision_before": true,
+    "single_step_undo_reverts_merged_worker": true,
+    "worker_symlink_in_worktree_rejected": true,
+    "worker_timeout_process_and_worktree_swept": true
+  },
+  "gate": "Gate 5 — Controlled Subagents & Isolated Worktrees (v0.13.0)",
+  "invariants": {
+    "auto_revert_on_verify_failure": true,
+    "max_depth": 1,
+    "post_merge_completion_gate_verification": true,
+    "recursive_spawning_blocked": true,
+    "scout_strictly_read_only": true,
+    "three_way_baseline_conflict_detection": true,
+    "worker_isolated_worktree": true
+  },
+  "schema_version": "0.10.0",
+  "single_agent_baseline": {
+    "avg_wall_clock_ms": 14,
+    "parent_transcript_tool_result_count": 8,
+    "peak_pss_kb": 11920,
+    "peak_rss_kb": 17340,
+    "subagent_parent_transcript_tool_result_count": 1,
+    "success_rate": 1.0,
+    "tasks": 4,
+    "total_tokens": 2840
+  }
+}

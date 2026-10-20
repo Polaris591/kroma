@@ -1,0 +1,24 @@
+{
+  "name": "kroma-cli",
+  "version": "1.5.0",
+  "description": "Kroma — Next-Generation Prismatic Microkernel Coding Agent Harness (All-in-One Linux + Windows Native Binary)",
+  "license": "MIT",
+  "bin": {
+    "kroma": "bin/kroma.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "kroma",
+    "coding-agent",
+    "ai-harness",
+    "rust",
+    "cli",
+    "tui"
+  ]
+}

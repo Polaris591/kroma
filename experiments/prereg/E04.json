@@ -1,0 +1,58 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "E04",
+  "title": "工具暴露与发现成本",
+  "hypothesis": "H2",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": "needs a frozen dev/holdout suite, a verifier outside the workspace and a provider run; preregistration lands first so the run cannot be shaped after seeing results",
+  "task_cluster_definition": {
+    "cluster": "direct vs deferred vs codemode exposure on one dev suite",
+    "independence": "task is the sampling unit; tasks sharing a repository are resampled at cluster level",
+    "dev_suite": "experiments/exp-00/suite-dev.json",
+    "holdout_suite": "experiments/exp-00/suite-holdout.json"
+  },
+  "model_identity_observability": {
+    "requested": "gemini-3.8-flash (registry cobblemon/gemini-3.8-flash-high); backend revision not observable",
+    "observable": [
+      "requested model string",
+      "adapter version",
+      "usage totals"
+    ],
+    "not_observable": [
+      "backend revision",
+      "weight identity"
+    ],
+    "claim_limit": "same public label in the same window; no claim of identical weights"
+  },
+  "quality_margin": {
+    "primary_metric": "wasted_model_actions",
+    "delta": "5 percentage points",
+    "rule": "primary metric is wasted model actions; quality non-inferior within 5pp"
+  },
+  "noise_and_power_plan": {
+    "plan": "9 runs; same model, temperature 0, fixed order per block",
+    "interval": "95% cluster bootstrap"
+  },
+  "cache_order_design": {
+    "order": "randomized within blocks; cache state recorded per run",
+    "warmup": "one discarded warmup per arm"
+  },
+  "budget": {
+    "plan": "9 runs, 800k tokens",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop after 9 runs or 800k tokens, whichever comes first",
+  "holdout_policy": {
+    "queries": 1,
+    "retire_after": "one confirmatory pass",
+    "retirement_action": "the holdout becomes validation and a new one must be frozen before another confirmatory claim",
+    "verifier_path": "/opt/kroma-exp/verifier.py"
+  },
+  "metrics": [
+    "wasted_model_actions",
+    "tool_search_calls",
+    "tokens_per_success",
+    "success_rate"
+  ]
+}

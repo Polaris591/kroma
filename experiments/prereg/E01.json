@@ -1,0 +1,59 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "E01",
+  "title": "完整能力的存在税",
+  "hypothesis": "H1",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": "needs a frozen dev/holdout suite, a verifier outside the workspace and a provider run; preregistration lands first so the run cannot be shaped after seeing results",
+  "task_cluster_definition": {
+    "cluster": "full build with every capability dormant vs minimal build, alternating order",
+    "independence": "task is the sampling unit; tasks sharing a repository are resampled at cluster level",
+    "dev_suite": "experiments/exp-00/suite-dev.json",
+    "holdout_suite": "experiments/exp-00/suite-holdout.json"
+  },
+  "model_identity_observability": {
+    "requested": "gemini-3.8-flash (registry cobblemon/gemini-3.8-flash-high); backend revision not observable",
+    "observable": [
+      "requested model string",
+      "adapter version",
+      "usage totals"
+    ],
+    "not_observable": [
+      "backend revision",
+      "weight identity"
+    ],
+    "claim_limit": "same public label in the same window; no claim of identical weights"
+  },
+  "quality_margin": {
+    "primary_metric": "interactive_startup",
+    "delta": "5 percentage points",
+    "rule": "a tax smaller than 3% of the measured noise band is reported as no tax; anything larger is reported with its interval"
+  },
+  "noise_and_power_plan": {
+    "plan": "5 alternating repeats per arm, 95% bootstrap over repeats; CPU-only, so noise is scheduler noise",
+    "interval": "95% cluster bootstrap"
+  },
+  "cache_order_design": {
+    "order": "randomized within blocks; cache state recorded per run",
+    "warmup": "one discarded warmup per arm"
+  },
+  "budget": {
+    "plan": "no model, no tokens; 20 runs, ~10 minutes wall",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop at 5 repeats per arm; stop early if the interval excludes zero",
+  "holdout_policy": {
+    "queries": 1,
+    "retire_after": "one confirmatory pass",
+    "retirement_action": "the holdout becomes validation and a new one must be frozen before another confirmatory claim",
+    "verifier_path": "/opt/kroma-exp/verifier.py"
+  },
+  "metrics": [
+    "interactive_startup",
+    "idle_process_tree_pss",
+    "idle_wakeups",
+    "activation_latency",
+    "post_cancel_plateau"
+  ]
+}

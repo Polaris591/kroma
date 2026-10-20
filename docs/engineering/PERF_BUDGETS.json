@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "note": "C00-12: every threshold here has an approver and a source. A number with neither is a guess that happens to be written down, and perf_gate::validate refuses it.",
+  "budgets": [
+    {
+      "workload": "P0 startup: kroma acp initialize to first response",
+      "primary_metric": "startup_ms",
+      "absolute_limit": 200,
+      "degradation_basis_points": 1500,
+      "measurement_method": "spawn kroma acp, send initialize, measure wall clock to the first response line; process tree PSS sampled every 100 ms",
+      "sample_plan": "5 alternating runs per exposure, median reported, spread reported as basis points",
+      "noise_basis": "E01 measured a 324 KB between-arm spread against an 8 027 KB within-arm spread; anything inside the within-arm spread is noise",
+      "exception_deadline": null,
+      "approved_by": "owner (2026-10-19, owner-authorized unlimited gemini-3.8-flash for experiment spend; performance thresholds approved in the same session)",
+      "source": "evidence/e01/exposure-cost.json - measure-exposure-cost.py, 2026-10-19"
+    },
+    {
+      "workload": "P1 idle: a session that has initialized and does nothing",
+      "primary_metric": "idle_cpu_ticks_8s",
+      "absolute_limit": 1,
+      "degradation_basis_points": 100,
+      "measurement_method": "cpu ticks (utime+stime) of the whole process tree over 8 idle seconds after initialize",
+      "sample_plan": "2 alternating runs per exposure",
+      "noise_basis": "E01 measured 0 ticks for both exposures; the ceiling is 1 tick so that a single scheduler tick is allowed and two are a regression",
+      "exception_deadline": null,
+      "approved_by": "owner (2026-10-19, same session)",
+      "source": "evidence/e01/existence-tax.json - measure-existence-tax.py, 2026-10-19"
+    },
+    {
+      "workload": "P2 activation: first token latency with the full tool schema",
+      "primary_metric": "ttft_ms",
+      "absolute_limit": 20000,
+      "degradation_basis_points": 2500,
+      "measurement_method": "provider-reported TTFT mean per arm over the frozen dev suite",
+      "sample_plan": "6 tasks per arm, one repetition; spread across the arm's own samples decides INCONCLUSIVE",
+      "noise_basis": "E01: 14 040 ms full schema vs 3 568 ms minimal, a 4x gap far outside the arm spread; smaller gaps are not claimed",
+      "exception_deadline": null,
+      "approved_by": "owner (2026-10-19, same session)",
+      "source": "evidence/e01-model/report.json - kroma bench, gpt-6-luna, 6 tasks, 2026-10-19"
+    }
+  ]
+}

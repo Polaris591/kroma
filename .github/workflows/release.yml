@@ -1,0 +1,541 @@
+name: Release
+
+# Full six-target build, triggered by a version tag. This is the job that would have caught the
+# arm64 musl binary shipping with stub SSL symbols (every HTTPS request failed at runtime) and the
+# Windows build breaking on an unguarded `#[link(name = "ssl")]`.
+#
+# Every target is *built and linked* here, never merely type-checked, and the two targets with a
+# hand-written TLS backend are additionally smoke-tested at runtime: linux-x64 natively,
+# linux-arm64 through qemu. The Android artifact cannot be executed on a GitHub runner; it is
+# verified statically (real OpenSSL linked in, no runtime libssl/libcrypto dependency) and the
+# device/emulator run remains an explicit manual gate -- see "Known limits" at the bottom.
+#
+# The macOS binaries are built on a real Mac runner: since the Gate-3 audit macOS uses native-tls,
+# so the link needs Security.framework and CoreFoundation.framework, i.e. a genuine SDK.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      # Two-pass signing: pass 1 builds and attests the candidate; the owner signs those exact bytes
+      # offline; pass 2 points at pass 1's artifact bundle and verifies the signature over it. A rebuild
+      # would produce different bytes, so verification must consume the same run, never a fresh build.
+      candidate_run:
+        description: 'Run id of the pass that produced the release-candidate artifact (empty = build only)'
+        required: false
+        default: ''
+      provenance_b64:
+        description: 'Base64 encoding of owner-signed public provenance JSON (never a private key; empty = build only)'
+        required: false
+        default: ''
+
+# Explicit least privilege; only the second-pass verifier needs actions: read.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  OPENSSL_VERSION: '3.5.7'
+  # T22 (KR-29): the digest of openssl-${OPENSSL_VERSION}.tar.gz. It is verified before extraction;
+  # an empty value fails the step instead of silently extracting an unverified archive. Record the
+  # value the owner verified (see docs/release/README.md) rather than a digest copied from a mirror.
+  OPENSSL_SHA256: 'a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8'
+  ANDROID_NDK_VERSION: '26.3.11579264'
+
+jobs:
+  validate-dispatch:
+    if: github.event_name == 'workflow_dispatch'
+    name: validate two-pass dispatch inputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Validate source gates on both passes before trusting dispatch inputs. A validator whose own negatives never execute is a
+      # validator nobody can trust, and the preregistration contract is exactly the kind of thing
+      # that rots silently.
+      - name: Python gates
+        run: |
+          python3 -m compileall -q scripts
+          python3 scripts/test-workflow-contract.py
+          python3 scripts/test-analyze-paired.py
+          python3 scripts/test-ci-artifact-ingest.py
+          python3 scripts/test-trusted-gate.py
+          python3 scripts/test-run-workspace-tests.py
+          python3 scripts/test-verify-prereg.py
+          python3 scripts/verify-prereg.py
+
+      - name: Require both values or neither
+        env:
+          CANDIDATE_RUN_INPUT: ${{ inputs.candidate_run }}
+          PROVENANCE_B64_INPUT: ${{ inputs.provenance_b64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CANDIDATE_RUN_INPUT" && -z "$PROVENANCE_B64_INPUT" ]]; then
+            echo "Build-only dispatch"; exit 0
+          fi
+          if [[ ! "$CANDIDATE_RUN_INPUT" =~ ^[1-9][0-9]{0,18}$ || -z "$PROVENANCE_B64_INPUT" ]]; then
+            echo "::error::verification requires a numeric candidate run and a public signed provenance document"
+            exit 1
+          fi
+          echo "Second-pass verification dispatch"
+
+  # RC1-03: a quality job the pack/sign steps cannot bypass. Until this existed, `pack` only needed the
+  # platform builds, so a tag could produce artifacts with fmt/clippy/tests failing.
+  quality:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: quality gate (fmt, clippy, rust tests, node, gates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      # Uses the repository's own rustup recipe (same as ci.yml) instead of a third-party toolchain
+      # action: rust-toolchain.toml stays the single source of truth and no extra action needs pinning.
+      - name: Install the pinned toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '20' }
+      - name: fmt (whole tree)
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # B-03: identical to ci.yml, by construction: both call the same script.
+      - name: tests (sandbox-dependent suites run separately)
+        run: scripts/run-workspace-tests.sh
+      - name: node regressions
+        run: |
+          node scripts/test-kroma-js-upgrade.js
+          node --test scripts/test-updater-faults.js
+          node scripts/test-release-trust-root.js
+          node scripts/test-release-pipeline.js
+          node scripts/test-provenance.js
+          node scripts/test-release-attestation.js
+          npm run test:bench
+          node scripts/verify-ledger.js
+      - name: release gates
+        run: |
+          node scripts/release-gate.js actions
+          node scripts/release-gate.js lock
+          node scripts/release-gate.js openssl
+          node scripts/release-gate.js dag
+      - name: Python acceptance gates
+        run: |
+          python3 -m compileall -q scripts
+          python3 scripts/test-workflow-contract.py
+          python3 scripts/test-analyze-paired.py
+          python3 scripts/test-ci-artifact-ingest.py
+          python3 scripts/test-trusted-gate.py
+          python3 scripts/test-run-workspace-tests.py
+          python3 scripts/test-verify-prereg.py
+          python3 scripts/verify-prereg.py
+      - name: entry points are byte-identical
+        run: cmp bin/kroma.js npm/kroma-cli/bin/kroma.js
+
+  # B-03: the sandbox suites are a HARD release condition, not a warning. Hosted runners may deny
+  # unprivileged user namespaces. Exit 2 is recorded as HOST_CAPABILITY_BLOCKED for diagnostics,
+  # but the job MUST FAIL rather than report success: later owner signature cannot substitute for
+  # GitHub's authenticated sandbox job conclusion. Only an actual exit 0 may proceed to packing.
+  sandbox:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: sandbox isolation (real bwrap)
+    runs-on: ubuntu-latest
+    needs: [quality]
+    outputs:
+      status: ${{ steps.run.outputs.status }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install bubblewrap and relax the user-namespace restriction
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          if [ -w /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns >/dev/null
+          fi
+          if [ -w /proc/sys/kernel/unprivileged_userns_clone ]; then
+            echo 1 | sudo tee /proc/sys/kernel/unprivileged_userns_clone >/dev/null
+          fi
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '20' }
+      - name: Run the isolation suites and record actual test exit code
+        id: run
+        run: |
+          set +e
+          scripts/run-sandbox-tests.sh 2>&1 | tee /tmp/sandbox.log
+          code="${PIPESTATUS[0]}"
+          set -e
+          if [ "$code" -eq 0 ]; then
+            status=PASS
+          elif [ "$code" -eq 2 ]; then
+            status=HOST_CAPABILITY_BLOCKED
+            echo "::warning::the runner cannot host the required sandbox"
+          else
+            status=FAIL
+            echo "::error::sandbox isolation tests failed"
+          fi
+          node scripts/release-sandbox-evidence.js "$status" "$code" sandbox-evidence.json
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" != PASS ]; then exit 1; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: sandbox-evidence
+          path: sandbox-evidence.json
+          if-no-files-found: error
+
+  linux:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo build --release -p kroma-cli
+      - run: ./target/release/kroma --version
+      # Not a string check and not `--version`: this makes the artifact perform a real HTTPS request
+      # and then proves an untrusted certificate is rejected.
+      - name: TLS smoke (real HTTPS + untrusted certificate rejected)
+        run: scripts/tls-smoke.sh target/release/kroma
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-x64
+          path: target/release/kroma
+          if-no-files-found: error
+
+  windows:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: win32-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - run: rustup target add x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo build --release --target x86_64-pc-windows-gnu -p kroma-cli
+      - name: The Windows binary must not depend on OpenSSL
+        run: |
+          if x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/kroma.exe \
+             | grep -iE 'DLL Name: .*(ssl|crypto)'; then
+            echo "::error::the Windows binary links an OpenSSL DLL; it should use schannel only"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: win32-x64
+          path: target/x86_64-pc-windows-gnu/release/kroma.exe
+          if-no-files-found: error
+
+  macos:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: darwin-arm64 + darwin-x64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # Both binaries are built in this job, so there is no way for the release to pick up a stale
+      # darwin artifact: packaging later consumes exactly what is uploaded here.
+      - run: cargo build --release --target aarch64-apple-darwin -p kroma-cli
+      - run: cargo build --release --target x86_64-apple-darwin -p kroma-cli
+      - run: ./target/aarch64-apple-darwin/release/kroma --version
+      - run: ./target/x86_64-apple-darwin/release/kroma --version
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: darwin-arm64
+          path: target/aarch64-apple-darwin/release/kroma
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: darwin-x64
+          path: target/x86_64-apple-darwin/release/kroma
+          if-no-files-found: error
+
+  android:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: android-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - run: rustup target add aarch64-linux-android
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install the NDK
+        run: sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+      # RC1-04: one shared fetch+verify path, so no platform can extract an unverified archive.
+      - name: Fetch and verify OpenSSL sources
+        run: scripts/fetch-openssl.sh "${OPENSSL_VERSION}" "${OPENSSL_SHA256}" .
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # No stubs. Android's own libssl/libcrypto are BoringSSL, which is not an OpenSSL ABI (the
+      # SSL_ctrl family this crate calls for SNI was removed) and is not exported to third-party
+      # code by the NDK at all. Link a real static OpenSSL instead.
+      - name: Build static OpenSSL for aarch64-linux-android
+        run: |
+          export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          scripts/build-android-openssl.sh "openssl-${OPENSSL_VERSION}" "$PWD/openssl-android" 24
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ github.workspace }}/android-linker.sh
+        run: |
+          NDK="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64"
+          printf '#!/bin/sh\nexec "%s/bin/aarch64-linux-android24-clang" -L"%s/openssl-android/lib" "$@"\n' \
+            "$NDK" "$GITHUB_WORKSPACE" > android-linker.sh
+          chmod +x android-linker.sh
+          cargo build --release --target aarch64-linux-android -p kroma-cli
+      - name: The Android binary must carry real OpenSSL, not link-only stubs
+        run: |
+          NDK_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          BIN=target/aarch64-linux-android/release/kroma
+          # Static OpenSSL means no runtime libssl/libcrypto entry: a NEEDED entry would resolve to
+          # Android's BoringSSL on a device and fail at the first HTTPS request.
+          "${NDK_BIN}/llvm-readelf" -d "$BIN" > "$RUNNER_TEMP/android.dynamic"
+          if grep -E 'NEEDED.*(libssl|libcrypto)' "$RUNNER_TEMP/android.dynamic"; then
+            echo "::error::the Android binary dynamically requires libssl/libcrypto (BoringSSL is not OpenSSL ABI)"
+            exit 1
+          fi
+          "${NDK_BIN}/llvm-nm" "$BIN" > "$RUNNER_TEMP/android.nm"
+          for sym in TLS_client_method SSL_CTX_new SSL_ctrl SSL_set1_host SSL_connect; do
+            grep -qE " [Tt] ${sym}$" "$RUNNER_TEMP/android.nm" || {
+              echo "::error::${sym} is not linked into the Android binary; its TLS backend is incomplete"
+              exit 1
+            }
+          done
+          strings -a "$BIN" > "$RUNNER_TEMP/android.strings"
+          grep -q 'OpenSSL 3' "$RUNNER_TEMP/android.strings" || {
+            echo "::error::the Android binary carries no OpenSSL implementation"
+            exit 1
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-arm64
+          path: target/aarch64-linux-android/release/kroma
+          if-no-files-found: error
+
+  musl:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: linux-arm64 (musl)
+    runs-on: ubuntu-latest
+    env:
+      # Zig writes a cache; the old default (/var/cache/zig) is not writable for the runner user.
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustup default "$toolchain"
+      - run: rustup target add aarch64-unknown-linux-musl
+      - name: Install zig
+        run: pip install --break-system-packages ziglang==0.13.0
+      - name: Locate the zig installation
+        # Do NOT copy the executable out of the pip package: without its sibling lib/ directory
+        # every invocation fails with "unable to find zig installation directory".
+        run: |
+          ZIG="$(python3 -c 'import os, ziglang; print(os.path.join(os.path.dirname(ziglang.__file__), "zig"))')"
+          echo "ZIG=${ZIG}" >> "$GITHUB_ENV"
+      - name: Fetch OpenSSL sources
+        run: |
+          scripts/fetch-openssl.sh "${OPENSSL_VERSION}" "${OPENSSL_SHA256}" .
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The arm64 musl binary used to be linked against *stub* SSL symbols, so it had no working
+      # TLS at all. Build a real static OpenSSL instead; the script refuses to be a stub.
+      - name: Build static OpenSSL for aarch64-musl
+        run: scripts/build-musl-openssl.sh "openssl-${OPENSSL_VERSION}" "$PWD/openssl-musl"
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C link-self-contained=no
+        run: |
+          printf '#!/bin/sh\nexport ZIG_GLOBAL_CACHE_DIR="%s"\nexport ZIG_LOCAL_CACHE_DIR="%s"\nexec "%s" cc -target aarch64-linux-musl -L"%s/openssl-musl/lib" "$@"\n' \
+            "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR" "$ZIG" "$GITHUB_WORKSPACE" > musl-linker.sh
+          chmod +x musl-linker.sh
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$PWD/musl-linker.sh" \
+            cargo build --release --target aarch64-unknown-linux-musl -p kroma-cli
+      - name: The musl binary must actually contain OpenSSL
+        # `strings | grep -q` under `pipefail` is a false-negative trap: grep closes the pipe on its
+        # first match, strings dies of SIGPIPE, and the pipeline reports 141. Write the file, then
+        # grep it.
+        run: |
+          strings -a target/aarch64-unknown-linux-musl/release/kroma > "$RUNNER_TEMP/musl.strings"
+          grep -q 'OpenSSL 3' "$RUNNER_TEMP/musl.strings" || {
+            echo "::error::the musl binary has no OpenSSL in it; TLS would fail at runtime"
+            exit 1
+          }
+      - name: Install qemu (to execute the cross-built binary)
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - name: TLS smoke (real HTTPS + untrusted certificate rejected)
+        # The same runtime gate as linux-x64, but for the cross-built artifact, executed under qemu.
+        run: scripts/tls-smoke.sh target/aarch64-unknown-linux-musl/release/kroma qemu-aarch64-static
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-arm64
+          path: target/aarch64-unknown-linux-musl/release/kroma
+          if-no-files-found: error
+
+  pack:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: pack npm tarball
+    needs: [quality, sandbox, linux, windows, macos, android, musl]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Collect the six binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Place them where the packaging script expects them
+        run: |
+          set -euo pipefail
+          install -Dm755 linux-x64/kroma   target/release/kroma
+          install -Dm755 win32-x64/kroma.exe target/x86_64-pc-windows-gnu/release/kroma.exe
+          install -Dm755 linux-arm64/kroma target/aarch64-unknown-linux-musl/release/kroma
+          install -Dm755 android-arm64/kroma target/aarch64-linux-android/release/kroma
+          install -Dm755 darwin-arm64/kroma target/aarch64-apple-darwin/release/kroma
+          install -Dm755 darwin-x64/kroma  target/x86_64-apple-darwin/release/kroma
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '20' }
+      # Reject missing or empty targets. All binary artifacts must come from this one workflow run;
+      # cross-job file modification times are not comparable source-identity evidence.
+      - run: npm/build-npm-packages.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kroma-cli-tarball
+          path: npm/dist/*.tgz
+          if-no-files-found: error
+
+  # Pass 1: assemble a complete, collision-free candidate and attest the *exact* bytes + sandbox
+  # evidence. The owner must sign the attestation along with all the candidate artifacts OFFLINE.
+  attest:
+    if: github.event_name == 'push' || inputs.candidate_run == ''
+    name: attest the candidate artifact set
+    runs-on: ubuntu-latest
+    needs: [pack, sandbox]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '20' }
+      - name: Download each workflow artifact into its own namespace
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: raw-artifacts
+          merge-multiple: false
+      - name: Enforce full eight-object candidate inventory
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          node scripts/release-candidate.js stage --downloads raw-artifacts --out candidate --version "$version"
+          node scripts/release-attestation.js build \
+            --root candidate --version "$version" --commit "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --sandbox "${{ needs.sandbox.outputs.status }}" \
+            --out release-attestation.json
+          node scripts/release-attestation.js verify release-attestation.json --root candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate
+          # Multiple paths mean GitHub v4 preserves candidate/ relative to the workspace root.
+          # Verification uses dist/candidate/ for bytes, dist/release-attestation.json for metadata.
+          path: |
+            candidate/**
+            release-attestation.json
+          if-no-files-found: error
+
+  # Pass 2: no rebuilding; download the immutable bundle from the inspected source run. The
+  # base64-encoded provenance document is PUBLIC signed JSON; the PRIVATE KEY stays offline.
+  release-verdict:
+    if: github.event_name == 'workflow_dispatch' && inputs.candidate_run != '' && inputs.provenance_b64 != ''
+    name: release verdict (signature over the attested bytes)
+    runs-on: ubuntu-latest
+    needs: [validate-dispatch]
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '20' }
+      - name: Validate the source GitHub run, sandbox job and artifact identity
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_INPUT: ${{ inputs.candidate_run }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_RUN_INPUT" =~ ^[1-9][0-9]{0,18}$ ]] || exit 1
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_INPUT}" > source-run.json
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_INPUT}/jobs?per_page=100" > source-jobs.json
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_INPUT}/artifacts?per_page=100" > source-artifacts.json
+          node scripts/verify-release-run.js source-run.json source-jobs.json source-artifacts.json \
+            "$CANDIDATE_RUN_INPUT" "$GITHUB_REPOSITORY" "$GITHUB_OUTPUT"
+      # Verify with the same program revision that produced the signed release candidate, not an
+      # arbitrarily newer default-branch version of the verifier.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.source.outputs.commit }}
+          persist-credentials: false
+      - name: Fetch only the original candidate artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_INPUT: ${{ inputs.candidate_run }}
+        run: |
+          set -euo pipefail
+          gh run download "$CANDIDATE_RUN_INPUT" -R "$GITHUB_REPOSITORY" -n release-candidate -D dist
+          test -f dist/release-attestation.json
+          test -d dist/candidate
+      - name: Import public signed provenance, verify complete artifact set and reject unsigned status
+        env:
+          SIGNED_PROVENANCE_B64: ${{ inputs.provenance_b64 }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          SOURCE_ATTEMPT: ${{ steps.source.outputs.attempt }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.runId }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SIGNED_PROVENANCE_B64" | base64 --decode > signed-provenance.json
+          test "$(wc -c < signed-provenance.json)" -le 262144
+          node scripts/release-attestation.js verdict dist/release-attestation.json \
+            --provenance signed-provenance.json --root dist \
+            --expected-repo "$GITHUB_REPOSITORY" --expected-run-id "$SOURCE_RUN_ID" \
+            --expected-run-attempt "$SOURCE_ATTEMPT" --expected-commit "$SOURCE_COMMIT" \
+            --out release-verdict.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: release-verdict
+          path: release-verdict.json
+          if-no-files-found: warn
+
+# Known limits (do not read as "verified"):
+#   - android-arm64 is verified by static inspection of the artifact. Running it needs a real
+#     device or an emulator, which no job here provides; that smoke is a manual release gate
+#     (`adb push` the binary and run a real HTTPS request, then repeat with an untrusted CA).
+#   - macOS binaries are only smoke-tested with `--version`; they use native-tls, whose runtime
+#     behaviour (Security.framework) cannot be exercised on a Linux runner.

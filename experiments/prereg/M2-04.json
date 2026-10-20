@@ -1,0 +1,75 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "M2-04",
+  "title": "工具缓存压缩交互与负结果：小型 factorial，缓存位置作为可构造的因子",
+  "hypothesis": "E05 could only run two cells because it treated cache state as an uncontrolled provider property. It is not: inside one repetition block the first run of an arm meets a cold prefix and the second meets a warm one, so cache position is a factor we can construct rather than observe. The factorial asks whether compaction's cost depends on cache position (interaction), not only whether compaction is cheaper on average.",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": null,
+  "task_cluster_definition": {
+    "cluster": "one task is one cluster; every cell is measured on the same six tasks",
+    "dev_suite": "/opt/kroma-exp/suite-dev.json",
+    "dev_suite_note": "frozen dev suite, already used by earlier experiments; this is a new factor, not a new task set",
+    "suite_sha256": "6c728eef4365e22eea7660b4e6cef15ed426a0d0870f1615ef688f006363eb48",
+    "tasks": 6,
+    "arms": [
+      "compaction_off (p1)",
+      "compaction_on (p2)"
+    ],
+    "factorial": {
+      "factors": {
+        "compaction": [
+          "off",
+          "on"
+        ],
+        "cache_position": [
+          "first_in_block (cold)",
+          "second_in_block (warm)"
+        ]
+      },
+      "cells": 4,
+      "bounded": "2 x 2 = 4 cells; the design does not enumerate further levels and stops at the declared run budget, which is what 'no infinite enumeration' means here",
+      "blocking": "one repetition = one block; both arms run inside it, so the first arm in a block is cold and the second is warm. Arm order is randomized per block by the seed.",
+      "runs": "2 arms x 6 tasks x 2 repetitions = 24"
+    },
+    "holdout_suite": "/opt/kroma-exp/suite-diag.json",
+    "holdout_suite_note": "declared only because the gate requires a second path; this factorial consumes no holdout (holdout_policy.queries = 0) and suite-diag.json is never read by this run"
+  },
+  "model_identity_observability": {
+    "reported_model_required_in_report": true,
+    "note": "same model all cells; cache_hit_ratio recorded per run as the check that the position factor did what it claims"
+  },
+  "quality_margin": {
+    "primary_metric": "success_rate",
+    "delta": "5 percentage points",
+    "rule": "a quality claim requires a significant difference; an interval that crosses zero may not be written as non-inferior"
+  },
+  "noise_and_power_plan": {
+    "plan": "24 runs; two blocks with randomized arm order; the factorial is analysed as main effects plus one interaction",
+    "interval": "95% cluster bootstrap over tasks, resamples 4000",
+    "statement": "6 clusters; the interaction is reported with its interval and a crossing interval is reported as inconclusive, never as non-inferior"
+  },
+  "cache_order_design": {
+    "order": "randomized within each block by the seed; position recorded per run",
+    "warmup": "none discarded - the first run of a block IS the cold cell, discarding it would delete the factor"
+  },
+  "budget": {
+    "plan": "24 runs, 4 000k tokens",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop after 24 runs or 4 000k tokens, whichever comes first",
+  "holdout_policy": {
+    "queries": 0,
+    "retire_after": "n/a",
+    "retirement_action": "this is a within-suite factorial, not a confirmatory holdout; no holdout is consumed",
+    "verifier_path": "/opt/kroma-exp/verifier.py",
+    "prior_use": "dev suite reused deliberately so the new factor is the only change"
+  },
+  "metrics": [
+    "success_rate",
+    "tokens_per_success",
+    "cache_hit_ratio",
+    "cache_position",
+    "compaction"
+  ]
+}

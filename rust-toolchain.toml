@@ -1,0 +1,8 @@
+# Pinned on purpose: `cargo fmt --check` output is toolchain-specific. A floating `stable` moved
+# rustfmt style (chain/line-breaking rules), so the same tree that was formatted on one machine
+# failed the fmt gate on another. Bumping this line is a deliberate change: run `cargo fmt --all`
+# with the new toolchain and commit the reformat in the same commit.
+[toolchain]
+channel = "1.85.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

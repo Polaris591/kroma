@@ -1,0 +1,46 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "M3-03",
+  "title": "跨模型校准：同一套件、同一对臂，换一个模型",
+  "hypothesis": "机制结论与模型无关；若不同模型给出不同方向，则任何单模型结论都必须标注模型身份",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": "preregistration lands before the paid run so the model, arms and rule cannot be chosen after seeing results",
+  "task_cluster_definition": {
+    "cluster": "single_agent vs adaptive_tournament_2, same suite and verifier as E07, model gpt-6-luna vs the recorded gemini-3.8-flash run",
+    "independence": "task is the sampling unit; the two models are not resampled, they are two recorded conditions",
+    "dev_suite": "experiments/exp-00/suite-dev.json",
+    "holdout_suite": "experiments/exp-00/suite-holdout.json"
+  },
+  "model_identity_observability": {
+    "requested": "gpt-6-luna (cobblemon endpoint, chat-completions); backend revision not observable",
+    "observable": ["requested model string", "adapter version", "usage totals"],
+    "not_observable": ["backend revision", "weight identity"],
+    "claim_limit": "same public label in the same window; a cross-model difference is a difference between two recorded conditions, not a property of a weight file"
+  },
+  "quality_margin": {
+    "primary_metric": "quality_pass_rate",
+    "delta": "5 percentage points",
+    "rule": "a mechanism whose direction differs between the two models is reported as model-dependent; it is not averaged into one number"
+  },
+  "noise_and_power_plan": {
+    "plan": "12 runs on gpt-6-luna (6 tasks x 2 arms), compared against the recorded 12 runs on gemini-3.8-flash with the same suite and arms",
+    "interval": "95% cluster bootstrap within each model; the between-model comparison is descriptive"
+  },
+  "cache_order_design": {
+    "order": "randomized within blocks; cache state recorded per run",
+    "warmup": "none"
+  },
+  "budget": {
+    "plan": "12 runs, 2M tokens, gpt-6-luna",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized for the cobblemon endpoint"
+  },
+  "stopping_rule": "stop at 12 runs; do not rerun to chase a direction",
+  "holdout_policy": {
+    "queries": 0,
+    "retire_after": "not used: this is a calibration run, not a confirmatory claim",
+    "retirement_action": "the holdout stays unused and available",
+    "verifier_path": "/opt/kroma-exp/verifier.py"
+  },
+  "metrics": ["quality_pass_rate", "total_tokens", "ttft_ms", "cache_hit_ratio"]
+}

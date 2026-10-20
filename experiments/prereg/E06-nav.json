@@ -1,0 +1,64 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "E06-nav",
+  "title": "E06 re-run on multi-file tasks: does a repo graph beat lexical search where the answer spans modules?",
+  "hypothesis": "The dev-suite E06 run put graph-only exposure 38% more expensive than lexical with equal quality, but every dev task lives in one file, so a graph had nothing to traverse. On two frozen tasks whose fix spans five modules, graph-only is non-inferior in quality and not more expensive than lexical.",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": null,
+  "task_cluster_definition": {
+    "cluster": "one task is one cluster; both tasks require locating code across modules",
+    "dev_suite": "/opt/kroma-exp/suite-dev.json",
+    "dev_suite_note": "already consumed by the E06 dev run; not reused here",
+    "holdout_suite": "/opt/kroma-exp/suite-nav.json",
+    "suite_sha256": "7f19727d9303a54b0757f3e1d20901afd9d0a907cfee0b16a42759c8712d8dc1",
+    "tasks": [
+      "rename-across-modules",
+      "one-writer-for-state"
+    ],
+    "arms": [
+      "lexical",
+      "graph"
+    ],
+    "runs": "2 tasks x 2 arms = 4",
+    "fairness_check": "each task graded unsolved (exit 1) and with a reference solution (exit 0) before the run",
+    "third_arm": "graph+history is not expressible: code_graph takes query/focus_files/max_nodes and has no history mode",
+    "pre_run_correction": "the first frozen form put a [path, content] pair in expect_absent, which the suite schema rejects (it takes paths only); the assertion was redundant with the oracle test, so it was dropped and the hash re-frozen before any run"
+  },
+  "model_identity_observability": {
+    "reported_model_required_in_report": true,
+    "note": "same model both arms; absolute token claims carry the model identity"
+  },
+  "quality_margin": {
+    "primary_metric": "fix_success_rate",
+    "delta": "5 percentage points",
+    "rule": "quality non-inferior within 5pp before any cost claim"
+  },
+  "noise_and_power_plan": {
+    "plan": "4 runs; same model, temperature 0, arm order alternated by task index",
+    "interval": "95% cluster bootstrap, resamples 4000",
+    "statement": "2 clusters cannot establish a distribution; this run can only contradict or fail to contradict the dev result"
+  },
+  "cache_order_design": {
+    "order": "arm order alternated by task index",
+    "cache": "provider-side cache state is not controllable and is not claimed"
+  },
+  "budget": {
+    "plan": "4 runs, 400k tokens",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop after 4 runs or 400k tokens, whichever comes first",
+  "holdout_policy": {
+    "queries": 1,
+    "retire_after": "one pass",
+    "retirement_action": "this suite becomes validation; a new one must be frozen before another claim",
+    "verifier_path": "/opt/kroma-exp/verifier.py",
+    "prior_use": "none - suite-nav.json is new"
+  },
+  "metrics": [
+    "fix_success_rate",
+    "tokens_per_success",
+    "scan_bytes",
+    "graph_query_ms"
+  ]
+}

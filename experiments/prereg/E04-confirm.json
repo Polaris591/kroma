@@ -1,0 +1,66 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "E04-confirm",
+  "title": "E04 confirmatory pass: does deferred tool discovery still cut tokens on a frozen, never-used holdout?",
+  "hypothesis": "The E04 dev run found deferred tool discovery 27% cheaper with equal quality (token CI excluding zero), while the earlier E04 two-arm run found no difference. One of the two is noise. On a fresh holdout that neither run has seen, deferred is non-inferior in quality and not more expensive than direct; codemode_only is likewise non-inferior and not more expensive.",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": null,
+  "task_cluster_definition": {
+    "suite": "/opt/kroma-exp/suite-holdout-e04.json",
+    "suite_sha256": "4a8e2b91d7bc5baec3f3ba01b3f5b957f94986aa2aba58d942fcfec355a1938b",
+    "tasks": [
+      "clamp-pagination",
+      "strict-config-parse"
+    ],
+    "arms": [
+      "direct",
+      "deferred",
+      "codemode_only"
+    ],
+    "runs": "2 tasks x 3 arms = 6",
+    "fairness_check": "each task graded unsolved (exit 1) and with a reference solution (exit 0) before the run",
+    "cluster": "one task is one cluster; both tasks are new and were never seen by any prior run",
+    "dev_suite": "/opt/kroma-exp/suite-dev.json",
+    "holdout_suite": "/opt/kroma-exp/suite-holdout-e04.json",
+    "dev_suite_note": "already consumed by the E04 dev run; not reused here"
+  },
+  "model_identity_observability": {
+    "reported_model_required_in_report": true,
+    "note": "same model for all arms; absolute token claims carry the model identity"
+  },
+  "quality_margin": {
+    "primary_metric": "success_rate",
+    "delta": "5 percentage points",
+    "rule": "quality non-inferior within 5pp before any cost claim"
+  },
+  "noise_and_power_plan": {
+    "repetitions": 1,
+    "tasks": 2,
+    "statement": "2 clusters cannot establish a distribution; this pass can only contradict or fail to contradict the dev result, and a CI that crosses zero is reported as inconclusive",
+    "plan": "6 runs; same model, temperature 0, arm order alternated by task index",
+    "interval": "95% cluster bootstrap, resamples 4000"
+  },
+  "cache_order_design": {
+    "order": "arm order alternated by task index",
+    "cache": "provider-side cache state is not controllable and is not claimed"
+  },
+  "budget": {
+    "plan": "6 runs, 400k tokens",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop after 6 runs or 400k tokens, whichever comes first",
+  "holdout_policy": {
+    "queries": 1,
+    "retire_after": "one confirmatory pass",
+    "retirement_action": "this suite becomes validation; a new one must be frozen before another confirmatory claim",
+    "verifier_path": "/opt/kroma-exp/verifier.py",
+    "prior_use": "none - suite-holdout-e04.json is new and has never been run; the E07 holdout is a different file and is already retired"
+  },
+  "metrics": [
+    "success_rate",
+    "tokens_per_success",
+    "tool_search_calls",
+    "wasted_model_actions"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "version": "demonstration-rates-not-for-billing",
+  "source": "PLACEHOLDER DEMO ONLY: synthetic smoke never prices provider use",
+  "models": {
+    "demo-only-model": {
+      "uncached_input_nano_usd": 100,
+      "cached_input_nano_usd": 50,
+      "cache_creation_input_nano_usd": 150,
+      "output_nano_usd": 400
+    }
+  }
+}

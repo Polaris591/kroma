@@ -1,0 +1,213 @@
+isValidHttpsTarballUrl
+  ok  accepts the pinned mirror tarball
+  ok  rejects a plain http URL
+  ok  rejects a `&` command chain
+  ok  rejects a `;` command separator
+  ok  rejects a pipe into a shell
+  ok  rejects embedded whitespace/newlines
+  ok  rejects a non-allow-listed host
+  ok  rejects embedded credentials
+  ok  rejects a non-default port
+  ok  rejects a query string
+  ok  rejects a non-https scheme
+  ok  rejects empty and non-string input
+isSafeInstallTarget
+  ok  accepts a plain npm package spec
+  ok  accepts a validated tarball URL
+  ok  rejects a package spec with a command chain
+  ok  rejects a non-allow-listed tarball host
+getManifestUrl (target-specific URLs)
+  ok  generates target-specific manifest URLs
+parseSemver / compareSemver (strict, prerelease, leading zeros, large int)
+  ok  compareSemver detects an upgrade
+  ok  compareSemver detects equality
+  ok  compareSemver detects a downgrade (mirror older than local)
+  ok  compareSemver accepts a leading v
+  ok  compareSemver compares numerically, not lexicographically
+  ok  compareSemver handles prerelease versions per SemVer 2.0.0
+  ok  parseSemver rejects leading zeros in numeric components
+  ok  parseSemver rejects integers exceeding MAX_SAFE_INTEGER
+  ok  compareSemver returns null for unparseable values
+parseStrictJson (duplicate keys, unicode escapes, edge cases)
+  ok  parses basic valid json object
+  ok  rejects duplicate keys
+  ok  rejects duplicate keys via unicode escape
+  ok  rejects unescaped control characters in strings
+  ok  rejects trailing commas in objects and arrays
+  ok  rejects numbers with leading zeros
+  ok  rejects extra tokens after root JSON value
+coercePublicKey & Ed25519 Public Key Formats
+  ok  coerces raw 32-byte hex public key
+  ok  coerces raw 32-byte base64 public key
+  ok  coerces SPKI DER buffer
+  ok  coerces PEM public key
+  ok  coerces KeyObject directly
+  ok  rejects invalid key format
+buildCanonicalSigningPayload & signManifest
+  ok  buildCanonicalSigningPayload produces deterministic domain-separated bytes
+  ok  signManifest creates verifiable 88-char base64 Ed25519 signature
+verifyManifest Security Invariants
+  ok  accepts a valid signed manifest with test trust root
+  ok  fails closed when the trust root is empty / unconfigured
+  ok  production trust root binds signatures to the declared release key
+  ok  rejects signing key not present in trusted keys
+  ok  rejects tampered signature
+  ok  rejects tampered version after signing
+  ok  rejects tampered target after signing
+  ok  rejects tampered sha256 after signing
+  ok  rejects tampered length after signing
+  ok  rejects tampered tarballUrl after signing
+  ok  rejects expired manifest
+  ok  rejects platform target mismatch
+  ok  rejects version downgrade below local installed version
+  ok  rejects version below antirollback floor
+  ok  antirollback in manifest cannot lower local installed version floor
+  ok  fails closed when version comparison fails
+  ok  rejects unknown field in manifest schema
+  ok  rejects non-canonical base64 signature
+  ok  rejects manifest exceeding MAX_MANIFEST_BYTES (64KB)
+Pure-Node Tar Stream Inspection & Path Security (BSD/GNU Column Immunity)
+  ok  accepts clean archive with regular files and directory entries
+  ok  extracts single target binary to destination path with 0755 mode
+  ok  rejects leading slash absolute path
+  ok  rejects leading backslash absolute path
+  ok  rejects path traversal .. in segments
+  ok  rejects redundant '.' segment
+  ok  rejects Windows drive letters
+  ok  rejects backslash in paths across all platforms
+  ok  rejects Windows ADS colon in paths
+  ok  rejects UNC paths
+  ok  rejects trailing dot in path segments
+  ok  rejects trailing space in path segments
+  ok  rejects Windows reserved device names
+  ok  rejects symbolic links (typeflag '2')
+  ok  rejects hard links (typeflag '1')
+  ok  rejects FIFOs / named pipes (typeflag '6')
+  ok  rejects character devices (typeflag '3')
+  ok  rejects block devices (typeflag '4')
+  ok  rejects PAX extended headers (typeflag 'x')
+  ok  rejects GNU longname headers (typeflag 'L')
+  ok  rejects base-256 binary tar size encoding
+  ok  rejects corrupted header checksum
+  ok  rejects truncated tar archive (missing EOF blocks)
+  ok  rejects non-zero trailing data after EOF blocks
+  ok  rejects non-zero trailing data across 16KiB chunk boundary after EOF blocks
+  ok  rejects duplicate paths with differing trailing slashes
+  ok  rejects child entry when ancestor is a regular file
+  ok  rejects file entry when path conflicts with existing directory
+  ok  outStream wx collision does not unlink pre-existing collision file
+  ok  outStream error handler catches ENOSPC and cleans up created stage file
+  ok  validates real npm pack output archive successfully
+  ok  rejects uncompressed byte bomb exceeding limit
+  ok  rejects entry count bomb exceeding limit
+  ok  rejects duplicate entry paths (including case-insensitive)
+  ok  rejects extraction when target entry is missing
+Deadlines & Redirect Security in Pure Node Fetchers
+  ok  fetchText enforces absolute deadline
+Production Upgrade Path Verification (Hash+Length & Never Spawn NPM on URL/Tamper)
+● upgrade  checking latest signed Kroma release (current: v1.5.0)...
+● upgrade  new verified version available: v1.5.0 → v1.5.1
+● upgrade  downloading verified release archive...
+● upgrade  installing verified local archive via npm...
+● upgrade  ✓ kroma upgraded successfully.
+  ok  handleSelfUpgrade downloads archive, verifies sha/length, and passes local path to npm
+● upgrade  checking latest signed Kroma release (current: v1.5.0)...
+● upgrade  new verified version available: v1.5.0 → v1.5.1
+● upgrade  downloading verified release archive...
+● upgrade  ✗ upgrade failed: Fixture tarball checksum or length mismatch
+  ok  handleSelfUpgrade NEVER spawns npm if tarball is tampered
+downloadBinaryIfNeeded Pure Node & Target-Specific Verification
+[kroma] production release trust root is unconfigured; on-demand binary download for linux-x64 is blocked.
+  ok  downloadBinaryIfNeeded fails closed when trust root is empty
+[kroma] Fetching verified native pre-built binary for linux-x64...
+  ok  downloadBinaryIfNeeded succeeds with fixture tarball and sets 0755
+Offline / CI Release Manifest Generation (scripts/generate-release-manifest.js)
+[manifest-gen] ✓ Signed release manifest generated: /tmp/kroma-test-sec-O2WicH/generated-manifest.json
+  ok  generateManifest produces valid signed manifest verified by verifyManifest
+  ok  generateManifest rejects output to a symlink
+Real Code Guard Mutation Tests (Removing Guards Fails Test Immediately)
+  ok  mutation guard check 1: disabling signature verification allows tampered payload
+  ok  mutation guard check 2: disabling antirollback check allows version downgrade
+  ok  mutation guard check 3: disabling tar path traversal check allows '..' path
+  ok  mutation guard check 4: disabling tar typeflag check allows symlinks
+Backpressure & Late-Open Lifecycle Tests
+  ok  slow output backpressure pauses gunzip and keeps buffer bounded
+  ok  gated late open after cleanup closes fd and cleans up stage file without orphans
+  ok  mutation guard check 5: disabling backpressure break allows buffer unconstrained loop
+
+all 109 checks passed
+Trust root state
+  ok  production trust root declares exactly the release key and is frozen
+  ok  a test-key manifest is refused by the production entry
+manifest_binds_platform_version_and_artifact_hash
+  ok  the test-channel manifest verifies with the test key
+  ok  every bound field invalidates the signature when changed
+unknown_rotated_revoked_expired_key_is_rejected
+  ok  an unknown keyId is refused
+  ok  a revoked key (removed from the trusted map) is refused
+  ok  an expired manifest is refused
+  ok  a manifest for another target is refused
+  ok  a downgrade below the antirollback floor is refused
+signature_failure_never_overwrites_existing_binary
+  ok  an existing binary is never replaced by a download attempt
+[kroma] Fetching verified native pre-built binary for cli...
+[kroma] verification or extraction failed: Signature verification failed for release manifest
+  ok  a failed verification creates no file at all
+[kroma] Fetching verified native pre-built binary for cli...
+[kroma] verification or extraction failed: Unknown or untrusted signing key: test-channel
+  ok  an unconfigured trust root refuses before touching the disk
+production_fixture_signed_by_release_key_verifies
+  ok  the production entry refuses the test key and names the trust root it holds
+
+all 13 checks passed (test channel; no production key was used)
+tampered_source_archive_fails_before_extract
+  ok  a matching digest passes
+  ok  a tampered archive is refused before extraction
+  ok  no pin in the repository is a configuration error, not a pass
+  ok  every workflow fetches OpenSSL through the verify-before-extract script
+release_uses_same_commit_for_tests_and_artifacts
+  ok  the same commit passes
+  ok  artifacts from another commit are refused
+release_quality_failure_blocks_pack_and_sign
+  ok  all gates passing allows packing
+  ok  any failing gate blocks pack and sign
+missing_platform_artifact_cannot_publish
+  ok  every declared platform present allows publishing
+  ok  a missing platform blocks the release
+cargo_lock_change_requires_review
+  ok  the checked-in lock matches its pinned digest
+  ok  a changed lock is refused (and so is a missing pin)
+rebuild_identity_is_comparable
+  ok  the same artifacts produce the same identity regardless of order
+  ok  any byte or length change changes the identity
+  ok  an artifact without a digest cannot contribute to an identity
+release artifacts and the signed manifest agree
+  ok  matching manifest passes
+  ok  a manifest for different bytes is refused
+SBOM is recomputable
+  ok  the SBOM is deterministic and every component is pinned
+  ok  a registry crate without a checksum is refused
+third-party actions are pinned
+  ok  an unpinned action reference is detected
+       release.yml: 25 pinned, 0 on mutable tags (owner must supply reviewed SHAs)
+  ok  the repository's current action pinning state is reported
+RC1-04: OpenSSL sources are verified before extraction
+  ok  a missing or malformed OpenSSL pin fails closed before any download
+warn fixture.yml: OPENSSL_SHA256 is declared but not pinned; downloads will fail closed
+  ok  a direct extraction of a downloaded OpenSSL archive is refused
+RC1-03: the release DAG gates artifacts on quality
+  ok  packing without a quality job is refused
+
+all 24 checks passed
+ledger ok: 32 acceptance documents, 92 commands, 31 task rows, 489 distinct cited identifiers
+ok  .github/workflows/ci.yml: 16 uses: entries are commit-pinned
+ok  .github/workflows/release.yml: 25 uses: entries are commit-pinned
+ok  Cargo.lock matches the pinned digest caa80f28083d1243d9c8e2d0e873404620cd9adf0a052159d286536ccf713f8c
+warn .github/workflows/ci.yml: OPENSSL_SHA256 is declared but not pinned; downloads will fail closed
+warn .github/workflows/ci.yml: OPENSSL_SHA256 is declared but not pinned; downloads will fail closed
+warn .github/workflows/release.yml: OPENSSL_SHA256 is declared but not pinned; downloads will fail closed
+warn .github/workflows/release.yml: OPENSSL_SHA256 is declared but not pinned; downloads will fail closed
+ok  every OpenSSL fetch in 2 workflows is verified before extraction
+ok  release DAG gates artifacts on quality (jobs: quality, linux, windows, macos, android, musl, pack)
+cmp: identical
+EXIT=0

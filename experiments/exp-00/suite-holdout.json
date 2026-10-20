@@ -1,0 +1,49 @@
+[
+  {
+    "id": "refactor-duplication",
+    "prompt": "src/a.py and src/b.py both define normalize_name. Extract one implementation into src/util.py and import it from both modules. All tests must pass.",
+    "files": {
+      "src/a.py": "def normalize_name(name):\n    return name.strip().lower()\n",
+      "src/b.py": "def normalize_name(name):\n    return name.strip().lower()\n",
+      "tests/test_norm.py": "from src.a import normalize_name as na\nfrom src.b import normalize_name as nb\nfrom src.util import normalize_name as nu\n\n\ndef test_agree():\n    for n in [' A ', 'b', ' Cc ']:\n        assert na(n) == nb(n) == nu(n)\n"
+    },
+    "expect_contains": [
+      [
+        "src/util.py",
+        "def normalize_name"
+      ]
+    ],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "/tmp/kv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/"
+    ]
+  },
+  {
+    "id": "atomic-write",
+    "prompt": "src/store.py writes state with open(path,'w'), which truncates on crash. Make the write atomic (write a temp file in the same directory, then os.replace) while keeping the save/load API.",
+    "files": {
+      "src/store.py": "def save(path, text):\n    with open(path, 'w') as f:\n        f.write(text)\n\n\ndef load(path):\n    with open(path) as f:\n        return f.read()\n",
+      "tests/test_store.py": "from src.store import save, load\n\n\ndef test_roundtrip(tmp_path):\n    p = str(tmp_path / 's.txt')\n    save(p, 'hello')\n    assert load(p) == 'hello'\n"
+    },
+    "expect_contains": [
+      [
+        "src/store.py",
+        "os.replace"
+      ]
+    ],
+    "expect_absent": [],
+    "regression_guard": false,
+    "verify_command": [
+      "/tmp/kv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/"
+    ]
+  }
+]

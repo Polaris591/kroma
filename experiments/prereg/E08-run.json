@@ -1,0 +1,62 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "E08",
+  "title": "E08: does a router that owns escalation change a stalling run?",
+  "hypothesis": "Wiring the M3-01 router into the run path gives it one real decision: with a router in force, `Plan` lowers the repair-race threshold from two verification failures to one, and anything else forbids the spend. On tasks that stall, routing_on therefore escalates earlier and costs more without buying quality; on tasks that never fail verification the two arms are identical.",
+  "status": "PREREGISTERED_NOT_RUN",
+  "not_run_reason": null,
+  "task_cluster_definition": {
+    "cluster": "one task is one cluster; both tasks need cross-module edits and both stalled in earlier runs",
+    "dev_suite": "/opt/kroma-exp/suite-dev.json",
+    "dev_suite_note": "already consumed by earlier runs; not reused here",
+    "holdout_suite": "/opt/kroma-exp/suite-nav.json",
+    "suite_sha256": "7f19727d9303a54b0757f3e1d20901afd9d0a907cfee0b16a42759c8712d8dc1",
+    "tasks": [
+      "rename-across-modules",
+      "one-writer-for-state"
+    ],
+    "arms": [
+      "routing_off",
+      "routing_on"
+    ],
+    "runs": "2 tasks x 2 arms = 4",
+    "fairness_check": "each task graded unsolved (exit 1) and with a reference solution (exit 0) before the run"
+  },
+  "model_identity_observability": {
+    "reported_model_required_in_report": true,
+    "note": "same model both arms"
+  },
+  "quality_margin": {
+    "primary_metric": "fix_success_rate",
+    "delta": "5 percentage points",
+    "rule": "quality non-inferior within 5pp before any cost claim"
+  },
+  "noise_and_power_plan": {
+    "plan": "4 runs; same model, temperature 0, arm order alternated by task index",
+    "interval": "95% cluster bootstrap, resamples 4000",
+    "statement": "2 clusters; this run can show whether the wiring executes and in which direction, not a distribution"
+  },
+  "cache_order_design": {
+    "order": "arm order alternated by task index",
+    "cache": "provider-side cache state is not controllable and is not claimed"
+  },
+  "budget": {
+    "plan": "4 runs, 2 000k tokens",
+    "spend_ceiling_usd": null,
+    "spend_basis": "owner-authorized unlimited for gemini-3.8-flash"
+  },
+  "stopping_rule": "stop after 4 runs or 2 000k tokens, whichever comes first",
+  "holdout_policy": {
+    "queries": 1,
+    "retire_after": "one pass",
+    "retirement_action": "this suite becomes validation; a new one must be frozen before another claim",
+    "verifier_path": "/opt/kroma-exp/verifier.py",
+    "prior_use": "used once by E06-nav; this is a second pass on the same tasks and is recorded as such"
+  },
+  "metrics": [
+    "fix_success_rate",
+    "tokens_per_success",
+    "route_decisions",
+    "adaptive_tournament_attempted"
+  ]
+}

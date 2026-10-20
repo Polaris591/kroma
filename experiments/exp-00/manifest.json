@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "id": "EXP-00",
+  "arms": [
+    {
+      "id": "baseline",
+      "kind": "baseline",
+      "model": "gemini-3.8-flash-high",
+      "price_table": "operator-cobblemon-2026-10"
+    },
+    {
+      "id": "candidate-on-demand-tools",
+      "kind": "candidate",
+      "model": "gemini-3.8-flash-high",
+      "price_table": "operator-cobblemon-2026-10"
+    }
+  ],
+  "tasks": [
+    {"id": "fix-off-by-one", "source": "experiments/exp-00/tasks.json#0"},
+    {"id": "add-guard-clause", "source": "experiments/exp-00/tasks.json#1"},
+    {"id": "rename-and-update-callsites", "source": "experiments/exp-00/tasks.json#2"},
+    {"id": "add-missing-test-case", "source": "experiments/exp-00/tasks.json#3"},
+    {"id": "refactor-duplication", "source": "experiments/exp-00/tasks.json#4"},
+    {"id": "reject-symlink-input", "source": "experiments/exp-00/tasks.json#5"},
+    {"id": "bound-output-size", "source": "experiments/exp-00/tasks.json#6"},
+    {"id": "holdout-atomic-write", "source": "experiments/exp-00/tasks.json#7"}
+  ],
+  "holdout": ["refactor-duplication", "holdout-atomic-write"],
+  "repeats": 3,
+  "sandbox": "bwrap",
+  "oracle": "python3 -m pytest -q tests/",
+  "max_total_tokens": 4000000
+}

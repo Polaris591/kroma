@@ -1,0 +1,704 @@
+{
+  "schema": "kroma.phase1.commands.v1",
+  "cwd_patched": "/opt/kroma-p1",
+  "cwd_baseline": "/opt/kroma-orig",
+  "baseline_note": "the baseline tree is built with CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 to fit the disk budget; this changes no test outcome",
+  "commands": [
+    {
+      "id": "check_patched",
+      "cmd": "cargo check --workspace --all-targets",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "not archived (superseded by clippy/test which compile the same targets)",
+      "note": "failed with E0004 before the DeadEnd fix; passes after"
+    },
+    {
+      "id": "fmt_all_patched",
+      "cmd": "cargo fmt --all -- --check",
+      "cwd": "patched",
+      "exit": 1,
+      "log": "logs/fmt_patched.log",
+      "note": "516 hunks; the repository is not rustfmt-clean at the delivered baseline. Per the handoff, no blanket reformat was committed; only the files whose formatting this patch broke were formatted."
+    },
+    {
+      "id": "fmt_patched_files",
+      "cmd": "rustfmt --edition 2021 --check <the 8 patched files>",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/fmt_patched_files.log",
+      "note": "after formatting session.rs, tournament.rs, gate2_evidence_projection.rs (the three files the patch left dirty). agent_loop.rs (10 hunks) and subagents.rs (2 hunks) were already dirty in the reconstructed baseline and were left untouched."
+    },
+    {
+      "id": "clippy_patched",
+      "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/clippy_patched.log",
+      "note": "two patch-introduced lints fixed: needless_range_loop (tournament.rs) and large_enum_variant (TranscriptItem, documented allow)"
+    },
+    {
+      "id": "clippy_baseline",
+      "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
+      "cwd": "baseline",
+      "exit": 0,
+      "log": "not archived (clean, no output)"
+    },
+    {
+      "id": "test_patched",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_patched_full.log",
+      "summary": "820 passed, 1 failed (b05_execution_context::run_deadline_clamps_mcp_timeout)",
+      "note": "the single failure reproduces at 1/10 on the reconstructed baseline as well -> pre-existing flake, see regressions.md"
+    },
+    {
+      "id": "test_baseline",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "baseline",
+      "exit": 0,
+      "log": "logs/test_orig_full.log",
+      "summary": "817 passed, 0 failed",
+      "note": "3 fewer tests than the patched tree: the first-batch patch adds three regression tests (T01 matrix, T05 forged marker, T07 WAL capacity)"
+    },
+    {
+      "id": "b08c_patched_repeat",
+      "cmd": "cargo test -p kroma-core --test b08c_git_metadata  (x20)",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/regression_b08c_patched.txt",
+      "summary": "1 failure in 20 runs"
+    },
+    {
+      "id": "b08c_baseline_repeat",
+      "cmd": "cargo test -p kroma-core --test b08c_git_metadata  (x21)",
+      "cwd": "baseline",
+      "exit": 0,
+      "log": "logs/regression_b08c_baseline.txt",
+      "summary": "0 failures in 21 runs (same test source, same production source -> sampling, not a patch regression)"
+    },
+    {
+      "id": "b05_patched_repeat",
+      "cmd": "cargo test -p kroma-core --test b05_execution_context  (x10)",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/regression_b05_patched.txt",
+      "summary": "1 failure in 10 runs"
+    },
+    {
+      "id": "b05_baseline_repeat",
+      "cmd": "cargo test -p kroma-core --test b05_execution_context  (x10)",
+      "cwd": "baseline",
+      "exit": 101,
+      "log": "logs/regression_b05_baseline.txt",
+      "summary": "1 failure in 10 runs -> pre-existing flake, not caused by the patch"
+    },
+    {
+      "id": "node_patched",
+      "cmd": "node scripts/test-kroma-js-upgrade.js",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/node_patched_1.log",
+      "summary": "108/108 checks passed"
+    },
+    {
+      "id": "node_baseline",
+      "cmd": "node scripts/test-kroma-js-upgrade.js",
+      "cwd": "baseline",
+      "exit": 0,
+      "log": "logs/node_orig_1.log",
+      "summary": "108/108 checks passed"
+    },
+    {
+      "id": "node_patched_repeat",
+      "cmd": "node scripts/test-kroma-js-upgrade.js  (x10)",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/node_patched_repeat.txt",
+      "summary": "0 failures in 10 runs; the ENOENT flake the handoff recorded in the other environment did not reproduce here"
+    },
+    {
+      "id": "release_build_patched",
+      "cmd": "cargo build --workspace --release",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/build_release_patched.log",
+      "summary": "target/release/kroma, 16216200 bytes"
+    },
+    {
+      "id": "t03_targeted",
+      "cmd": "cargo test -p kroma-core --test t03_context_budget",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "not archived (inline: 12 passed / 0 failed)",
+      "note": "T03 acceptance tests"
+    },
+    {
+      "id": "t03_clippy",
+      "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "not archived (0 warnings)",
+      "note": "T03"
+    },
+    {
+      "id": "t03_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t03.log",
+      "note": "T03: 844 passed / 0 failed"
+    },
+    {
+      "id": "t04_targeted",
+      "cmd": "cargo test -p kroma-core --test t04_budget_lifecycle",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "not archived (inline: 8 passed / 0 failed)",
+      "note": "T04 reservation lifecycle"
+    },
+    {
+      "id": "t04_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t04.log",
+      "note": "T04: 852 passed / 0 failed"
+    },
+    {
+      "id": "t05_targeted",
+      "cmd": "cargo test -p kroma-core --test t05_compaction_identity",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T05: 6 passed / 0 failed"
+    },
+    {
+      "id": "t05_gate2",
+      "cmd": "cargo test -p kroma-core --test gate2_evidence_projection",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T05: 18 passed / 0 failed"
+    },
+    {
+      "id": "t05_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t05.log",
+      "note": "T05: 857 passed / 1 failed (b08c_git_metadata pre-existing flake, 5/5 green serially)"
+    },
+    {
+      "id": "t06_secure_fs_unit",
+      "cmd": "cargo test -p kroma-core --lib secure_fs",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T06: 21 passed (14 existing + 7 new)"
+    },
+    {
+      "id": "t06_targeted",
+      "cmd": "cargo test -p kroma-core --test t06_bounded_io",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T06: 7 passed / 0 failed"
+    },
+    {
+      "id": "t06_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t06.log",
+      "note": "T06: 872 passed / 0 failed"
+    },
+    {
+      "id": "t07_session_unit",
+      "cmd": "cargo test -p kroma-core --lib session::tests",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T07: 21 passed (16 existing + 5 new)"
+    },
+    {
+      "id": "t07_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t07.log",
+      "note": "T07: 879 passed / 0 failed"
+    },
+    {
+      "id": "t08_windows_build",
+      "cmd": "cargo build -p kroma-cli --target x86_64-pc-windows-gnu",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t08_windows_build.log",
+      "note": "T08: kroma.exe 199,409,491 bytes (build, not check)"
+    },
+    {
+      "id": "t08_windows_tests_check",
+      "cmd": "cargo check -p kroma-core --tests --target x86_64-pc-windows-gnu",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t08_windows_tests_check.log",
+      "note": "T08: all test code type-checks on Windows incl. 3 new cfg(windows) cases"
+    },
+    {
+      "id": "t08_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t08.log",
+      "note": "T08: 880 passed / 1 failed (b05 run_deadline_clamps_mcp_timeout, documented flake 2.1, green on rerun)"
+    },
+    {
+      "id": "t09_targeted",
+      "cmd": "cargo test -p kroma-core --test t09_execution_boundary",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T09: 8 passed / 0 failed (bwrap + config wiring)"
+    },
+    {
+      "id": "t09_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t09.log",
+      "note": "T09: 887 passed / 2 failed (b05 2.1 + b08c 2.2 documented flakes, both green on rerun)"
+    },
+    {
+      "id": "t10_targeted",
+      "cmd": "cargo test -p kroma-core --test t10_container_lifecycle",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T10: 9 passed / 0 failed incl. 3 real-docker lifecycle cases (docker 26.1.5, alpine:3.20)"
+    },
+    {
+      "id": "t10_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t10.log",
+      "note": "T10: 898 passed / 0 failed"
+    },
+    {
+      "id": "t11_targeted",
+      "cmd": "cargo test -p kroma-core --test t11_assembly",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T11: 5 passed / 0 failed (cross-surface digest equality, dependency gates, ledger semantics)"
+    },
+    {
+      "id": "t11_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t11.log",
+      "note": "T11: 903 passed / 0 failed"
+    },
+    {
+      "id": "t12_targeted",
+      "cmd": "cargo test -p kroma-core --test t12_tool_discovery_loop",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T12: 4 passed / 0 failed (strict-provider round-trip, denied tool, unmount, budgets)"
+    },
+    {
+      "id": "t12_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t12.log",
+      "note": "T12: 905 passed / 2 failed (b05 2.1 + b08c 2.2 documented flakes, both green on rerun)"
+    },
+    {
+      "id": "t13_targeted",
+      "cmd": "cargo test -p kroma-core --test t13_mcp_handshake",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T13: 6 passed / 0 failed (real python stdio servers: version, capability, pagination, cursor cycle, budgets, annotations)"
+    },
+    {
+      "id": "t13_mcp_config",
+      "cmd": "cargo test -p kroma-core --test mcp_config",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T13: 9 passed / 0 failed after fixtures declare the tools capability"
+    },
+    {
+      "id": "t13_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t13.log",
+      "note": "T13: 911 passed / 2 failed (session_ownership 2.5 + b08c 2.2 documented flakes, both green on rerun)"
+    },
+    {
+      "id": "t14_targeted",
+      "cmd": "cargo test -p kroma-core --test t14_cache_accounting",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T14: 4 passed / 0 failed (advancing breakpoint, prefix stability, wire merge mapping, creation-vs-read accounting)"
+    },
+    {
+      "id": "t14_cache_stability",
+      "cmd": "cargo test -p kroma-core --test context_cache_stability",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T14: 4 passed / 0 failed"
+    },
+    {
+      "id": "t14_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t14.log",
+      "note": "T14: 917 passed / 0 failed"
+    },
+    {
+      "id": "t15_targeted",
+      "cmd": "cargo test -p kroma-core --test t15_evidence_store",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T15: 5 passed / 0 failed (evicted recovery, explicit statuses, fork isolation, historical bytes, GC)"
+    },
+    {
+      "id": "t15_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t15.log",
+      "note": "T15: 921 passed / 1 failed (b08c 2.2 documented flake, 5/5 green serially)"
+    },
+    {
+      "id": "t16_targeted",
+      "cmd": "cargo test -p kroma-core --test t16_repo_graph_budget",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T16: 3 passed / 0 failed (cold/warm same cap, changed-file + cached tail, natural-language corpus)"
+    },
+    {
+      "id": "t16_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t16.log",
+      "note": "T16: 925 passed / 0 failed"
+    },
+    {
+      "id": "t17_targeted",
+      "cmd": "cargo test -p kroma-core --test t17_experiment_manifest",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T17: 10 passed / 0 failed (ids, holdout, matrix cap, export+hash, unknown fields, dir collisions, baselines, promotion)"
+    },
+    {
+      "id": "t17_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t17.log",
+      "note": "T17: 935 passed / 0 failed"
+    },
+    {
+      "id": "t18_usage_cost",
+      "cmd": "cargo test -p kroma-core --test t18_usage_cost",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T18: 5 passed / 0 failed (cache-write rate, per-attempt models, estimate vs measured, incomplete totals)"
+    },
+    {
+      "id": "t18_provenance",
+      "cmd": "cargo test -p kroma-core --test t18_provenance_identity",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T18: 7 passed / 0 failed (git timeout, bounded hash read, incomplete identity, mode bits, binary separation, wire request identity)"
+    },
+    {
+      "id": "t18_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t18.log",
+      "note": "T18: 947 passed / 0 failed"
+    },
+    {
+      "id": "t19_targeted",
+      "cmd": "cargo test -p kroma-core --test t19_ahe_isolation",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T19: 9 passed / 0 failed (source untouched, identical starts, frozen judge, verdict split, evaluator identity, RAII cleanup)"
+    },
+    {
+      "id": "t19_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t19.log",
+      "note": "T19: 955 passed / 1 failed (b05 agent_runner_real_toolchain_clamps_run_deadline, load-sensitive spawn flake, b05 14/14 green on rerun)"
+    },
+    {
+      "id": "t20_targeted",
+      "cmd": "cargo test -p kroma-core --test t20_capability_manifest",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T20: 7 passed / 0 failed (manifest vs repo, CLI flags, version agreement, old-report gate, doc drift)"
+    },
+    {
+      "id": "t20_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t20.log",
+      "note": "T20: 963 passed / 0 failed"
+    },
+    {
+      "id": "t21_node_upgrade",
+      "cmd": "node scripts/test-kroma-js-upgrade.js",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t21_node_upgrade.log",
+      "note": "T21: all 108 existing Node checks still pass"
+    },
+    {
+      "id": "t21_trust_root",
+      "cmd": "node scripts/test-release-trust-root.js",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t21_trust_root.log",
+      "note": "T21: 13 test-channel checks pass (tamper/unknown/rotated/expired/downgrade/no-overwrite); production trust root is empty by design"
+    },
+    {
+      "id": "t22_release_pipeline",
+      "cmd": "node scripts/test-release-pipeline.js",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t22_release_pipeline.log",
+      "note": "T22: 21 checks passed (archive pin before extract, same-commit, quality gates block pack, platform presence, lock pin, rebuild identity, manifest/artifact match, SBOM determinism, action pinning detector)"
+    },
+    {
+      "id": "t22_lock_pin",
+      "cmd": "node scripts/release-gate.js lock",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T22: Cargo.lock matches docs/release/Cargo.lock.sha256"
+    },
+    {
+      "id": "t22_sbom",
+      "cmd": "node scripts/generate-sbom.js --out docs/release/sbom.json",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T22: 124 components, lockfile caa80f28..., sbom 0c866311... (deterministic)"
+    },
+    {
+      "id": "t23_targeted",
+      "cmd": "cargo test -p kroma-core --test t23_snapshot_identity",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T23: 5 passed / 0 failed (A->B->A, two routes to same content, crash replay, external rename+chmod, multiple undo)"
+    },
+    {
+      "id": "t23_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t23.log",
+      "note": "T23: 968 passed / 0 failed"
+    },
+    {
+      "id": "t24_exp00_dryrun",
+      "cmd": "kroma --experiment experiments/exp-00/manifest.json",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/t24_exp00_dryrun.log",
+      "note": "T24: EXP-00 dry-run, 48 jobs (2 arms x 8 tasks x 3 repeats), basis=holdout, digest 05757bf3fe69c9f9; real model runs BLOCKED (no authorized spend cap)"
+    },
+    {
+      "id": "t25_targeted",
+      "cmd": "cargo test -p kroma-core --test t25_task_state",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T25: 4 passed / 0 failed (constraint survives compaction+resume, mentions are not causes, hypotheses need evidence, compression cost includes rereads)"
+    },
+    {
+      "id": "t25_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t25.log",
+      "note": "T25: 971 passed / 1 failed (b08c 2.2 documented flake, 5/5 green serially)"
+    },
+    {
+      "id": "t26_targeted",
+      "cmd": "cargo test -p kroma-core --test t26_localization",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T26: 2 passed / 0 failed (5/5 natural-language rank-1 vs 0/5 symbol-name baseline on opaque filenames; truncation fallback works)"
+    },
+    {
+      "id": "t26_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t26.log",
+      "note": "T26: 974 passed / 0 failed"
+    },
+    {
+      "id": "t27_unit",
+      "cmd": "cargo test -p kroma-core --lib control_policy",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T27: 8 passed / 0 failed (deterministic actions, caps, budget floor, isolation stop, multi-candidate gate, loser cost)"
+    },
+    {
+      "id": "t27_targeted",
+      "cmd": "cargo test -p kroma-core --test t27_control_policy",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T27: 3 passed / 0 failed (probe runs on an isolated copy and leaves the parent byte-identical; unauthorized never executes)"
+    },
+    {
+      "id": "t27_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t27.log",
+      "note": "T27: 985 passed / 0 failed"
+    },
+    {
+      "id": "t28_handoff",
+      "cmd": "cargo test -p kroma-core --lib handoff",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T28: 5 passed / 0 failed (revocation effective next retrieval, falsified/expired stats, path/policy/branch/version invalidation, handoff without transcript, truncation)"
+    },
+    {
+      "id": "t28_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 101,
+      "log": "logs/test_t28.log",
+      "note": "T28: 988 passed / 2 failed (mcp 2.4 + b08c 2.2 documented flakes; 20/20 and 5/5 green on rerun)"
+    },
+    {
+      "id": "t29_targeted",
+      "cmd": "cargo test -p kroma-core --test t29_harness_evolution",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T29: 5 passed / 0 failed (round declaration, frozen acceptance criteria, component allowlist, promotion gates, negative rounds kept)"
+    },
+    {
+      "id": "t29_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t29.log",
+      "note": "T29: 995 passed / 0 failed"
+    },
+    {
+      "id": "t30_full_suite",
+      "cmd": "cargo test --workspace --no-fail-fast",
+      "cwd": "patched",
+      "exit": 0,
+      "log": "logs/test_t30_final.log",
+      "note": "T30 sealed tree: 995 passed / 0 failed"
+    },
+    {
+      "id": "t30_clippy",
+      "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T30: 0 warnings"
+    },
+    {
+      "id": "t30_fmt_touched",
+      "cmd": "rustfmt --check --edition 2021 $(git diff --name-only 19723b6..HEAD | grep '\\.rs$')",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T30: 0 diffs across the 95 touched files (whole-tree non-clean count 507 baseline -> 105, all pre-existing)"
+    },
+    {
+      "id": "t30_patch_applies",
+      "cmd": "git apply --check dist-t30/kroma_T00_T30.patch",
+      "cwd": "delivered tree 19723b6",
+      "exit": 0,
+      "note": "T30: patch applies cleanly to the delivered source"
+    },
+    {
+      "id": "t30_node_suites",
+      "cmd": "node scripts/test-kroma-js-upgrade.js; node scripts/test-release-trust-root.js; node scripts/test-release-pipeline.js",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T30: 108 + 13 + 21 checks passed"
+    },
+    {
+      "id": "t30_ledger",
+      "cmd": "node scripts/verify-ledger.js",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T30: 32 acceptance docs, 82 commands, 31 task rows; every cited identifier exists or is explicitly marked as not-tested"
+    },
+    {
+      "id": "t22_action_pins",
+      "cmd": "node scripts/release-gate.js actions",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T22: all 38 uses: entries pinned to 40-char commit SHAs (8 distinct actions resolved via GitHub API); pinned-with-comment form supported"
+    },
+    {
+      "id": "t21_keygen",
+      "cmd": "openssl genpkey -algorithm ed25519 -out /root/kroma-release/kroma-release-key.pem && openssl pkey -in … -pubout -outform DER | tail -c 32",
+      "cwd": "host",
+      "exit": 0,
+      "note": "T21: production key pair generated on the host at the owner's instruction; keyId kroma-release-2026; private key 600, never in the repo"
+    },
+    {
+      "id": "t21_trust_root_tests",
+      "cmd": "node scripts/test-release-trust-root.js",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T21: 13 passed (production root declares exactly kroma-release-2026, test key refused, impostor keyId refused)"
+    },
+    {
+      "id": "t21_upgrade_tests",
+      "cmd": "node scripts/test-kroma-js-upgrade.js",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T21/T22: 109 passed (incl. production-root signature binding)"
+    },
+    {
+      "id": "t21_sign_and_verify",
+      "cmd": "node scripts/generate-release-manifest.js --key-id kroma-release-2026 --private-key-file /root/kroma-release/kroma-release-key.pem … && verifyManifest(text)",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T21: real manifest verified with the production root; sha256 matches SHA256SUMS for the sealed tarball; tampered payload refused"
+    },
+    {
+      "id": "t21_sbom_manifest_verify",
+      "cmd": "node -e 'require(\"./bin/kroma.js\").verifyManifest(<signed manifest>)'",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T21: production-root verification of a real signed manifest"
+    },
+    {
+      "id": "t30_release_gate",
+      "cmd": "node scripts/release-gate.js lock && node scripts/release-gate.js actions",
+      "cwd": "patched",
+      "exit": 0,
+      "note": "T22/T30: Cargo.lock pinned digest matches; 16 + 22 uses: entries commit-pinned"
+    },
+    {
+      "id": "t24_bench_dev_r2",
+      "cmd": "kroma bench --suite suite-dev.json --executor provider --budget-tokens 600000 --allow-write --allow-shell --json",
+      "cwd": "/tmp/exp00-run",
+      "exit": 0,
+      "log": "logs/exp00/dev-round2.json",
+      "note": "T24: dev round 2, both arms 6/6; tournament +17.6% tokens for no pass gain"
+    },
+    {
+      "id": "t24_bench_holdout_r2",
+      "cmd": "kroma bench --suite suite-holdout.json --executor provider --budget-tokens 600000 --repetitions 3 --allow-write --allow-shell --json",
+      "cwd": "/tmp/exp00-run",
+      "exit": 0,
+      "log": "logs/exp00/holdout-round2.json",
+      "note": "T24: holdout 12 runs; single 5/6 vs tournament 6/6, delta +16.7% CI [0%,+33.3%] -> Inconclusive per preregistered rule; ~$1.45 total for 8.77M tokens"
+    }
+  ]
+}

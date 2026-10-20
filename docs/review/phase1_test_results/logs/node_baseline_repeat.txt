@@ -1,0 +1,16 @@
+run 2 FAILED
+FAIL  gated late open after cleanup closes fd and cleans up stage file without orphans
+"Error: ENOENT: no such file or directory, lstat '/tmp/kroma-test-sec-XmmzlG/gated-dest.bin.tmp.809857.1792227377845'"
+run 4 FAILED
+FAIL  gated late open after cleanup closes fd and cleans up stage file without orphans
+"Error: ENOENT: no such file or directory, lstat '/tmp/kroma-test-sec-UV3eQt/gated-dest.bin.tmp.809914.1792227378619'"
+run 7 FAILED
+FAIL  gated late open after cleanup closes fd and cleans up stage file without orphans
+"Error: ENOENT: no such file or directory, lstat '/tmp/kroma-test-sec-inX7ZI/gated-dest.bin.tmp.809992.1792227379789'"
+run 8 FAILED
+FAIL  gated late open after cleanup closes fd and cleans up stage file without orphans
+"Error: ENOENT: no such file or directory, lstat '/tmp/kroma-test-sec-HIliKn/gated-dest.bin.tmp.810018.1792227380179'"
+run 12 FAILED
+FAIL  gated late open after cleanup closes fd and cleans up stage file without orphans
+"Error: ENOENT: no such file or directory, lstat '/tmp/kroma-test-sec-iYtsfl/gated-dest.bin.tmp.810127.1792227381749'"
+baseline node failures: 5/15

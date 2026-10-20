@@ -1,0 +1,253 @@
+{
+  "gate": "Gate 7",
+  "version": "1.2.0",
+  "generated_by": "kroma v1.2.0 acceptance run (measured on this machine, not estimated)",
+  "repograph_navigation": {
+    "corpus": "/opt/harness (the kroma workspace itself)",
+    "files_indexed": 62,
+    "symbols_extracted": 1436,
+    "cross_file_edges": 6234,
+    "files_skipped": 0,
+    "truncated": false,
+    "full_graph_build_ms": 58,
+    "avg_query_ms": 0.1,
+    "pagerank": {
+      "cold_start_damping": 0.85,
+      "seeded_damping": 0.35,
+      "iterations": 15,
+      "seed_weights": {
+        "path_match": 60.0,
+        "symbol_definition": 150.0,
+        "focus_file": 400.0,
+        "one_hop_neighbour": 30.0
+      }
+    },
+    "symbol_query_benchmark": {
+      "cases": 10,
+      "top1_accuracy": 1.0,
+      "top3_recall": 1.0,
+      "results": [
+        {
+          "query": "WorkspaceCap",
+          "expected": "crates/kroma-core/src/workspace.rs",
+          "rank": 1
+        },
+        {
+          "query": "RepoGraph",
+          "expected": "crates/kroma-core/src/repo_graph.rs",
+          "rank": 1
+        },
+        {
+          "query": "SnapshotStore",
+          "expected": "crates/kroma-core/src/revision.rs",
+          "rank": 1
+        },
+        {
+          "query": "execute_recall_evidence",
+          "expected": "crates/kroma-core/src/tools/recall_evidence.rs",
+          "rank": 1
+        },
+        {
+          "query": "RpcDispatcher",
+          "expected": "crates/kroma-core/src/surface.rs",
+          "rank": 1
+        },
+        {
+          "query": "ProjectionProfile",
+          "expected": "crates/kroma-core/src/context_projector.rs",
+          "rank": 1
+        },
+        {
+          "query": "PredictiveValidator",
+          "expected": "crates/kroma-core/src/attribution.rs",
+          "rank": 1
+        },
+        {
+          "query": "SubagentRole",
+          "expected": "crates/kroma-core/src/subagents.rs",
+          "rank": 1
+        },
+        {
+          "query": "PolicyEngine",
+          "expected": "crates/kroma-core/src/tool/policy.rs",
+          "rank": 1
+        },
+        {
+          "query": "serialize_openai_request_body",
+          "expected": "crates/kroma-core/src/provider/chat_completions.rs",
+          "rank": 1
+        }
+      ]
+    },
+    "languages": [
+      "rust",
+      "python",
+      "typescript",
+      "javascript",
+      "go",
+      "c",
+      "cpp",
+      "java"
+    ],
+    "kernel_tool": {
+      "name": "code_graph",
+      "effect_class": "read_only",
+      "builtin_tool_count": 11
+    },
+    "neighbour_lists": "aggregated per neighbour file (one entry per file with its summed edge weight)"
+  },
+  "multimodal_read": {
+    "supported_formats": [
+      "image/png",
+      "image/jpeg",
+      "image/gif",
+      "image/webp"
+    ],
+    "header_dimension_parse_correctness": 1.0,
+    "formats_verified": 4,
+    "max_attachment_bytes": 1048576,
+    "base64_encoding": "RFC 4648 standard alphabet with padding (hand-rolled, zero new dependencies)",
+    "binary_rejection_preserved": true,
+    "masquerade_rejection": "a .png whose magic bytes are not PNG is still rejected as binary",
+    "provider_projection": {
+      "chat_completions": "tool message content becomes [{type:text},{type:image_url}]",
+      "anthropic_messages": "tool_result content becomes [{type:text},{type:image,source:{type:base64}}]",
+      "openai_responses": "function_call_output text plus a follow-up user turn with input_image parts"
+    },
+    "context_budget": "base64 payload length is counted in TranscriptItem::estimated_bytes, tool_output_bytes and raw_tool_bytes; Step-Down Compaction clears the attachments together with the raw text, and an emergency eviction pass drops every image but the newest (then the newest too) before the projection would ever return ContextBudgetExceeded",
+    "max_attachment_bytes_note": "1 MiB raw (<=1.4 MiB base64), kept below BudgetConfig::context_high_watermark_bytes (1.5 MiB) so a single attachment cannot on its own push the request over the high watermark"
+  },
+  "anthropic_messages_protocol": {
+    "path": "/v1/messages",
+    "headers": [
+      "x-api-key",
+      "anthropic-version: 2023-06-01",
+      "anthropic-beta: prompt-caching-2024-07-31"
+    ],
+    "explicit_cache_breakpoints": 3,
+    "breakpoint_locations": [
+      "static system block",
+      "last tool definition",
+      "projector frozen-prefix boundary (PinnedBaselineEnd, TailWindowStart fallback)"
+    ],
+    "sse_events_handled": [
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+      "error"
+    ],
+    "delta_types_handled": [
+      "text_delta",
+      "thinking_delta",
+      "signature_delta",
+      "input_json_delta"
+    ],
+    "cache_accounting": "input_tokens = input + cache_read + cache_creation; cached_input_tokens = cache_read_input_tokens",
+    "verified_cache_hit_ratio_in_test": 0.8713
+  },
+  "openai_responses_protocol": {
+    "path": "/v1/responses",
+    "request_shape": [
+      "model",
+      "instructions",
+      "input[]",
+      "tools[]",
+      "reasoning.effort",
+      "stream",
+      "store=false"
+    ],
+    "input_item_types": [
+      "message(input_text/output_text)",
+      "reasoning",
+      "function_call",
+      "function_call_output",
+      "input_image"
+    ],
+    "sse_events_handled": [
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.output_text.delta",
+      "response.reasoning_summary_text.delta",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed",
+      "response.incomplete",
+      "response.failed",
+      "error"
+    ],
+    "cache_accounting": "usage.input_tokens_details.cached_tokens"
+  },
+  "protocol_selection": {
+    "flag": "--protocol",
+    "env": "KROMA_PROTOCOL",
+    "values": [
+      "auto",
+      "chat-completions",
+      "anthropic-messages",
+      "openai-responses"
+    ],
+    "auto_detection": "base URL containing 'anthropic' or a model id prefixed 'claude-' selects anthropic-messages; a base URL containing '/responses' selects openai-responses; otherwise chat-completions (unchanged default)"
+  },
+  "transport_shared": {
+    "module": "crates/kroma-core/src/provider/transport.rs",
+    "note": "the hand-written TLS + HTTP/1.1 framing (openat2-free: plain tokio TcpStream + OpenSSL on unix / Schannel on windows) is now shared by all three protocol clients instead of being duplicated",
+    "failure_classes": [
+      "TransportFailure::Transient",
+      "TransportFailure::Fatal",
+      "BodyFailure::Fatal",
+      "BodyFailure::Stream"
+    ],
+    "mid_stream_retry_policy": "a mid-stream failure is never retried once business data has been observed (§4.3), preserved for all three protocols"
+  },
+  "test_suite": {
+    "workspace_tests_passed": 165,
+    "workspace_tests_failed": 0,
+    "compiler_warnings": 0,
+    "new_test_file": "crates/kroma-core/tests/gate7_repograph_vision_protocols.rs",
+    "new_tests": 12,
+    "windows_cross_check": "cargo check --workspace --target x86_64-pc-windows-gnu --all-targets (0 warnings)",
+    "new_tests_detail": {
+      "pre_review": 5,
+      "post_review_regressions": [
+        "test_repo_graph_multi_space_cjk_identifiers_and_deduplicated_neighbour_lists",
+        "test_step_down_compaction_evicts_stale_image_attachments_and_reclaims_budget",
+        "test_multimodal_read_never_aborts_the_run_with_context_budget_exceeded",
+        "test_anthropic_truncated_sse_streams_are_rejected",
+        "test_openai_responses_truncated_sse_streams_are_rejected",
+        "test_responses_non_streaming_failed_status_is_an_error",
+        "test_anthropic_wire_messages_alternate_roles_and_lead_with_thinking"
+      ]
+    }
+  },
+  "post_review_hardening": {
+    "source": "3-way Gemini review of v1.2.0",
+    "context_projection": [
+      "run_step_down_compaction compares content.len() + image_attachment_bytes() against MIN_COMPACTABLE_TOOL_BYTES and reclaims the full payload",
+      "image attachments are cleared on both the projected item and the canonical transcript",
+      "emergency image eviction keeps a valid multimodal read from aborting the run with ContextBudgetExceeded"
+    ],
+    "multimodal_read": [
+      "MAX_IMAGE_ATTACHMENT_BYTES lowered 4 MiB -> 1 MiB",
+      "oversized image files fail fast with the real reason instead of falling through to the 8 MiB binary scanner",
+      "ImageAttachment::base64_data is Arc<str> so projecting a turn never deep-clones the payload",
+      "JPEG sniffer rejects non-marker bytes, EOI/SOS before a SOF, and SOF segments shorter than 7 bytes",
+      "the sniffed MIME type must match the extension"
+    ],
+    "protocols": [
+      "OpenAI Responses rejects a stream without response.completed/response.incomplete and never promotes unclosed function_call items with `{}`",
+      "Anthropic rejects a stream without message_stop, without a stop_reason, or with an unclosed tool_use block",
+      "Anthropic wire messages strictly alternate roles, lead assistant turns with thinking blocks, omit empty text blocks and omit an empty `system`",
+      "the cache_control prefix breakpoint is translated through the transcript->wire merge map",
+      "a non-streaming Responses status of failed/cancelled is an error, not a Stop turn"
+    ],
+    "repograph": [
+      "`const `/`type ` prefixes trim leading whitespace before ident_at + slicing (no UTF-8 char-boundary panic on CJK identifiers)",
+      "called_by / calls_into aggregate weights per neighbour file instead of listing duplicates"
+    ]
+  }
+}
