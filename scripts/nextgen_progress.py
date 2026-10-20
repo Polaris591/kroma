@@ -12,11 +12,57 @@ Usage:
       [--commit SHA] [--evidence TEXT]... [--blocker TEXT] [--decision TEXT]
   nextgen_progress.py status <ledger.json>
 """
+import hashlib
 import json
 import os
+import subprocess
 import sys
+from datetime import datetime, timezone
 
-VALID = {"TODO", "IN_PROGRESS", "DONE", "BLOCKED", "REJECTED"}
+# Status vocabulary is the taskbook's own (taskctl.py STATES), not an invention.
+VALID = {"TODO", "IN_PROGRESS", "IMPLEMENTED_UNVERIFIED", "VERIFIED", "FAILED",
+         "BLOCKED_EXTERNAL", "REJECTED_WITH_EVIDENCE", "DEFERRED_WITH_RATIONALE"}
+RESEARCH_TERMINAL = {"REJECTED_WITH_EVIDENCE", "DEFERRED_WITH_RATIONALE"}
+
+SKIP_DIRS = {".git", "target", "__pycache__", "node_modules"}
+
+
+def tree_sha256(root):
+    """Same algorithm as nextgen_baseline_identity.py, so receipts bind to the
+    source tree rather than to a filename.
+
+    docs/nextgen/ is excluded on purpose: it holds the ledger itself, so
+    including it would make every receipt's tree hash self-referential.
+    """
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        for name in sorted(filenames):
+            if name.endswith(".pyc"):
+                continue
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            if rel.startswith("docs/nextgen/"):
+                continue
+            entries.append((rel, full))
+    entries.sort()
+    h = hashlib.sha256()
+    for rel, full in entries:
+        mode = "100755" if os.access(full, os.X_OK) else "100644"
+        fh = hashlib.sha256()
+        with open(full, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                fh.update(chunk)
+        h.update(f"{mode} {fh.hexdigest()} {rel}\n".encode())
+    return h.hexdigest()
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def load(path):
@@ -65,8 +111,7 @@ def cmd_init(argv):
 
 def cmd_set(argv):
     if len(argv) < 3:
-        print("usage: set <ledger.json> <task-id> <STATUS> [flags]",
-              file=sys.stderr)
+        print("usage: set <ledger.json> <task-id> <STATUS> [flags]", file=sys.stderr)
         return 1
     path, tid, status = argv[0], argv[1], argv[2].upper()
     if status not in VALID:
@@ -79,41 +124,95 @@ def cmd_set(argv):
         return 1
 
     commit = None
-    evidence, blocker, decision = [], None, None
+    receipts, blocker, decision = [], None, None
     i = 3
     while i < len(argv):
         a = argv[i]
         if a == "--commit":
             commit = argv[i + 1]; i += 2
-        elif a == "--evidence":
-            evidence.append(argv[i + 1]); i += 2
+        elif a == "--receipt":
+            receipts.append(argv[i + 1]); i += 2
         elif a == "--blocker":
             blocker = argv[i + 1]; i += 2
         elif a == "--decision":
             decision = argv[i + 1]; i += 2
+        elif a == "--root":
+            globals()["_ROOT"] = argv[i + 1]; i += 2
         else:
             print(f"unknown flag {a}", file=sys.stderr)
             return 1
 
-    if status == "DONE" and not evidence:
-        print("refusing DONE without --evidence", file=sys.stderr)
+    root = os.path.abspath(globals().get("_ROOT") or os.getcwd())
+    tree = tree_sha256(root)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    built = []
+    for spec in receipts:
+        fields = {}
+        for part in spec.split(";"):
+            if not part.strip():
+                continue
+            k, _, v = part.partition("=")
+            fields[k.strip()] = v.strip()
+        rel = fields.get("path", "")
+        full = os.path.join(root, rel) if rel else ""
+        if not rel or not os.path.isfile(full):
+            print(f"receipt path does not exist: {rel!r}", file=sys.stderr)
+            return 1
+        # taskctl.py resolves receipt paths against the directory holding the
+        # ledger (docs/nextgen), so store them relative to that directory.
+        evidence_root = os.path.join(root, "docs", "nextgen")
+        stored_rel = os.path.relpath(full, evidence_root).replace(os.sep, "/")
+        receipt = {
+            "command": fields.get("command", ""),
+            "path": stored_rel,
+            "sha256": file_sha256(full),
+            "source_tree_sha256": tree,
+            "completed_utc": now,
+            "exit_code": int(fields.get("exit", "0")),
+            "required": fields.get("required", "true").lower() != "false",
+        }
+        if "kind" in fields:
+            receipt["kind"] = fields["kind"]
+        if "tests" in fields:
+            receipt["tests_run"] = int(fields["tests"])
+        if not receipt["command"]:
+            print(f"receipt needs command=: {spec!r}", file=sys.stderr)
+            return 1
+        built.append(receipt)
+
+    if status == "VERIFIED":
+        if not built:
+            print("refusing VERIFIED without at least one --receipt", file=sys.stderr)
+            return 1
+        if not commit:
+            print("refusing VERIFIED without --commit", file=sys.stderr)
+            return 1
+        bad = [r for r in built if r["required"] and r["exit_code"] != 0]
+        if bad:
+            print(f"refusing VERIFIED with failing required receipt: {bad[0]['command']}",
+                  file=sys.stderr)
+            return 1
+    if status in RESEARCH_TERMINAL and not decision:
+        print(f"refusing {status} without --decision", file=sys.stderr)
         return 1
-    if status == "BLOCKED" and not blocker:
-        print("refusing BLOCKED without --blocker", file=sys.stderr)
+    if status == "BLOCKED_EXTERNAL" and not blocker:
+        print("refusing BLOCKED_EXTERNAL without --blocker", file=sys.stderr)
         return 1
 
     rec["status"] = status
     rec["attempts"] = int(rec.get("attempts") or 0) + 1
     if commit:
         rec["commit"] = commit
-    rec["evidence"] = sorted(set(list(rec.get("evidence") or []) + evidence))
+    rec["evidence"] = list(rec.get("evidence") or []) + built
     if blocker:
         rec["blocker"] = blocker
     if decision:
         rec["decision"] = decision
     save(path, doc)
     print(json.dumps({"task": tid, "status": status,
-                      "evidence": rec["evidence"]}, indent=2))
+                      "receipts": len(built),
+                      "source_tree_sha256": tree[:16]}, indent=2))
     return 0
 
 

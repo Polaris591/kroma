@@ -5,18 +5,72 @@
   "operator_authorization": null,
   "records": {
     "KR-A01": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "6c583d9",
+      "evidence": [
+        {
+          "command": "python3 scripts/nextgen_baseline_identity.py . <archive.zip>",
+          "path": "baseline.json",
+          "sha256": "0b74f9fb6265af9f923820389b38c8d4aacb34e0f660f6b6d55cb6a0ffe1fb05",
+          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "completed_utc": "2026-10-20T22:52:35Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        },
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w0-workspace-test.log",
+          "sha256": "5a6b35f322297b3b9741f53916d56b2bb4b22f693fef10cd620454c5e37252ef",
+          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "completed_utc": "2026-10-20T22:52:35Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1281
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "baseline locked before any task change; identity bound to tree hash, not ZIP name"
     },
     "KR-A02": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "6c583d9",
+      "evidence": [
+        {
+          "command": "python3 scripts/nextgen_host_capability.py .",
+          "path": "host_capabilities.json",
+          "sha256": "8b42ace0583dccd350dd97887d7e0bc96ea6ce991225f1b7e19b0caaaa1e712a",
+          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "completed_utc": "2026-10-20T22:52:35Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        },
+        {
+          "command": "bash scripts/run-sandbox-tests.sh",
+          "path": "evidence/w0-sandbox.log",
+          "sha256": "1d94c62c4ca23854695dfa369ab7bb5af9107f7991ce18d2537c823193b4f756",
+          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "completed_utc": "2026-10-20T22:52:35Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 56
+        },
+        {
+          "command": "sh scripts/nextgen_rust_gate.sh",
+          "path": "evidence/w0-nextgen-gate.log",
+          "sha256": "93d15e7c868ee842fb3a94026423e4b9ce2a1b2598791d41a84595a922e057c1",
+          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "completed_utc": "2026-10-20T22:52:35Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "gate"
+        }
+      ],
       "blocker": null,
       "decision": null
     },
@@ -37,10 +91,21 @@
       "decision": null
     },
     "KR-A05": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "6c583d9",
+      "evidence": [
+        {
+          "command": "python3 scripts/nextgen_coverage_ledger.py .",
+          "path": "coverage_ledger.json",
+          "sha256": "47756b0754f770750812cf8690eadb2a4962d86c9ca17fb39a26e62f9de8b2a6",
+          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "completed_utc": "2026-10-20T22:52:35Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        }
+      ],
       "blocker": null,
       "decision": null
     },
