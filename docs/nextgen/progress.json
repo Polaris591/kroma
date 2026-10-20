@@ -119,19 +119,19 @@
     },
     "KR-B01": {
       "status": "VERIFIED",
-      "attempts": 2,
-      "commit": "8a17191",
+      "attempts": 3,
+      "commit": "5aa3b14",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "b89ed25841e6616d6addbb30198cec12f81e55f44690c5579fe14b4c8617b2fd",
-          "source_tree_sha256": "30217cf2cd3df76a261038e0f3b943083c6752d2e9899b7b0ed621996005c3a6",
-          "completed_utc": "2026-10-20T23:27:20Z",
+          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
+          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1284
+          "tests_run": 1289
         }
       ],
       "blocker": null,
@@ -139,19 +139,19 @@
     },
     "KR-B02": {
       "status": "VERIFIED",
-      "attempts": 1,
-      "commit": "8a17191",
+      "attempts": 2,
+      "commit": "5aa3b14",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "b89ed25841e6616d6addbb30198cec12f81e55f44690c5579fe14b4c8617b2fd",
-          "source_tree_sha256": "30217cf2cd3df76a261038e0f3b943083c6752d2e9899b7b0ed621996005c3a6",
-          "completed_utc": "2026-10-20T23:27:11Z",
+          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
+          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1284
+          "tests_run": 1289
         }
       ],
       "blocker": null,
@@ -159,19 +159,19 @@
     },
     "KR-B03": {
       "status": "VERIFIED",
-      "attempts": 1,
-      "commit": "8a17191",
+      "attempts": 2,
+      "commit": "5aa3b14",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --lib budget_estimation_tests --locked",
+          "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "b89ed25841e6616d6addbb30198cec12f81e55f44690c5579fe14b4c8617b2fd",
-          "source_tree_sha256": "30217cf2cd3df76a261038e0f3b943083c6752d2e9899b7b0ed621996005c3a6",
-          "completed_utc": "2026-10-20T23:27:11Z",
+          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
+          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1284
+          "tests_run": 1289
         }
       ],
       "blocker": null,
@@ -179,19 +179,19 @@
     },
     "KR-B04": {
       "status": "VERIFIED",
-      "attempts": 3,
-      "commit": "8a17191",
+      "attempts": 4,
+      "commit": "5aa3b14",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "b89ed25841e6616d6addbb30198cec12f81e55f44690c5579fe14b4c8617b2fd",
-          "source_tree_sha256": "30217cf2cd3df76a261038e0f3b943083c6752d2e9899b7b0ed621996005c3a6",
-          "completed_utc": "2026-10-20T23:27:20Z",
+          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
+          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1284
+          "tests_run": 1289
         }
       ],
       "blocker": null,
@@ -262,18 +262,42 @@
       "decision": null
     },
     "KR-D01": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "5aa3b14",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
+          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "completed_utc": "2026-10-20T23:44:19Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1289
+        }
+      ],
       "blocker": null,
       "decision": null
     },
     "KR-D02": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "5aa3b14",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
+          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "completed_utc": "2026-10-20T23:44:19Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1289
+        }
+      ],
       "blocker": null,
       "decision": null
     },
