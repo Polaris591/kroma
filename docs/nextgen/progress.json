@@ -1,0 +1,968 @@
+{
+  "schema_version": "1.0",
+  "baseline_sha256": "ce97a1b673bcf0b572379255b4f26e738314ac30537cc4a3d871c55c669a9d09",
+  "live_total_budget": 0,
+  "operator_authorization": null,
+  "records": {
+    "KR-A01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-A02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-A03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-A04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-A05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-A06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-B01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-B02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-B03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-B04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-B05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-B06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-C01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-C02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-C03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-C04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-C05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-C06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-D01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-D02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-D03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-D04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-D05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-D06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-E01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-E02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-E03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-E04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-E05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-E06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-F01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-F02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-F03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-F04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-F05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-F06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-G01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-G02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-G03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-G04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-G05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-G06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-H01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-H02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-H03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-H04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-H05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-H06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-I01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-I02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-I03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-I04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-I05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-I06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-J01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-J02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-J03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-J04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-J05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-J06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-K01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-K02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-K03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-K04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-K05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-K06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-L01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-L02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-L03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-L04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-L05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-L06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-M01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-M02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-M03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-M04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-M05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-M06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-N01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-N02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-N03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-N04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-N05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-N06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-O01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-O02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-O03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-O04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-O05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-O06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-P01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-P02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-P03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-P04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-P05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-P06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-Q01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-Q02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-Q03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-Q04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-Q05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-Q06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-R01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-R02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-R03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-R04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-R05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-R06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-S01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-S02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-S03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-S04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-S05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-S06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-T01": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-T02": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-T03": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-T04": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-T05": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    },
+    "KR-T06": {
+      "status": "TODO",
+      "attempts": 0,
+      "commit": null,
+      "evidence": [],
+      "blocker": null,
+      "decision": null
+    }
+  }
+}

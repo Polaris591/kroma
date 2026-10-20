@@ -1,0 +1,149 @@
+{
+  "task": "KR-A02",
+  "tier_definitions": {
+    "pure_logic": "no process, no kernel feature; runs anywhere",
+    "process": "spawns child processes; needs a working fork/exec and /proc",
+    "kernel_isolation": "requires bwrap plus unprivileged user+net namespaces",
+    "ipc_unix_socket": "requires AF_UNIX bind in the test sandbox",
+    "cross_platform": "requires an actual Windows/macOS runner; never inferable here",
+    "paid_network": "requires a real provider credential and spend authorisation"
+  },
+  "tier_status": {
+    "pure_logic": "PROVEN",
+    "process": "PROVEN",
+    "kernel_isolation": "PROVEN",
+    "ipc_unix_socket": "PROVEN",
+    "cross_platform": "BLOCKED",
+    "paid_network": "BLOCKED"
+  },
+  "facts": {
+    "bwrap_usable": true,
+    "user_namespaces": true,
+    "af_unix_bind": true,
+    "proc_pid_consistent": true
+  },
+  "probes": {
+    "toolchain": {
+      "rustc": {
+        "command": [
+          "rustc",
+          "-V"
+        ],
+        "exit_code": 0,
+        "stdout": "rustc 1.85.1 (4eb161250 2025-03-15)",
+        "stderr": ""
+      },
+      "cargo": {
+        "command": [
+          "cargo",
+          "-V"
+        ],
+        "exit_code": 0,
+        "stdout": "cargo 1.85.1 (d73d2caf9 2024-12-31)",
+        "stderr": ""
+      },
+      "rustfmt": {
+        "command": [
+          "rustfmt",
+          "--version"
+        ],
+        "exit_code": 0,
+        "stdout": "rustfmt 1.8.0-stable (4eb161250e 2025-03-15)",
+        "stderr": ""
+      },
+      "clippy": {
+        "command": [
+          "cargo",
+          "clippy",
+          "--version"
+        ],
+        "exit_code": 0,
+        "stdout": "clippy 0.1.85 (4eb161250e 2025-03-15)",
+        "stderr": ""
+      }
+    },
+    "bwrap": {
+      "version": {
+        "command": [
+          "bwrap",
+          "--version"
+        ],
+        "exit_code": 0,
+        "stdout": "bubblewrap 0.12.0",
+        "stderr": ""
+      },
+      "namespace_probe": {
+        "command": [
+          "bwrap",
+          "--ro-bind",
+          "/",
+          "/",
+          "--dev",
+          "/dev",
+          "--proc",
+          "/proc",
+          "--unshare-all",
+          "--die-with-parent",
+          "true"
+        ],
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "available": true
+    },
+    "namespaces": {
+      "unshare_user_net": {
+        "command": [
+          "unshare",
+          "-Urn",
+          "true"
+        ],
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "unshare_user": {
+        "command": [
+          "unshare",
+          "-Ur",
+          "true"
+        ],
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "max_user_namespaces": "14695",
+      "max_net_namespaces": "14695"
+    },
+    "af_unix": {
+      "bind_attempt": {
+        "path": "/tmp/tmpgg06ioc5/probe.sock",
+        "ok": true,
+        "errno": null,
+        "error": null
+      }
+    },
+    "proc": {
+      "getpid": 1955630,
+      "proc_self_stat_pid": 1955630,
+      "consistent": true,
+      "error": null,
+      "proc_version": "Linux version 6.12.95+deb13-amd64 (debian-kernel@lists.debian.org) (x86_64-linux-gnu-gcc-14 (Debian 14.2.0-19) 14.2.0, GNU ld (GNU Binutils for Debian) 2.44) #1 SMP PREEMPT_DYNAMIC Debian 6.12.95-1 (2026-07-04)",
+      "in_container": false
+    },
+    "platform": {
+      "system": "Linux",
+      "release": "6.12.95+deb13-amd64",
+      "machine": "x86_64",
+      "python": "3.13.5",
+      "cgroup": "0::/init.scope"
+    }
+  },
+  "blocked_tiers": [
+    "cross_platform",
+    "paid_network"
+  ],
+  "gate_verdict": "A full acceptance run cannot be claimed green while any required tier is BLOCKED. cross_platform and paid_network are BLOCKED by design on this host: a single Linux box can never prove Windows or macOS behaviour, and no provider spend is authorised by default.",
+  "note": "Missing capability is reported as BLOCKED with its raw probe output; it is never converted into PASS."
+}

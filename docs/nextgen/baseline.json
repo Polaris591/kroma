@@ -1,0 +1,50 @@
+{
+  "task": "KR-A01",
+  "workspace_version": "1.5.0",
+  "toolchain": "rustc 1.85.1 (4eb161250 2025-03-15)",
+  "delivered_baseline": {
+    "source": "git commit 61ffcc30c5783e443275abf0399468aa27d542c8",
+    "file_count": 560,
+    "tree_identity": "011652af38572da3a0c2109857786ba7cfb5dc07795c90645620ddba005e4417"
+  },
+  "working_tree": {
+    "file_count": 562,
+    "tree_identity": {
+      "algorithm": "sha256 over sorted '<mode> <content-sha256> <path>' lines",
+      "sha256": "b0bc222588cdba7be28762810f82baa20067cd4b0b6a8b1c4ae73fdabdea48fa"
+    }
+  },
+  "archive_identity": {
+    "path": "R2_RustFix_original.zip",
+    "sha256": "ce97a1b673bcf0b572379255b4f26e738314ac30537cc4a3d871c55c669a9d09"
+  },
+  "git_identity": {
+    "commit": "61ffcc30c5783e443275abf0399468aa27d542c8",
+    "tree": "f274797350a2c68f069c61765350eb03d020ec21",
+    "dirty": true
+  },
+  "host_capabilities": {
+    "bwrap_version": "bubblewrap 0.12.0",
+    "user_namespaces": true,
+    "af_unix_bind": true,
+    "proc_pid_consistent": true
+  },
+  "identity_test_cases": {
+    "case1_one_byte_changes_tree": {
+      "pass": true,
+      "probe_file": "crates/kroma-cli/src/approval_ui.rs"
+    },
+    "case2_no_git_still_identifies": {
+      "pass": true,
+      "tree_identity_len": 64,
+      "commit_reported": "61ffcc30c5783e443275abf0399468aa27d542c8",
+      "fabricated_commit": false
+    },
+    "case3_same_name_different_content_rejected": {
+      "pass": true,
+      "probe_file": "crates/kroma-cli/src/approval_ui.rs"
+    }
+  },
+  "identity_tests_passed": true,
+  "note": "archive_identity identifies the delivered package; tree_identity identifies the source tree and works without .git; git_identity is null rather than guessed when no repository exists."
+}
