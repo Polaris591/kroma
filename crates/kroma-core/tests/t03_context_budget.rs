@@ -475,6 +475,10 @@ async fn small_context_compacts_before_first_overflow_request() {
         .collect();
 
     let wide = BudgetConfig {
+        // KR-B04: declare the wide window explicitly. The fallback path now compacts against the
+        // conservative window, so leaving this unset would compact the fixture history and the
+        // "history exceeds the window" precondition below would no longer hold.
+        model_context_window_tokens: Some(1_000_000),
         max_model_turns: 32,
         max_tool_calls: 64,
         max_total_tool_output_bytes: 4 * 1024 * 1024,
@@ -788,4 +792,276 @@ fn config_source_display_shows_the_ceiling_and_every_clamp() {
     assert!(plain
         .redacted_summary()
         .contains("allowed_models:   (unrestricted)"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// KR-B04: an unconfigured model window must still enforce the hard pre-send check.
+//
+// Before the fix the whole-request window check ran only when the capability source was
+// `Configured`. With no `model_context_window_tokens`, `ModelCapabilities::resolve` still yields
+// `Some(CONSERVATIVE_CONTEXT_WINDOW_TOKENS)` but the source is `ConservativeFallback`, so the
+// check was skipped entirely and an oversized request went to the provider.
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unconfigured_window_still_refuses_an_oversized_request() {
+    use kroma_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
+    use kroma_core::events::EventLogger;
+    use kroma_core::provider::{ModelProvider, ProviderCompletion, ProviderError, ProviderRequest};
+    use kroma_core::revision::SnapshotStore;
+    use kroma_core::session::SessionJournal;
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ModelProvider for CountingProvider {
+        fn complete<'a>(
+            &'a self,
+            _req: ProviderRequest,
+            _budget: &'a BudgetConfig,
+            _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(ProviderCompletion {
+                    turn: AssistantTurn {
+                        content: Some("should never be reached".to_string()),
+                        reasoning_blocks: Vec::new(),
+                        tool_calls: Vec::new(),
+                        finish_reason: FinishReason::Stop,
+                        usage: None,
+                    },
+                    request_body_bytes: 1,
+                    latency_ms: 1,
+                    ttft_ms: None,
+                    attempts_used: 1,
+                    reported_model: None,
+                })
+            })
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("kroma-b04-window-{}", uuid::Uuid::new_v4()));
+    let ws = root.join("ws");
+    let state = root.join("state");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(ws.join("lib.rs"), "pub fn a() {}\n").unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(CountingProvider {
+        calls: Arc::clone(&calls),
+    });
+    let env = Arc::new(kroma_core::env::LocalHostEnv::new(&ws, state.clone()).unwrap());
+    let policy = PolicyEngine::new(
+        PolicyMode::FullAutonomous,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    // No window configured: capability source is ConservativeFallback (32768 tokens).
+    let budget = BudgetConfig::default();
+    assert_eq!(
+        kroma_core::budget::ModelCapabilities::resolve(None, None).source,
+        kroma_core::budget::CapabilitySource::ConservativeFallback,
+        "this test only makes sense on the fallback path"
+    );
+
+    // ~60000 CJK chars is ~180 KB and well past the 32768-token fallback window.
+    let oversized_prompt = "中".repeat(60_000);
+    let runtime = build_default_runtime(env, policy, budget.clone(), None);
+    let cfg = AgentRunConfig::new(&oversized_prompt, budget);
+    let run_id = cfg.run_id;
+    let logger = EventLogger::new(run_id, Some(state.clone()), true).unwrap();
+    let journal = SessionJournal::create(state.join("sessions"), &ws).unwrap();
+    let store = Arc::new(SnapshotStore::new(root.join("snapshots")));
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .with_session_journal(journal)
+        .with_snapshot_store(store)
+        .run(logger)
+        .await;
+
+    assert_eq!(
+        summary.terminal_reason,
+        TerminalReason::ContextBudgetExceeded,
+        "a fallback-window run must refuse an oversized request instead of sending it"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "zero provider calls: the hard window check must run before transmission"
+    );
+
+    let log = std::fs::read_to_string(state.join(format!("{}.jsonl", run_id))).unwrap_or_default();
+    assert!(
+        log.contains("context_budget_exceeded"),
+        "the refusal must be recorded structurally; log:\n{log}"
+    );
+    assert!(
+        log.contains("conservative_fallback"),
+        "the fallback capability source must be recorded; log:\n{log}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------------------------
+// KR-B01: the tool set that is measured must be the tool set that is sent.
+//
+// Activated (discovered) tools were appended to the request *after* the estimate and the window
+// check, so a run whose static schema fit the window could still transmit an over-window request
+// once discovery contributed a large schema. This test activates a deliberately huge tool schema
+// and requires the request to be refused before any provider call.
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn activated_tool_schema_is_measured_before_the_request_is_sent() {
+    use kroma_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
+    use kroma_core::events::EventLogger;
+    use kroma_core::extensions::{
+        CustomToolContext, ExtensionManifest, ExtensionTrustLevel, ScopedExtension,
+        ScopedToolDefinition,
+    };
+    use kroma_core::provider::{ModelProvider, ProviderCompletion, ProviderError, ProviderRequest};
+    use kroma_core::revision::SnapshotStore;
+    use kroma_core::session::SessionJournal;
+    use kroma_core::tool::definition::{ToolDefinition, ToolMetadata};
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
+    use kroma_core::types::EffectClass;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ModelProvider for CountingProvider {
+        fn complete<'a>(
+            &'a self,
+            _req: ProviderRequest,
+            _budget: &'a BudgetConfig,
+            _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(ProviderCompletion {
+                    turn: AssistantTurn {
+                        content: Some("should never be reached".to_string()),
+                        reasoning_blocks: Vec::new(),
+                        tool_calls: Vec::new(),
+                        finish_reason: FinishReason::Stop,
+                        usage: None,
+                    },
+                    request_body_bytes: 1,
+                    latency_ms: 1,
+                    ttft_ms: None,
+                    attempts_used: 1,
+                    reported_model: None,
+                })
+            })
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("kroma-b01-tools-{}", uuid::Uuid::new_v4()));
+    let ws = root.join("ws");
+    let state = root.join("state");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(ws.join("lib.rs"), "pub fn a() {}\n").unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(CountingProvider {
+        calls: Arc::clone(&calls),
+    });
+    let env = Arc::new(kroma_core::env::LocalHostEnv::new(&ws, state.clone()).unwrap());
+    let policy = PolicyEngine::new(
+        PolicyMode::FullAutonomous,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    // 20k tokens fits the static prompt + schemas comfortably but not an extra ~50k-token schema.
+    let budget = BudgetConfig {
+        model_context_window_tokens: Some(20_000),
+        ..Default::default()
+    };
+    let runtime = build_default_runtime(env, policy, budget.clone(), None);
+
+    let manifest = ExtensionManifest {
+        name: "b01-big-schema".to_string(),
+        version: "1.0.0".to_string(),
+        api_version: "1.0.0".to_string(),
+        capabilities: vec!["tools".to_string()],
+        trust_level: ExtensionTrustLevel::OperatorTrusted,
+        source: "test-fixture".to_string(),
+        checksum: None,
+    };
+    let mut ext = ScopedExtension::new(manifest);
+    ext.tools.push(ScopedToolDefinition {
+        definition: ToolDefinition {
+            name: "b01_big_schema_tool".to_string(),
+            // ~200 KB of ASCII: roughly 50k conservative tokens on its own.
+            description: "d".repeat(200_000),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } }
+            }),
+        },
+        metadata: ToolMetadata {
+            effect_class: EffectClass::ReadOnly,
+            default_timeout_sec: 5,
+            inline_output_cap_bytes: 1024,
+        },
+        handler: Arc::new(|_: &str, _: &CustomToolContext<'_>| {
+            kroma_core::tools::ToolExecutionOutput::success(
+                String::new(),
+                kroma_core::messages::ToolResultMeta::default(),
+            )
+        }),
+    });
+    runtime
+        .registry()
+        .register_extension(ext)
+        .expect("register big-schema extension");
+    let activated = runtime.activate_tools(&["b01_big_schema_tool".to_string()]);
+    assert!(
+        activated.iter().any(|(_, r)| r.is_ok()),
+        "the fixture tool must actually be activated: {activated:?}"
+    );
+
+    // On-demand mode keeps non-core schemas out of the initial prefix, so activation really
+    // is the moment the tool set grows -- which is the sequence this test is about.
+    let cfg = AgentRunConfig::new("do something small", budget).with_on_demand_tools(true);
+    let run_id = cfg.run_id;
+    let logger = EventLogger::new(run_id, Some(state.clone()), true).unwrap();
+    let journal = SessionJournal::create(state.join("sessions"), &ws).unwrap();
+    let store = Arc::new(SnapshotStore::new(root.join("snapshots")));
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+
+    let (summary, _logger) = AgentRunner::new(cfg, provider, runtime, rx)
+        .with_session_journal(journal)
+        .with_snapshot_store(store)
+        .run(logger)
+        .await;
+
+    assert_eq!(
+        summary.terminal_reason,
+        TerminalReason::ContextBudgetExceeded,
+        "an activated tool schema that pushes the request over the window must be refused"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "zero provider calls: the window check must see the activated tool set"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }

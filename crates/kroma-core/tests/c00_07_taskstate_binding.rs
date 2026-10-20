@@ -407,6 +407,9 @@ async fn binding_is_derived_from_the_transcript_the_compaction_overlay_makes_can
         Arc::new(NonInteractiveApprovalHandler),
     );
     let budget = BudgetConfig {
+        // KR-B04: declare the window explicitly. The fallback window now also drives compaction,
+        // so leaving it unset would compact below the 170 KiB watermark this fixture is built on.
+        model_context_window_tokens: Some(1_000_000),
         // Sized from the measured fixture: the static prefix is ~10 KiB and one `read` result is
         // capped at ~64 KiB. Turns 2 and 3 fit; turn 4 does not, and by then the first read result
         // is outside the protected tail window, so it is the one that gets compacted.
@@ -579,6 +582,8 @@ async fn pinned_fact_survives_compaction_in_the_request_path_and_gc_is_auditable
         Arc::new(NonInteractiveApprovalHandler),
     );
     let budget = BudgetConfig {
+        // KR-B04: see the note above; keep the 170 KiB watermark as the binding limit.
+        model_context_window_tokens: Some(1_000_000),
         context_high_watermark_bytes: 170 * 1024,
         context_low_watermark_bytes: 160 * 1024,
         context_tail_window_bytes: 512,

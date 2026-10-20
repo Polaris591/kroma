@@ -1,0 +1,11 @@
+Diff in /opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core/tests/t03_context_budget.rs:1033:
+         .expect("register big-schema extension");
+     let activated = runtime.activate_tools(&["b01_big_schema_tool".to_string()]);
+     assert!(
+-        activated
+-            .iter()
+-            .any(|(_, r)| r.is_ok()),
++        activated.iter().any(|(_, r)| r.is_ok()),
+         "the fixture tool must actually be activated: {activated:?}"
+     );
+ 

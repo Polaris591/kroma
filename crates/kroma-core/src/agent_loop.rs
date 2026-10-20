@@ -1180,10 +1180,30 @@ impl AgentRunner {
             (None, None) => None,
         };
 
+        // KR-B04: `BudgetConfig::token_watermarks` only yields token thresholds when the operator
+        // configured `model_context_window_tokens`. On the fallback path the resolved capability
+        // window exists (conservative) but the projector cannot see it, so compaction would only
+        // ever fire on the byte watermark -- which can be far larger than the window. Feed the
+        // resolved window in so compaction happens *before* the hard pre-send check has to refuse.
+        let project_config;
+        let project_budget = match (
+            state.budget_tracker.config().model_context_window_tokens,
+            self.model_capabilities.context_window_tokens,
+        ) {
+            (None, Some(window)) => {
+                project_config = crate::budget::BudgetConfig {
+                    model_context_window_tokens: Some(window),
+                    ..state.budget_tracker.config().clone()
+                };
+                &project_config
+            }
+            _ => state.budget_tracker.config(),
+        };
+
         // Project context (100% Append-Only unless watermark crossed)
         let mut projected = match state.projector.project(
             &mut state.transcript,
-            state.budget_tracker.config(),
+            project_budget,
             state.static_prefix.static_prefix_bytes,
             pressure_tokens,
             state.absolute_turn,
@@ -1404,14 +1424,60 @@ impl AgentRunner {
             ));
         }
 
+        // KR-B01/B02: the request's tool set must be final *before* it is measured. Activated
+        // discovered tools used to be appended after the estimate and the window check, so a run
+        // whose static schema fit could still transmit an over-window request once discovery added
+        // tools. Build (and freeze) the tool set first, then measure exactly what will be sent.
+        //
+        // T12 (KR-09): activated discovered tools join the request, appended in activation order so
+        // the list is stable across turns. They are resolved from the live registry and policy, so a
+        // tool that was unmounted or denied after activation simply stops appearing.
+        let mut request_tools = state.visible_tools.clone();
+        for definition in self.tool_runtime.activated_tool_definitions() {
+            if !request_tools
+                .iter()
+                .any(|existing| existing.name == definition.name)
+            {
+                request_tools.push(definition);
+            }
+        }
+        // C00-08: the request boundary. `visible_tools` + the activated extensions of it are exactly
+        // what this request declares; the runtime freezes that against the live registry and the
+        // gateway here, so a mount or an MCP `tools/list` refresh that lands while this request is in
+        // flight cannot change what it sees or reach.
+        let boundary = self.tool_runtime.begin_request(
+            &request_tools
+                .iter()
+                .map(|definition| definition.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        if boundary.deferred_fallback().is_some() {
+            // The deferred set produced nothing: declare the base tools the engine still permits
+            // rather than sending a request the model cannot act on.
+            request_tools = self
+                .tool_runtime
+                .registry()
+                .visible_definitions_for_engine(self.tool_runtime.policy_engine());
+        }
+        // Bytes of the tool schema that will actually be transmitted. This is the single source for
+        // both the budget estimate and the window check; there is no second copy to drift.
+        let final_tool_schema_bytes = serde_json::to_vec(&request_tools)
+            .map(|v| v.len())
+            .unwrap_or_else(|_| state.static_prefix.tools_json.len());
+
         // F08 (`v1.4.0`): reserve budget *before* sending the request. Estimate the prompt
         // input tokens from the projected byte size and refuse to start a request that would
         // already blow the remaining budget; otherwise cap this request's output so a single
         // completion cannot overshoot what is left.
         // `static_prefix_bytes` already includes `system_prompt.len()` (see
-        // `prompt.rs::build_static_prefix`), so it must not be added again here.
+        // `prompt.rs::build_static_prefix`), so it must not be added again here. The static tool
+        // schema is swapped for the final one so activation is reflected in the estimate.
+        let static_non_tool_bytes = state
+            .static_prefix
+            .static_prefix_bytes
+            .saturating_sub(state.static_prefix.tools_json.len());
         let estimated_input_tokens = estimate_prompt_input_tokens(
-            state.static_prefix.static_prefix_bytes,
+            static_non_tool_bytes.saturating_add(final_tool_schema_bytes),
             projected.message_history_bytes,
         );
         // F05 (`v1.5.1`): the token cap is enforced through the shared [`TokenBudget`], not a
@@ -1461,14 +1527,16 @@ impl AgentRunner {
         // history, images and the output reservation — and runs before anything is transmitted.
         // `bytes / 4` is not a tokenizer, so this uses the conservative estimator (non-ASCII text is
         // charged at 1 token per 2 bytes) and says so in the event.
-        if let (Some(window), true) = (
-            self.model_capabilities.context_window_tokens,
-            self.model_capabilities.source == crate::budget::CapabilitySource::Configured,
-        ) {
+        //
+        // KR-B04: this must also run for `ConservativeFallback`. `resolve` supplies a conservative
+        // window there, so gating on `CapabilitySource::Configured` left the default (unconfigured)
+        // path with no whole-request check at all. `Unbounded` is excluded by construction: its
+        // `context_window_tokens` is `None`, which the pattern below already rejects.
+        if let Some(window) = self.model_capabilities.context_window_tokens {
             let estimated_input = crate::budget::conservative_request_tokens(
                 &state.static_prefix.system_prompt,
                 &projected.messages,
-                state.static_prefix.tools_json.len(),
+                final_tool_schema_bytes,
                 REQUEST_SERIALIZATION_OVERHEAD_BYTES,
             );
             let reserved_output = self
@@ -1480,7 +1548,7 @@ impl AgentRunner {
                     reserved_output_tokens: reserved_output,
                     window_tokens: window,
                     capability_source: self.model_capabilities.source.as_str().to_string(),
-                    tool_schema_bytes: state.static_prefix.tools_json.len(),
+                    tool_schema_bytes: final_tool_schema_bytes,
                     message_count: projected.messages.len(),
                 });
                 return Err(self.finish_run(
@@ -1520,36 +1588,6 @@ impl AgentRunner {
 
         // B16: track the attempts that are really transmitted, so a failed call can report them.
         let wire_attempts = crate::provider::WireAttempts::new();
-        // T12 (KR-09): activated discovered tools join the request, appended in activation order so
-        // the list is stable across turns. They are resolved from the live registry and policy, so a
-        // tool that was unmounted or denied after activation simply stops appearing.
-        let mut request_tools = state.visible_tools.clone();
-        for definition in self.tool_runtime.activated_tool_definitions() {
-            if !request_tools
-                .iter()
-                .any(|existing| existing.name == definition.name)
-            {
-                request_tools.push(definition);
-            }
-        }
-        // C00-08: the request boundary. `visible_tools` + the activated extensions of it are exactly
-        // what this request declares; the runtime freezes that against the live registry and the
-        // gateway here, so a mount or an MCP `tools/list` refresh that lands while this request is in
-        // flight cannot change what it sees or reach.
-        let boundary = self.tool_runtime.begin_request(
-            &request_tools
-                .iter()
-                .map(|definition| definition.name.clone())
-                .collect::<Vec<_>>(),
-        );
-        if boundary.deferred_fallback().is_some() {
-            // The deferred set produced nothing: declare the base tools the engine still permits
-            // rather than sending a request the model cannot act on.
-            request_tools = self
-                .tool_runtime
-                .registry()
-                .visible_definitions_for_engine(self.tool_runtime.policy_engine());
-        }
         // T18 (KR-15): identity of the request as it will be sent, computed after activation so the
         // tool list in the digest is the one the model actually receives.
         let request_identity = crate::provenance::request_identity(
