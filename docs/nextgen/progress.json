@@ -119,59 +119,83 @@
     },
     "KR-B01": {
       "status": "VERIFIED",
-      "attempts": 1,
-      "commit": "1faf6fb",
+      "attempts": 2,
+      "commit": "8a17191",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --test t03_context_budget --locked",
+          "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "841088dacad32ed3663f3868d7b99904e3dff36c1f051a628e04df633c9054da",
-          "source_tree_sha256": "419a42c1b67408a0168c1ce401a0a24b29a8fa7ba0a2000efb96b8c4550f0259",
-          "completed_utc": "2026-10-20T23:14:10Z",
+          "sha256": "b89ed25841e6616d6addbb30198cec12f81e55f44690c5579fe14b4c8617b2fd",
+          "source_tree_sha256": "30217cf2cd3df76a261038e0f3b943083c6752d2e9899b7b0ed621996005c3a6",
+          "completed_utc": "2026-10-20T23:27:20Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1283
+          "tests_run": 1284
         }
       ],
       "blocker": null,
       "decision": "tool set is built and frozen before measurement; one serialized byte count feeds both estimate and window check"
     },
     "KR-B02": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
-      "blocker": null,
-      "decision": null
-    },
-    "KR-B03": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
-      "blocker": null,
-      "decision": null
-    },
-    "KR-B04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 1,
-      "commit": "1faf6fb",
+      "commit": "8a17191",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --test t03_context_budget --locked",
+          "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "841088dacad32ed3663f3868d7b99904e3dff36c1f051a628e04df633c9054da",
-          "source_tree_sha256": "419a42c1b67408a0168c1ce401a0a24b29a8fa7ba0a2000efb96b8c4550f0259",
-          "completed_utc": "2026-10-20T23:14:10Z",
+          "sha256": "b89ed25841e6616d6addbb30198cec12f81e55f44690c5579fe14b4c8617b2fd",
+          "source_tree_sha256": "30217cf2cd3df76a261038e0f3b943083c6752d2e9899b7b0ed621996005c3a6",
+          "completed_utc": "2026-10-20T23:27:11Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1283
+          "tests_run": 1284
         }
       ],
       "blocker": null,
-      "decision": "code and red-first test done; stays unverified until KR-B02 (its declared dependency) lands"
+      "decision": "implemented as identity seal + single-source byte count rather than a new PreparedRequest type; RunPlan/FeatureLedger/BudgetTracker reused unchanged"
+    },
+    "KR-B03": {
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "8a17191",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --lib budget_estimation_tests --locked",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "b89ed25841e6616d6addbb30198cec12f81e55f44690c5579fe14b4c8617b2fd",
+          "source_tree_sha256": "30217cf2cd3df76a261038e0f3b943083c6752d2e9899b7b0ed621996005c3a6",
+          "completed_utc": "2026-10-20T23:27:11Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1284
+        }
+      ],
+      "blocker": null,
+      "decision": "one conservative estimate feeds both reserve and window check; bytes/4 path deleted"
+    },
+    "KR-B04": {
+      "status": "VERIFIED",
+      "attempts": 3,
+      "commit": "8a17191",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "b89ed25841e6616d6addbb30198cec12f81e55f44690c5579fe14b4c8617b2fd",
+          "source_tree_sha256": "30217cf2cd3df76a261038e0f3b943083c6752d2e9899b7b0ed621996005c3a6",
+          "completed_utc": "2026-10-20T23:27:20Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1284
+        }
+      ],
+      "blocker": null,
+      "decision": "dependency KR-B02 now verified; red test flips ModelStop to ContextBudgetExceeded"
     },
     "KR-B05": {
       "status": "TODO",
