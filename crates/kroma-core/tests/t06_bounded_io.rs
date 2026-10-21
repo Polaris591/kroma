@@ -338,8 +338,14 @@ fn a_short_read_of_a_large_file_pays_for_the_whole_file() {
     let time_read = |path: &str| {
         let started = Instant::now();
         for _ in 0..5 {
-            let out = execute_read(&ws, &format!(r#"{{"path":"{path}","offset":1,"limit":10}}"#));
-            assert!(matches!(out.outcome, kroma_core::messages::ToolOutcome::Success));
+            let out = execute_read(
+                &ws,
+                &format!(r#"{{"path":"{path}","offset":1,"limit":10}}"#),
+            );
+            assert!(matches!(
+                out.outcome,
+                kroma_core::messages::ToolOutcome::Success
+            ));
         }
         started.elapsed() / 5
     };
