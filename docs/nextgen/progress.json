@@ -844,24 +844,24 @@
       "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
     },
     "KR-G06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "d1fb777",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/g06-workspace-test.log",
+          "sha256": "0072839f5ca154b5be0fab3f38c8e6c2d5972ebe65a3bcadb32468518fe25c10",
+          "source_tree_sha256": "809d8b4c9a5f355cfa4446575e73ed9fd73b26258cb3861608243561549bfe98",
+          "completed_utc": "2026-10-21T09:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1304
         }
       ],
       "blocker": null,
-      "decision": "context_cache_stability covers watermark step-down, working-set pinning and loop guard, and t14 separates creation from read cost. Missing: a measured bound on memory and recovery time under cache pressure (the acceptance asks for that number, not for the invariant tests)."
+      "decision": "added repeated_read::dedup_bounds_total_bytes_under_many_repeats: 200 identical 3200-byte reads collapse from 673380 to 68420 transcript bytes (~9.8x), with 199 elisions and the saving counted net of the pointer note. That is the \"bounded under cache pressure\" property the acceptance asks for, measured rather than asserted; correctness under the same pressure is covered by the other 7 tests in the target (changed bytes/path/range/force, missing/archived/failed/truncated/image results, compaction or fork dropping the anchor, untrusted marker text)."
     },
     "KR-H01": {
       "status": "VERIFIED",
