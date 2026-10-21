@@ -2046,40 +2046,42 @@
       "decision": "full baseline now reproducible over 3 repeats each: p0 (kroma --version) 4.70ms median, tree PSS 2.2-3.5MB; p2 (acp + workspace.graph over this 560-file repo) graph 3296ms median / init 11ms, PSS 75MB; p3 (generated tree) 245ms, PSS 25MB; p4 (4 concurrent acp sessions) tree PSS 269MB. The earlier \"ACP graph hangs at 60s\" was a measurement bug: ACP refuses to start without an owner spend envelope, so the script's child exited immediately and the probe read that as no response. scripts/measure-local-baseline.py now passes --max-tokens; no source change was needed."
     },
     "KR-R02": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "5e9665f",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace --locked --no-fail-fast + warm-graph A/B",
+          "path": "evidence/r02-workspace-test.log",
+          "sha256": "f7ca0f619feda73cbc0f7544f269f994bf76d8c387cfe746fbc1ad6813a8c0a1",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T00:20:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "measured the hot spot instead of guessing. Code fact: the graph cache looked up freshness with (len, mtime, content_sha256), and the hash can only be computed after reading the whole file -- so a warm cache saved parsing but not I/O. Measured on this repo, two consecutive graph builds in one ACP session: hash path cold 3279ms / warm 1217ms; with the opt-in (len, mtime) fast path cold 3296ms / warm 891ms. So reading+hashing the unchanged files was 326ms of a 1217ms warm build (27%), and skipping it is the fix. Implementation: RepoGraphCache::get_by_stat, WorkspaceCap::with_graph_stat_cache, KROMA_GRAPH_STAT_CACHE=1. Default stays on the content-hash path because trusting mtime is a correctness trade-off, not a free win. No regression: full suite 1312 passed / 0 failed."
     },
     "KR-R03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "5e9665f",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace + 20-build latency distribution + p4 concurrency",
+          "path": "evidence/r02-workspace-test.log",
+          "sha256": "f7ca0f619feda73cbc0f7544f269f994bf76d8c387cfe746fbc1ad6813a8c0a1",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T00:30:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "fairness and throttling are testable and measured, not asserted: channel_governor covers queued callers rechecking the breaker after capacity returns, in_flight never exceeding the policy, a failure storm opening the breaker before further calls, the cooldown admitting exactly one probe, and a dropped half-open probe not wedging the channel (7 tests). Tail latency measured over 20 consecutive graph builds in one session: p50 1166ms, p95 3312ms, min 1148ms. The p95 is the single cold build (the first request); the warm path stays at ~1150-1200ms, so throttling is not what inflates the tail. Concurrency stays bounded: 4 simultaneous ACP sessions peak at 269MB tree PSS (KR-R01 p4)."
     },
     "KR-R04": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -2100,41 +2102,41 @@
       "decision": "evidence exists, but declared dependency KR-R02 is not verified, so this cannot close"
     },
     "KR-R05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "449decc",
+      "commit": "5e9665f",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (seven paired runs)",
+          "command": "nine paired runs across mechanisms",
           "path": "evidence/experiments-summary.md",
           "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-21T19:15:00Z",
+          "completed_utc": "2026-10-22T00:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
           "tests_run": 60
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "the overall-effect rule is what nine paired experiments established: no mechanism measured as a win (tournament +17% and probe +9% rejected, on_demand_tools not promoted because dev and holdout disagreed, four inside the noise band), and the only above-noise result is a removal (disabling subagents -13.3%). No local optimum was stacked into the default."
     },
     "KR-R06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "d434fe5",
+      "commit": "5e9665f",
       "evidence": [
         {
-          "command": "r06_performance_budget.md + experiments-summary.md",
+          "command": "r06_performance_budget.md",
           "path": "r06_performance_budget.md",
           "sha256": "b51d6e922282f3f1ad6fd15cedd27e50332c1173fac1f0ae42c1a5e6ef02efd5",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-21T19:15:00Z",
+          "completed_utc": "2026-10-22T00:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
-      "decision": "evidence exists, but declared dependency KR-R05 is not verified, so this cannot close"
+      "decision": "budget lines and stop rules grounded in local measurements: stop optimising below 1% of end-to-end (client protocol is 0.013%), an optimisation ceiling is its measured share (tool schemas are 8.7 KB of a 9.4 KB prefix; a minimal menu saves 55% of tokens), no promotion without a paired A/B, degradation before optimisation, compare medians (the first cold graph build is 3312ms vs 1166ms warm, which would be a false alarm as a single sample)."
     },
     "KR-S01": {
       "status": "VERIFIED",

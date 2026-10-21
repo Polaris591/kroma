@@ -92,6 +92,9 @@ pub struct WorkspaceCap {
     /// KR-I05: whether `code_graph` may reuse the per-workspace parse cache. `true` (default) is the
     /// shipped behaviour; an arm can turn it off to measure what the cache is actually worth.
     graph_cache_enabled: bool,
+    /// KR-R02: whether the graph cache may trust `(len, mtime)` alone. Off by default: the content
+    /// hash path reads and hashes every file, which is correct but slower.
+    graph_stat_cache_enabled: bool,
     /// BUG-08: set only on the short-lived clone handed to one approved tool call. `None` on the
     /// workspace every other caller sees, so an unapproved call can never bypass the guard.
     sensitive_path_approval: Option<Arc<SensitivePathApproval>>,
@@ -136,6 +139,7 @@ impl WorkspaceCap {
                 root_dir_fd: Arc::new(dir_fd),
                 repo_graph_cache: Arc::new(Mutex::new(RepoGraphCache::new())),
                 graph_cache_enabled: true,
+                graph_stat_cache_enabled: false,
                 sensitive_path_approval: None,
             })
         }
@@ -151,6 +155,7 @@ impl WorkspaceCap {
                 root_dir_fd: Arc::new(dir_fd),
                 repo_graph_cache: Arc::new(Mutex::new(RepoGraphCache::new())),
                 graph_cache_enabled: true,
+                graph_stat_cache_enabled: false,
                 sensitive_path_approval: None,
             })
         }
@@ -178,6 +183,16 @@ impl WorkspaceCap {
     /// Whether `code_graph` may reuse the parse cache on this handle.
     pub fn graph_cache_enabled(&self) -> bool {
         self.graph_cache_enabled
+    }
+
+    /// KR-R02: let the graph cache trust `(len, mtime)` and skip reading + hashing unchanged files.
+    pub fn with_graph_stat_cache(mut self, enabled: bool) -> Self {
+        self.graph_stat_cache_enabled = enabled;
+        self
+    }
+
+    pub fn graph_stat_cache_enabled(&self) -> bool {
+        self.graph_stat_cache_enabled
     }
 
     /// BUG-08: build a short-lived clone carrying an interactive approval for `approval`'s path.

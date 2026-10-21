@@ -116,6 +116,7 @@ async fn single_agent_arm_hides_spawn_subagent_and_records_its_envelope() {
             causal_pruning: false,
             require_verified: true,
             on_demand_tools: false,
+            graph_cache: true,
             tool_filter: None,
             routing: false,
         },
@@ -723,6 +724,7 @@ fn stub_arms() -> Vec<BenchStrategyConfig> {
             causal_pruning: false,
             require_verified: true,
             on_demand_tools: false,
+            graph_cache: true,
             tool_filter: None,
             routing: false,
         })

@@ -40,7 +40,10 @@ impl LocalHostEnv {
         workspace_root: impl AsRef<Path>,
         state_dir: impl Into<PathBuf>,
     ) -> Result<Self, WorkspaceError> {
-        let workspace = WorkspaceCap::new(workspace_root)?;
+        // KR-R02: opt-in via environment so the ablation can be run without a new CLI flag; the
+        // default stays on the content-hash path, which is the safe one.
+        let trust_mtime = std::env::var("KROMA_GRAPH_STAT_CACHE").ok().as_deref() == Some("1");
+        let workspace = WorkspaceCap::new(workspace_root)?.with_graph_stat_cache(trust_mtime);
         Ok(Self {
             workspace,
             inode_locks: InodeMutationLock::new(),

@@ -287,6 +287,18 @@ impl RepoGraphCache {
         self.entries.is_empty()
     }
 
+    /// KR-R02: a cheaper freshness check that uses only the `(len, mtime_ns)` fingerprint.
+    ///
+    /// The content-hash path must read and hash every file *before* it can look in the cache, so a
+    /// warm cache saves parsing but not I/O. Skipping the read is only safe when the filesystem's
+    /// mtime is trustworthy, so callers opt in.
+    pub fn get_by_stat(&self, rel: &str, len: u64, mtime_ns: u64) -> Option<CachedFileParse> {
+        self.entries
+            .get(rel)
+            .filter(|e| e.len == len && e.mtime_ns == mtime_ns)
+            .cloned()
+    }
+
     fn get_fresh(
         &mut self,
         rel: &str,
@@ -503,6 +515,32 @@ impl RepoGraph {
             }
             let len = meta.len();
             let mtime_ns = mtime_nanos(&meta);
+
+            // KR-R02: opt-in fast path. When the caller trusts mtime, a `(len, mtime_ns)` hit skips
+            // reading and hashing the file entirely; without it the cache only saves parsing, because
+            // every build still reads and hashes every file (measured as the dominant cost).
+            if cap.graph_stat_cache_enabled() {
+                if let Some(cached) = cache.get_by_stat(&rel, len, mtime_ns) {
+                    cache_hits += 1;
+                    let entry_bytes = cached.byte_len;
+                    if total_bytes.saturating_add(entry_bytes) > max_total_bytes {
+                        truncated = true;
+                        break;
+                    }
+                    total_bytes += entry_bytes;
+                    file_hashes.push((rel.clone(), cached.content_sha256.clone()));
+                    let mut indices = Vec::with_capacity(cached.symbols.len());
+                    for def in &cached.symbols {
+                        indices.push(symbols.len());
+                        symbols.push(def.clone());
+                    }
+                    file_symbols.push(indices);
+                    file_tokens.push(cached.tokens.clone());
+                    file_import_tokens.push(cached.import_tokens.clone());
+                    files.push(rel);
+                    continue;
+                }
+            }
 
             let mut file = file;
             let mut bytes = Vec::with_capacity(len as usize);
