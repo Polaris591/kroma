@@ -51,7 +51,17 @@
 - 真实远端 MCP（HTTP/SSE）未验证：只有 stdio 第三方实现。
 - 跨平台构建未验证：本机是 Linux，Windows/macOS 无法证明。
 - ACP `workspace.graph` 在 560 文件仓库上 60 秒无响应（KR-R01 记录），未修复。
-- 没有 push 到 GitHub：Kroma 没有配置任何远程仓库，本机无 gh CLI 与 token。
+- 跨平台构建未验证（同上）。
+- ~~没有 push 到 GitHub~~：**已推送**。`git@github.com:Polaris591/kroma.git` 分支
+  `nextgen-r2-rustfix` = `651d1e1`，`main` 仍为 `91597c4` 未被改动，未创建任何 tag。
+
+## 六点五、交付分支
+
+远程：`git@github.com:Polaris591/kroma.git`
+分支：`nextgen-r2-rustfix`（本地 `main` → 远程新分支，独立历史）
+本地 HEAD：`651d1e18e318f5ebea487bb14cfa8935d64113af`
+远程 `main`：`91597c4a7e44e5ec6b95e1bca3fe8b039e2a29be`（未改动）
+未创建 tag，未发布。
 
 ## 七、证据目录
 
