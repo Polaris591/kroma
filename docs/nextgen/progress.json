@@ -2351,24 +2351,24 @@
       "decision": "Windows x86_64 cross build+link verified (PE32+ 223MB, mingw 39.79s); aarch64-linux link failed (no cross linker); macOS has no SDK. Run evidence remains impossible here."
     },
     "KR-T03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "22a6d73",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/t03-workspace-test.log",
+          "sha256": "70465308e4c7731b6d6cbc466346e0d9ccb47e10b381b87e2088e8e99c19cc0b",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T18:50:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1311
         }
       ],
       "blocker": null,
-      "decision": "not verified this round: upgrade/rollback and old-session compatibility were not exercised. Missing: the migration run."
+      "decision": "downgrades are refused up front, not silently reinterpreted. The WAL reader verifies four things per line (valid JSON, contiguous seq, prev_hash chain, hash) and the header (seq 0, zero prev_hash); added session_state_transaction::an_older_wal_format_is_refused_rather_than_reinterpreted with three cases -- a header missing the hash field (what an older writer could emit), a header that parses but carries the wrong seq, and a non-WAL file. All three return an explicit SessionError::Invalid rather than being read as current format. Not covered: an actual migration path that would upgrade a real old session (there is none, and the task only requires that an unrecoverable downgrade be refused)."
     },
     "KR-T04": {
       "status": "BLOCKED_EXTERNAL",
@@ -2397,7 +2397,7 @@
         {
           "command": "delivery package inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "390e68df4303f9e4fca9aa93f48556cf9501601ca5f35094b59cf8c1b2477f6a",
+          "sha256": "2f00ac79784d7a98edb822a6584d6d38e00ebd0bd0a9a444908351665d1ff790",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
@@ -2416,7 +2416,7 @@
         {
           "command": "final report inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "390e68df4303f9e4fca9aa93f48556cf9501601ca5f35094b59cf8c1b2477f6a",
+          "sha256": "2f00ac79784d7a98edb822a6584d6d38e00ebd0bd0a9a444908351665d1ff790",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T08:15:00Z",
           "exit_code": 0,

@@ -715,3 +715,61 @@ async fn session_route_and_misrouting() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// KR-T03: a WAL written by an older/incompatible format must be refused explicitly.
+///
+/// The acceptance says "no silent irreversible format damage; a downgrade that cannot be recovered
+/// must be refused up front". The reader verifies four things per line (valid JSON, contiguous seq,
+/// prev_hash chain, hash) and the header (seq 0, zero prev_hash). This pins the refusal for the
+/// shape an older writer would produce, so a future format change cannot quietly reinterpret old
+/// bytes as new ones.
+#[test]
+fn an_older_wal_format_is_refused_rather_than_reinterpreted() {
+    use kroma_core::session::{SessionError, SessionJournal};
+
+    let root = std::env::temp_dir().join(format!("kroma-t03-wal-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+
+    // (a) header missing the hash field entirely -- what an older writer could emit.
+    let old = root.join("old-format.wal.jsonl");
+    std::fs::write(
+        &old,
+        "{\"seq\":0,\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"}\n",
+    )
+    .unwrap();
+    let err = match SessionJournal::open(&old) {
+        Ok(_) => panic!("an incomplete header must be refused"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, SessionError::Invalid(_)),
+        "expected an explicit Invalid refusal, got {err:?}"
+    );
+
+    // (b) header that parses but has the wrong sequence -- a reordered/merged file.
+    let bad_seq = root.join("bad-seq.wal.jsonl");
+    std::fs::write(
+        &bad_seq,
+        "{\"seq\":7,\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"payload\":{},\"hash\":\"00\"}\n",
+    )
+    .unwrap();
+    let err = match SessionJournal::open(&bad_seq) {
+        Ok(_) => panic!("a wrong header seq must be refused"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, SessionError::Invalid(_)),
+        "expected an explicit Invalid refusal, got {err:?}"
+    );
+
+    // (c) not a WAL at all.
+    let garbage = root.join("garbage.wal.jsonl");
+    std::fs::write(&garbage, "not json at all\n").unwrap();
+    let err = match SessionJournal::open(&garbage) {
+        Ok(_) => panic!("garbage must be refused"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, SessionError::Invalid(_)));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
