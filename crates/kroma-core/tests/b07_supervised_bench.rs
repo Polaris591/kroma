@@ -279,3 +279,42 @@ async fn b07_verify_invalid_limits_rejected_without_spawn() {
 
     let _ = fs::remove_dir_all(&ws);
 }
+
+/// KR-C04: a timeout must sweep the whole process group, not just the leader.
+///
+/// The normal-exit sweep is covered above. The timeout path is the one that can leak: the leader is
+/// killed while a background grandchild it started is still running, so cleanup has to be driven by
+/// the process group rather than by the leader's exit.
+#[tokio::test]
+async fn b07_verify_command_timeout_sweeps_grandchild() {
+    let ws = temp_workspace("timeout-grandchild");
+    let task = task_with_verify(
+        "timeout-grandchild",
+        sh("sleep 30 >/dev/null 2>&1 & echo $! > bg.pid; sleep 30"),
+    );
+
+    let verdict = task
+        .evaluate_with_timeout(&ws, Duration::from_millis(600))
+        .await;
+    assert!(
+        !verdict.resolved,
+        "a command that outlives the timeout must not resolve: {:?}",
+        verdict.failures
+    );
+    assert_failure_mentions(&verdict, "timed out");
+
+    let pid: i32 = fs::read_to_string(ws.join("bg.pid"))
+        .expect("fixture must record the grandchild pid")
+        .trim()
+        .parse()
+        .expect("pid");
+    let _guard = PidGuard(pid);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        process_terminated(pid),
+        "background grandchild {} must be swept after the verify command times out",
+        pid
+    );
+
+    let _ = fs::remove_dir_all(&ws);
+}

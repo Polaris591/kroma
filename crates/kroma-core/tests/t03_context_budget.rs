@@ -1113,3 +1113,99 @@ fn request_identity_changes_when_the_tool_schema_changes() {
         "reordering the same tool set must not change the identity"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// KR-B06: the audit log explains what was sent without storing what the user typed.
+//
+// `RunStarted` carries `prompt_hash`, never the prompt. This pins that down for the whole log: a
+// marker placed in the task must not appear anywhere in the run's JSONL.
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_event_log_does_not_contain_the_prompt_in_plaintext() {
+    use kroma_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
+    use kroma_core::events::EventLogger;
+    use kroma_core::provider::{ModelProvider, ProviderCompletion, ProviderError, ProviderRequest};
+    use kroma_core::revision::SnapshotStore;
+    use kroma_core::session::SessionJournal;
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    struct OneShotProvider;
+
+    impl ModelProvider for OneShotProvider {
+        fn complete<'a>(
+            &'a self,
+            _req: ProviderRequest,
+            _budget: &'a BudgetConfig,
+            _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                Ok(ProviderCompletion {
+                    turn: AssistantTurn {
+                        content: Some("done".to_string()),
+                        reasoning_blocks: Vec::new(),
+                        tool_calls: Vec::new(),
+                        finish_reason: FinishReason::Stop,
+                        usage: None,
+                    },
+                    request_body_bytes: 1,
+                    latency_ms: 1,
+                    ttft_ms: None,
+                    attempts_used: 1,
+                    reported_model: None,
+                })
+            })
+        }
+    }
+
+    const MARKER: &str = "KR-B06-PLAINTEXT-MARKER-9f3a";
+
+    let root = std::env::temp_dir().join(format!("kroma-b06-log-{}", uuid::Uuid::new_v4()));
+    let ws = root.join("ws");
+    let state = root.join("state");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+
+    let env = Arc::new(kroma_core::env::LocalHostEnv::new(&ws, state.clone()).unwrap());
+    let policy = PolicyEngine::new(
+        PolicyMode::ReadOnly,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    let budget = BudgetConfig {
+        model_context_window_tokens: Some(200_000),
+        ..Default::default()
+    };
+    let runtime = build_default_runtime(env, policy, budget.clone(), None);
+    let cfg = AgentRunConfig::new(format!("investigate {MARKER} please"), budget);
+    let run_id = cfg.run_id;
+    let logger = EventLogger::new(run_id, Some(state.clone()), true).unwrap();
+    let journal = SessionJournal::create(state.join("sessions"), &ws).unwrap();
+    let store = Arc::new(SnapshotStore::new(root.join("snapshots")));
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+
+    let (_summary, _logger) = AgentRunner::new(cfg, Arc::new(OneShotProvider), runtime, rx)
+        .with_session_journal(journal)
+        .with_snapshot_store(store)
+        .run(logger)
+        .await;
+
+    let log = std::fs::read_to_string(state.join(format!("{}.jsonl", run_id))).unwrap_or_default();
+    assert!(
+        !log.is_empty(),
+        "the run must produce a structured log to audit"
+    );
+    assert!(
+        log.contains("RunStarted"),
+        "the log must record that the run started; log:\n{log}"
+    );
+    assert!(
+        !log.contains(MARKER),
+        "the prompt must not be stored in plaintext; log:\n{log}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

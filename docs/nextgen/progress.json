@@ -125,8 +125,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
-          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "sha256": "02a4c94d07737c1cfe5e8ca73843fdf2aac8d2ce162395a76faf5cd600f86f00",
+          "source_tree_sha256": "05d23734980970f5d85f725a439dcc61aa6405eff0a2239e06ab2ea580ea46e4",
           "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
@@ -145,8 +145,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
-          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "sha256": "02a4c94d07737c1cfe5e8ca73843fdf2aac8d2ce162395a76faf5cd600f86f00",
+          "source_tree_sha256": "05d23734980970f5d85f725a439dcc61aa6405eff0a2239e06ab2ea580ea46e4",
           "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
@@ -165,8 +165,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
-          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "sha256": "02a4c94d07737c1cfe5e8ca73843fdf2aac8d2ce162395a76faf5cd600f86f00",
+          "source_tree_sha256": "05d23734980970f5d85f725a439dcc61aa6405eff0a2239e06ab2ea580ea46e4",
           "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
@@ -185,8 +185,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
-          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "sha256": "02a4c94d07737c1cfe5e8ca73843fdf2aac8d2ce162395a76faf5cd600f86f00",
+          "source_tree_sha256": "05d23734980970f5d85f725a439dcc61aa6405eff0a2239e06ab2ea580ea46e4",
           "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
@@ -214,18 +214,41 @@
       "decision": null
     },
     "KR-C01": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "da662d5",
+      "evidence": [
+        {
+          "command": "python3 scripts/nextgen_spawn_audit.py .",
+          "path": "spawn_points.json",
+          "sha256": "b8052326341f373ad15e8db529af5d353e94edda6b80da59562aa23b856aaa47",
+          "source_tree_sha256": "05d23734980970f5d85f725a439dcc61aa6405eff0a2239e06ab2ea580ea46e4",
+          "completed_utc": "2026-10-20T23:52:19Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        }
+      ],
       "blocker": null,
       "decision": null
     },
     "KR-C02": {
-      "status": "TODO",
-      "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "status": "VERIFIED",
+      "attempts": 1,
+      "commit": "da662d5",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --test gate3_reversible_extensions --locked",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "02a4c94d07737c1cfe5e8ca73843fdf2aac8d2ce162395a76faf5cd600f86f00",
+          "source_tree_sha256": "05d23734980970f5d85f725a439dcc61aa6405eff0a2239e06ab2ea580ea46e4",
+          "completed_utc": "2026-10-20T23:52:19Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1289
+        }
+      ],
       "blocker": null,
       "decision": null
     },
@@ -269,8 +292,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
-          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "sha256": "02a4c94d07737c1cfe5e8ca73843fdf2aac8d2ce162395a76faf5cd600f86f00",
+          "source_tree_sha256": "05d23734980970f5d85f725a439dcc61aa6405eff0a2239e06ab2ea580ea46e4",
           "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,
@@ -289,8 +312,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "7c547497f1b35e3ddcb26b4fcd81f6e94c5874192c97baa96923868d11d2f29d",
-          "source_tree_sha256": "990f440419980a10b3b0aeb803a3fa7fb01c78a27f50be6231cf44318a2a20bb",
+          "sha256": "02a4c94d07737c1cfe5e8ca73843fdf2aac8d2ce162395a76faf5cd600f86f00",
+          "source_tree_sha256": "05d23734980970f5d85f725a439dcc61aa6405eff0a2239e06ab2ea580ea46e4",
           "completed_utc": "2026-10-20T23:44:19Z",
           "exit_code": 0,
           "required": true,

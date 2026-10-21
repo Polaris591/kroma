@@ -343,3 +343,56 @@ fn pre_t05_wal_without_availability_still_loads() {
     assert_eq!(meta.availability, CompactionAvailability::Unknown);
     assert!(meta.is_available());
 }
+
+/// KR-M01: projection may shrink, stub or archive an item, but it must never change *what kind of
+/// message* it is. A tool result that turned into a user or assistant message would be a privilege
+/// escalation: lower-trust content inheriting a higher role.
+#[test]
+fn projection_never_changes_a_message_role() {
+    fn kind_of(item: &TranscriptItem) -> &'static str {
+        match item {
+            TranscriptItem::User(_) => "user",
+            TranscriptItem::Assistant(_) => "assistant",
+            TranscriptItem::ToolResult(_) => "tool-result",
+        }
+    }
+
+    let big = "x".repeat(40_000);
+    let mut transcript = vec![
+        TranscriptItem::User(UserMessage {
+            content: "read the source".into(),
+        }),
+        assistant_with(&[("call_big", "read")]),
+        tool_result("call_big", "read", Some("src/a.rs"), &big),
+    ];
+    for _turn in 0..6 {
+        transcript.push(assistant_with(&[("call_filler", "read")]));
+        transcript.push(tool_result(
+            "call_filler",
+            "read",
+            Some("src/filler.rs"),
+            "pub fn filler() {}\n",
+        ));
+    }
+    let before: Vec<&'static str> = transcript.iter().map(kind_of).collect();
+
+    let budget = kroma_core::budget::BudgetConfig {
+        context_high_watermark_bytes: 8 * 1024,
+        context_low_watermark_bytes: 4 * 1024,
+        context_tail_window_bytes: 512,
+        context_min_tail_turns: 1,
+        max_total_tool_output_bytes: 4 * 1024 * 1024,
+        ..Default::default()
+    };
+    let mut projector = ContextProjector::new();
+    projector
+        .project(&mut transcript, &budget, 0, None, 40)
+        .unwrap();
+
+    let after: Vec<&'static str> = transcript.iter().map(kind_of).collect();
+    assert_eq!(
+        before, after,
+        "projection must not reclassify or reorder messages: a tool result cannot become a user or \
+         assistant message"
+    );
+}
