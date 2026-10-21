@@ -4671,6 +4671,7 @@ mod e02e05_metric_tests {
                 turn,
                 usage_basis: usage_basis.map(str::to_string),
                 reported_model: Some("measured-model".to_string()),
+                model_identity_matches: None,
                 token_accounting: None,
                 input_tokens,
                 cached_input_tokens,

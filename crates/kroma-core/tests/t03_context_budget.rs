@@ -1209,3 +1209,107 @@ async fn the_event_log_does_not_contain_the_prompt_in_plaintext() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------------------------
+// KR-L05: a provider that answers as a different model must be recorded, not silently accepted.
+//
+// The task asks that both the executor and the model's actual capability be verifiable. The run
+// dispatches to one model and the provider reports another; the answer is still useful, so the run
+// continues, but the discrepancy lands in the structured log instead of vanishing.
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_model_identity_mismatch_is_recorded_not_silently_accepted() {
+    use kroma_core::agent_loop::{build_default_runtime, AgentRunConfig, AgentRunner};
+    use kroma_core::events::EventLogger;
+    use kroma_core::provider::{
+        DispatchBinding, ModelProvider, ProviderCompletion, ProviderError, ProviderRequest,
+    };
+    use kroma_core::revision::SnapshotStore;
+    use kroma_core::session::SessionJournal;
+    use kroma_core::tool::policy::{NonInteractiveApprovalHandler, PolicyEngine, PolicyMode};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    struct MismatchProvider;
+
+    impl ModelProvider for MismatchProvider {
+        fn dispatch_binding(&self) -> Option<DispatchBinding> {
+            Some(DispatchBinding {
+                endpoint: "http://127.0.0.1:9".to_string(),
+                model: "requested-model".to_string(),
+            })
+        }
+
+        fn complete<'a>(
+            &'a self,
+            _req: ProviderRequest,
+            _budget: &'a BudgetConfig,
+            _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderCompletion, ProviderError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                Ok(ProviderCompletion {
+                    turn: AssistantTurn {
+                        content: Some("done".to_string()),
+                        reasoning_blocks: Vec::new(),
+                        tool_calls: Vec::new(),
+                        finish_reason: FinishReason::Stop,
+                        usage: None,
+                    },
+                    request_body_bytes: 1,
+                    latency_ms: 1,
+                    ttft_ms: None,
+                    attempts_used: 1,
+                    reported_model: Some("a-different-model".to_string()),
+                })
+            })
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("kroma-l05-{}", uuid::Uuid::new_v4()));
+    let ws = root.join("ws");
+    let state = root.join("state");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+
+    let env = Arc::new(kroma_core::env::LocalHostEnv::new(&ws, state.clone()).unwrap());
+    let policy = PolicyEngine::new(
+        PolicyMode::ReadOnly,
+        Arc::new(NonInteractiveApprovalHandler),
+    );
+    let budget = BudgetConfig {
+        model_context_window_tokens: Some(200_000),
+        ..Default::default()
+    };
+    let runtime = build_default_runtime(env, policy, budget.clone(), None);
+    let cfg = AgentRunConfig::new("say done", budget);
+    let run_id = cfg.run_id;
+    let logger = EventLogger::new(run_id, Some(state.clone()), true).unwrap();
+    let journal = SessionJournal::create(state.join("sessions"), &ws).unwrap();
+    let store = Arc::new(SnapshotStore::new(root.join("snapshots")));
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+
+    let (_summary, _logger) = AgentRunner::new(cfg, Arc::new(MismatchProvider), runtime, rx)
+        .with_session_journal(journal)
+        .with_snapshot_store(store)
+        .run(logger)
+        .await;
+
+    let log = std::fs::read_to_string(state.join(format!("{}.jsonl", run_id))).unwrap_or_default();
+    assert!(
+        log.contains("ModelRequestCompleted"),
+        "the completed request must be logged; log:\n{log}"
+    );
+    assert!(
+        log.contains("\"model_identity_matches\":false"),
+        "a provider answering as a different model must be recorded as a mismatch; log:\n{log}"
+    );
+    assert!(
+        log.contains("a-different-model"),
+        "the reported model must be kept so the mismatch is auditable"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

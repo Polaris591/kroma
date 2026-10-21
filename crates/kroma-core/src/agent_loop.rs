@@ -1815,6 +1815,15 @@ impl AgentRunner {
                 turn: state.current_turn,
                 usage_basis: Some("provider_reported".to_string()),
                 reported_model: completion.reported_model.clone(),
+                // KR-L05: check the model the provider actually answered as against the one this run
+                // dispatched to. None means the adapter declares no binding (nothing to check).
+                model_identity_matches: match (
+                    self.provider.dispatch_binding(),
+                    completion.reported_model.as_deref(),
+                ) {
+                    (Some(binding), Some(reported)) => Some(reported == binding.model),
+                    _ => None,
+                },
                 token_accounting: Some(self.token_budget.accounting_snapshot()),
                 input_tokens: usage.input_tokens,
                 cached_input_tokens: usage.cached_input_tokens,
@@ -1853,6 +1862,13 @@ impl AgentRunner {
                 turn: state.current_turn,
                 usage_basis: Some("byte_estimate_not_measured".to_string()),
                 reported_model: completion.reported_model.clone(),
+                model_identity_matches: match (
+                    self.provider.dispatch_binding(),
+                    completion.reported_model.as_deref(),
+                ) {
+                    (Some(binding), Some(reported)) => Some(reported == binding.model),
+                    _ => None,
+                },
                 token_accounting: Some(self.token_budget.accounting_snapshot()),
                 input_tokens: est_input,
                 cached_input_tokens: None,

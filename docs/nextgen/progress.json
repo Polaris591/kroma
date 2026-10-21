@@ -1418,24 +1418,24 @@
       "decision": "Retry-After is parsed (transport.rs:754/756) and retry accounting is covered (provider_contract::retry_token_allowance_blocks_transmission_and_preserves_unknown_spend, runner_retry_exhaustion_retains_first_attempt_and_sends_once). Missing: seeded/deterministic jitter -- grep for seed in provider/*.rs returns nothing."
     },
     "KR-L05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "88bf88a",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/l05-workspace-test.log",
+          "sha256": "199ee6d52a76bde0b6ca10d2393c6546be8f94bf73ce3fc2f68637b49eda86b7",
+          "source_tree_sha256": "50806e5886f42611f117fa29c2c9d16ecb08f1ba338ac7c3c00bbdda446b8601",
+          "completed_utc": "2026-10-21T08:50:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1303
         }
       ],
       "blocker": null,
-      "decision": "ModelCapabilities::resolve exists and the fallback is honest (KR-B04 work), but there is no model capability registration or /models refresh path, so \"the executor and the model both verifiable\" is not met. Missing: the refresh mechanism."
+      "decision": "added ModelRequestCompleted::model_identity_matches: the run now compares the model the provider reports against the one it dispatched to (provider.dispatch_binding()), recording Some(true)/Some(false)/None instead of silently accepting a substitution. Test: t03_context_budget::a_model_identity_mismatch_is_recorded_not_silently_accepted drives a provider that declares requested-model and answers as a-different-model, and asserts the log carries model_identity_matches:false plus the reported id. Capability numbers remain explicit about their source (configured / conservative_fallback / unbounded) from the KR-B04 work."
     },
     "KR-L06": {
       "status": "DEFERRED_WITH_RATIONALE",

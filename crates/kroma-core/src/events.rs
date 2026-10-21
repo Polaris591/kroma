@@ -69,6 +69,13 @@ pub enum EventPayload {
         usage_basis: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reported_model: Option<String>,
+        /// KR-L05: whether the model the provider reported matches the one this run dispatched to.
+        /// `None` means the adapter does not declare a dispatch binding (so nothing can be checked),
+        /// `Some(true)` means the provider confirmed the requested model, `Some(false)` means the
+        /// provider answered as a different model -- the run continues (the answer is still useful)
+        /// but the discrepancy is recorded instead of being silently accepted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_identity_matches: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token_accounting: Option<crate::budget::TokenAccountingSnapshot>,
         input_tokens: u64,
