@@ -50,6 +50,11 @@ CASES = ("p0", "p2", "p3", "p4")
 # Fixed P2 input so repeats stay comparable: a real symbol search, not a toy string.
 GRAPH_PARAMS = {"query": "process supervisor", "max_nodes": 20}
 
+# ACP refuses to start without an owner spend envelope (KR-E04). Without it the process exits
+# immediately and the measurement sees a dead child, which reads as "no response" rather than
+# "refused to start" -- that misdiagnosis is why p2-p4 used to time out.
+ACP_SPEND_ENVELOPE = 100_000
+
 # P3 indexes a generated tree, so its query names a symbol that tree actually defines.
 CASE_PARAMS = {"p3": {"query": "generated_entry_00042", "max_nodes": 20}}
 
@@ -407,7 +412,7 @@ def run_concurrent(case, binary, env, workspace, timeout, interval, logdir, repe
         "case": "p4",
         "repeat": repeat,
         "order": order,
-        "argv": ["acp"],
+        "argv": ["acp", "--max-tokens", str(ACP_SPEND_ENVELOPE)],
         "sessions": sessions,
         "workspace": workspace,
         "timeout_s": timeout,
@@ -442,9 +447,9 @@ def run_case(case, binary, env, workspace, timeout, interval, logdir, repeat, or
         argv = ["--version"]
     elif case == "p3":
         # P3 must index the generated tree, not whatever directory this script happens to run in.
-        argv = ["acp", "--workspace", workspace]
+        argv = ["acp", "--workspace", workspace, "--max-tokens", str(ACP_SPEND_ENVELOPE)]
     else:
-        argv = ["acp"]
+        argv = ["acp", "--max-tokens", str(ACP_SPEND_ENVELOPE)]
     record = {
         "case": case,
         "repeat": repeat,

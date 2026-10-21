@@ -2037,7 +2037,7 @@
         {
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
-          "sha256": "fb9acf1405eff99d987d0a9ce659468013c19c322dfc6d4c503fb283cb200287",
+          "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
@@ -2049,24 +2049,23 @@
       "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-R01": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "3cdd9bc",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
+          "command": "python3 scripts/measure-local-baseline.py --kroma ./target/debug/kroma --repeats 3 --timeout 120",
+          "path": "r01_local_baseline.json/report.json",
+          "sha256": "8ded457728f0e465ec088e4f792b9ae5be897ebd8cd97904939876d553e26b91",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "completed_utc": "2026-10-21T08:10:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1302
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "p0 (kroma --version) is reproducible over three repeats (wall 4.1/4.3/61.2ms, tree PSS 2.5-7.0MB) but p2/p3/p4 (kroma acp + workspace.graph) time out at 60s on a 560-file repo. Missing: a working graph measurement, which is most of this task."
+      "decision": "full baseline now reproducible over 3 repeats each: p0 (kroma --version) 4.70ms median, tree PSS 2.2-3.5MB; p2 (acp + workspace.graph over this 560-file repo) graph 3296ms median / init 11ms, PSS 75MB; p3 (generated tree) 245ms, PSS 25MB; p4 (4 concurrent acp sessions) tree PSS 269MB. The earlier \"ACP graph hangs at 60s\" was a measurement bug: ACP refuses to start without an owner spend envelope, so the script's child exited immediately and the probe read that as no response. scripts/measure-local-baseline.py now passes --max-tokens; no source change was needed."
     },
     "KR-R02": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2269,7 +2268,7 @@
         {
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
-          "sha256": "fb9acf1405eff99d987d0a9ce659468013c19c322dfc6d4c503fb283cb200287",
+          "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
@@ -2307,7 +2306,7 @@
         {
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
-          "sha256": "fb9acf1405eff99d987d0a9ce659468013c19c322dfc6d4c503fb283cb200287",
+          "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
@@ -2346,7 +2345,7 @@
         {
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
-          "sha256": "fb9acf1405eff99d987d0a9ce659468013c19c322dfc6d4c503fb283cb200287",
+          "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
@@ -2365,7 +2364,7 @@
         {
           "command": "delivery package inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "0117acbaa3e729902b24ce00c49a24a390dcd780b903ac7f057cf6b85f686e29",
+          "sha256": "f2d74e6333c9582c25ae50f073c0d4f44a9777dc413d6f62f5f960a65c374aaf",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
@@ -2384,9 +2383,9 @@
         {
           "command": "final report inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "0117acbaa3e729902b24ce00c49a24a390dcd780b903ac7f057cf6b85f686e29",
+          "sha256": "f2d74e6333c9582c25ae50f073c0d4f44a9777dc413d6f62f5f960a65c374aaf",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:00:00Z",
+          "completed_utc": "2026-10-21T08:15:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"

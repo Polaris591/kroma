@@ -73,18 +73,21 @@ no deployment present
 F06 的负实验登记为空。任务卡要求"所有 mandatory 适用门禁 VERIFIED 才可称发布候选验收通过；
 仍有 blocked 必须醒目标出"——当前仍有 blocked，故不能通过，只能如实标出。
 
-## KR-R01 资源基线的 ACP 分支（本机可复现，不属外部阻塞）
+## KR-R01 资源基线（已修正误判）
 
-p0（`kroma --version`）三次重复可复现：wall 4.1 / 4.3 / 61.2 ms，树 PSS 2.5–7.0 MB。
+p0（`kroma --version`）三次重复可复现：wall 4.70ms 中位数，树 PSS 2.2–3.5MB。
 
-p2/p3/p4（`kroma acp` + `workspace.graph`）在 560 文件仓库上 60 秒仍无响应：
+p2/p3/p4 曾经在 60 秒超时，我一度记成「ACP 的 workspace.graph 挂住」。**那是误判。** 真实原因是
+ACP 在没有 owner spend envelope 时 fail-closed 退出（KR-E04 引入的安全行为），而测量脚本是那之前
+写的、没传 `--max-tokens`，于是子进程立刻死掉，探测端读成了「没有响应」。
+
+修好脚本参数后，同一台机器上：
 
 ```
-$ python3 scripts/measure-local-baseline.py --kroma ./target/debug/kroma \
-      --out /opt/pi-qq/workspace/r01b --repo . --repeats 2 --timeout 60 --only p2
-p2 repeats=2 exit_zero=False timed_out=True {"tree_peak_pss_kb": {"max": 5548, ...}}
+p2  graph 3296ms 中位数 / init 11ms / 树 PSS 75MB   (本仓 560 文件)
+p3  graph 245ms  中位数 / 树 PSS 25MB               (生成的小树)
+p4  4 个并发 acp 会话，树 PSS 269MB
 ```
 
-这是本机可复现的现象：要么 ACP 的 `workspace.graph` 在中等仓库上过慢，要么测量驱动的握手
-方式不对。两者都需要继续定位，因此该项保持 IMPLEMENTED_UNVERIFIED 并附本探测——它不缺外部
-条件，所以不标 BLOCKED。
+全部 `exit_zero=True, timed_out=False`。源码没有改动，改的是 `scripts/measure-local-baseline.py`。
+所以这一项从「本机可复现的缺陷」变成了「可复现的基线」，不再需要单独调查。

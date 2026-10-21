@@ -1,11 +1,11 @@
 {
   "binary": {
-    "mtime_utc": "2026-10-21T00:36:08Z",
+    "mtime_utc": "2026-10-21T02:17:45Z",
     "path": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/target/debug/kroma",
-    "sha256": "75a0938ace79803bcdb2c8ee4a74cf59b33d11ed4e48181b156a0b4bdded84c5",
-    "size_bytes": 132754056
+    "sha256": "ed486072c9fe7984ac35711bec03994b34d6c47c0179ad7971a90c4fc1d405df",
+    "size_bytes": 120203664
   },
-  "finished_at": "2026-10-21T00:46:38Z",
+  "finished_at": "2026-10-21T02:46:46Z",
   "hardware": {
     "cpu_count": 4,
     "cpu_model": "AMD EPYC 7K62 48-Core Processor",
@@ -17,7 +17,7 @@
   "method": {
     "cache_state": "warm (page cache not dropped; cold-cache start unmeasured)",
     "order": "fixed per repeat: p0,p2,p3,p4",
-    "per_run_deadline_s": 60.0,
+    "per_run_deadline_s": 120.0,
     "repeats": 3,
     "resource_accounting": "sum over the /proc process tree; Rss double counts shared pages, Pss apportions them; children shorter than one sample are missed; main_process_maxrss_kb covers the main PID only",
     "thresholds": "none: numbers only, no SLO is set here"
@@ -29,7 +29,7 @@
       ],
       "case": "p0",
       "exit_code": 0,
-      "main_process_maxrss_kb": 18856,
+      "main_process_maxrss_kb": 18924,
       "order": 1,
       "raw_log": "raw-p0-r1.log",
       "repeat": 1,
@@ -38,184 +38,263 @@
       "stdout_bytes": 12,
       "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
       "timed_out": false,
-      "timeout_s": 60.0,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 7041,
-      "tree_peak_rss_kb": 9540,
+      "tree_peak_pss_kb": 2962,
+      "tree_peak_rss_kb": 4512,
       "tree_pss_unavailable": false,
-      "tree_samples": 13,
+      "tree_samples": 1,
       "version_line": "kroma 1.5.0",
-      "wall_ms": 61.195,
+      "wall_ms": 5.291,
       "workspace": null
     },
     {
       "argv": [
-        "acp"
+        "acp",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p2",
-      "exit_code": 2,
-      "init_ms": null,
-      "init_ok": false,
-      "main_process_maxrss_kb": 18984,
+      "exit_code": 0,
+      "graph_ms": 3296.451,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "process",
+          "supervisor"
+        ],
+        "ranked": 20,
+        "total_files": 275,
+        "total_symbols": 5795
+      },
+      "init_ms": 13.761,
+      "init_ok": true,
+      "main_process_maxrss_kb": 78032,
       "order": 2,
       "raw_log": "raw-p2-r1.log",
       "repeat": 1,
       "sample_interval_ms": 10.0,
-      "stderr_bytes": 509,
+      "stderr_bytes": 253,
       "stdout_bytes": 0,
       "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "timed_out": true,
-      "timeout_s": 60.0,
+      "timed_out": false,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 13805,
-      "tree_peak_rss_kb": 16304,
+      "tree_peak_pss_kb": 75304,
+      "tree_peak_rss_kb": 78296,
       "tree_pss_unavailable": false,
-      "tree_samples": 7,
+      "tree_samples": 256,
       "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
     },
     {
       "argv": [
         "acp",
         "--workspace",
-        "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+        "/opt/pi-qq/workspace/r01full/_p3_workspace",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p3",
-      "exit_code": 2,
-      "init_ms": null,
-      "init_ok": false,
-      "main_process_maxrss_kb": 18984,
+      "exit_code": 0,
+      "graph_ms": 245.132,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "generated_entry_00042"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 1200
+      },
+      "init_ms": 9.233,
+      "init_ok": true,
+      "main_process_maxrss_kb": 27588,
       "order": 3,
       "raw_log": "raw-p3-r1.log",
       "repeat": 1,
       "sample_interval_ms": 10.0,
-      "stderr_bytes": 509,
+      "stderr_bytes": 253,
       "stdout_bytes": 0,
       "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "timed_out": true,
-      "timeout_s": 60.0,
+      "timed_out": false,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 2231,
-      "tree_peak_rss_kb": 3500,
+      "tree_peak_pss_kb": 25162,
+      "tree_peak_rss_kb": 27808,
       "tree_pss_unavailable": false,
-      "tree_samples": 1,
-      "workspace": "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+      "tree_samples": 20,
+      "workspace": "/opt/pi-qq/workspace/r01full/_p3_workspace"
     },
     {
-      "all_graph_ok": false,
+      "all_graph_ok": true,
       "argv": [
-        "acp"
+        "acp",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p4",
-      "exit_code": 1,
+      "exit_code": 0,
       "order": 4,
       "per_session": [
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20140,
+          "exit_code": 0,
+          "graph_ms": 4113.323,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 15.787,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77260,
           "order": 4,
           "raw_log": "raw-p2-r1.log",
           "repeat": 1,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
+          "timed_out": false,
+          "timeout_s": 120.0,
           "tree_peak_processes": 1,
-          "tree_peak_pss_kb": 4647,
-          "tree_peak_rss_kb": 7012,
+          "tree_peak_pss_kb": 62058,
+          "tree_peak_rss_kb": 77644,
           "tree_pss_unavailable": false,
-          "tree_samples": 1,
+          "tree_samples": 250,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20140,
+          "exit_code": 0,
+          "graph_ms": 4214.589,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 17.34,
+          "init_ok": true,
+          "main_process_maxrss_kb": 78024,
           "order": 5,
           "raw_log": "raw-p2-r1.log",
           "repeat": 1,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 67325,
+          "tree_peak_rss_kb": 78236,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 254,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20396,
+          "exit_code": 0,
+          "graph_ms": 4034.944,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 20.436,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77236,
           "order": 6,
           "raw_log": "raw-p2-r1.log",
           "repeat": 1,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 62037,
+          "tree_peak_rss_kb": 77740,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 242,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20396,
+          "exit_code": 0,
+          "graph_ms": 4313.242,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 19.275,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77412,
           "order": 7,
           "raw_log": "raw-p2-r1.log",
           "repeat": 1,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 75210,
+          "tree_peak_rss_kb": 77856,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 260,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         }
       ],
       "repeat": 1,
       "sample_interval_ms": 10.0,
       "sessions": 4,
-      "timed_out": true,
-      "timeout_s": 60.0,
-      "tree_peak_pss_kb": 4647,
+      "timed_out": false,
+      "timeout_s": 120.0,
+      "tree_peak_pss_kb": 266630,
       "wall_ms": null,
       "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
     },
@@ -225,7 +304,7 @@
       ],
       "case": "p0",
       "exit_code": 0,
-      "main_process_maxrss_kb": 20780,
+      "main_process_maxrss_kb": 21104,
       "order": 5,
       "raw_log": "raw-p0-r2.log",
       "repeat": 2,
@@ -234,184 +313,263 @@
       "stdout_bytes": 12,
       "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
       "timed_out": false,
-      "timeout_s": 60.0,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 2547,
-      "tree_peak_rss_kb": 3816,
+      "tree_peak_pss_kb": 3479,
+      "tree_peak_rss_kb": 5420,
       "tree_pss_unavailable": false,
       "tree_samples": 1,
       "version_line": "kroma 1.5.0",
-      "wall_ms": 4.282,
+      "wall_ms": 4.699,
       "workspace": null
     },
     {
       "argv": [
-        "acp"
+        "acp",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p2",
-      "exit_code": 2,
-      "init_ms": null,
-      "init_ok": false,
-      "main_process_maxrss_kb": 20780,
+      "exit_code": 0,
+      "graph_ms": 3366.755,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "process",
+          "supervisor"
+        ],
+        "ranked": 20,
+        "total_files": 275,
+        "total_symbols": 5795
+      },
+      "init_ms": 11.34,
+      "init_ok": true,
+      "main_process_maxrss_kb": 77524,
       "order": 6,
       "raw_log": "raw-p2-r2.log",
       "repeat": 2,
       "sample_interval_ms": 10.0,
-      "stderr_bytes": 509,
+      "stderr_bytes": 253,
       "stdout_bytes": 0,
       "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "timed_out": true,
-      "timeout_s": 60.0,
+      "timed_out": false,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 3357,
-      "tree_peak_rss_kb": 4920,
+      "tree_peak_pss_kb": 75222,
+      "tree_peak_rss_kb": 77868,
       "tree_pss_unavailable": false,
-      "tree_samples": 1,
+      "tree_samples": 268,
       "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
     },
     {
       "argv": [
         "acp",
         "--workspace",
-        "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+        "/opt/pi-qq/workspace/r01full/_p3_workspace",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p3",
-      "exit_code": 2,
-      "init_ms": null,
-      "init_ok": false,
-      "main_process_maxrss_kb": 20780,
+      "exit_code": 0,
+      "graph_ms": 247.789,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "generated_entry_00042"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 1200
+      },
+      "init_ms": 18.98,
+      "init_ok": true,
+      "main_process_maxrss_kb": 27860,
       "order": 7,
       "raw_log": "raw-p3-r2.log",
       "repeat": 2,
       "sample_interval_ms": 10.0,
-      "stderr_bytes": 509,
+      "stderr_bytes": 253,
       "stdout_bytes": 0,
       "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "timed_out": true,
-      "timeout_s": 60.0,
+      "timed_out": false,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 3119,
-      "tree_peak_rss_kb": 4388,
+      "tree_peak_pss_kb": 25306,
+      "tree_peak_rss_kb": 27952,
       "tree_pss_unavailable": false,
-      "tree_samples": 1,
-      "workspace": "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+      "tree_samples": 22,
+      "workspace": "/opt/pi-qq/workspace/r01full/_p3_workspace"
     },
     {
-      "all_graph_ok": false,
+      "all_graph_ok": true,
       "argv": [
-        "acp"
+        "acp",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p4",
-      "exit_code": 1,
+      "exit_code": 0,
       "order": 8,
       "per_session": [
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20780,
+          "exit_code": 0,
+          "graph_ms": 3898.27,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 17.748,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77264,
           "order": 8,
           "raw_log": "raw-p2-r2.log",
           "repeat": 2,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 62292,
+          "tree_peak_rss_kb": 77588,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 232,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20780,
+          "exit_code": 0,
+          "graph_ms": 4423.376,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 12.302,
+          "init_ok": true,
+          "main_process_maxrss_kb": 78024,
           "order": 9,
           "raw_log": "raw-p2-r2.log",
           "repeat": 2,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 75866,
+          "tree_peak_rss_kb": 78512,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 268,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20780,
+          "exit_code": 0,
+          "graph_ms": 4213.073,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 16.905,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77224,
           "order": 10,
           "raw_log": "raw-p2-r2.log",
           "repeat": 2,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 66403,
+          "tree_peak_rss_kb": 77724,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 253,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20780,
+          "exit_code": 0,
+          "graph_ms": 4015.61,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 18.922,
+          "init_ok": true,
+          "main_process_maxrss_kb": 78472,
           "order": 11,
           "raw_log": "raw-p2-r2.log",
           "repeat": 2,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 64438,
+          "tree_peak_rss_kb": 78764,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 237,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         }
       ],
       "repeat": 2,
       "sample_interval_ms": 10.0,
       "sessions": 4,
-      "timed_out": true,
-      "timeout_s": 60.0,
-      "tree_peak_pss_kb": null,
+      "timed_out": false,
+      "timeout_s": 120.0,
+      "tree_peak_pss_kb": 268999,
       "wall_ms": null,
       "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
     },
@@ -421,7 +579,7 @@
       ],
       "case": "p0",
       "exit_code": 0,
-      "main_process_maxrss_kb": 20780,
+      "main_process_maxrss_kb": 21232,
       "order": 9,
       "raw_log": "raw-p0-r3.log",
       "repeat": 3,
@@ -430,184 +588,263 @@
       "stdout_bytes": 12,
       "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
       "timed_out": false,
-      "timeout_s": 60.0,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 2483,
-      "tree_peak_rss_kb": 3752,
+      "tree_peak_pss_kb": 2214,
+      "tree_peak_rss_kb": 3488,
       "tree_pss_unavailable": false,
       "tree_samples": 1,
       "version_line": "kroma 1.5.0",
-      "wall_ms": 4.065,
+      "wall_ms": 4.696,
       "workspace": null
     },
     {
       "argv": [
-        "acp"
+        "acp",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p2",
-      "exit_code": 2,
-      "init_ms": null,
-      "init_ok": false,
-      "main_process_maxrss_kb": 20780,
+      "exit_code": 0,
+      "graph_ms": 3268.384,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "process",
+          "supervisor"
+        ],
+        "ranked": 20,
+        "total_files": 275,
+        "total_symbols": 5795
+      },
+      "init_ms": 9.354,
+      "init_ok": true,
+      "main_process_maxrss_kb": 78232,
       "order": 10,
       "raw_log": "raw-p2-r3.log",
       "repeat": 3,
       "sample_interval_ms": 10.0,
-      "stderr_bytes": 509,
+      "stderr_bytes": 253,
       "stdout_bytes": 0,
       "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "timed_out": true,
-      "timeout_s": 60.0,
+      "timed_out": false,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 4122,
-      "tree_peak_rss_kb": 6240,
+      "tree_peak_pss_kb": 75812,
+      "tree_peak_rss_kb": 78476,
       "tree_pss_unavailable": false,
-      "tree_samples": 1,
+      "tree_samples": 266,
       "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
     },
     {
       "argv": [
         "acp",
         "--workspace",
-        "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+        "/opt/pi-qq/workspace/r01full/_p3_workspace",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p3",
-      "exit_code": 2,
-      "init_ms": null,
-      "init_ok": false,
-      "main_process_maxrss_kb": 20780,
+      "exit_code": 0,
+      "graph_ms": 241.924,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "generated_entry_00042"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 1200
+      },
+      "init_ms": 9.329,
+      "init_ok": true,
+      "main_process_maxrss_kb": 27748,
       "order": 11,
       "raw_log": "raw-p3-r3.log",
       "repeat": 3,
       "sample_interval_ms": 10.0,
-      "stderr_bytes": 509,
+      "stderr_bytes": 253,
       "stdout_bytes": 0,
       "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "timed_out": true,
-      "timeout_s": 60.0,
+      "timed_out": false,
+      "timeout_s": 120.0,
       "tree_peak_processes": 1,
-      "tree_peak_pss_kb": 3514,
-      "tree_peak_rss_kb": 5476,
+      "tree_peak_pss_kb": 25446,
+      "tree_peak_rss_kb": 28088,
       "tree_pss_unavailable": false,
-      "tree_samples": 1,
-      "workspace": "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+      "tree_samples": 21,
+      "workspace": "/opt/pi-qq/workspace/r01full/_p3_workspace"
     },
     {
-      "all_graph_ok": false,
+      "all_graph_ok": true,
       "argv": [
-        "acp"
+        "acp",
+        "--max-tokens",
+        "100000"
       ],
       "case": "p4",
-      "exit_code": 1,
+      "exit_code": 0,
       "order": 12,
       "per_session": [
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20780,
+          "exit_code": 0,
+          "graph_ms": 4024.282,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 15.992,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77700,
           "order": 12,
           "raw_log": "raw-p2-r3.log",
           "repeat": 3,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 62324,
+          "tree_peak_rss_kb": 78004,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 235,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20780,
+          "exit_code": 0,
+          "graph_ms": 4339.969,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 15.192,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77864,
           "order": 13,
           "raw_log": "raw-p2-r3.log",
           "repeat": 3,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 75478,
+          "tree_peak_rss_kb": 78124,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 259,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20780,
+          "exit_code": 0,
+          "graph_ms": 4109.432,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 10.692,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77848,
           "order": 14,
           "raw_log": "raw-p2-r3.log",
           "repeat": 3,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 64364,
+          "tree_peak_rss_kb": 78252,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 236,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         },
         {
           "argv": [
-            "acp"
+            "acp",
+            "--max-tokens",
+            "100000"
           ],
           "case": "p2",
-          "exit_code": 2,
-          "init_ms": null,
-          "init_ok": false,
-          "main_process_maxrss_kb": 20780,
+          "exit_code": 0,
+          "graph_ms": 4197.73,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 275,
+            "total_symbols": 5795
+          },
+          "init_ms": 11.463,
+          "init_ok": true,
+          "main_process_maxrss_kb": 77620,
           "order": 15,
           "raw_log": "raw-p2-r3.log",
           "repeat": 3,
           "sample_interval_ms": 10.0,
-          "stderr_bytes": 509,
+          "stderr_bytes": 253,
           "stdout_bytes": 0,
           "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "timed_out": true,
-          "timeout_s": 60.0,
-          "tree_peak_processes": null,
-          "tree_peak_pss_kb": null,
-          "tree_peak_rss_kb": null,
+          "timed_out": false,
+          "timeout_s": 120.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 66871,
+          "tree_peak_rss_kb": 78040,
           "tree_pss_unavailable": false,
-          "tree_samples": 0,
+          "tree_samples": 246,
           "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
         }
       ],
       "repeat": 3,
       "sample_interval_ms": 10.0,
       "sessions": 4,
-      "timed_out": true,
-      "timeout_s": 60.0,
-      "tree_peak_pss_kb": null,
+      "timed_out": false,
+      "timeout_s": 120.0,
+      "tree_peak_pss_kb": 269037,
       "wall_ms": null,
       "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
     }
@@ -623,133 +860,172 @@
     "commit": {
       "exit": 0,
       "stdout": [
-        "15dd82dd2a401bc7f217a174d239739ba128e9e5"
+        "3cdd9bcd85d01ad2e889cd95cd490078f3e39c41"
       ]
     },
     "dirty_paths": {
       "exit": 0,
       "stdout": [
-        "M docs/CAPABILITIES.md",
-        "?? docs/nextgen/gate_receipt.json",
-        "?? docs/nextgen/r01_local_baseline.json/",
-        "?? scripts/nextgen_gate_receipt.py"
+        "M scripts/measure-local-baseline.py"
       ]
     },
     "repo": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2",
     "tree": {
       "exit": 0,
       "stdout": [
-        "da4b873e6c38215c77d876a1a78df458eb5e30f0"
+        "b32b442c90aae49f65b474163c1482b288c80d8f"
       ]
     }
   },
-  "started_at": "2026-10-21T00:46:38Z",
+  "started_at": "2026-10-21T02:46:22Z",
   "summary": {
     "p0": {
       "all_exit_zero": true,
       "main_process_maxrss_kb": {
-        "max": 20780,
+        "max": 21232,
         "values": [
-          18856,
-          20780,
-          20780
+          18924,
+          21104,
+          21232
         ]
       },
       "repeats": 3,
       "timed_out": false,
       "tree_peak_pss_kb": {
-        "max": 7041,
+        "max": 3479,
         "values": [
-          7041,
-          2547,
-          2483
+          2962,
+          3479,
+          2214
         ]
       },
       "tree_peak_rss_kb": {
-        "max": 9540,
+        "max": 5420,
         "values": [
-          9540,
-          3816,
-          3752
+          4512,
+          5420,
+          3488
         ]
       },
       "wall_ms": {
-        "max": 61.195,
-        "median": 4.282,
-        "min": 4.065,
+        "max": 5.291,
+        "median": 4.699,
+        "min": 4.696,
         "values": [
-          61.195,
-          4.282,
-          4.065
+          5.291,
+          4.699,
+          4.696
         ]
       }
     },
     "p2": {
-      "all_exit_zero": false,
-      "main_process_maxrss_kb": {
-        "max": 20780,
+      "all_exit_zero": true,
+      "graph_ms": {
+        "max": 3366.755,
+        "median": 3296.451,
+        "min": 3268.384,
         "values": [
-          18984,
-          20780,
-          20780
+          3296.451,
+          3366.755,
+          3268.384
+        ]
+      },
+      "init_ms": {
+        "max": 13.761,
+        "median": 11.34,
+        "min": 9.354,
+        "values": [
+          13.761,
+          11.34,
+          9.354
+        ]
+      },
+      "main_process_maxrss_kb": {
+        "max": 78232,
+        "values": [
+          78032,
+          77524,
+          78232
         ]
       },
       "repeats": 3,
-      "timed_out": true,
+      "timed_out": false,
       "tree_peak_pss_kb": {
-        "max": 13805,
+        "max": 75812,
         "values": [
-          13805,
-          3357,
-          4122
+          75304,
+          75222,
+          75812
         ]
       },
       "tree_peak_rss_kb": {
-        "max": 16304,
+        "max": 78476,
         "values": [
-          16304,
-          4920,
-          6240
+          78296,
+          77868,
+          78476
         ]
       }
     },
     "p3": {
-      "all_exit_zero": false,
-      "main_process_maxrss_kb": {
-        "max": 20780,
+      "all_exit_zero": true,
+      "graph_ms": {
+        "max": 247.789,
+        "median": 245.132,
+        "min": 241.924,
         "values": [
-          18984,
-          20780,
-          20780
+          245.132,
+          247.789,
+          241.924
+        ]
+      },
+      "init_ms": {
+        "max": 18.98,
+        "median": 9.329,
+        "min": 9.233,
+        "values": [
+          9.233,
+          18.98,
+          9.329
+        ]
+      },
+      "main_process_maxrss_kb": {
+        "max": 27860,
+        "values": [
+          27588,
+          27860,
+          27748
         ]
       },
       "repeats": 3,
-      "timed_out": true,
+      "timed_out": false,
       "tree_peak_pss_kb": {
-        "max": 3514,
+        "max": 25446,
         "values": [
-          2231,
-          3119,
-          3514
+          25162,
+          25306,
+          25446
         ]
       },
       "tree_peak_rss_kb": {
-        "max": 5476,
+        "max": 28088,
         "values": [
-          3500,
-          4388,
-          5476
+          27808,
+          27952,
+          28088
         ]
       }
     },
     "p4": {
-      "all_exit_zero": false,
+      "all_exit_zero": true,
       "repeats": 3,
-      "timed_out": true,
+      "timed_out": false,
       "tree_peak_pss_kb": {
-        "max": 4647,
+        "max": 269037,
         "values": [
-          4647
+          266630,
+          268999,
+          269037
         ]
       }
     }
