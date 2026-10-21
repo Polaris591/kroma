@@ -1,0 +1,2 @@
+/tmp/kroma-win.exe: PE32+ executable for MS Windows 5.02 (console), x86-64 (stripped to external PDB), 9 sections
+size: 18933296 bytes

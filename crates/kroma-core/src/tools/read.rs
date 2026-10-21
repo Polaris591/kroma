@@ -49,6 +49,7 @@ fn read_result_cache_key(
     workspace: &WorkspaceCap,
     args: &ReadArgs,
 ) -> Option<(String, u128, u128, u64, usize, usize, bool)> {
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     let (norm_rel, file) = workspace.open_existing_no_symlink(&args.path).ok()?;
     let meta = file.metadata().ok()?;
@@ -80,11 +81,26 @@ fn read_result_cache_key(
     sha2::Digest::update(&mut hasher, &head[..filled]);
     let head_hash =
         u128::from_be_bytes(<[u8; 16]>::try_from(&sha2::Digest::finalize(hasher)[..16]).ok()?);
+    // ctime/inode are Unix-only; on other platforms the head hash below carries the invalidation.
+    #[cfg(unix)]
     let ctime = meta.ctime() as u128 * 1_000_000_000 + meta.ctime_nsec() as u128;
+    #[cfg(not(unix))]
+    let ctime = 0u128;
     Some((
         norm_rel.to_string_lossy().replace('\\', "/"),
         mtime,
-        ctime ^ (meta.ino() as u128) ^ head_hash,
+        ctime
+            ^ {
+                #[cfg(unix)]
+                {
+                    meta.ino() as u128
+                }
+                #[cfg(not(unix))]
+                {
+                    0u128
+                }
+            }
+            ^ head_hash,
         meta.len(),
         args.offset.unwrap_or(1),
         args.limit.unwrap_or(MAX_READ_LINES),
