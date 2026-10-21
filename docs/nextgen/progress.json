@@ -2362,7 +2362,7 @@
         {
           "command": "delivery package inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "559d5f678abbddca3264824a325137fc5ad30f4e4d05e34e5fbdecd2bb8f6b89",
+          "sha256": "e8588e164f13f2c9fc4d179c4b877678919284804ae4c55b7ae67775de1d370f",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
@@ -2381,7 +2381,7 @@
         {
           "command": "final report inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "559d5f678abbddca3264824a325137fc5ad30f4e4d05e34e5fbdecd2bb8f6b89",
+          "sha256": "e8588e164f13f2c9fc4d179c4b877678919284804ae4c55b7ae67775de1d370f",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T08:15:00Z",
           "exit_code": 0,
