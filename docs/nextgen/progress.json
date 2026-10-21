@@ -1043,22 +1043,23 @@
       "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-I05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "38d575c",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "kroma bench --executor provider --arms arms-graphcache.json",
+          "path": "evidence/exp-graphcache-dev.json",
+          "sha256": "d6f3fa44a3b90114e64dfa0aa3e80aa23a84e340b74b52b2373c27f5452f1860",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-21T22:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 12
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "arm built and experiment run (this is the first of the 38 to get a real arm rather than a label): BenchStrategyConfig.graph_cache -> LocalHostEnv::new_with_graph_cache -> WorkspaceCap::with_graph_cache -> execute_code_graph picks a throwaway cache when off. Result on the 6-task dev suite: baseline 116943 tokens, cache-off 116106 tokens, both 6/6 -- a 0.7% difference, inside the noise band. So the dev tasks do not re-parse the graph enough for the cache to matter; measuring it needs a task that calls code_graph repeatedly. Deferred with that reason rather than claimed as a win or a loss."
     },
     "KR-I06": {
       "status": "IMPLEMENTED_UNVERIFIED",

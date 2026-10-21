@@ -746,6 +746,10 @@ pub struct BenchStrategyConfig {
     /// rest on demand via `discover_tools`.
     #[serde(default)]
     pub on_demand_tools: bool,
+    /// KR-I05: arm ablation — reuse the per-workspace graph parse cache (default `true`, the shipped
+    /// behaviour). `false` re-parses every file on every `code_graph` build.
+    #[serde(default = "default_graph_cache")]
+    pub graph_cache: bool,
     /// The tool set this arm is allowed to see. `None` inherits the executor's registry; a list
     /// narrows it, so "the same agent with fewer schemas" is an arm rather than a build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -756,6 +760,11 @@ pub struct BenchStrategyConfig {
 }
 
 fn default_require_verified() -> bool {
+    true
+}
+
+/// KR-I05: the cache is on by default; only an ablation arm turns it off.
+fn default_graph_cache() -> bool {
     true
 }
 
@@ -771,6 +780,7 @@ impl BenchStrategyConfig {
             causal_pruning: false,
             require_verified: true,
             on_demand_tools: false,
+            graph_cache: true,
             tool_filter: None,
             routing: false,
         }
@@ -788,6 +798,7 @@ impl BenchStrategyConfig {
             causal_pruning: false,
             require_verified: true,
             on_demand_tools: false,
+            graph_cache: true,
             tool_filter: None,
             routing: false,
         }
@@ -2634,7 +2645,11 @@ impl ProviderBenchExecutor {
         // The sealed snapshot of this arm lives beside the event log, outside the workspace the
         // agent can read (M1-04-A2).
         let seal_dir = state_dir.join("sealed");
-        let env = match LocalHostEnv::new(workspace_root, state_dir.clone()) {
+        let env = match LocalHostEnv::new_with_graph_cache(
+            workspace_root,
+            state_dir.clone(),
+            strategy.graph_cache,
+        ) {
             Ok(env) => Arc::new(env),
             Err(e) => {
                 return self.error_result(

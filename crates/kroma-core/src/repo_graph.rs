@@ -1561,7 +1561,14 @@ pub fn execute_code_graph(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecu
         .take(16)
         .collect();
 
-    let graph = RepoGraph::build_from_workspace(workspace, MAX_GRAPH_FILES);
+    // KR-I05: an ablation arm can turn the per-workspace parse cache off. Without it every build
+    // re-parses every file, which is exactly what the cache is supposed to save.
+    let graph = if workspace.graph_cache_enabled() {
+        RepoGraph::build_from_workspace(workspace, MAX_GRAPH_FILES)
+    } else {
+        let mut cold = RepoGraphCache::new();
+        RepoGraph::build_from_workspace_cached(workspace, MAX_GRAPH_FILES, &mut cold)
+    };
     let report = graph.query(&query_terms, &focus_files, max_nodes);
 
     let mut body = report.render();

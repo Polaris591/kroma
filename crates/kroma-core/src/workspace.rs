@@ -89,6 +89,9 @@ pub struct WorkspaceCap {
     /// handle so repeated `code_graph` / `/graph` builds do not re-parse unchanged files. Entries
     /// are content-addressed (verified by SHA-256), so reuse can never return a stale graph.
     repo_graph_cache: Arc<Mutex<RepoGraphCache>>,
+    /// KR-I05: whether `code_graph` may reuse the per-workspace parse cache. `true` (default) is the
+    /// shipped behaviour; an arm can turn it off to measure what the cache is actually worth.
+    graph_cache_enabled: bool,
     /// BUG-08: set only on the short-lived clone handed to one approved tool call. `None` on the
     /// workspace every other caller sees, so an unapproved call can never bypass the guard.
     sensitive_path_approval: Option<Arc<SensitivePathApproval>>,
@@ -132,6 +135,7 @@ impl WorkspaceCap {
                 root,
                 root_dir_fd: Arc::new(dir_fd),
                 repo_graph_cache: Arc::new(Mutex::new(RepoGraphCache::new())),
+                graph_cache_enabled: true,
                 sensitive_path_approval: None,
             })
         }
@@ -146,6 +150,7 @@ impl WorkspaceCap {
                 root,
                 root_dir_fd: Arc::new(dir_fd),
                 repo_graph_cache: Arc::new(Mutex::new(RepoGraphCache::new())),
+                graph_cache_enabled: true,
                 sensitive_path_approval: None,
             })
         }
@@ -162,6 +167,17 @@ impl WorkspaceCap {
     /// BUG-06: the incremental `RepoGraph` parse cache shared by every clone of this handle.
     pub fn repo_graph_cache(&self) -> &Arc<Mutex<RepoGraphCache>> {
         &self.repo_graph_cache
+    }
+
+    /// KR-I05: turn the per-workspace graph parse cache off for this handle (an ablation arm).
+    pub fn with_graph_cache(mut self, enabled: bool) -> Self {
+        self.graph_cache_enabled = enabled;
+        self
+    }
+
+    /// Whether `code_graph` may reuse the parse cache on this handle.
+    pub fn graph_cache_enabled(&self) -> bool {
+        self.graph_cache_enabled
     }
 
     /// BUG-08: build a short-lived clone carrying an interactive approval for `approval`'s path.

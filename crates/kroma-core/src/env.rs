@@ -47,6 +47,21 @@ impl LocalHostEnv {
             state_dir: state_dir.into(),
         })
     }
+
+    /// KR-I05: same as [`LocalHostEnv::new`], but the per-workspace graph parse cache can be turned
+    /// off so an ablation arm measures what the cache is worth.
+    pub fn new_with_graph_cache(
+        workspace_root: impl AsRef<Path>,
+        state_dir: impl Into<PathBuf>,
+        graph_cache: bool,
+    ) -> Result<Self, WorkspaceError> {
+        let workspace = WorkspaceCap::new(workspace_root)?.with_graph_cache(graph_cache);
+        Ok(Self {
+            workspace,
+            inode_locks: InodeMutationLock::new(),
+            state_dir: state_dir.into(),
+        })
+    }
 }
 
 impl ExecutionEnv for LocalHostEnv {
