@@ -7,13 +7,13 @@
     "KR-A01": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "36247eb",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "python3 scripts/nextgen_baseline_identity.py . <archive.zip>",
           "path": "baseline.json",
           "sha256": "0b74f9fb6265af9f923820389b38c8d4aacb34e0f660f6b6d55cb6a0ffe1fb05",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -23,7 +23,7 @@
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w0-workspace-test.log",
           "sha256": "5a6b35f322297b3b9741f53916d56b2bb4b22f693fef10cd620454c5e37252ef",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -37,13 +37,13 @@
     "KR-A02": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "36247eb",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "python3 scripts/nextgen_host_capability.py .",
           "path": "host_capabilities.json",
           "sha256": "8b42ace0583dccd350dd97887d7e0bc96ea6ce991225f1b7e19b0caaaa1e712a",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -53,7 +53,7 @@
           "command": "bash scripts/run-sandbox-tests.sh",
           "path": "evidence/w0-sandbox.log",
           "sha256": "1d94c62c4ca23854695dfa369ab7bb5af9107f7991ce18d2537c823193b4f756",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -64,7 +64,7 @@
           "command": "sh scripts/nextgen_rust_gate.sh",
           "path": "evidence/w0-nextgen-gate.log",
           "sha256": "93d15e7c868ee842fb3a94026423e4b9ce2a1b2598791d41a84595a922e057c1",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -77,13 +77,13 @@
     "KR-A03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -97,13 +97,13 @@
     "KR-A04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "python3 scripts/nextgen_gate_receipt.py .",
           "path": "gate_receipt.json",
           "sha256": "4a792d16755b51b5b72fb922597a22be40ce63252ce80545eeae41feed1c5c79",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:45:00Z",
           "exit_code": 0,
           "required": true,
@@ -116,13 +116,13 @@
     "KR-A05": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "36247eb",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "python3 scripts/nextgen_coverage_ledger.py .",
           "path": "coverage_ledger.json",
           "sha256": "47756b0754f770750812cf8690eadb2a4962d86c9ca17fb39a26e62f9de8b2a6",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -135,13 +135,13 @@
     "KR-A06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "docs/CAPABILITIES.md license drift corrected (superseded note kept)",
           "path": "a06_doc_drift_fix.md",
           "sha256": "6d10d2cbd1b38cfce79ec6cd83e9f65cc7af2ac9e8fba7b261aad82c7d381184",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:45:00Z",
           "exit_code": 0,
           "required": true,
@@ -154,13 +154,13 @@
     "KR-B01": {
       "status": "VERIFIED",
       "attempts": 3,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -174,13 +174,13 @@
     "KR-B02": {
       "status": "VERIFIED",
       "attempts": 2,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -194,13 +194,13 @@
     "KR-B03": {
       "status": "VERIFIED",
       "attempts": 2,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -214,13 +214,13 @@
     "KR-B04": {
       "status": "VERIFIED",
       "attempts": 4,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -234,13 +234,13 @@
     "KR-B05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -254,13 +254,13 @@
     "KR-B06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -274,13 +274,13 @@
     "KR-C01": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -294,13 +294,13 @@
     "KR-C02": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -314,13 +314,13 @@
     "KR-C03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "bash scripts/run-sandbox-tests.sh",
           "path": "evidence/w2-sandbox.log",
           "sha256": "7b000e79428b722dbba97550a5d3bd053136bd0848442ce9ba69bb8a4c688086",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -334,13 +334,13 @@
     "KR-C04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -354,13 +354,13 @@
     "KR-C05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -374,13 +374,13 @@
     "KR-C06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -394,13 +394,13 @@
     "KR-D01": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -414,13 +414,13 @@
     "KR-D02": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "5ebe3d4",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -434,13 +434,13 @@
     "KR-D03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -454,13 +454,13 @@
     "KR-D04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -474,13 +474,13 @@
     "KR-D05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -494,13 +494,13 @@
     "KR-D06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -514,13 +514,13 @@
     "KR-E01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -534,13 +534,13 @@
     "KR-E02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -554,13 +554,13 @@
     "KR-E03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "python3 scripts/nextgen_latency_breakdown.py <canary logs>",
           "path": "evidence/e05-canary-chat-completions.jsonl",
           "sha256": "179e0669030b2f66dce5f92d6ca3c22758c9492a5554a5c1bca6f5ab4e53c2cc",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:55:00Z",
           "exit_code": 0,
           "required": true,
@@ -573,13 +573,13 @@
     "KR-E04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma run --max-tokens 20000 (live)",
           "path": "e05_canary_summary.json",
           "sha256": "37f712ee3b167cfc2a8604887de96286eb27502b3f59ccd2c5994210bb26fc0e",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:25:00Z",
           "exit_code": 0,
           "required": true,
@@ -592,13 +592,13 @@
     "KR-E05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma run --output-format jsonl (live canary, 3 protocols)",
           "path": "e05_canary_summary.json",
           "sha256": "37f712ee3b167cfc2a8604887de96286eb27502b3f59ccd2c5994210bb26fc0e",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:25:00Z",
           "exit_code": 0,
           "required": true,
@@ -611,13 +611,13 @@
     "KR-E06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -631,13 +631,13 @@
     "KR-F01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -651,13 +651,13 @@
     "KR-F02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -671,13 +671,13 @@
     "KR-F03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:05:00Z",
           "exit_code": 0,
           "required": true,
@@ -691,13 +691,13 @@
     "KR-F04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -710,13 +710,13 @@
     "KR-F05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -729,13 +729,13 @@
     "KR-F06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:05:00Z",
           "exit_code": 0,
           "required": true,
@@ -749,13 +749,13 @@
     "KR-G01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -769,13 +769,13 @@
     "KR-G02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -789,13 +789,13 @@
     "KR-G03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -808,13 +808,13 @@
     "KR-G04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -827,13 +827,13 @@
     "KR-G05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -846,13 +846,13 @@
     "KR-G06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -866,13 +866,13 @@
     "KR-H01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "d55b6c9",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -886,13 +886,13 @@
     "KR-H02": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "d55b6c9",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -906,13 +906,13 @@
     "KR-H03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -925,13 +925,13 @@
     "KR-H04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -944,13 +944,13 @@
     "KR-H05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -963,13 +963,13 @@
     "KR-H06": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -982,13 +982,13 @@
     "KR-I01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1002,13 +1002,13 @@
     "KR-I02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1021,13 +1021,13 @@
     "KR-I03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1040,13 +1040,13 @@
     "KR-I04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1059,13 +1059,13 @@
     "KR-I05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1078,13 +1078,13 @@
     "KR-I06": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1097,13 +1097,13 @@
     "KR-J01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -1117,13 +1117,13 @@
     "KR-J02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1136,13 +1136,13 @@
     "KR-J03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1155,13 +1155,13 @@
     "KR-J04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1174,13 +1174,13 @@
     "KR-J05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1193,13 +1193,13 @@
     "KR-J06": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1212,13 +1212,13 @@
     "KR-K01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "d55b6c9",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:50:00Z",
           "exit_code": 0,
           "required": true,
@@ -1229,7 +1229,7 @@
           "command": "python3 (mcp contract extraction)",
           "path": "mcp_contract.json",
           "sha256": "95adaa664470df54b1cd998688a65131e1640f9e5f2ab856f8ea97c6a1265b5d",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:50:00Z",
           "exit_code": 0,
           "required": true,
@@ -1242,13 +1242,13 @@
     "KR-K02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5bda0c0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T02:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1262,13 +1262,13 @@
     "KR-K03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1282,13 +1282,13 @@
     "KR-K04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1301,13 +1301,13 @@
     "KR-K05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1321,13 +1321,13 @@
     "KR-K06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e8242b0",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma run --mcp-server everything=npx -y @modelcontextprotocol/server-everything",
           "path": "evidence/k06-live-mcp-everything.jsonl",
           "sha256": "99411277e1da2ed46b969042b0ab786b5eaaf67f2c23191e29166efe90b13407",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T03:55:00Z",
           "exit_code": 0,
           "required": true,
@@ -1341,13 +1341,13 @@
     "KR-L01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1361,13 +1361,13 @@
     "KR-L02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1380,13 +1380,13 @@
     "KR-L03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -1400,13 +1400,13 @@
     "KR-L04": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1420,13 +1420,13 @@
     "KR-L05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1440,13 +1440,13 @@
     "KR-L06": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1459,13 +1459,13 @@
     "KR-M01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -1479,13 +1479,13 @@
     "KR-M02": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1499,13 +1499,13 @@
     "KR-M03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1519,13 +1519,13 @@
     "KR-M04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1538,13 +1538,13 @@
     "KR-M05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1558,13 +1558,13 @@
     "KR-M06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1578,13 +1578,13 @@
     "KR-N01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -1598,13 +1598,13 @@
     "KR-N02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "dd06309",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T02:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1618,13 +1618,13 @@
     "KR-N03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1637,13 +1637,13 @@
     "KR-N04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1656,13 +1656,13 @@
     "KR-N05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1676,13 +1676,13 @@
     "KR-N06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1696,13 +1696,13 @@
     "KR-O01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1716,13 +1716,13 @@
     "KR-O02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1735,13 +1735,13 @@
     "KR-O03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1754,13 +1754,13 @@
     "KR-O04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -1774,13 +1774,13 @@
     "KR-O05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -1793,13 +1793,13 @@
     "KR-O06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "d55b6c9",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:50:00Z",
           "exit_code": 0,
           "required": true,
@@ -1813,13 +1813,13 @@
     "KR-P01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1833,13 +1833,13 @@
     "KR-P02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w2-workspace-test.log",
           "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -1853,13 +1853,13 @@
     "KR-P03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1873,13 +1873,13 @@
     "KR-P04": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1893,13 +1893,13 @@
     "KR-P05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1913,13 +1913,13 @@
     "KR-P06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1933,13 +1933,13 @@
     "KR-Q01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1953,13 +1953,13 @@
     "KR-Q02": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1973,13 +1973,13 @@
     "KR-Q03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "efba4b2",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "python3 (dependency inventory)",
           "path": "dependency_licenses.json",
           "sha256": "535f55bea06dbbd55fe5801d0dd087d94bf3b840ff564418725e149452d06294",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -1992,13 +1992,13 @@
     "KR-Q04": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2012,13 +2012,13 @@
     "KR-Q05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2032,13 +2032,13 @@
     "KR-Q06": {
       "status": "BLOCKED_EXTERNAL",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
           "sha256": "fb9acf1405eff99d987d0a9ce659468013c19c322dfc6d4c503fb283cb200287",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -2051,13 +2051,13 @@
     "KR-R01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "gate receipt / measurement",
           "path": "r01_local_baseline.json/report.json",
           "sha256": "d6b7abdc394ed01e6312be1b0cbcfddfa24c28b90fc0b426d609c6e9eb1cbba4",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -2070,13 +2070,13 @@
     "KR-R02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -2089,13 +2089,13 @@
     "KR-R03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -2108,13 +2108,13 @@
     "KR-R04": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2128,13 +2128,13 @@
     "KR-R05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -2147,13 +2147,13 @@
     "KR-R06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2167,13 +2167,13 @@
     "KR-S01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2187,13 +2187,13 @@
     "KR-S02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -2206,13 +2206,13 @@
     "KR-S03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -2225,13 +2225,13 @@
     "KR-S04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -2244,13 +2244,13 @@
     "KR-S05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
           "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
           "required": true,
@@ -2263,13 +2263,13 @@
     "KR-S06": {
       "status": "BLOCKED_EXTERNAL",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
           "sha256": "fb9acf1405eff99d987d0a9ce659468013c19c322dfc6d4c503fb283cb200287",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -2282,13 +2282,13 @@
     "KR-T01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2302,13 +2302,13 @@
     "KR-T02": {
       "status": "BLOCKED_EXTERNAL",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
           "sha256": "fb9acf1405eff99d987d0a9ce659468013c19c322dfc6d4c503fb283cb200287",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -2321,13 +2321,13 @@
     "KR-T03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2341,13 +2341,13 @@
     "KR-T04": {
       "status": "BLOCKED_EXTERNAL",
       "attempts": 0,
-      "commit": "3d62a32",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
           "sha256": "fb9acf1405eff99d987d0a9ce659468013c19c322dfc6d4c503fb283cb200287",
-          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -2360,13 +2360,13 @@
     "KR-T05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2380,13 +2380,13 @@
     "KR-T06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "15dd82d",
+      "commit": "5f4d2b9",
       "evidence": [
         {
           "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
           "path": "evidence/w4-todo-targets.log",
           "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T04:40:00Z",
           "exit_code": 0,
           "required": true,
