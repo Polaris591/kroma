@@ -75,12 +75,24 @@
       "decision": null
     },
     "KR-A03": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w2-workspace-test.log",
+          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "completed_utc": "2026-10-21T03:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1295
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "all 49 host-blocked failures clear on a capable host: 1295 passed / 0 failed, 0 ignored, no tests removed or ignored"
     },
     "KR-A04": {
       "status": "TODO",
@@ -278,12 +290,24 @@
       "decision": null
     },
     "KR-C03": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "bash scripts/run-sandbox-tests.sh",
+          "path": "evidence/w2-sandbox.log",
+          "sha256": "7b000e79428b722dbba97550a5d3bd053136bd0848442ce9ba69bb8a4c688086",
+          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "completed_utc": "2026-10-21T03:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 56
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "run-sandbox-tests.sh: 7 targets, 56/56 passed under real bwrap 0.12.0 (b13/t09/t31/t33/t35/t36/t38); not argv-shape tests"
     },
     "KR-C04": {
       "status": "VERIFIED",
@@ -494,52 +518,61 @@
       "decision": "t18_usage_cost::cache_creation_and_read_have_distinct_rates, mixed_returned_models_are_priced_per_attempt, byte_estimate_cannot_claim_provider_measured_cost"
     },
     "KR-E03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "dd06309",
+      "commit": "e8242b0",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/w2-workspace-test.log",
-          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
-          "completed_utc": "2026-10-21T02:00:00Z",
+          "command": "python3 scripts/nextgen_latency_breakdown.py <canary logs>",
+          "path": "evidence/e05-canary-chat-completions.jsonl",
+          "sha256": "179e0669030b2f66dce5f92d6ca3c22758c9492a5554a5c1bca6f5ab4e53c2cc",
+          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "completed_utc": "2026-10-21T03:55:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1295
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "request events carry latency_ms and ttft_ms only; there is no per-phase breakdown (queue, connect, TLS, serialize, stream end, tool, verify, compaction), so total latency cannot yet be attributed"
+      "decision": "scripts/nextgen_latency_breakdown.py attributes run time to pre-first-token / stream / tool / unaccounted using the emitted events; on the live canary 94.9% of time is pre-first-token (3336 of 3524 ms). The tool states what is still blended instead of inventing a split"
     },
     "KR-E04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "dd06309",
+      "commit": "e8242b0",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/w2-workspace-test.log",
-          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "command": "kroma run --max-tokens 20000 (live)",
+          "path": "e05_canary_summary.json",
+          "sha256": "37f712ee3b167cfc2a8604887de96286eb27502b3f59ccd2c5994210bb26fc0e",
           "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
-          "completed_utc": "2026-10-21T02:00:00Z",
+          "completed_utc": "2026-10-21T03:25:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1295
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "the provider bench executor exists and takes an explicit budget, but no live canary has been run; this becomes verifiable only in W3 with real credentials"
+      "decision": "live canary ran under an explicit --max-tokens cap; a first attempt at 2000 tokens was refused before dispatch (budget_exhausted, 0 requests sent), which is the \"limit and abort\" behaviour; each run produced an auditable JSONL receipt"
     },
     "KR-E05": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "kroma run --output-format jsonl (live canary, 3 protocols)",
+          "path": "e05_canary_summary.json",
+          "sha256": "37f712ee3b167cfc2a8604887de96286eb27502b3f59ccd2c5994210bb26fc0e",
+          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "completed_utc": "2026-10-21T03:25:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "three live protocols against https://cobblemon.asia/v1: chat-completions (in 1904/cached 0/out 5, ttft 3336ms), openai-responses (1898/0/5, 1789ms), anthropic-messages (1973/0/5, 1819ms); all provider_reported model gpt-6.1-sol, each with request_identity_sha256"
     },
     "KR-E06": {
       "status": "TODO",
@@ -550,28 +583,64 @@
       "decision": null
     },
     "KR-F01": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w2-workspace-test.log",
+          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "completed_utc": "2026-10-21T03:30:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1295
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "experiments/foundation-v1/suite.json (6 smoke), experiments/exp-00/suite-dev.json (6 dev) and suite-holdout.json (2 holdout) are frozen task sets with reproducible files, expect_contains/absent scoring and verify_command; budget is experiment-level (--budget-tokens x arms, --experiment-budget-tokens) rather than a per-task field"
     },
     "KR-F02": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w2-workspace-test.log",
+          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "completed_utc": "2026-10-21T03:30:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1295
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "t38_prereg_oracle_authority::rewriting_the_prereg_after_admission_does_not_widen_the_gate and changing_the_oracle_bytes_after_admission_is_refused; t34_evaluation_authorization (2). The agent cannot widen its own gate or oracle"
     },
     "KR-F03": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w2-workspace-test.log",
+          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "completed_utc": "2026-10-21T04:05:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1295
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "three-protocol live receipts and the latency breakdown exist, but a paired A/B (baseline arm vs candidate arm) needs a candidate, and candidates come from W4 experiments. Nothing is promoted on single-arm evidence"
     },
     "KR-F04": {
       "status": "TODO",
@@ -590,28 +659,64 @@
       "decision": null
     },
     "KR-F06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w2-workspace-test.log",
+          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "completed_utc": "2026-10-21T04:05:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1295
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "bench_prereg_gate (6: prereg admission, refuses dev/holdout collision, report records the prereg), release-attestation.js and release-pipeline.js both exit 0. Signing and re-run machinery exist; the negative-experiment registry is empty because no W4 experiment has run yet"
     },
     "KR-G01": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w2-workspace-test.log",
+          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "completed_utc": "2026-10-21T03:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1295
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "context_cache_stability (4: watermark step-down + working-set pinning, loop guard, readonly batch ordering), t14_cache_accounting (4: creation vs read separated, unknown never free), repeated_read_runner::real_runner_elides_only_outgoing_duplicates_and_preserves_raw_wal"
     },
     "KR-G02": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w2-workspace-test.log",
+          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "completed_utc": "2026-10-21T03:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1295
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "context_cache_stability::test_watermark_step_down_compaction_working_set_pinning_and_outline_stub pins prefix stability; client-side stability is reported separately from provider cache usage, which is 0 in the live canary"
     },
     "KR-G03": {
       "status": "TODO",
@@ -876,12 +981,24 @@
       "decision": "SSE parsed incrementally; terminal frame ends the call. Red-first: old code took 5.0009s (socket hold), new code 0.00s"
     },
     "KR-K03": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w2-workspace-test.log",
+          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "source_tree_sha256": "6f09ecf9ba04646537c6d8a47b07f37305a161a7e1d3fcf679b21f04034892cf",
+          "completed_utc": "2026-10-21T03:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1295
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "mcp_config: an_untrusted_workspace_config_cannot_declare_mcp_servers (a directory cannot widen its own authority), a_wedged_mcp_server_times_out_and_is_cleaned_up, a_timed_out_call_never_executes_a_queued_mutation, unmount_during_a_call_is_bounded_and_reaps_the_child"
     },
     "KR-K04": {
       "status": "TODO",
@@ -900,12 +1017,24 @@
       "decision": null
     },
     "KR-K06": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "e8242b0",
+      "evidence": [
+        {
+          "command": "kroma run --mcp-server everything=npx -y @modelcontextprotocol/server-everything",
+          "path": "evidence/k06-live-mcp-everything.jsonl",
+          "sha256": "99411277e1da2ed46b969042b0ab786b5eaaf67f2c23191e29166efe90b13407",
+          "source_tree_sha256": "352476769a584e02cc1145186ec1e03ff3972f015d0dd5418334fbbff668b4cf",
+          "completed_utc": "2026-10-21T03:55:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 3
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "real third-party MCP server (@modelcontextprotocol/server-everything over stdio via npx): 3 successful mcp__everything__echo calls, 6 discover_tools, 4 model turns, model_stop. Independent implementation, not the local fixture. No remote HTTP MCP endpoint was available, so that part is not claimed"
     },
     "KR-L01": {
       "status": "TODO",

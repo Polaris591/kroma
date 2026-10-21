@@ -1,0 +1,61 @@
+{
+  "task": "KR-E05",
+  "endpoint": "https://cobblemon.asia/v1",
+  "requested_model": "gpt-6.1-sol",
+  "runs": [
+    {
+      "protocol": "chat-completions",
+      "evidence_file": "docs/nextgen/evidence/e05-canary-chat-completions.jsonl",
+      "evidence_sha256": "179e0669030b2f66dce5f92d6ca3c22758c9492a5554a5c1bca6f5ab4e53c2cc",
+      "reported_model": "gpt-6.1-sol",
+      "usage_basis": "provider_reported",
+      "input_tokens": 1904,
+      "cached_input_tokens": 0,
+      "uncached_input_tokens": 1904,
+      "output_tokens": 5,
+      "request_identity_sha256": "2034244923ff4a401aaa590efe456da909868c0fdd51226054a03c72da74bfd1",
+      "latency_ms": 3516,
+      "ttft_ms": 3336,
+      "terminal_reason": "model_stop",
+      "status": "completed"
+    },
+    {
+      "protocol": "openai-responses",
+      "evidence_file": "docs/nextgen/evidence/e05-canary-openai-responses.jsonl",
+      "evidence_sha256": "02d2e019a2c46585092e4e90e3b249e01bab8fcb5958926f41e341e8ca37d5fd",
+      "reported_model": "gpt-6.1-sol",
+      "usage_basis": "provider_reported",
+      "input_tokens": 1898,
+      "cached_input_tokens": 0,
+      "uncached_input_tokens": 1898,
+      "output_tokens": 5,
+      "request_identity_sha256": "519f7f899a2ffdd60d521bc798cb502bc833cbe2c53648e9d1cc45e15700574c",
+      "latency_ms": 3485,
+      "ttft_ms": 1789,
+      "terminal_reason": "model_stop",
+      "status": "completed"
+    },
+    {
+      "protocol": "anthropic-messages",
+      "evidence_file": "docs/nextgen/evidence/e05-canary-anthropic-messages.jsonl",
+      "evidence_sha256": "217d4e67966a29a326ab133be2e5f5f90cc916ba0bd103e54ee2e573f1b178ea",
+      "reported_model": "gpt-6.1-sol",
+      "usage_basis": "provider_reported",
+      "input_tokens": 1973,
+      "cached_input_tokens": 0,
+      "uncached_input_tokens": 1973,
+      "output_tokens": 5,
+      "request_identity_sha256": "519f7f899a2ffdd60d521bc798cb502bc833cbe2c53648e9d1cc45e15700574c",
+      "latency_ms": 2762,
+      "ttft_ms": 1819,
+      "terminal_reason": "model_stop",
+      "status": "completed"
+    }
+  ],
+  "note": "Three wire protocols exercised against one live OpenAI-compatible endpoint. Each receipt carries the provider-reported model id, input/cached/output token components, the request identity hash and latency. Cache components are 0 on these short prompts -- that is a measurement, not an assumption, and it is why no cache saving is claimed here.",
+  "not_claimed": [
+    "no cost saving is claimed from these runs",
+    "no third-party MCP interoperability is claimed",
+    "cache hit behaviour on long prompts is unmeasured"
+  ]
+}
