@@ -956,22 +956,23 @@
       "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-H06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "5062011",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:35:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "bounded output with an authorised path back to the exact bytes: tool results are capped by max_tool_inline_output_bytes / max_tool_inline_lines and spill to disk beyond that (t06_bounded_io: registry_overflow_or_duplicate_id_is_not_silently_truncated, huge_ignore_file_cannot_allocate_unbounded), while recall_evidence plus the evidence store can restore the raw text for a trusted artifact reference (t15_evidence_store::evicted_text_can_be_loaded_by_trusted_artifact_ref, and a corrupt/expired artifact returns an explicit status rather than silently degrading). Dedup then keeps the repeated bodies out of later requests (repeated_read, 9.8x bound measured in KR-G06). Not measured: whether fault localisation and success rate are non-inferior under the smaller output -- that needs a paired run with a task that depends on full output."
     },
     "KR-I01": {
       "status": "VERIFIED",
