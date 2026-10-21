@@ -69,7 +69,7 @@ no deployment present
 
 ## KR-T04 独立最终验收
 
-依赖 KR-A03 / KR-Q06 / KR-T02 / KR-T03 / KR-F06。Q06、T02 外部阻塞，T03 未完成，
+依赖 KR-A03 / KR-Q06 / KR-T02 / KR-T03 / KR-F06。Q06、T02 外部阻塞（T03 现已 VERIFIED，此处描述的是当时状态），
 F06 的负实验登记为空。任务卡要求"所有 mandatory 适用门禁 VERIFIED 才可称发布候选验收通过；
 仍有 blocked 必须醒目标出"——当前仍有 blocked，故不能通过，只能如实标出。
 
