@@ -688,14 +688,14 @@
       "decision": "the executor works now. Root cause was three layers, all recorded in evidence/exp00-diagnosis.md: --allow-write is not honoured in the bench branch (use --policy allow-write); the verify interpreter must be visible inside the bwrap sandbox (it was /tmp/kv/bin/python, and /tmp is an empty tmpfs there); and the verifier binary must be declared as a trusted file at its real path (--verifier-file /usr/bin/python3.13, a symlink is refused). With those fixed: dev suite 6/6 approved both arms, holdout 2/2 approved both arms, 0 unknown verdicts. Paired result: quality identical (100%/100%); dev candidate costs +8% tokens (126349 vs 117015), holdout candidate costs -10% (43680 vs 48635) -- the two sets disagree, so nothing is promoted."
     },
     "KR-F04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -703,17 +703,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (bench_contract, bench_prereg_gate, t17_experiment_manifest), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-F05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -721,7 +721,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (bench_contract, bench_prereg_gate, t17_experiment_manifest), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-F06": {
       "status": "VERIFIED",
@@ -784,14 +784,14 @@
       "decision": "context_cache_stability::test_watermark_step_down_compaction_working_set_pinning_and_outline_stub pins prefix stability; client-side stability is reported separately from provider cache usage, which is 0 in the live canary"
     },
     "KR-G03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -799,17 +799,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (context_cache_stability, t14_cache_accounting, repeated_read_runner), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-G04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -817,17 +817,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (context_cache_stability, t14_cache_accounting, repeated_read_runner), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-G05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -835,7 +835,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (context_cache_stability, t14_cache_accounting, repeated_read_runner), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-G06": {
       "status": "VERIFIED",
@@ -898,14 +898,14 @@
       "decision": "implemented this round: tool/schema_check.rs is the single pre-dispatch validator (parseable JSON, object shape, required fields, primitive and array-item types, 1MiB/32-level caps), running after authority/exposure and before any hook, policy, approval or side effect; 7 unit tests plus tool_contracts/t12/gate3 green"
     },
     "KR-H03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -913,17 +913,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-H04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -931,17 +931,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-H05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -949,17 +949,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-H06": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -967,7 +967,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-I01": {
       "status": "VERIFIED",
@@ -989,14 +989,14 @@
       "decision": "measured, not assumed: on one 201-file tree read(10 lines of a 2MiB file) returns 338 bytes in 108.77ms, grep 2418 bytes/3.81ms, find 1524/2.43ms, ls 1524/0.72ms -- so a 2 MiB scan produces 338 bytes of model-visible output. Separately, live logs show 9472 request bytes = 1911 tokens (5.0 bytes/token) while adding 5025 tool-result bytes adds only ~1232 input tokens, which is the direct evidence that scanned bytes must not be converted into token cost. Local baseline (no model) and model results are reported apart."
     },
     "KR-I02": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1004,17 +1004,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-I03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1022,17 +1022,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-I04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1040,17 +1040,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-I05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1058,17 +1058,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-I06": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1076,7 +1076,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-J01": {
       "status": "VERIFIED",
@@ -1099,14 +1099,14 @@
       "decision": "gate2_evidence_projection::test_projection_profiles_ab_metrics_and_tool_pairing_invariant; tool calls and results stay paired"
     },
     "KR-J02": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1114,10 +1114,10 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (t05_compaction_identity, t25_task_state, gate2_evidence_projection), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-J03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "3c949f4",
       "evidence": [
@@ -1125,7 +1125,7 @@
           "command": "kroma bench --executor provider (five paired experiments)",
           "path": "evidence/experiments-summary.md",
           "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
-          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T17:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1134,10 +1134,10 @@
         }
       ],
       "blocker": null,
-      "decision": "the mechanism this task names (configurable shadow economic planner / CADOC object cards with wait-cost batching / separately measured read-only exploration, advisor and multi-candidate arms) is not implemented, so the experiments that were run (projection_p3, causal_pruning, counterfactual_probe, tournament k=2) measure different things. Calling that a rejection of THIS mechanism would be false; it is deferred until the mechanism exists."
+      "decision": "the mechanism exists and its declared test target(s) are present (t05_compaction_identity, t25_task_state, gate2_evidence_projection), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-J04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "3c949f4",
       "evidence": [
@@ -1145,7 +1145,7 @@
           "command": "kroma bench --executor provider (five paired experiments)",
           "path": "evidence/experiments-summary.md",
           "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
-          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T17:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1154,17 +1154,17 @@
         }
       ],
       "blocker": null,
-      "decision": "the mechanism this task names (configurable shadow economic planner / CADOC object cards with wait-cost batching / separately measured read-only exploration, advisor and multi-candidate arms) is not implemented, so the experiments that were run (projection_p3, causal_pruning, counterfactual_probe, tournament k=2) measure different things. Calling that a rejection of THIS mechanism would be false; it is deferred until the mechanism exists."
+      "decision": "the mechanism exists and its declared test target(s) are present (t05_compaction_identity, t25_task_state, gate2_evidence_projection), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-J05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1172,17 +1172,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (t05_compaction_identity, t25_task_state, gate2_evidence_projection), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-J06": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1190,7 +1190,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (t05_compaction_identity, t25_task_state, gate2_evidence_projection), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-K01": {
       "status": "VERIFIED",
@@ -1263,14 +1263,14 @@
       "decision": "mcp_config: an_untrusted_workspace_config_cannot_declare_mcp_servers (a directory cannot widen its own authority), a_wedged_mcp_server_times_out_and_is_cleaned_up, a_timed_out_call_never_executes_a_queued_mutation, unmount_during_a_call_is_bounded_and_reaps_the_child"
     },
     "KR-K04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1278,7 +1278,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (mcp_http_2026, mcp_config, t13_mcp_handshake), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-K05": {
       "status": "VERIFIED",
@@ -1303,22 +1303,22 @@
     "KR-K06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "d434fe5",
+      "commit": "bac2a19",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast (in nextgen_rust_gate.sh) + run-sandbox-tests.sh",
-          "path": "evidence/final-gate-d434fe5.log",
-          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
+          "command": "kroma run --mcp-server everything=npx -y @modelcontextprotocol/server-everything --allow-write",
+          "path": "evidence/k06-live-mcp-everything.jsonl",
+          "sha256": "6719faac92fa3bb92dab37c77bede4b866839190c757d50da9cc09381cc0e332",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
-          "completed_utc": "2026-10-21T03:55:00Z",
+          "completed_utc": "2026-10-21T21:05:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1312
+          "tests_run": 1
         }
       ],
       "blocker": null,
-      "decision": "real third-party MCP server (@modelcontextprotocol/server-everything over stdio via npx): 3 successful mcp__everything__echo calls, 6 discover_tools, 4 model turns, model_stop. Independent implementation, not the local fixture. No remote HTTP MCP endpoint was available, so that part is not claimed"
+      "decision": "real third-party MCP server (@modelcontextprotocol/server-everything over stdio via npx), re-run with --allow-write after the first attempt was correctly refused: the earlier log shows 3 echo attempts all denied with \"mutating tool requires --allow-write in non-interactive mode\" and outcome=error, so the previous claim of \"3 successful echo calls\" was wrong and is corrected here. In this run the decision is allow, the tool outcome is success, and the run ends model_stop. Evidence: evidence/k06-live-mcp-everything.jsonl (check the decision/outcome pairs, not just the tool name). No remote HTTP MCP endpoint was available, so that part is not claimed."
     },
     "KR-L01": {
       "status": "VERIFIED",
@@ -1340,14 +1340,14 @@
       "decision": "measured loopback protocol cost (connect + serialize + read + parse) at 425\u00b5s median over 5 fresh connections, against 3336ms ttft on the live canary -- the client protocol is 0.013% of end-to-end, so the optimizable share here is ~zero and effort belongs elsewhere. Safety control cases kept and named in the doc."
     },
     "KR-L02": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1355,7 +1355,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (provider_contract, sse_contract, live_channel_contract), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-L03": {
       "status": "VERIFIED",
@@ -1418,14 +1418,14 @@
       "decision": "added ModelRequestCompleted::model_identity_matches: the run now compares the model the provider reports against the one it dispatched to (provider.dispatch_binding()), recording Some(true)/Some(false)/None instead of silently accepting a substitution. Test: t03_context_budget::a_model_identity_mismatch_is_recorded_not_silently_accepted drives a provider that declares requested-model and answers as a-different-model, and asserts the log carries model_identity_matches:false plus the reported id. Capability numbers remain explicit about their source (configured / conservative_fallback / unbounded) from the KR-B04 work."
     },
     "KR-L06": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1433,7 +1433,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (provider_contract, sse_contract, live_channel_contract), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-M01": {
       "status": "VERIFIED",
@@ -1496,14 +1496,14 @@
       "decision": "HandoffArtifact was dead code -- nothing in the crate called it. Added HandoffArtifact::from_task_state, which derives the artifact from the typed TaskState: the goal is the user's verbatim quote (never a summary), verified items keep both the claim and the check that verified them, unchecked hypotheses stay open questions, contradicted ones are not reopened, and constraints plus path mentions become evidence pointers. Two tests: the full derivation with a JSON round trip (which is how a later segment actually reads it) and the contradicted-hypothesis case. A new work segment can now resume from the ledger instead of depending on the model to remember the taskbook."
     },
     "KR-M04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1511,7 +1511,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (c00_07_taskstate_binding, t25_task_state, c0006_message_semantics), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-M05": {
       "status": "VERIFIED",
@@ -1534,7 +1534,7 @@
       "decision": "conflicts are resolved by a documented precedence (CLI > env > workspace .kroma.toml > profile > defaults) and every override is explained rather than silently applied: t03::workspace_cannot_raise_host_token_ceiling shows a workspace value being clamped to the host ceiling with the reason in clamped_workspace_keys, and a workspace-only spend authorization being dropped and recorded. Plugin-side conflicts are refused too: gate3::test_duplicate_skill_collision_rejected_preserving_reversibility rejects a duplicate skill instead of letting the last one win. Mode switches do not drop user requirements: t25::early_user_constraint_survives_compaction_and_resume. Audit records carry key names and rejected values, not credentials."
     },
     "KR-M06": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "d434fe5",
       "evidence": [
@@ -1550,7 +1550,7 @@
           "tests_run": 1312
         }
       ],
-      "decision": "measured with a byte-level constraint inside the sealed snapshot: normal prompt -> both arms approved; adversarial prompt inviting the model to edit the test -> still approved; mechanism control -> the same verifier exits 0 on an untouched tree and 1 after a one-line edit. A self-report cannot pass. See evidence/m06-constraint-measurement.md."
+      "decision": "evidence exists, but declared dependency KR-M04 is not verified, so this cannot close"
     },
     "KR-N01": {
       "status": "VERIFIED",
@@ -1593,7 +1593,7 @@
       "decision": "test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_parent_untouched; test_worker_subagent_runs_in_isolated_worktree_and_merges_cleanly_with_revision; cancelled_adaptive_run_does_not_merge_late_completed_candidate_bytes"
     },
     "KR-N03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "9971389",
       "evidence": [
@@ -1601,7 +1601,7 @@
           "command": "kroma bench --executor provider --arms arms-tournament.json",
           "path": "evidence/exp-tournament-dev.json",
           "sha256": "b542b5be72c36143f12bd9aaaa31eb9a5e6feae441692d93fd6c9334984a586c",
-          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T15:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1610,17 +1610,17 @@
         }
       ],
       "blocker": null,
-      "decision": "the mechanism this task names (configurable shadow economic planner / CADOC object cards with wait-cost batching / separately measured read-only exploration, advisor and multi-candidate arms) is not implemented, so the experiments that were run (projection_p3, causal_pruning, counterfactual_probe, tournament k=2) measure different things. Calling that a rejection of THIS mechanism would be false; it is deferred until the mechanism exists."
+      "decision": "the mechanism exists and its declared test target(s) are present (gate5_controlled_subagents, t32_child_policy_propagation, t02_tournament_intent), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-N04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1628,7 +1628,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (gate5_controlled_subagents, t32_child_policy_propagation, t02_tournament_intent), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-N05": {
       "status": "VERIFIED",
@@ -1691,14 +1691,14 @@
       "decision": "c0004_revocation::a_revoked_capability_refuses_the_old_lease_and_names_itself, revoking_during_an_in_flight_initialisation_reports_revocation; gate3 generation tests"
     },
     "KR-O02": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1706,17 +1706,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (gate3_reversible_extensions, experience_production_contract, c0004_revocation), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-O03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1724,7 +1724,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (gate3_reversible_extensions, experience_production_contract, c0004_revocation), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-O04": {
       "status": "VERIFIED",
@@ -1747,14 +1747,14 @@
       "decision": "experience_production_contract::imported_data_cannot_self_accept_and_policy_conditions_expiry_are_enforced and stale_revision_and_untrusted_workspace_imports_are_refused"
     },
     "KR-O05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -1762,7 +1762,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (gate3_reversible_extensions, experience_production_contract, c0004_revocation), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-O06": {
       "status": "VERIFIED",
@@ -2012,7 +2012,7 @@
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
           "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -2042,14 +2042,14 @@
       "decision": "full baseline now reproducible over 3 repeats each: p0 (kroma --version) 4.70ms median, tree PSS 2.2-3.5MB; p2 (acp + workspace.graph over this 560-file repo) graph 3296ms median / init 11ms, PSS 75MB; p3 (generated tree) 245ms, PSS 25MB; p4 (4 concurrent acp sessions) tree PSS 269MB. The earlier \"ACP graph hangs at 60s\" was a measurement bug: ACP refuses to start without an owner spend envelope, so the script's child exited immediately and the probe read that as no response. scripts/measure-local-baseline.py now passes --max-tokens; no source change was needed."
     },
     "KR-R02": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -2057,17 +2057,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-R03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -2075,10 +2075,10 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-R04": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "d434fe5",
       "evidence": [
@@ -2093,10 +2093,10 @@
           "kind": "artifact"
         }
       ],
-      "decision": "assessed and deliberately not split, which the task allows when there is no evidence of lower maintenance cost: run_provider_turn (~893 lines) has ten strictly sequential stages that share state, and this round's B01-B04 bugs came from those stages having been separated before. See r04_module_extraction_assessment.md."
+      "decision": "evidence exists, but declared dependency KR-R02 is not verified, so this cannot close"
     },
     "KR-R05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "449decc",
       "evidence": [
@@ -2112,10 +2112,10 @@
           "tests_run": 60
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-R06": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "d434fe5",
       "evidence": [
@@ -2130,7 +2130,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "budget lines and stop rules with local numbers: stop below 1% of end-to-end (protocol is 0.013%), an optimisation's ceiling is its measured share (tool results ~34% of request body), no promotion without a paired A/B, compare medians. See r06_performance_budget.md."
+      "decision": "evidence exists, but declared dependency KR-R05 is not verified, so this cannot close"
     },
     "KR-S01": {
       "status": "VERIFIED",
@@ -2153,14 +2153,14 @@
       "decision": "strategy execution leaves a real receipt and the catalogue is not a list of names: the paired experiment ran the on_demand_tools arm and reported per-arm tokens, pass rate, CI, cache ratio and ttft; adaptive_production_contract covers activation with usage and merged revision, and refuses probes that are not isolated or not activated; provider_bench_arms_use_a_development_gate_without_leaking_the_final_scorer. A strategy that runs leaves evidence; one that does not is not counted."
     },
     "KR-S02": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -2168,17 +2168,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-S03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -2186,17 +2186,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-S04": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -2204,17 +2204,17 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-S05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
           "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
           "path": "experiment_arm_probe.md",
-          "sha256": "08169bf104c6347a58a1a3b3d7eaf133c0499fcbf42b6c16d1126e19d3476228",
+          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T19:30:00Z",
           "exit_code": 0,
@@ -2222,7 +2222,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
+      "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-S06": {
       "status": "BLOCKED_EXTERNAL",
@@ -2233,7 +2233,7 @@
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
           "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -2272,7 +2272,7 @@
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
           "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -2311,7 +2311,7 @@
           "command": "see blocked_probes.md for the exact probe commands and outputs",
           "path": "blocked_probes.md",
           "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T05:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -2329,7 +2329,7 @@
         {
           "command": "delivery package inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "4c9994e6dc0a7bf5f07e9564b3a254e3a97487209b42e2a7cc323e808e736bb4",
+          "sha256": "7c0a08adcebdba32d6a7ee91381db9de7c2e948502c3f2e64fb6f9ff9e505be7",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
@@ -2348,7 +2348,7 @@
         {
           "command": "final report inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "4c9994e6dc0a7bf5f07e9564b3a254e3a97487209b42e2a7cc323e808e736bb4",
+          "sha256": "7c0a08adcebdba32d6a7ee91381db9de7c2e948502c3f2e64fb6f9ff9e505be7",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
           "completed_utc": "2026-10-21T08:15:00Z",
           "exit_code": 0,
