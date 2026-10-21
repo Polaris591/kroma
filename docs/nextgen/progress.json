@@ -1033,22 +1033,23 @@
       "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-I04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "bb77c5b",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
-          "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
+          "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
+          "completed_utc": "2026-10-22T02:20:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1313
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (t06_bounded_io, t16_repo_graph_budget, t26_localization), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "truncation is reported, and ranking is task-seeded rather than lexicographic-only: budget_excluded_workspace_is_reported_as_truncated_not_empty and changed_early_file_plus_cached_tail_is_bounded pin that a partial index is labelled partial (the model is told the boundary) and that cached and uncached builds obey the same total cap; RepoGraph exposes RankedFile/score and personalized_pagerank (repo_graph.rs:928) so candidates are ranked against the query rather than by walk order. Not measured: a recall@K comparison of ranked vs unranked on real tasks -- that needs a task set with known relevant files, which this round did not build."
     },
     "KR-I05": {
       "status": "DEFERRED_WITH_RATIONALE",
