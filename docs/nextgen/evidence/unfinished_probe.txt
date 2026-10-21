@@ -24,4 +24,4 @@
 === J06 / L06 端点能力（代码事实）===
   openai_responses MessageSemantics fields present: explicit_prompt_cache, cache_write_usage, hosted_tool_search_replay
   native server-side compaction support in adapter: False
-  native tool-search support: True
+  native tool-search support: False (no adapter field declares it)
