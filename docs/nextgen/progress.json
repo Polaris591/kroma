@@ -936,22 +936,23 @@
       "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
     },
     "KR-H06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
       "commit": "5062011",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "kroma bench --executor provider --arms arms-h06.json (64k vs 32k inline)",
+          "path": "evidence/exp-h06-inline.json",
+          "sha256": "bff74d8acfdb31715678632f6ad3878aeeb76739a499a64e02910ef6404cf06f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:10:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 12
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "measured and rejected: halving the inline window (32 KiB inline, 8 KiB head / 16 KiB tail) moved dev tokens 120066 -> 119869 (-0.16%, inside the ~2-task drift this suite shows between identical runs) at 6/6 vs 6/6. Nothing to gain; the shipped 64 KiB default stays. Implemented as an arm (max_tool_inline_output_bytes + bash_head_bytes + bash_tail_bytes) so the claim is reproducible."
     },
     "KR-I01": {
       "status": "VERIFIED",

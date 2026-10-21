@@ -757,6 +757,15 @@ pub struct BenchStrategyConfig {
     /// E08: arm ablation — let a router decide the strategy from each turn's own tool activity.
     #[serde(default)]
     pub routing: bool,
+    /// KR-H06: arm ablation — how many bytes of a tool result are inlined before it becomes a
+    /// re-readable artifact. Smaller values cut prompt tokens and force paged reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_inline_output_bytes: Option<usize>,
+    /// KR-H06: bash head/tail window for this arm; must sum to no more than the inline cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bash_head_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bash_tail_bytes: Option<usize>,
 }
 
 fn default_require_verified() -> bool {
@@ -783,6 +792,9 @@ impl BenchStrategyConfig {
             graph_cache: true,
             tool_filter: None,
             routing: false,
+            max_tool_inline_output_bytes: None,
+            bash_head_bytes: None,
+            bash_tail_bytes: None,
         }
     }
 
@@ -801,6 +813,9 @@ impl BenchStrategyConfig {
             graph_cache: true,
             tool_filter: None,
             routing: false,
+            max_tool_inline_output_bytes: None,
+            bash_head_bytes: None,
+            bash_tail_bytes: None,
         }
     }
 
@@ -2666,6 +2681,15 @@ impl ProviderBenchExecutor {
             max_run_duration: self.settings.max_run_duration,
             // The arm's shared run-tree ceiling: parent + every child subagent draw from this ledger.
             max_total_tokens: Some(budget_tokens),
+            max_tool_inline_output_bytes: strategy
+                .max_tool_inline_output_bytes
+                .unwrap_or_else(|| BudgetConfig::default().max_tool_inline_output_bytes),
+            bash_head_bytes: strategy
+                .bash_head_bytes
+                .unwrap_or_else(|| BudgetConfig::default().bash_head_bytes),
+            bash_tail_bytes: strategy
+                .bash_tail_bytes
+                .unwrap_or_else(|| BudgetConfig::default().bash_tail_bytes),
             ..BudgetConfig::default()
         };
 

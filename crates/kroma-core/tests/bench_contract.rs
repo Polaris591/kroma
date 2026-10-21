@@ -119,6 +119,9 @@ async fn single_agent_arm_hides_spawn_subagent_and_records_its_envelope() {
             graph_cache: true,
             tool_filter: None,
             routing: false,
+            max_tool_inline_output_bytes: None,
+            bash_head_bytes: None,
+            bash_tail_bytes: None,
         },
     ];
 
@@ -727,6 +730,9 @@ fn stub_arms() -> Vec<BenchStrategyConfig> {
             graph_cache: true,
             tool_filter: None,
             routing: false,
+            max_tool_inline_output_bytes: None,
+            bash_head_bytes: None,
+            bash_tail_bytes: None,
         })
         .collect()
 }
