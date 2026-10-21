@@ -673,7 +673,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "b33b2bb03ba3f095a4fded50df0ccd221927903e",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "orthogonal-factor experiment: the tool menu size is the dominant cost factor, and it is explainable rather than a mystery. Full menu: 6/6 at 119568 tokens. Minimal menu (read/edit/write/ls/find/grep): 6/6 at 53276 tokens -- a 55% reduction with identical quality, because every tool schema is part of the static prefix (measured earlier at 8.7 KB of a 9.4 KB prefix). The interaction is explicit: these dev tasks need only file tools, so dropping the rest costs nothing here; a task needing code_graph or delegation would pay for it. That is why the result is \"the factor is large and shaped by task type\", not \"always send 7 tools\"."
@@ -769,7 +777,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "b3b16ba7fc2ced4e3e9d4122bd832399576d1d81",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "three arms measured (off / implicit / explicit) on the dev suite over openai-responses: cache hit ratio rises 0.299 -> 0.665 -> 0.76, but tokens rise too (86147 -> 89162 -> 87557), so on short histories the write cost exceeds the read saving. explicit beats implicit on both hit ratio and total tokens, so if caching is ever enabled it should be explicit. The shipped default stays off, and this data supports that default. Caveat: three separate runs (mode is provider-level), and the implicit run passed 5/6 where the others passed 6/6 -- inside the known single-repetition noise band."
@@ -903,7 +919,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "09166b31e13d8e89db5cd8182ce99174d3b57e31",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "measured and rejected: the efficient-candidate prompt profile costs MORE, not less. Two runs on the same dev suite: default 120324 tokens (6/6), efficient-candidate 146405 tokens (6/6) -- +22% for identical quality. So the \"task-aware navigation prompt\" does not pay off on these tasks and stays off (the CLI already marks it experimental). This is the same shape as the v4 E04 finding (dev looked good, holdout reversed); here even dev disagrees."
@@ -940,7 +964,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "228c0684958c2a9af24b719b122958ff7c378586",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "measured and rejected: halving the inline window (32 KiB inline, 8 KiB head / 16 KiB tail) moved dev tokens 120066 -> 119869 (-0.16%, inside the ~2-task drift this suite shows between identical runs) at 6/6 vs 6/6. Nothing to gain; the shipped 64 KiB default stays. Implemented as an arm (max_tool_inline_output_bytes + bash_head_bytes + bash_tail_bytes) so the claim is reproducible."
@@ -1031,7 +1063,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "38d575cb65ddccbfae84587cd65ec5b086814a99",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "verified with a live paired run: with the workspace graph cache the dev suite finished in 250s, with the cache disabled (KR-I05 arm graph_cache=false) 383s, same 6/6 and same tokens within noise (116943 vs 116106). The difference is the repeated parse cost itself, which is what this task asks to remove; cache stays on by default."
@@ -1087,7 +1127,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "959e6c4f681f502b2c67a2f6d206ec75bb9af06b",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "the strong baseline was measured against the shipped profile, not against a strawman: P2 (stub + evidence graph) 6/6 at 114156 tokens vs P1 (stub without the evidence graph -- the masking-style baseline) 6/6 at 117679 tokens, i.e. the lighter profile is 3% MORE expensive with identical quality. So P2 stays the default and the masking candidate is not promoted. Recovery is quantified separately: the evidence graph is what makes evicted text retrievable (KR-D06: evicted_text_can_be_loaded_by_trusted_artifact_ref), so P1 would have dropped recoverability and still cost more."
@@ -1105,7 +1153,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "99713896d86394dd99df6e53785a78ddee58ed1c",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "not implemented, so this is deferred rather than rejected: there is no economic planner in the tree (no keep/commit/reason/interval state), so the acceptance condition was never tested. The projection-profile numbers that an earlier record mislabelled as a planner comparison are: p3 116926 vs baseline 120061 (p3 2.6% cheaper, both 6/6), which is a projection result, not a planner verdict."
@@ -1141,7 +1197,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "959e6c4f681f502b2c67a2f6d206ec75bb9af06b",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "not demonstrated, so not verified: a semantic-summary candidate would have to beat the conservative stub baseline (114156 tokens) with fidelity and cost both acceptable, and no candidate was built or run. The tree has no summary implementation; context_economy.rs is cost accounting and says so itself. Deferred rather than claimed."
@@ -1473,7 +1537,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "208d27107f70f1c6c42f49386a0ac6a9ec1d01fc",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "measured and rejected as an optimisation: an arm that starts with one operator-accepted record injected (experience=true) costs 120522 tokens on the dev suite against 115319 without it (+4.5%), with both arms at 6/6. So the record did not improve action quality and it made the run slightly more expensive; the mechanism stays available (accept/revoke/expiry are unchanged and tested) but nothing claims a win for injecting it. The earlier \"25% faster\" figure was never measured and is not repeated here."
@@ -1511,7 +1583,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "42b9da16e79d0aae94263810f1db999ac487b384",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "224cfcd4345b85e81c659196b74e3693cbfd7d9e55a45947695ae3b413ebb351"
+          }
         }
       ],
       "decision": "verified with two live fixture runs: with the on-demand tool menu the constraint suite costs 17631 tokens and the trap suite 22211, against baseline 22222 and 20572 -- so the candidate is not uniformly cheaper, and the trap suite is exactly the verifier control that catches a change which only looks cheap. Policy conditions and expiry are enforced by both suites."
@@ -1569,7 +1649,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "99713896d86394dd99df6e53785a78ddee58ed1c",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "blocker": null,
@@ -1588,7 +1676,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "208d27107f70f1c6c42f49386a0ac6a9ec1d01fc",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "verified with a paired run (arm loop_guard on/off, added for this task): on 113811 tokens at 6/6, off 117459 at 6/6 -- 3.1% cheaper with the guard on, which is inside this suite's own drift, so the honest reading is \"no measurable harm and a mild edge\", not a proven saving. The guard stays on. The mechanism itself (signature over tool+args, recoverable trail, per-file edit failure counting) is unchanged; this run only prices the switch."
@@ -2075,7 +2171,15 @@
           "completed_utc": "2026-10-21T17:52:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "artifact",
+          "provenance": {
+            "measured_commit": "208d27107f70f1c6c42f49386a0ac6a9ec1d01fc",
+            "dirty": null,
+            "changed_paths": null,
+            "endpoint": null,
+            "model": "gpt-6.1-sol",
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+          }
         }
       ],
       "decision": "verified with a combination run: every mechanism that won or tied on its own local measurement switched on at once (p3 + tournament k=2 + counterfactual probe + causal pruning + on-demand tools + experience) costs 128821 tokens at 6/6, against 119832 at 6/6 for the default. Turning on all local optima is 7.5% more expensive and no better, which is exactly the rule this task states: the product default follows the whole-run result, not the sum of local wins. This is also the regression guard -- if a future change makes the combined arm win, the numbers move."
