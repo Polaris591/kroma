@@ -7,7 +7,7 @@ members and no leaderboard can be produced over the rest -- which is exactly wha
 
 | id | harness | availability on this host | why it is not comparable here |
 |---|---|---|---|
-| H01 | Pi Coding Agent | installed (`pi`), runnable | not obtainable here, so no run |
+| H01 | Pi Coding Agent | installed (`pi`), runnable | -- comparable: this is the only harness that could be run here |
 | H02 | DeepSeek Harness / DSH | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
 | H03 | Claude Code | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
 | H04 | OpenAI Codex | not installed (probe: `command -v codex` empty) | not obtainable here, so no run |

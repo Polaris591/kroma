@@ -1,57 +1,72 @@
-# 最终验收报告
+# W5 最终验收：数据、Pareto 与逐实验处置
 
-日期：2026-10-22
-基线提交：`61ffcc30`
-代码提交：`e091fbc`（门禁 `evidence/final-gate-8f63776.log`：GATE_EXIT=0 / SANDBOX_EXIT=0，1410 通过 / 0 失败）
-账本：`docs/nextgen/progress.json`（`taskctl validate --progress` ok:true）
+日期 2026-10-21。基线 `61ffcc30`，代码提交 `8f63776`（门禁 1410 通过 / 0 失败），账本 `progress.json`。
 
-## 一、账本分布
+## 1. 汇总指标
 
-| 状态 | 数量 |
+| 指标 | 值 |
 |---|---|
-| VERIFIED | 101 |
-| REJECTED_WITH_EVIDENCE | 6 |
-| BLOCKED_EXTERNAL | 7 |
-| DEFERRED_WITH_RATIONALE | 6 |
-| IMPLEMENTED_UNVERIFIED | 0 |
-| TODO | 0 |
+| 任务完成 | 101/120 VERIFIED（84%），其余 6 判负 / 7 外部阻塞 / 6 研究范围不成立 |
+| 门禁 | 1410 测试通过 / 0 失败，strict clippy 通过，sandbox 56 通过 |
+| 实验数 | 22 个配对实验（dev 6 任务为主，留出集 2 任务） |
+| 单次运行成本 | dev 套件 53k–150k token/arm，中位约 115k；每次约 7–9 分钟墙钟 |
+| 成本/成功 | 中位 arm 115k token / 6 个成功 ≈ 19k token 每任务成功 |
+| 稳定性 | 同一 baseline 同套件不同轮次通过率 6/6 与 4/6，单次重复漂移约 2 个任务；小于 5% 的 token 差异只能算无结论 |
+| 资源 | p0 墙钟 57.7ms；p2 图构建 3410ms、峰值 RSS 77MB；p4 峰值 PSS 264MB |
 
-外部阻塞：`KR-F05, KR-J06, KR-L06, KR-Q06, KR-S06, KR-T02, KR-T04`
-实测判负：`KR-G03, KR-H04, KR-H06, KR-J02, KR-M04, KR-N03`
-研究范围不成立：`KR-I02, KR-I06, KR-J03, KR-J04, KR-J05, KR-O02`
+## 2. Pareto 权衡（token vs 质量）
 
-探测证据：`blocked_probes.md`（T02/Q06/S06/T04）、`evidence/j06_l06_probe.txt`（端点无 provider-native
-compaction 与 tool search）、`evidence/f05_disposition.md` + `f05_availability.txt`（27 项逐项处置，本机只有 pi
-可运行）、`evidence/i02_root_cause.md`、`adr_j06_l06_o02_f05.md`。
+下表按「相对第一臂的 token 变化」排序，质量列是各自 resolved/tasks。判据是：只有在质量不降的前提下省 token 才算赢，
+省下的百分点小于漂移（约 2 个任务）的不算证据。
 
-## 二、门禁与收据
+| 实验 | 第一臂 | 第二臂 | token 变化 | 质量 | 处置 |
+|---|---|---|---|---|---|
+| g03-implicit | candidate-on-demand-tools | baseline | 149036 → 89162 (-40.2%) | 6/6 vs 5/6 | 缓存三臂，命中率涨但 token 也涨 |
+| h06-inline | inline_32k | inline_64k | 119869 → 120066 (+0.2%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
+| h04-efficient-candidate | baseline | candidate-on-demand-tools | 146405 → 146743 (+0.2%) | 6/6 vs 6/6 | 判负，不采纳 |
+| injection-file-surface | baseline | candidate-on-demand-tools | 16547 → 16588 (+0.2%) | 1/1 vs 1/1 | 候选在特定夹具上略省，未推广 |
+| causal-dev | causal_pruning | baseline | 112497 → 113068 (+0.5%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
+| graphcache-dev | no_graph_cache | baseline | 116106 → 116943 (+0.7%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
+| p3-dev | projection_p3 | baseline | 116926 → 120061 (+2.7%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
+| h04-default | candidate-on-demand-tools | baseline | 116778 → 120324 (+3.0%) | 6/6 vs 6/6 | 候选在特定夹具上略省，未推广 |
+| j02-p1-vs-p2 | baseline_full_context | masking_p1 | 114156 → 117679 (+3.1%) | 6/6 vs 6/6 | 判负，不采纳 |
+| n04-loopguard | loop_guard_on | loop_guard_off | 113811 → 117459 (+3.2%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
+| requireverified | require_verified | baseline | 112055 → 116393 (+3.9%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
+| m04-experience | experience_off | experience_on | 115319 → 120522 (+4.5%) | 6/6 vs 6/6 | 判负，不采纳 |
+| r05-pareto | default | all_local_optima_on | 119832 → 128821 (+7.5%) | 6/6 vs 6/6 | 判负，不采纳 |
+| constraint-trap | baseline | candidate-on-demand-tools | 20572 → 22211 (+8.0%) | 1/1 vs 1/1 | 判负，不采纳 |
+| probe-dev | baseline | counterfactual_probe | 73259 → 79867 (+9.0%) | 4/6 vs 4/6 | 判负，不采纳 |
+| subagents | no_subagents | baseline | 103835 → 119802 (+15.4%) | 6/6 vs 6/6 | 判负/仅子代理关闭略省 |
+| tournament-dev | baseline | adaptive_tournament_2 | 108459 → 126948 (+17.0%) | 6/6 vs 6/6 | 判负/仅子代理关闭略省 |
+| constraint | candidate-on-demand-tools | baseline | 17631 → 22222 (+26.0%) | 1/1 vs 1/1 | 候选在特定夹具上略省，未推广 |
+| g03-explicit | baseline | candidate-on-demand-tools | 87557 → 111823 (+27.7%) | 6/6 vs 6/6 | 缓存三臂，命中率涨但 token 也涨 |
+| g03-off | baseline | candidate-on-demand-tools | 86147 → 110139 (+27.9%) | 6/6 vs 6/6 | 缓存三臂，命中率涨但 token 也涨 |
+| injection-prompt-surface | baseline | candidate-on-demand-tools | 16804 → 22645 (+34.8%) | 1/1 vs 1/1 | 候选在特定夹具上略省，未推广 |
+| minimal-tools-dev | minimal_tools | baseline | 53276 → 119568 (+124.4%) | 6/6 vs 6/6 | 最大杠杆；不设为默认（任务类型决定） |
 
-`evidence/final-gate-8f63776.log`：[0]–[7] 全过，全量 1410 通过 / 0 失败，strict clippy 通过，sandbox 通过。
-测量与判负项各自绑自己的文件（`exp-*.json`、`e05-canary-*.jsonl`、`k06-live-mcp-everything.jsonl`、
-`report.json`、`r02_graph_stat_cache.log`、`r06_baseline.log` 等），实验用的 arm 定义在 `evidence/arms-*.json`。
+## 3. 逐实验处置与原因
 
-## 三、做出来的东西
+- 采纳（进入默认）：无。所有默认配置保持基线值；唯一被采纳的是代码修复（7 个 bug）与 I03 的 opt-in 缓存。
+- 拒绝（有测量支撑）：H04 efficient-candidate 提示 +22%、N03 锦标赛 k=2 +17%、J02 masking/P1 +3% 且丢可恢复性、
+  G03 缓存三臂命中率涨但 token 也涨、H06 内联窗口减半 −0.16%（噪声内）、M04 经验注入 +4.5%、R05 局部最优全开 +7.5%。
+- 噪声内不晋升：P3 −2.6%、causal_pruning −0.5%、require_verified −3.7%、N04 loop_guard −3.1%、graph cache 0.7%。
+- 最大杠杆记录：工具菜单 7 个 vs 全量省 55%（119568 → 53276，6/6 对 6/6），工具 schema 占 9.4KB 前缀里的 8.7KB；
+  结论是「因素大且由任务类型决定」，不是「永远只给 7 个工具」。
+- 唯一超噪声收益：关掉子代理 −13.3%（103835 vs 119802），方向是减功能，未设为默认。
 
-7 个 bug 红→绿修好：窗口检查被来源条件挡住、动态工具晚于估算、WriterLease 重入、路径别名双写、MCP SSE
-5.0009s→0.00s、三套 token 估算口径、DNS 二次解析+私网落地；另加工具参数统一校验层。
+## 4. 未跑的真实环境与不支持场景
 
-三个真实现：I03 结果缓存（随机化测试抓出两个 stale bug，前 8KiB hash 修好）、S02 影子选择器（接入
-`prepare_run`，每 run 写「推荐/实际/反事实估计/是否应用」到 `<state_dir>/shadow_selector.jsonl`，不改控制流）、
-N04/M04/R05/H06 的 arm 接线。
+- 无 Windows / macOS 真机：T02 阻塞，跨平台只做了 Linux 交叉构建（PE32+ x86_64 39.79s）。
+- 无第三方安全工具链（semgrep/cargo-audit/cargo-deny）与独立评审方：Q06 阻塞，T04 依赖它。
+- 无部署实例可灰度：S06 阻塞。
+- 27 个 harness 只有 `pi` 可运行：F05 阻塞，逐项处置在 `f05_disposition.md`。
+- 端点不支持 provider-native compaction 与 tool search：J06/L06 阻塞，探测在 `j06_l06_probe.txt`。
+- 语义摘要（J05）与经济计划器（J03）未实现；I06 需要的语法解析器不在树里；I02 的根因是整文件 SHA256。
 
-16 个 live 配对实验，7 个判负：H04 +22%、N03 +17%、J02 +3% 且丢可恢复性、G03 命中率涨 token 也涨、H06 −0.16%、
-M04 +4.5%、R05 全开 +7.5%。最大杠杆是工具菜单（省 55%）；唯一超噪声收益是关掉子代理 −13.3%。
+## 5. 下一轮瓶颈
 
-R02 用自带测试重测：冷 1030271µs → 热 448052µs（−56.5%），stat 快速路径实测没命中，先前的 27% 已撤回。
+1. 单次重复噪声（约 2 个任务）让所有小于 5% 的收益都不可判定 —— 下一轮必须每个 arm 至少 3 次重复，否则继续是在噪声里做决定。
+2. 工具菜单是最大的成本项，但没有「按任务类型自动裁剪」的证据；这是唯一值得先做的方向。
+3. 外部能力缺口（Windows/macOS 真机、安全工具链、可灰度部署）不补齐，T02/Q06/S06/T04 无法推进。
+4. 20 个 BLOCKED/DEFERRED 项里有 6 项只差「一个 arm + 一次预注册配对」，瓶颈是运行预算而不是设计。
 
-## 四、证据自校验
-
-```
-cd docs/nextgen && sha256sum -c SHA256SUMS.txt
-python3 ../../scripts/verify_ledger_binding.py . progress.json
-python3 taskctl.py validate --progress progress.json --source-root ../..
-```
-
-## 五、交付
-
-`git@github.com:Polaris591/kroma.git` 分支 `nextgen-r2-rustfix`；`main` 未动，无 tag。
