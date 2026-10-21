@@ -166,12 +166,58 @@ impl McpHttpClient {
                 "unsupported MCP HTTP response content-type".into(),
             ));
         }
-        let bytes = read_full_body(&mut response, &budget, deadline, MAX_MCP_MESSAGE_BYTES)
-            .await
-            .map_err(|e| McpError::Io(e.to_string()))?;
+        // KR-K02: an SSE response is parsed as it arrives. The terminal JSON-RPC response ends the
+        // call, so a server that keeps the connection open (which the transport spec allows) no
+        // longer holds the client until the deadline. JSON responses keep the whole-body path.
         let message = if is_sse {
-            parse_sse_final(&bytes, id)?
+            use crate::provider::transport::{pump_sse_events, BodyFailure, Flow};
+            let mut terminal: Option<Value> = None;
+            let mut frame_error: Option<String> = None;
+            let pumped = pump_sse_events(
+                &mut response,
+                &budget,
+                deadline,
+                MAX_MCP_MESSAGE_BYTES,
+                |_name, data| {
+                    if terminal.is_some() {
+                        return Ok(Flow::Stop);
+                    }
+                    match serde_json::from_str::<Value>(data) {
+                        Ok(value) => {
+                            let is_terminal = value.get("id").and_then(Value::as_i64) == Some(id)
+                                && (value.get("result").is_some() || value.get("error").is_some());
+                            if is_terminal {
+                                terminal = Some(value);
+                                return Ok(Flow::Stop);
+                            }
+                            Ok(Flow::Continue)
+                        }
+                        Err(e) => {
+                            if frame_error.is_none() {
+                                frame_error = Some(e.to_string());
+                            }
+                            Ok(Flow::Continue)
+                        }
+                    }
+                },
+            )
+            .await;
+            match (terminal, pumped) {
+                (Some(value), _) => value,
+                (None, Err(BodyFailure::Fatal(e) | BodyFailure::Stream(e))) => {
+                    return Err(McpError::Io(e.to_string()));
+                }
+                (None, Ok(())) => {
+                    return Err(McpError::Protocol(format!(
+                        "MCP SSE stream ended without a terminal response{}",
+                        frame_error.map(|e| format!(": {e}")).unwrap_or_default()
+                    )));
+                }
+            }
         } else {
+            let bytes = read_full_body(&mut response, &budget, deadline, MAX_MCP_MESSAGE_BYTES)
+                .await
+                .map_err(|e| McpError::Io(e.to_string()))?;
             serde_json::from_slice::<Value>(&bytes)
                 .map_err(|e| McpError::Protocol(format!("malformed MCP JSON response: {}", e)))?
         };
@@ -546,6 +592,12 @@ fn extract_argument_headers(
 
 /// Parse complete bounded SSE responses, permitting request-related notifications but never
 /// independent server requests or a second final response. A missing final is a protocol error.
+/// Whole-buffer SSE parser, kept for the framing tests only.
+///
+/// Production reads SSE incrementally (see the `is_sse` branch of `call`): the terminal response ends
+/// the call, so a server that keeps the connection open cannot stall the client until the deadline.
+/// The framing rules this function encodes are still worth pinning down, so it stays test-only.
+#[cfg(test)]
 fn parse_sse_final(input: &[u8], expected_id: i64) -> Result<Value, McpError> {
     let text = std::str::from_utf8(input).map_err(|_| McpError::Protocol("non-UTF8 SSE".into()))?;
     let mut data = String::new();

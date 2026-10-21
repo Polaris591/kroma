@@ -2,7 +2,7 @@ use crate::budget::BudgetConfig;
 use crate::messages::{AssistantTurn, FinishReason, ReasoningBlock, ToolCall, TranscriptItem};
 use crate::provider::sse::{parse_usage_json, SseStreamAssembler, MAX_SSE_RESPONSE_BYTES};
 use crate::provider::transport::{
-    pump_body, read_error_body, read_full_body, send_request, BodyFailure, HttpRequestSpec,
+    pump_body, read_error_body, read_full_body, send_request, BodyFailure, Flow, HttpRequestSpec,
     TransportFailure,
 };
 use crate::provider::{
@@ -670,7 +670,7 @@ impl ChatCompletionsClient {
                     if ttft_ref.is_none() {
                         *ttft_ref = Some(attempt_start.elapsed().as_millis() as u64);
                     }
-                    assembler_ref.feed_bytes(chunk)
+                    assembler_ref.feed_bytes(chunk).map(|()| Flow::Continue)
                 },
             )
             .await

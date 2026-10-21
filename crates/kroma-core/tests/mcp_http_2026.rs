@@ -123,3 +123,52 @@ fn rejects_non_loopback_plain_http_and_forged_newlines() {
     )
     .is_err());
 }
+
+/// KR-K02: a terminal SSE response ends the call, even when the server keeps the connection open.
+///
+/// The transport spec allows the server to hold the connection after delivering the response. The
+/// client used to read the body to EOF first, so such a server stalled every call until the
+/// deadline. This fixture sends the terminal frame with no `Content-Length` (so the body would only
+/// end when the socket closes) and then holds the socket for five seconds.
+#[tokio::test]
+async fn http_mcp_2026_sse_terminal_response_ends_the_call_without_connection_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/mcp",
+        listener.local_addr().unwrap().port()
+    );
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let (_headers, req) = accept_json(&mut stream);
+        let response = json!({"jsonrpc":"2.0","id":req["id"],"result":{
+            "cacheScope":"private", "ttlMs":60000,
+            "tools":[{"name":"echo","description":"echo fixture","inputSchema":{
+                "type":"object","properties":{"text":{"type":"string"}}}}]
+        }});
+        // Deliberately no Content-Length and no Connection: close.
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+        stream.write_all(head.as_bytes()).unwrap();
+        stream
+            .write_all(format!(": heartbeat\n\ndata: {}\n\n", response).as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+        // Hold the socket well past the assertion window.
+        thread::sleep(Duration::from_secs(5));
+    });
+
+    let mut client = McpHttpClient::new(&url, None, Duration::from_secs(20)).unwrap();
+    let started = Instant::now();
+    let catalog = client
+        .list_tools()
+        .await
+        .expect("the terminal SSE frame must resolve the call");
+    let elapsed = started.elapsed();
+
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].name, "echo");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the call must end on the terminal frame, not on connection close (took {elapsed:?})"
+    );
+    drop(server);
+}

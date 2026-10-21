@@ -49,6 +49,17 @@ pub(crate) enum BodyFailure {
     Stream(ProviderError),
 }
 
+/// Whether a body consumer wants more bytes.
+///
+/// `Stop` is how a caller that already has what it needs (an SSE terminal response) releases the
+/// connection instead of waiting for the server to close it. It is not an error: the body is simply
+/// no longer read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flow {
+    Continue,
+    Stop,
+}
+
 // ---------------------------------------------------------------------------------------------
 // TLS
 // ---------------------------------------------------------------------------------------------
@@ -813,7 +824,7 @@ pub(crate) async fn pump_body<F>(
     mut on_chunk: F,
 ) -> Result<(), BodyFailure>
 where
-    F: FnMut(&[u8]) -> Result<(), ProviderError>,
+    F: FnMut(&[u8]) -> Result<Flow, ProviderError>,
 {
     let mut buf = [0u8; 4096];
 
@@ -884,7 +895,10 @@ where
                     Ok(Ok(n)) => {
                         remaining -= n;
                         total_decoded += n;
-                        on_chunk(&buf[..n]).map_err(BodyFailure::Fatal)?;
+                        match on_chunk(&buf[..n]).map_err(BodyFailure::Fatal)? {
+                            Flow::Continue => {}
+                            Flow::Stop => return Ok(()),
+                        }
                     }
                     Ok(Err(e)) => {
                         return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
@@ -958,7 +972,10 @@ where
                     ))));
                 }
                 total_read += n;
-                on_chunk(&buf[..n]).map_err(BodyFailure::Fatal)?;
+                match on_chunk(&buf[..n]).map_err(BodyFailure::Fatal)? {
+                    Flow::Continue => {}
+                    Flow::Stop => return Ok(()),
+                }
             }
             Ok(Err(e)) => {
                 return Err(BodyFailure::Stream(ProviderError::IncompleteStream(
@@ -999,7 +1016,7 @@ pub(crate) async fn read_full_body(
     let mut out: Vec<u8> = Vec::new();
     pump_body(head, budget, deadline, cap, |chunk| {
         out.extend_from_slice(chunk);
-        Ok(())
+        Ok(Flow::Continue)
     })
     .await
     .map_err(|e| match e {
@@ -1061,7 +1078,7 @@ pub(crate) async fn read_error_body(
     let mut out: Vec<u8> = Vec::new();
     let _ = pump_body(head, budget, deadline, MAX_ERROR_BODY_BYTES, |chunk| {
         out.extend_from_slice(chunk);
-        Ok(())
+        Ok(Flow::Continue)
     })
     .await;
     out.truncate(MAX_ERROR_BODY_BYTES);
@@ -1081,7 +1098,7 @@ pub(crate) async fn pump_sse_events<F>(
     mut on_event: F,
 ) -> Result<(), BodyFailure>
 where
-    F: FnMut(&str, &str) -> Result<(), ProviderError>,
+    F: FnMut(&str, &str) -> Result<Flow, ProviderError>,
 {
     let mut pending: Vec<u8> = Vec::new();
     let mut event_name = String::new();
@@ -1106,7 +1123,10 @@ where
                         std::mem::take(&mut event_name)
                     };
                     let payload = std::mem::take(&mut data);
-                    on_event(&name, &payload)?;
+                    match on_event(&name, &payload)? {
+                        Flow::Continue => {}
+                        Flow::Stop => return Ok(Flow::Stop),
+                    }
                 }
                 event_name.clear();
                 data.clear();
@@ -1122,7 +1142,7 @@ where
             }
             // `id:` / `retry:` / comment lines are ignored: neither protocol uses them.
         }
-        Ok(())
+        Ok(Flow::Continue)
     })
     .await?;
 
@@ -1133,7 +1153,10 @@ where
         } else {
             event_name
         };
-        on_event(&name, &data).map_err(BodyFailure::Fatal)?;
+        match on_event(&name, &data).map_err(BodyFailure::Fatal)? {
+            Flow::Continue => {}
+            Flow::Stop => return Ok(()),
+        }
     }
     Ok(())
 }

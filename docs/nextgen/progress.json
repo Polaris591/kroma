@@ -494,20 +494,44 @@
       "decision": "t18_usage_cost::cache_creation_and_read_have_distinct_rates, mixed_returned_models_are_priced_per_attempt, byte_estimate_cannot_claim_provider_measured_cost"
     },
     "KR-E03": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "dd06309",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "completed_utc": "2026-10-21T02:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "request events carry latency_ms and ttft_ms only; there is no per-phase breakdown (queue, connect, TLS, serialize, stream end, tool, verify, compaction), so total latency cannot yet be attributed"
     },
     "KR-E04": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "dd06309",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "completed_utc": "2026-10-21T02:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the provider bench executor exists and takes an explicit budget, but no live canary has been run; this becomes verifiable only in W3 with real credentials"
     },
     "KR-E05": {
       "status": "TODO",
@@ -1012,12 +1036,24 @@
       "decision": "b11b_child_capability_decay::child_automatic_authority_never_exceeds_the_parent; t32_child_policy_propagation::provider_subagent_backend_installs_the_request_execution_policy"
     },
     "KR-N02": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "dd06309",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "completed_utc": "2026-10-21T02:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_parent_untouched; test_worker_subagent_runs_in_isolated_worktree_and_merges_cleanly_with_revision; cancelled_adaptive_run_does_not_merge_late_completed_candidate_bytes"
     },
     "KR-N03": {
       "status": "TODO",

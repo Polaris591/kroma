@@ -22,8 +22,8 @@ use crate::messages::{
 use crate::provider::endpoint::{validate_base_url, ValidatedEndpoint};
 use crate::provider::sse::MAX_SSE_RESPONSE_BYTES;
 use crate::provider::transport::{
-    pump_sse_events, read_error_body, read_full_body, send_request, BodyFailure, HttpRequestSpec,
-    TransportFailure,
+    pump_sse_events, read_error_body, read_full_body, send_request, BodyFailure, Flow,
+    HttpRequestSpec, TransportFailure,
 };
 use crate::provider::{
     DispatchBinding, ModelProvider, ProviderCompletion, ProviderError, ProviderRequest,
@@ -951,7 +951,7 @@ impl AnthropicMessagesClient {
                     if ttft_ref.is_none() {
                         *ttft_ref = Some(attempt_start.elapsed().as_millis() as u64);
                     }
-                    assembler_ref.feed(event, data)
+                    assembler_ref.feed(event, data).map(|()| Flow::Continue)
                 },
             )
             .await
