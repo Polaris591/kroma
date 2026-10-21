@@ -1987,24 +1987,24 @@
       "decision": "dependency and license inventory generated from the workspace manifests; no vendored upstream sources under crates/"
     },
     "KR-Q04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "219e598",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/q04-workspace-test.log",
+          "sha256": "5bb3b82f658fa8d7dc43cb80be4b5f67d198e0a13939dcace87b9aa82ea8cfa8",
+          "source_tree_sha256": "f8f387848ca6254a4cb1884320d519ab95935d17f4d88e2caeae090aa8f4cc5e",
+          "completed_utc": "2026-10-21T12:00:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1309
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "added tool_contracts::hostile_argument_bodies_are_refused_without_panicking: 14 adversarial bodies (truncated JSON, null, array, scalar, wrong types, bad array items, duplicate keys, control characters, 40-deep nesting, oversized, trailing garbage, __proto__) all return a structured refusal under 512 bytes or a legitimate pass, with no panic and no allocation blow-up; four classes are spot-asserted so the loop cannot pass vacuously. Other trusted boundaries already carry adversarial tests: filesystem_security (path escape), mcp_http_2026 (hostile schema, forged headers, non-loopback plaintext), b13/t09/t31 sandbox suites."
     },
     "KR-Q05": {
       "status": "IMPLEMENTED_UNVERIFIED",

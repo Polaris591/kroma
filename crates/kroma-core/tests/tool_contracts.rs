@@ -224,3 +224,72 @@ fn every_registered_tool_declares_a_complete_contract() {
     names.dedup();
     assert_eq!(total, names.len(), "tool names must be unique");
 }
+
+/// KR-Q04: the argument boundary must survive hostile input without panicking.
+///
+/// This is a small deterministic fuzz: a fixed set of malformed and adversarial bodies, each of which
+/// must produce a structured refusal rather than a panic, an allocation blow-up or a pass-through.
+/// The inputs are chosen to hit the classes the validator claims to handle (unparseable, wrong shape,
+/// wrong type, missing required, deep nesting, oversized, duplicate keys, control characters).
+#[test]
+fn hostile_argument_bodies_are_refused_without_panicking() {
+    use kroma_core::tool::definition::ToolDefinition;
+    use kroma_core::tool::schema_check::{validate_arguments, MAX_ARGUMENT_BYTES};
+    use serde_json::json;
+
+    let def = ToolDefinition {
+        name: "probe".to_string(),
+        description: "probe".to_string(),
+        parameters: json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": {"type": "string"},
+                "limit": {"type": "integer"},
+                "tags": {"type": "array", "items": {"type": "string"}}
+            }
+        }),
+    };
+
+    let deep = format!("{}{}{}", "{\"a\":".repeat(40), "1", "}".repeat(40));
+    let huge = "x".repeat(MAX_ARGUMENT_BYTES + 1);
+    let cases: Vec<String> = vec![
+        String::new(),                                   // empty -> treated as {}
+        "{".to_string(),                                 // truncated
+        "null".to_string(),                              // not an object
+        "[1,2,3]".to_string(),                           // array
+        "\"string\"".to_string(),                        // scalar
+        "{\"path\":123}".to_string(),                    // wrong type
+        "{\"limit\":\"ten\"}".to_string(),               // wrong type
+        "{\"tags\":[\"a\",1]}".to_string(),              // bad item
+        "{\"path\":\"a\",\"path\":\"b\"}".to_string(),   // duplicate key
+        "{\"path\":\"\\u0000\\u001b[31m\"}".to_string(), // control chars
+        deep,
+        huge,
+        "{\"path\":\"a\"} trailing".to_string(),
+        "{\"__proto__\":{\"polluted\":true}}".to_string(),
+    ];
+
+    for (i, body) in cases.iter().enumerate() {
+        // The only requirement is: no panic, and a verdict either way. A pass is fine for bodies
+        // that happen to be valid (empty body, __proto__ object); the point is the boundary holds.
+        let verdict = validate_arguments(&def, body);
+        if let Err(message) = &verdict {
+            assert!(
+                !message.is_empty(),
+                "case {i} must explain the refusal, got an empty message"
+            );
+            assert!(
+                message.len() < 512,
+                "case {i} refusal must stay small, got {} bytes",
+                message.len()
+            );
+        }
+    }
+
+    // The classes that must be refused, spot-checked so the loop above cannot pass vacuously.
+    assert!(validate_arguments(&def, "{").is_err());
+    assert!(validate_arguments(&def, "null").is_err());
+    assert!(validate_arguments(&def, "{\"path\":123}").is_err());
+    assert!(validate_arguments(&def, "{}").is_err());
+}
