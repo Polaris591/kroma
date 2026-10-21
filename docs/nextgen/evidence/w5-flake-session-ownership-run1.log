@@ -1,0 +1,662 @@
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling thiserror-impl v2.0.21
+   Compiling tokio v1.53.2
+   Compiling thiserror v2.0.21
+   Compiling serde v1.0.229
+   Compiling uuid v1.15.1
+   Compiling kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)
+   Compiling kroma-cli v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 29.86s
+[0] Offline source wiring checks
+PASS static: OpenAI explicit input breakpoint
+PASS static: OpenAI conservative capability gate
+PASS static: OpenAI usage split invariant
+PASS static: Unknown cache writes do not appear free
+PASS static: MCP stateless HTTP adapter
+PASS static: MCP metadata header
+PASS static: MCP annotated parameter headers
+PASS static: MCP cache isolated per server instance
+PASS static: Legacy stdio remains present
+PASS static: Trusted config HTTP option
+PASS static: Context cache-aware opt-in
+PASS static: Context non-tool invariant
+PASS static: MCP live loopback Rust fixture
+PASS static: Native tool-search replay refuses unsupported item
+PASS static: MCP bounded annotated headers
+PASS static: MCP strict JSON-RPC response shape
+PASS static: Compaction discounts non-reclaimable multimodal output
+PASS static: Provider-aware paired gate
+PASS static: Provider-aware paired gate fixtures
+PASS static: Context planner Rust fixture
+PASS git diff --check
+Rust compiler/tests: NOT RUN (static source checks are not a substitute)
+test_all_good_noninferior_and_cheaper (__main__.GateFixtures.test_all_good_noninferior_and_cheaper) ... ok
+test_different_models_are_refused (__main__.GateFixtures.test_different_models_are_refused) ... ok
+test_duplicates_are_refused (__main__.GateFixtures.test_duplicates_are_refused) ... ok
+test_estimated_cost_increase_not_claimed (__main__.GateFixtures.test_estimated_cost_increase_not_claimed) ... ok
+test_missing_pair_is_refused (__main__.GateFixtures.test_missing_pair_is_refused) ... ok
+test_quality_regression_blocks_savings (__main__.GateFixtures.test_quality_regression_blocks_savings) ... ok
+test_small_sample_cannot_promote (__main__.GateFixtures.test_small_sample_cannot_promote) ... ok
+test_synthetic_usage_never_priced (__main__.GateFixtures.test_synthetic_usage_never_priced) ... ok
+test_unknown_cache_read_split_blocks_cost_claim (__main__.GateFixtures.test_unknown_cache_read_split_blocks_cost_claim) ... ok
+test_unknown_write_split_blocks_cost_claim (__main__.GateFixtures.test_unknown_write_split_blocks_cost_claim) ... ok
+test_usage_invariant_is_refused (__main__.GateFixtures.test_usage_invariant_is_refused) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 0.020s
+
+OK
+[1] Workspace formatting
+[2] Cache wire-mode regression fixtures
+   Compiling serde v1.0.229
+   Compiling ref-cast-impl v1.0.27
+   Compiling strum_macros v0.28.0
+   Compiling ahash v0.8.12
+   Compiling email_address v0.2.9
+   Compiling ref-cast v1.0.27
+   Compiling fluent-uri v0.4.1
+   Compiling uuid v1.15.1
+   Compiling jsonschema-value v0.58.6
+   Compiling referencing v0.58.6
+   Compiling strum v0.28.0
+   Compiling jsonschema v0.58.6
+   Compiling kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.98s
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 5 tests
+test provider::openai_responses::nextgen_cache_wire_tests::diagnostics_reason_is_allowlisted_and_counts_are_exact ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::bad_usage_is_rejected_not_priced_as_free ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::implicit_keeps_original_instructions_and_skips_explicit_markers ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::explicit_only_marks_developer_input_block_without_dropping_store_false ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::off_is_byte_identical_to_baseline_serializer ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 397 filtered out; finished in 0.00s
+
+[3] Cache-aware compaction budget decisions and history invariants
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 5 tests
+test cache_aware_compaction::tests::avoids_destroying_expensive_hot_prefix ... ok
+test cache_aware_compaction::tests::budget_never_sacrificed_for_cache_hit ... ok
+test cache_aware_compaction::tests::cold_prefix_can_compact_before_high_watermark ... ok
+test cache_aware_compaction::tests::no_proactive_without_measured_usage ... ok
+test cache_aware_compaction::tests::no_speculation_below_threshold_or_without_tool_bytes ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 397 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 2 tests
+test context_projector::nextgen_history_guard_tests::missing_cache_telemetry_never_equals_zero_cache_hits ... ok
+test context_projector::nextgen_history_guard_tests::user_constraints_must_remain_byte_identical_in_projection ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 400 filtered out; finished in 0.00s
+
+[4] MCP HTTP protocol isolated fixtures + trusted config
+   Compiling kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.39s
+     Running tests/mcp_http_2026.rs (target/debug/deps/mcp_http_2026-bc09f379e7d232cf)
+
+running 3 tests
+test rejects_non_loopback_plain_http_and_forged_newlines ... ok
+test http_mcp_2026_sse_terminal_response_ends_the_call_without_connection_close ... ok
+test http_mcp_2026_json_catalog_and_sse_tool_response_preserves_custom_headers ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.97s
+     Running tests/mcp_config.rs (target/debug/deps/mcp_config-24328d2f38c5e539)
+
+running 10 tests
+test an_untrusted_workspace_config_cannot_declare_mcp_servers ... ok
+test mcp_server_inherits_sanitized_env_and_receives_explicit_env ... ok
+test mcp_tool_invalid_arguments_rejected_without_server_dispatch ... ok
+test mcp_tool_is_error_returns_tool_failure_and_preserves_content ... ok
+test modern_mcp_endpoint_can_only_be_declared_by_trusted_user_config ... ok
+test trusted_config_mcp_server_is_dispatchable ... ok
+test unmount_during_a_call_is_bounded_and_reaps_the_child ... ok
+test a_server_that_stops_reading_still_shuts_down ... ok
+test a_wedged_mcp_server_times_out_and_is_cleaned_up ... ok
+test a_timed_out_call_never_executes_a_queued_mutation ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s
+
+[5] P0 cache write accounting parser and cost ledger tests
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 3 tests
+test provider::openai_responses::cache_write_accounting_tests::gpt_5_6_usage_parses_cache_writes_separately_from_reads ... ok
+test provider::openai_responses::cache_write_accounting_tests::old_responses_usage_preserves_unknown_cache_write_metadata ... ok
+test provider::openai_responses::cache_write_accounting_tests::complete_response_exposes_write_usage_to_cost_accounting ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 399 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 1 test
+test context_economy::tests::cache_writes_cannot_be_mispriced_as_free_or_uncached ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 1 test
+test context_economy::tests::cache_write_unknown_is_not_a_measured_zero_on_writing_models ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.00s
+
+[5b] Native search replay / malformed provider guard
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 2 tests
+test provider::openai_responses::native_tool_search_replay_guard_tests::sse_search_items_cannot_disappear_from_replayed_transcript ... ok
+test provider::openai_responses::native_tool_search_replay_guard_tests::json_tool_search_items_cannot_disappear_from_replayed_transcript ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 400 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 1 test
+test provider::openai_responses::malformed_response_shape_tests::missing_or_wrong_output_is_not_an_empty_success ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.00s
+
+[6] Full workspace regression
+   Compiling kroma-cli v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-cli)
+   Compiling kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 19s
+     Running unittests src/main.rs (target/debug/deps/kroma-9d61692395b43df2)
+
+running 26 tests
+test approval_ui::tests::escapes_bidi_override ... ok
+test approval_ui::tests::escapes_ansi_and_carriage_return_but_keeps_newline_and_tab ... ok
+test approval_ui::tests::cancelled_approval_denies_promptly_without_blocking ... ok
+test tests::test_causal_pruning_flag_is_opt_in ... ok
+test tests::bench_prereg_gate_is_required_for_provider_runs ... ok
+test tests::bf11_bench_model_and_price_table_are_provider_only_overrides ... ok
+test tests::prompt_candidate_is_explicit_and_parsed_for_each_surface ... ok
+test tests::test_completion_gate_selection_honors_shell_authorization ... ok
+test tests::test_cli_flags_and_policy_modes ... ok
+test tests::test_max_tokens_flag_feeds_the_unified_token_cap ... ok
+test tests::test_mcp_server_flag_parses_into_a_trusted_config ... ok
+test tests::test_gate6_multi_surface_cli_flags_and_serve_security ... ok
+test tests::test_no_subagents_outranks_workspace_config ... ok
+test tests::test_reconcile_orphan_snapshot_and_emit_revision_restored_event ... ok
+test tests::test_restore_rev_records_revision_so_a_following_undo_stays_in_sync ... ok
+test tests::test_cli_fork_restores_workspace_and_moves_the_leaf ... ok
+test tests::test_subagent_cli_flags_parse ... ok
+test tests::test_serve_help_text_and_non_loopback_warning ... ok
+test tests::test_tournament_k_forms_the_arm_and_refuses_a_one_candidate_race ... ok
+test tests::test_restore_rev_recovers_a_pending_merge_before_restoring ... ok
+test tests::test_verify_cmd_and_no_verify_flags_parse ... ok
+test tests::test_workspace_revision_management_flags_parse ... ok
+test tests::verifier_file_is_an_explicit_bounded_capability ... ok
+test tests::test_undo_rebinds_the_wal_when_the_undone_revision_shares_the_rewind_leaf ... ok
+test tests::test_undo_recovers_a_pending_merge_before_restoring ... ok
+test tests::test_headless_mounts_a_trusted_mcp_server ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/bench_budget_envelope.rs (target/debug/deps/bench_budget_envelope-029039c1e09c8868)
+
+running 4 tests
+test an_unusable_execution_sandbox_is_refused_before_the_first_request ... ok
+test an_insufficient_experiment_ceiling_is_refused_at_the_cli ... ok
+test a_workspace_max_tokens_cannot_authorize_a_paid_run ... ok
+test each_bench_arm_gets_its_own_allowance_at_the_cli ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.12s
+
+     Running tests/crash_recovery_matrix.rs (target/debug/deps/crash_recovery_matrix-aabc1bbf193f5aef)
+
+running 11 tests
+test crash_child_entry ... ok
+test crash_before_leaf_move_completes_the_fork_from_its_intent ... ok
+test crash_mid_restore_finishes_the_recorded_restore ... ok
+test crash_between_snapshot_and_wal_adopts_the_orphan_manifest ... ok
+test crash_before_capture_refuses_to_overwrite_external_bytes ... ok
+test crash_mid_wal_append_discards_the_torn_line ... ok
+test crash_with_a_corrupt_manifest_blocks_the_next_mutation ... ok
+test force_restore_completes_a_crashed_restore_over_a_user_edit ... ok
+test crash_mid_undo_completes_the_rewind_from_its_intent ... ok
+test user_edit_during_a_crashed_restore_is_refused_and_the_journal_kept ... ok
+test real_cli_undo_crash_is_completed_by_the_next_process ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.59s
+
+     Running unittests src/lib.rs (target/debug/deps/kroma_core-0a6fe84437ed0a1a)
+
+running 402 tests
+test activation::tests::a_failed_activation_rolls_back_and_stays_failed ... ok
+test activation::tests::a_shared_dependency_outlives_the_first_release ... ok
+test activation::tests::cycles_and_unknown_dependencies_are_refused ... ok
+test activation::tests::release_is_measured_by_the_registry_not_by_drop_being_called ... ok
+test activation::tests::the_run_switch_cap_is_enforced ... ok
+test ahe::tests::a_candidate_touching_the_judge_is_refused_before_it_runs ... ok
+test agent_loop::budget_estimation_tests::test_bug09_input_estimate_does_not_double_count_the_system_prompt ... ok
+test ahe::tests::a_prediction_about_an_unknown_task_is_refused ... ok
+test activation::tests::initialisation_runs_once_for_concurrent_callers ... ok
+test activation::tests::dwell_and_cooldown_block_early_switches ... ok
+test async_tasks::tests::a_never_started_task_recovers_safe_and_resumes ... ok
+test async_tasks::tests::accept_requires_a_verified_revision_and_snapshots_evidence ... ok
+test async_tasks::tests::begin_execution_refuses_legacy_and_started_but_allows_never_started ... ok
+test async_tasks::tests::control_request_round_trips_and_applies ... ok
+test async_tasks::tests::duplicate_and_capacity_are_rejected ... ok
+test async_tasks::tests::execution_completion_is_not_acceptance_and_a_challenge_blocks_it ... ok
+test async_tasks::tests::failed_prune_rolls_back_and_stays_retryable ... ok
+test async_tasks::tests::failed_resume_does_not_publish_phantom_running ... ok
+test async_tasks::tests::failed_spend_update_is_not_applied_twice ... ok
+test async_tasks::tests::interrupted_running_tasks_become_suspended ... ok
+test async_tasks::tests::is_accepted_requires_an_explicit_acceptance_and_matching_verification ... ok
+test async_tasks::tests::legacy_records_without_the_new_fields_deserialize_to_unknown_and_not_accepted ... ok
+test async_tasks::tests::pause_suspends_scheduling_but_never_allows_a_second_launch ... ok
+test async_tasks::tests::post_rename_dir_sync_failure_publishes_and_reports_uncertain ... ok
+test async_tasks::tests::precommit_failure_leaves_registry_and_disk_unchanged ... ok
+test async_tasks::tests::prune_terminal_checked_reports_a_commit_failure_instead_of_claiming_space ... ok
+test ahe::tests::a_working_repair_is_accepted_without_touching_the_source_tree ... ok
+test async_tasks::tests::prune_terminal_never_evicts_a_record_with_a_pending_merge ... ok
+test async_tasks::tests::reconcile_records_decisions_without_clearing_the_unknown_block ... ok
+test async_tasks::tests::recovery_marks_a_started_task_unknown_and_blocks_resume_and_settle ... ok
+test async_tasks::tests::real_precommit_failure_leaves_memory_unchanged ... ok
+test async_tasks::tests::rename_failure_leaves_the_previous_document_intact ... ok
+test async_tasks::tests::settle_finish_refuses_a_terminal_record_with_a_mismatched_outcome ... ok
+test async_tasks::tests::verification_record_without_a_parent_snapshot_revision_deserializes_to_none ... ok
+test async_tasks::tests::registration_binds_ownership_and_reserves_budget ... ok
+test attribution::tests::diagnostic_parsing_covers_rust_python_and_generic_stacks ... ok
+test attribution::tests::fork_rewind_prunes_future_mutations ... ok
+test attribution::tests::json_and_toml_checks ... ok
+test attribution::tests::attribution_ranks_the_edited_span_highest ... ok
+test attribution::tests::scanner_accepts_braces_inside_strings_and_comments ... ok
+test attribution::tests::scanner_accepts_rust_lifetimes_and_raw_strings ... ok
+test attribution::tests::scanner_reports_conflict_markers_only_outside_strings ... ok
+test attribution::tests::scanner_reports_unclosed_brace_at_its_opening_position ... ok
+test bench::bf13_child_ledger_tests::bf13_ledger_accounts_for_failed_and_losing_children ... ok
+test bench::e02e05_metric_tests::arm_metrics_pool_request_level_samples_instead_of_run_means ... ok
+test bench::bf13_child_ledger_tests::bf13_ledger_fails_closed_on_missing_or_duplicate_attempts ... ok
+test bench::e02e05_metric_tests::measured_run_metrics_sum_provider_reported_usage_and_ttft ... ok
+test bench::e02e05_metric_tests::legacy_report_without_metric_fields_still_deserializes ... ok
+test bench::e02e05_metric_tests::unmeasured_cache_and_ttft_serialize_as_null ... ok
+test bench::tests::a_verdict_needs_enough_independent_tasks ... ok
+test bench::tests::clustered_bootstrap_is_wider_when_repetitions_are_correlated ... ok
+test bench::tests::colliding_arm_names_do_not_share_a_workspace ... ok
+test ahe::tests::a_repair_that_regresses_another_task_is_rejected ... ok
+test ahe::tests::a_candidate_whose_prediction_does_not_hold_is_rejected ... ok
+test bench::tests::test_an_arm_can_narrow_the_tool_set ... ok
+test bench::tests::scoring_reads_the_sealed_snapshot_not_the_live_workspace ... ok
+test bench::tests::test_an_arm_naming_a_candidate_runs_its_base_profile_plus_the_stage ... ok
+test bench::tests::test_is_resolved_rejects_escaping_post_condition_paths ... ok
+test bench::tests::test_load_suite_rejects_escaping_paths_in_every_field ... ok
+test bench::tests::test_load_suite_accepts_legal_paths_and_synthetic_arm_materializes_and_resolves ... ok
+test bench::tests::test_parse_arms_requires_two_distinct_named_arms ... ok
+test bench::tests::test_provider_origin_strips_credentials_and_path ... ok
+test bench::tests::test_paired_benchmark_is_budget_locked_and_picks_a_winner ... ok
+test bench::tests::every_arm_owns_its_workspace_and_a_separate_sealed_snapshot ... ok
+test bench::tests::test_synthetic_executor_label_is_marked ... ok
+test bench::tests::the_cost_gate_rejects_over_budget_and_refuses_unknown_cost ... ok
+test cache_aware_compaction::tests::budget_never_sacrificed_for_cache_hit ... ok
+test bench::tests::the_safety_gate_outranks_a_clearing_effect ... ok
+test cache_aware_compaction::tests::avoids_destroying_expensive_hot_prefix ... ok
+test cache_aware_compaction::tests::cold_prefix_can_compact_before_high_watermark ... ok
+test cache_aware_compaction::tests::no_proactive_without_measured_usage ... ok
+test cache_aware_compaction::tests::no_speculation_below_threshold_or_without_tool_bytes ... ok
+test channel_governor::tests::a_failure_storm_opens_the_breaker_before_any_further_call ... ok
+test channel_governor::tests::a_dropped_permit_returns_capacity ... ok
+test channel_governor::tests::a_success_resets_the_failure_streak ... ok
+test channel_governor::tests::backoff_is_exponential_and_capped ... ok
+test channel_governor::tests::dropping_a_half_open_probe_does_not_wedge_the_channel ... ok
+test channel_governor::tests::in_flight_never_exceeds_the_policy ... ok
+test channel_governor::tests::a_queued_caller_rechecks_the_breaker_after_capacity_returns ... ok
+test completion_gate::tests::auto_detected_verification_without_shell_authorization_returns_skipped ... ok
+test completion_gate::tests::auto_detects_cargo_workspace_verification ... ok
+test completion_gate::tests::dirty_file_short_circuit_does_not_spawn_an_invalid_command ... ok
+test completion_gate::tests::failing_verification_returns_the_structured_failure_evidence ... ok
+test completion_gate::tests::failure_fingerprint_ignores_progress_noise_but_keeps_diagnostic_changes ... ok
+test completion_gate::tests::failure_fingerprint_ignores_whitespace_only_differences ... ok
+test channel_governor::tests::a_failed_probe_reopens_the_breaker ... ok
+test channel_governor::tests::the_cooldown_admits_exactly_one_probe_and_success_closes ... ok
+test completion_gate::tests::parse_command_argv_preserves_quoted_segments_and_escapes ... ok
+test completion_gate::tests::localizer_keeps_head_tail_and_finds_failure_lines ... ok
+test config_file::c0003_config_tests::an_implemented_candidate_is_accepted_and_the_rest_are_refused_by_name ... ok
+test config_file::c0003_config_tests::an_unknown_profile_is_still_an_unknown_profile_in_the_config_file ... ok
+test config_file::permission_tests::test_restrict_dir_permissions_refuses_a_symlinked_leaf ... ok
+test config_file::permission_tests::test_restrict_dir_permissions_sets_0700_on_a_real_directory ... ok
+test config_file::permission_tests::test_restrict_file_permissions_refuses_a_symlinked_leaf ... ok
+test config_file::permission_tests::test_restrict_file_permissions_sets_0600_on_a_regular_file ... ok
+test config_file::permission_tests::test_write_file_atomically_refuses_a_symlinked_temp_path_and_keeps_the_target_intact ... ok
+test config_file::permission_tests::test_write_file_atomically_retries_past_a_stale_regular_temp_file ... ok
+test config_file::permission_tests::test_write_file_atomically_writes_and_restricts_permissions ... ok
+test context_authority::tests::a_summary_cannot_escalate_authority_or_launder_sensitivity ... ok
+test context_authority::tests::recall_is_refused_across_scopes_and_after_the_segment_is_gone ... ok
+test context_authority::tests::segments_round_trip_with_every_field_and_refuse_cross_scope_merges ... ok
+test context_economy::tests::a_real_cost_reduction_is_reported_as_a_saving ... ok
+test context_economy::tests::a_smaller_prompt_with_a_higher_cost_is_not_a_saving ... ok
+test context_economy::tests::an_unknown_cost_is_reported_as_unknown_not_as_a_saving ... ok
+test context_economy::tests::cache_write_unknown_is_not_a_measured_zero_on_writing_models ... ok
+test context_economy::tests::cache_writes_cannot_be_mispriced_as_free_or_uncached ... ok
+test context_economy::tests::dimensions_are_reported_separately ... ok
+test context_projector::c0003_profile_tests::candidates_use_their_own_ids_and_stay_off_by_default ... ok
+test context_projector::c0003_profile_tests::legacy_profile_semantics_are_unchanged ... ok
+test context_projector::c0003_profile_tests::unknown_ids_are_refused ... ok
+test context_projector::nextgen_history_guard_tests::missing_cache_telemetry_never_equals_zero_cache_hits ... ok
+test context_projector::nextgen_history_guard_tests::user_constraints_must_remain_byte_identical_in_projection ... ok
+test context_projector::tests::refresh_last_touched_never_regresses_a_larger_checkpoint_turn ... ok
+test completion_gate::tests::streaming_capture_keeps_a_bounded_head_and_rolling_tail ... ok
+test context_projector::tests::working_set_pins_release_files_older_than_the_window_under_a_resume_offset ... ok
+test control_policy::tests::a_probe_never_starts_below_its_budget_floor ... ok
+test control_policy::tests::a_probe_without_isolation_stops_instead_of_touching_the_workspace ... ok
+test control_policy::tests::an_exhausted_budget_wins_over_everything_else ... ok
+test control_policy::tests::loser_cost_is_part_of_the_total ... ok
+test control_policy::tests::multi_candidate_is_experimental_and_never_autonomous ... ok
+test control_policy::tests::probing_requires_an_explicit_cap_and_authorization ... ok
+test control_policy::tests::repeating_the_same_failure_stops_escalation ... ok
+test control_policy::tests::the_single_agent_path_is_the_default ... ok
+test credential_broker::tests::a_settled_spend_is_not_reoffered_after_a_restart ... ok
+test credential_broker::tests::each_dispatch_settles_only_its_own_reservation ... ok
+test credential_broker::tests::host_parsing_covers_bracketed_ipv6 ... ok
+test credential_broker::tests::ipv6_private_and_ipv4_mapped_targets_are_refused ... ok
+test credential_broker::tests::redirects_and_private_targets_are_refused ... ok
+test credential_broker::tests::restart_restores_reservations_and_keeps_unknown_liability ... ok
+test credential_broker::tests::the_gate_checks_the_presented_identity_against_the_grant ... ok
+test credential_broker::tests::the_grant_binds_job_subject_model_endpoint_epoch_and_budget ... ok
+test envelope::tests::apply_to_writes_the_kernel_fields ... ok
+test envelope::tests::every_required_bound_is_required ... ok
+test envelope::tests::token_ceiling_is_enforced_by_the_ledger_not_a_copy ... ok
+test envelope::tests::unknown_keys_are_refused ... ok
+test envelope::tests::unknown_usage_is_not_zeroed ... ok
+test envelope::tests::zero_bounds_are_rejected_by_name ... ok
+test evidence_lifecycle::tests::bindings_serialise_with_their_dependencies ... ok
+test evidence_lifecycle::tests::facts_go_stale_when_their_subject_or_environment_moves ... ok
+test evidence_lifecycle::tests::pins_survive_gc_until_the_last_reason_is_released ... ok
+test evolution::tests::evaluation_budget_is_checked_before_spending ... ok
+test evolution::tests::the_baseline_survives_and_only_evaluated_candidates_win ... ok
+test evolution::tests::the_pool_is_bounded_and_deduplicated_by_configuration ... ok
+test experience::tests::a_blank_actor_cannot_accept_a_candidate ... ok
+test experience::tests::a_model_guess_cannot_become_repository_or_global_knowledge ... ok
+test experience::tests::a_revoked_key_cannot_reappear_at_a_different_scope ... ok
+test experience::tests::acceptance_requires_evidence ... ok
+test experience::tests::candidates_are_not_retrieved_until_accepted ... ok
+test experience::tests::duplicate_keys_deduplicate_and_retrieval_is_bounded ... ok
+test experience::tests::expired_and_stale_records_are_not_retrieved ... ok
+test experience::tests::injection_is_bounded_and_leaves_the_cache_prefix_untouched ... ok
+test experience::tests::repository_text_can_never_be_promoted_to_a_global_instruction ... ok
+test experience::tests::reproposing_an_accepted_key_cannot_rewrite_its_guidance ... ok
+test experience::tests::retrieval_respects_scope ... ok
+test experience::tests::revocation_is_sticky_for_the_same_key ... ok
+test context_projector::tests::resumed_compaction_releases_stale_hot_file_and_keeps_recent_file_pinned ... ok
+test extensions::tests::read_pipe_bounded_returns_by_the_deadline_without_eof ... ok
+test handoff::tests::a_changed_file_policy_or_branch_invalidates_the_right_records ... ok
+test handoff::tests::an_oversized_handoff_is_truncated_and_says_so ... ok
+test handoff::tests::revocation_is_effective_on_the_next_retrieval ... ok
+test handoff::tests::statistics_separate_falsified_from_expired ... ok
+test handoff::tests::the_handoff_carries_claims_and_evidence_not_the_transcript ... ok
+test job_scope::tests::a_kept_workspace_outlives_its_scope ... ok
+test job_scope::tests::a_recycled_pid_is_not_mistaken_for_a_recorded_child ... ok
+test extensions::tests::write_pipe_bounded_returns_by_the_deadline_when_the_reader_stalls ... ok
+test job_scope::tests::cancellation_refuses_new_work_and_reaps_children ... ok
+test job_scope::tests::jobs_do_not_share_a_working_directory ... ok
+test job_scope::tests::reclaim_terminates_and_forgets_a_recorded_group ... ok
+test job_scope::tests::scoring_only_sees_sealed_bytes_and_detects_tampering ... ok
+test mcp::call_lifetime_tests::a_cancelled_queue_entry_is_rejected_before_execution ... ok
+test mcp::call_lifetime_tests::an_expired_queue_entry_is_rejected_before_execution ... ok
+test mcp::call_lifetime_tests::boundary_n_minus_one_n_and_n_plus_one ... ok
+test mcp::call_lifetime_tests::bounded_sink_stops_at_the_exact_limit ... ok
+test mcp::call_lifetime_tests::drop_after_a_reaped_leader_does_not_sweep_a_recycled_group ... ok
+test bench::tests::a_stopped_verification_is_an_unknown_verdict_not_a_failure ... ok
+test mcp::call_lifetime_tests::eof_handling_empty_and_partial ... ok
+test mcp::call_lifetime_tests::fragmented_oversize_stops_reading_immediately ... ok
+test mcp::call_lifetime_tests::drop_sweeps_the_group_after_the_leader_exited_unreaped ... ok
+test mcp::call_lifetime_tests::invalid_utf8_rejected_as_protocol_error ... ok
+test mcp::call_lifetime_tests::no_newline_fast_producer_does_not_hang ... ok
+test completion_gate::tests::gate_200ms_pipe_drain_prevents_grandchild_hang_and_sweeps_pgid ... ok
+test mcp::call_lifetime_tests::oversized_request_is_rejected_before_queueing ... ok
+test mcp::call_lifetime_tests::public_regression_invalid_utf8_in_valid_json_string_poisons_client ... ok
+test mcp::call_lifetime_tests::queue_admission_is_bounded_and_rejects_before_dispatch ... ok
+test mcp::call_lifetime_tests::full_queue_rejects_new_call_and_shutdown_reaps_the_server ... ok
+test mcp::call_lifetime_tests::render_tool_result_preserves_content_and_structured_content ... ok
+test mcp::call_lifetime_tests::reserved_envelope_margin_covers_the_worst_case_wire_frame ... ok
+test mcp::call_lifetime_tests::subsequent_call_fails_closed_when_poisoned ... ok
+test mcp::call_lifetime_tests::write_cap_counts_the_trailing_newline ... ok
+test mcp_http::tests::header_values_base64_sentinel_and_unicode_are_safe ... ok
+test mcp_http::tests::nested_headers_encoded_and_absent_or_null_omitted ... ok
+test mcp_http::tests::rejects_malformed_jsonrpc_notifications_and_repeated_results ... ok
+test mcp_http::tests::rejects_unbounded_annotated_headers_before_transport ... ok
+test mcp_http::tests::schema_headers_nested_case_collision_rejected ... ok
+test mcp_http::tests::sse_final_checks_id_and_does_not_drop_request ... ok
+test mcp_http::tests::unsafe_remote_http_and_invalid_token_rejected ... ok
+test perf_gate::tests::an_uncalibrated_budget_is_refused_by_field ... ok
+test perf_gate::tests::no_budget_and_no_baseline_promote_nothing ... ok
+test perf_gate::tests::regression_and_tolerance_are_distinguished ... ok
+test process_launch::tests::only_policies_carrying_path_suppress_the_fallback ... ok
+test process_launch::tests::path_fallback_fills_only_a_missing_host_path ... ok
+test prompt::tests::workspace_context_is_fenced_as_untrusted_and_escapes_filenames ... ok
+test prompt::tests::workspace_context_skips_sensitive_files ... ok
+test mcp::call_lifetime_tests::public_regression_partial_read_timeout_poisons_next_request ... ok
+test job_scope::tests::cancel_names_a_child_that_cannot_be_reclaimed ... ok
+test provenance::tests::a_non_repository_reports_unknown_rather_than_a_fake_commit ... ok
+test provenance::tests::build_and_vcs_directories_are_excluded ... ok
+test provenance::tests::special_files_are_never_read_and_cannot_stall_the_walk ... ok
+test provenance::tests::the_binary_is_identified_by_content ... ok
+test provenance::tests::a_dirty_tree_is_distinguishable_from_the_clean_tree_at_the_same_commit ... ok
+test provenance::tests::the_filesystem_root_is_not_walked ... ok
+test provider::openai_responses::cache_write_accounting_tests::complete_response_exposes_write_usage_to_cost_accounting ... ok
+test provider::openai_responses::cache_write_accounting_tests::gpt_5_6_usage_parses_cache_writes_separately_from_reads ... ok
+test provider::openai_responses::cache_write_accounting_tests::old_responses_usage_preserves_unknown_cache_write_metadata ... ok
+test provider::openai_responses::malformed_response_shape_tests::missing_or_wrong_output_is_not_an_empty_success ... ok
+test provider::openai_responses::native_tool_search_replay_guard_tests::json_tool_search_items_cannot_disappear_from_replayed_transcript ... ok
+test provider::openai_responses::native_tool_search_replay_guard_tests::sse_search_items_cannot_disappear_from_replayed_transcript ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::bad_usage_is_rejected_not_priced_as_free ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::diagnostics_reason_is_allowlisted_and_counts_are_exact ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::explicit_only_marks_developer_input_block_without_dropping_store_false ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::implicit_keeps_original_instructions_and_skips_explicit_markers ... ok
+test provider::openai_responses::nextgen_cache_wire_tests::off_is_byte_identical_to_baseline_serializer ... ok
+test provider::retry_budget_tests::reported_identity_is_unknown_when_missing_and_conflicts_are_rejected ... ok
+test provider::retry_budget_tests::zero_allowance_is_refused_and_dropped_retry_is_unknown ... ok
+test revision::tests::a_directory_sync_failure_keeps_the_intent_and_replays ... ok
+test revision::tests::diff_paths_reports_added_removed_and_modified_paths_only ... ok
+test revision::tests::revision_id_is_content_addressed_and_mode_sensitive ... ok
+test revision::tests::revision_id_parse_rejects_traversal_and_accepts_content_addresses ... ok
+test routing::tests::a_wobbling_run_switches_once_not_once_per_turn ... ok
+test provenance::tests::editing_a_tracked_file_changes_the_source_hash ... ok
+test routing::tests::low_confidence_falls_back_instead_of_guessing ... ok
+test routing::tests::low_confidence_refuses_the_expensive_strategy ... ok
+test routing::tests::the_band_between_thresholds_holds ... ok
+test routing::tests::the_signal_comes_from_measured_counts ... ok
+test scoring_zones::tests::hidden_results_do_not_leak_back_per_attempt ... ok
+test scoring_zones::tests::the_capability_table_is_the_only_authority ... ok
+test scoring_zones::tests::the_worker_zone_holds_no_key_and_no_hidden_cases ... ok
+test secure_fs::tests::bounded_handle_read_uses_the_handle_type_not_the_path ... ok
+test secure_fs::tests::bounded_read_refuses_a_directory ... ok
+test secure_fs::tests::bounded_read_refuses_a_fifo_without_blocking ... ok
+test secure_fs::tests::bounded_read_refuses_a_symlinked_leaf ... ok
+test secure_fs::tests::bounded_read_refuses_oversized_content_before_decoding ... ok
+test secure_fs::tests::bounded_read_stops_a_growing_file_at_the_limit ... ok
+test secure_fs::tests::bounded_read_truncates_at_the_limit_and_reports_it ... ok
+test secure_fs::tests::create_new_no_symlink_creates_at_the_requested_mode ... ok
+test secure_fs::tests::create_new_no_symlink_does_not_follow_a_planted_symlink ... ok
+test secure_fs::tests::create_new_no_symlink_refuses_an_existing_path ... ok
+test secure_fs::tests::ensure_private_dir_creates_nested_paths_and_only_restricts_the_last_component ... ok
+test secure_fs::tests::ensure_private_dir_io_keeps_the_os_error_kind ... ok
+test secure_fs::tests::ensure_private_dir_refuses_a_symlinked_final_component ... ok
+test secure_fs::tests::ensure_private_dir_rejects_a_path_without_a_directory_component ... ok
+test secure_fs::tests::ensure_private_dir_tolerates_an_os_owned_symlinked_ancestor ... ok
+test secure_fs::tests::flag_constants_carry_the_no_follow_policy ... ok
+test secure_fs::tests::open_existing_no_symlink_reads_a_regular_file ... ok
+test secure_fs::tests::open_existing_no_symlink_refuses_a_symlinked_leaf ... ok
+test secure_fs::tests::restrict_dir_no_follow_sets_0700_and_refuses_a_symlinked_leaf ... ok
+test secure_fs::tests::restrict_file_no_follow_refuses_a_symlinked_leaf_without_touching_the_target ... ok
+test secure_fs::tests::restrict_file_no_follow_sets_the_mode_on_a_regular_file ... ok
+test self_repair_guard::tests::a_protected_file_name_is_refused_in_any_directory ... ok
+test self_repair_guard::tests::changes_outside_the_declared_surface_are_refused ... ok
+test self_repair_guard::tests::one_violation_refuses_the_whole_candidate ... ok
+test self_repair_guard::tests::ordinary_source_paths_are_allowed ... ok
+test self_repair_guard::tests::protected_artifacts_are_refused_even_inside_an_allowed_prefix ... ok
+test self_repair_guard::tests::unsafe_paths_are_refused ... ok
+test session::tests::a_create_that_cannot_sync_its_directory_is_not_acknowledged_and_a_clean_create_reopens ... ok
+test session::tests::a_failed_rollback_poisons_the_wal_and_no_later_append_corrupts_the_chain ... ok
+test provenance::tests::the_resolved_dependency_set_is_recorded_when_pinned ... ok
+test session::tests::approved_completion_clears_dirty_files_until_a_new_mutation ... ok
+test session::tests::disk_full_mid_write_rolls_back_and_the_session_stays_readable ... ok
+test session::tests::non_wal_text_file_is_rejected_without_modification ... ok
+test session::tests::gate_rejections_survive_resume_and_clear_after_resolution ... ok
+test routing::tests::dwell_and_switch_cap_bound_the_run ... ok
+test session::tests::oversized_wal_candidate_is_rejected_without_modification ... ok
+test session::tests::projection_updates_are_append_only_and_replayed ... ok
+test session::tests::single_line_file_without_newline_is_rejected_without_modification ... ok
+test session::tests::symlink_to_external_file_is_rejected_and_target_untouched ... ok
+test session::tests::symlink_wal_is_rejected_and_target_untouched ... ok
+test session::tests::torn_tail_is_repaired_but_corrupt_middle_is_refused ... ok
+test session::tests::wal_file_capacity_boundaries_are_dual_with_the_reader ... ok
+test session::tests::wal_line_capacity_boundaries_are_dual_with_the_reader ... ok
+test mcp::call_lifetime_tests::regression_oversized_no_newline_allocates_and_fails_closed ... ok
+test session::tests::wal_repairs_only_incomplete_trailing_line ... ok
+test session::tests::wal_round_trips_signed_reasoning_and_branching ... ok
+test session::tests::wal_writer_enforces_reader_limits_before_writing ... ok
+test session::tests::oversized_projection_overlay_is_refused_transactionally ... ok
+test session_ownership::tests::a_competing_process_lock_blocks_the_writer_and_is_reclaimed_on_release ... ok
+test session_ownership::tests::a_missing_workspace_still_has_one_identity_per_path ... ok
+test session_ownership::tests::a_panicking_scope_releases_its_lease ... ok
+test session_ownership::tests::a_reader_is_never_blocked_by_a_writer_lease ... ok
+test session_ownership::tests::a_reentrant_lease_keeps_the_workspace_claimed ... ok
+test session_ownership::tests::a_relative_spelling_resolves_against_the_cwd ... ok
+test session_ownership::tests::a_symlinked_lock_file_is_refused ... ok
+test session_ownership::tests::a_symlinked_spelling_shares_the_writers_slot ... ok
+
+running 1 test
+test session_ownership::tests::lock_holder_child ... test session::tests::wal_oversized_append_is_transactional ... ok
+test session_ownership::tests::different_workspaces_are_independent_and_same_workspace_is_exclusive ... FAILED
+test session_ownership::tests::dropping_the_inner_lease_first_keeps_the_outer_claim ... ok
+test session_ownership::tests::lock_holder_child ... ok
+test session_ownership::tests::lock_path_is_stable_across_equivalent_spellings ... ok
+test session_ownership::tests::session_routes_are_scoped_to_the_workspace ... ok
+test surface::approval::b01_broker_tests::acp_cleanup_before_insert_does_not_resurrect_waiter ... ok
+test surface::approval::b01_broker_tests::acp_disable_for_stale_owner_does_not_touch_successor ... ok
+test surface::daemon::tests::test_daemon_non_loopback_warning_emitted_and_does_not_leak_token ... ok
+test surface::daemon::tests::test_daemon_unix_socket_active_socket_not_preempted ... ok
+test surface::daemon::tests::test_daemon_unix_socket_bind_chmod_failure_cleans_up_socket ... ok
+test surface::daemon::tests::test_daemon_unix_socket_controlled_stale_socket_recovered ... ok
+test surface::daemon::tests::test_daemon_unix_socket_drop_does_not_delete_replaced_path ... ok
+test surface::daemon::tests::test_daemon_unix_socket_normal_drop_cleans_up_socket ... ok
+test surface::daemon::tests::test_daemon_unix_socket_parent_dir_mode_is_0700 ... ok
+test surface::daemon::tests::test_daemon_unix_socket_regular_file_not_overwritten_bytes_preserved ... ok
+test surface::daemon::tests::test_daemon_unix_socket_shared_parent_mode_unchanged_and_shared_writable_refused ... ok
+test surface::daemon::tests::test_daemon_unix_socket_shared_sticky_parent_left_untouched ... ok
+test surface::daemon::tests::test_daemon_unix_socket_stale_replacement_before_unlink_refused ... ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.04s
+
+test surface::daemon::tests::test_daemon_unix_socket_symlink_not_overwritten_target_preserved ... ok
+test surface::daemon::tests::test_daemon_unix_socket_symlinked_ancestor_refused ... ok
+test surface::daemon::tests::test_daemon_unix_socket_symlinked_parent_refused ... ok
+test surface::daemon::tests::test_daemon_unix_socket_uncreated_parent_ancestor_symlink_not_created ... ok
+test surface::daemon::tests::test_unix_socket_parent_policy_never_tightens_or_binds_shared_directories ... ok
+test session_ownership::tests::different_tmpdir_does_not_create_a_second_lock_domain ... ok
+test surface::dispatcher::session::b01_ownership_tests::acp_response_refuses_when_no_active_run ... ok
+test surface::dispatcher::session::b01_ownership_tests::acp_response_refuses_wrong_owner_connection ... ok
+test surface::dispatcher::session::b01_ownership_tests::admission_cap_busy_rejects_without_claiming ... ok
+test surface::dispatcher::session::b01_ownership_tests::cancel_targets_only_requests_registered_before_it ... ok
+test surface::dispatcher::session::b01_ownership_tests::retiring_one_request_does_not_remove_a_successor ... ok
+test surface::dispatcher::session::b11a_grant_guard_tests::dropping_the_guard_retires_the_runs_grants ... ok
+test surface::repl::input_assembly_tests::paste_markers_are_split_and_stripped ... ok
+test surface::repl::input_assembly_tests::trailing_backslash_detection_honors_escaping ... ok
+test surface::repl::input_assembly_tests::waiting_line_is_emitted_only_on_state_change ... ok
+test surface::repl::input_assembly_tests::waiting_state_maps_from_live_events ... ok
+test surface::session_manager::tests::an_oversized_index_is_refused_before_writing_and_rolls_back ... ok
+test surface::session_manager::tests::directory_sync_failure_keeps_the_committed_index ... ok
+test surface::session_manager::tests::precommit_failure_leaves_the_previous_index_and_no_temp_file ... ok
+test surface::session_manager::tests::the_write_cap_rejects_a_document_over_the_production_limit ... ok
+test surface::dispatcher::session::b01_ownership_tests::cancel_queued_before_claim_cancels_the_run ... ok
+test surface::transport::tests::test_abort_cannot_be_revived_by_close ... ok
+test surface::transport::tests::test_concurrent_send_post_reserve_race_linearization ... ok
+test session::tests::oversized_checkpoint_is_refused_transactionally ... ok
+test surface::transport::tests::test_frame_reader_corrupted_second_half_fails_fast ... ok
+test surface::transport::tests::test_graceful_close_flushes_all_queued_items_beyond_eight ... ok
+test surface::transport::tests::test_frame_reader_cancellation_and_resumption ... ok
+test surface::transport::tests::test_outbound_queue_byte_limit_overflow_fail_closes ... ok
+test surface::transport::tests::test_outbound_queue_item_limit_overflow_fail_closes ... ok
+test surface::transport::tests::test_writer_exits_promptly_when_already_aborted ... ok
+test surface::transport::tests::test_graceful_close_repeated_does_not_extend_deadline ... ok
+test task_host::tests::a_spec_round_trips_through_the_registry ... ok
+test task_host::tests::keep_pending_merge_preserves_the_intent ... ok
+test task_host::tests::only_a_replayable_intent_may_claim_a_pending_replay ... ok
+test task_host::tests::settle_finish_is_one_commit_of_artifact_spend_state_and_notification ... ok
+test task_host::tests::settle_finish_never_overwrites_an_open_challenge ... ok
+test task_host::tests::settle_finish_reaches_suspended_task_completion ... ok
+test task_state::tests::digest_of_a_state_without_bindings_or_pins_is_unchanged ... ok
+test task_state::tests::pinned_fact_survives_gc_while_an_unreferenced_fact_is_dropped ... ok
+test task_state::tests::stale_unpinned_fact_is_not_fresh_and_is_dropped ... ok
+test task_state_projection::tests::a_sensitive_fact_contributes_its_key_and_nothing_else ... ok
+test task_state_projection::tests::stale_and_missing_facts_never_reach_the_block ... ok
+test task_state_projection::tests::the_block_is_bounded_and_reports_what_it_costs ... ok
+test theme::tests::color_decision_respects_no_color_dumb_term_and_tty ... ok
+test theme::tests::coloured_renderer_emits_truecolor_sequences ... ok
+test theme::tests::diff_preview_marks_added_removed_and_is_borderless ... ok
+test theme::tests::effective_no_color_treats_empty_values_as_unset ... ok
+test theme::tests::gate_line_reports_pass_and_fail ... ok
+test theme::tests::helper_formatters_are_stable ... ok
+test theme::tests::plain_renderer_emits_no_escape_sequences ... ok
+test theme::tests::short_rev_sanitizes_control_characters ... ok
+test theme::tests::spectrum_hairline_is_monotonic_and_bounded ... ok
+test theme::tests::status_dots_use_expected_spectrum_colors ... ok
+test theme::tests::theme_parses_known_names_and_rejects_unknown ... ok
+test theme::tests::unified_diff_preview_classifies_lines ... ok
+test theme::tests::untrusted_text_is_sanitised_before_colouring ... ok
+test surface::transport::tests::test_writer_in_flight_write_aborts_immediately_on_fail_closed ... ok
+test tool::codemode::tests::a_program_cannot_reach_outside_the_workspace ... ok
+test tool::codemode::tests::arguments_are_parsed_strictly ... ok
+test tool::codemode::tests::a_program_runs_against_the_workspace_api ... ok
+test tool::codemode::tests::the_tool_is_a_side_effect_like_bash_so_one_policy_gates_both ... ok
+test tool::exposure::tests::a_refresh_applies_at_the_next_request_boundary ... ok
+test tool::exposure::tests::an_in_flight_request_keeps_its_frozen_schema ... ok
+test tool::exposure::tests::exposure_never_stands_in_for_authorization ... ok
+test tool::exposure::tests::withdrawal_is_visible_to_new_requests_only ... ok
+test tool::nested::tests::call_allowance_and_concurrency_are_enforced_separately ... ok
+test tool::nested::tests::cancellation_refuses_new_calls_but_lets_in_flight_ones_finish ... ok
+test tool::nested::tests::nesting_depth_is_bounded ... ok
+test tool::nested::tests::oversized_results_fail_instead_of_truncating ... ok
+test surface::transport::tests::test_close_deadline_includes_in_flight_writes ... ok
+test tool::output_buffer::permission_tests::test_spill_file_refuses_a_symlinked_leaf_and_never_touches_its_target ... ok
+test tool::policy::tests::meet_keeps_only_authority_both_modes_grant ... ok
+test tool::policy::tests::meet_never_widens_either_input ... ok
+test tool::policy::tests::meet_of_the_incomparable_write_modes_is_read_only ... ok
+test tools::bash::tests::the_spill_file_name_never_becomes_a_path ... ok
+test tools::edit::match_tests::a_crlf_body_matches_an_lf_old_text_and_the_span_keeps_the_crlf ... ok
+test tools::edit::match_tests::a_missing_old_text_reports_match_not_found_with_a_diagnostic_kind ... ok
+test tools::edit::match_tests::a_tier1_unique_hit_is_still_refused_when_tier2_reveals_duplicates ... ok
+test tools::edit::match_tests::an_ambiguous_old_text_is_refused_as_not_unique ... ok
+test tools::edit::match_tests::an_empty_old_text_is_refused_instead_of_panicking ... ok
+test tools::edit::match_tests::replacement_is_written_back_in_the_dominant_eol_style ... ok
+test tools::edit::match_tests::tier1_exact_match_covers_exactly_the_old_text ... ok
+test tools::edit::match_tests::tier1_wins_when_the_exact_match_is_unique ... ok
+test tools::edit::match_tests::tier2_tolerates_trailing_whitespace_on_the_file_line ... ok
+test usage_cost::tests::absent_identity_usage_or_cache_split_is_not_free ... ok
+test usage_cost::tests::cache_split_and_reasoning_are_not_double_charged ... ok
+test usage_cost::tests::invalid_cache_or_overflow_stays_unknown_but_measured_zero_is_zero ... ok
+test tool::codemode::tests::the_program_is_fed_on_stdin_and_cannot_end_its_own_heredoc ... ok
+test tool::nested::tests::the_deadline_covers_the_whole_script ... ok
+test session::tests::writer_never_commits_a_record_reader_would_reject ... ok
+
+failures:
+
+---- session_ownership::tests::different_workspaces_are_independent_and_same_workspace_is_exclusive stdout ----
+
+thread 'session_ownership::tests::different_workspaces_are_independent_and_same_workspace_is_exclusive' panicked at crates/kroma-core/src/session_ownership.rs:636:57:
+called `Result::unwrap()` on an `Err` value: WriterConflict { workspace_root: "/tmp/kroma-own-a4c3efb0-10aa-43a7-b240-34d569bc9236/a", current_owner: "owner-a\t2186953" }
+
+
+failures:
+    session_ownership::tests::different_workspaces_are_independent_and_same_workspace_is_exclusive
+
+test result: FAILED. 401 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.69s
+
+error: test failed, to rerun pass `-p kroma-core --lib`
