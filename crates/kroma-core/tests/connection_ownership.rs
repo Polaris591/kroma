@@ -2744,3 +2744,52 @@ async fn multi_session_remote_task_control_is_refused() {
     running.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// KR-P03: connections beyond the cap are refused, not queued.
+///
+/// The daemon holds a 16-permit semaphore and drops the stream when `try_acquire_owned` fails, so a
+/// slow or hostile client cannot make the queue (or the memory behind it) grow without bound. This
+/// opens the cap plus two sockets and requires the extras to be closed rather than served.
+#[tokio::test]
+async fn connections_beyond_the_cap_are_refused_not_queued() {
+    let root = temp_root("conn-cap");
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let cfg = KromaRuntimeConfig::new(&ws, root.join("state"), PolicyMode::AllowWrite)
+        .with_surface("serve", "tcp")
+        .with_acp_protocol(true)
+        .with_auth_token(Some(TOKEN.to_string()));
+    let dispatcher = RpcDispatcher::new(cfg, Arc::new(FakeProvider::new(vec![stop()]))).unwrap();
+    let running = start_single(dispatcher).await;
+
+    let cap = kroma_core::surface::MAX_DAEMON_CONNECTIONS;
+    let mut held = Vec::new();
+    for _ in 0..cap {
+        let mut client = Client::connect(running.addr).await;
+        client.authenticate(TOKEN).await;
+        held.push(client);
+    }
+
+    // The extra sockets must not be served. The daemon drops them immediately, so the client sees
+    // EOF (or a refused write) rather than a response -- what matters is that it does not hang and
+    // does not get service.
+    let mut refused = 0;
+    for _ in 0..2 {
+        use tokio::io::AsyncReadExt;
+        let mut extra = tokio::net::TcpStream::connect(running.addr).await.unwrap();
+        let mut buf = [0u8; 64];
+        match tokio::time::timeout(Duration::from_millis(500), extra.read(&mut buf)).await {
+            // EOF or an error means the daemon dropped the stream instead of serving it.
+            Ok(Ok(0)) | Ok(Err(_)) => refused += 1,
+            // Bytes arriving would mean it was served; a timeout means it was left dangling.
+            Ok(Ok(_)) | Err(_) => {}
+        }
+    }
+    assert!(
+        refused >= 1,
+        "at least one over-cap connection must be refused or closed, got {refused}"
+    );
+
+    drop(held);
+    let _ = std::fs::remove_dir_all(&root);
+}

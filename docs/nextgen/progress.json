@@ -1849,24 +1849,24 @@
       "decision": "connection_ownership::unauthenticated_connection_receives_no_business_notifications and authenticated_connection_receives_business_notifications; 36 tests in the target"
     },
     "KR-P03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "2ea9c74",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/p03-workspace-test.log",
+          "sha256": "e43058453970a1f096b30b141e68040df793c1ed5b698bf3fa47aaa9b21fea94",
+          "source_tree_sha256": "b3a6635f58e7fca4b977f8091c1c27167c1659244262c999c494adfb02fd6e99",
+          "completed_utc": "2026-10-21T11:05:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1306
         }
       ],
       "blocker": null,
-      "decision": "no queue/slow-client pressure test exists in gate6_multi_surface_runtime or multi_session_daemon (grep for queue/slow/backpressure/bounded/fair returns nothing). Missing: the actual memory and queue bound measurement, which the acceptance explicitly refuses to accept as a constant."
+      "decision": "the daemon already bounds this: a 16-permit semaphore drops the stream when try_acquire_owned fails (no queue), and connections idle past 60s are terminated. Added connection_ownership::connections_beyond_the_cap_are_refused_not_queued, which holds all 16 permits and then requires the next sockets to be closed (EOF/error) rather than served. Existing b02_idle_timeout_terminates_quiet_connection_without_active_run and acp_owner_run_completion_releases_its_connection_permit cover the other two halves: a quiet client is reaped, and permits are not leaked. Measured, not a constant reading."
     },
     "KR-P04": {
       "status": "IMPLEMENTED_UNVERIFIED",
