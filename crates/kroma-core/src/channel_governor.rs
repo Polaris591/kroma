@@ -7,7 +7,7 @@
 //!
 //!  * **in-flight cap** — a semaphore of `max_in_flight` permits, so a burst cannot fan out further
 //!    than the policy allows, whatever the caller does;
-//!  * **backoff schedule** — exponential with a hard cap, deterministic (no jitter), so a retry plan
+//!  * **backoff schedule** — exponential with a hard cap, deterministic by default (jitter is opt-in and seeded), so a retry plan
 //!    is reproducible in a report;
 //!  * **circuit breaker** — after `failure_threshold` consecutive failures the channel is *open* for
 //!    `cooldown`, during which [`ChannelGovernor::acquire`] refuses **without touching the channel**.
@@ -37,6 +37,43 @@ pub struct ChannelPolicy {
     pub failure_threshold: usize,
     /// How long the breaker stays open before one probe is allowed.
     pub cooldown: Duration,
+    /// KR-L04: optional jitter on the retry backoff.
+    ///
+    /// `None` (the default) keeps the retry plan exactly reproducible, which is what a report wants.
+    /// Setting it spreads retries so a fleet that failed together does not retry in lockstep. The
+    /// spread is derived from `(seed, attempt)`, so it is randomised in production and still
+    /// pinnable by a test.
+    pub jitter: Option<JitterPolicy>,
+}
+
+/// KR-L04: deterministic-but-spread retry jitter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitterPolicy {
+    /// Upper bound of the added delay, as a percentage of the computed backoff (0..=100).
+    pub percent: u8,
+    /// Seed for the pseudo-random sequence: same seed and same attempt always give the same delay.
+    pub seed: u64,
+}
+
+impl JitterPolicy {
+    pub fn new(percent: u8, seed: u64) -> Self {
+        Self {
+            percent: percent.min(100),
+            seed,
+        }
+    }
+
+    /// Fraction (0.0..1.0) of the allowed spread to add for this attempt.
+    fn fraction_for_attempt(&self, attempt: usize) -> f64 {
+        // xorshift64* over (seed, attempt): dependency-free, and identical for identical inputs --
+        // which is exactly the property the task asks a randomised behaviour to have.
+        let mut x = self.seed ^ ((attempt as u64) << 32) ^ 0x9E37_79B9_7F4A_7C15;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let mixed = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        ((mixed >> 40) as f64) / ((1u64 << 24) as f64)
+    }
 }
 
 impl Default for ChannelPolicy {
@@ -49,6 +86,7 @@ impl Default for ChannelPolicy {
             max_backoff: Duration::from_secs(8),
             failure_threshold: 3,
             cooldown: Duration::from_secs(30),
+            jitter: None,
         }
     }
 }
@@ -250,6 +288,23 @@ impl ChannelGovernor {
     ///
     /// Deterministic on purpose: a report should be able to state the exact retry plan.
     pub fn backoff_for_attempt(&self, attempt: usize) -> Duration {
+        let base = self.deterministic_backoff(attempt);
+        match self.policy.jitter {
+            // Default: exactly reproducible, so a report can state the retry plan.
+            None => base,
+            Some(jitter) => {
+                // Spread on top of the deterministic plan. Same seed and attempt always produce the
+                // same delay, so enabling jitter does not make a run unreproducible.
+                let spread = base.mul_f64(
+                    jitter.fraction_for_attempt(attempt) * (f64::from(jitter.percent) / 100.0),
+                );
+                (base + spread).min(self.policy.max_backoff)
+            }
+        }
+    }
+
+    /// The un-jittered exponential plan.
+    fn deterministic_backoff(&self, attempt: usize) -> Duration {
         if attempt <= 1 {
             return Duration::ZERO;
         }
@@ -497,5 +552,48 @@ mod tests {
         }
         assert_eq!(governor.snapshot().in_flight, 0);
         assert!(governor.try_acquire().is_ok(), "capacity came back on drop");
+    }
+
+    /// KR-L04: seeded jitter must be reproducible and must actually spread.
+    #[test]
+    fn seeded_jitter_is_reproducible_and_spreads() {
+        let base = ChannelPolicy {
+            base_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let plain = ChannelGovernor::new(base.clone());
+        let jittered = ChannelPolicy {
+            jitter: Some(JitterPolicy::new(50, 42)),
+            ..base.clone()
+        };
+
+        let first = ChannelGovernor::new(jittered.clone()).backoff_for_attempt(3);
+        let again = ChannelGovernor::new(jittered.clone()).backoff_for_attempt(3);
+        assert_eq!(
+            first, again,
+            "the same seed and attempt must always produce the same delay"
+        );
+
+        let unjittered = plain.backoff_for_attempt(3);
+        assert!(
+            first >= unjittered,
+            "jitter may only add delay: {first:?} < {unjittered:?}"
+        );
+        let ceiling = unjittered.mul_f64(1.5) + Duration::from_millis(2);
+        assert!(
+            first <= ceiling,
+            "50% jitter must stay within its bound: {first:?} > {ceiling:?}"
+        );
+
+        let other_seed = ChannelGovernor::new(ChannelPolicy {
+            jitter: Some(JitterPolicy::new(50, 7)),
+            ..base
+        });
+        let differs = (2..10).any(|attempt| {
+            other_seed.backoff_for_attempt(attempt)
+                != ChannelGovernor::new(jittered.clone()).backoff_for_attempt(attempt)
+        });
+        assert!(differs, "different seeds must spread differently");
     }
 }

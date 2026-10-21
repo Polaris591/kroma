@@ -1396,24 +1396,24 @@
       "decision": "provider_contract::streaming_responses_report_their_own_model_identity and retry_token_allowance_blocks_transmission_and_preserves_unknown_spend (unknown is never recorded as free)"
     },
     "KR-L04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "3204768",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/l04-workspace-test.log",
+          "sha256": "727ff5145c1a96bf7f3601d2320aa2e991590598235376175b70dc849087dc04",
+          "source_tree_sha256": "2f5203606b9bc0713fd1c3c7d4028d2066f2e080b489f0221a4b9ce42409411e",
+          "completed_utc": "2026-10-21T11:35:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1306
         }
       ],
       "blocker": null,
-      "decision": "Retry-After is parsed (transport.rs:754/756) and retry accounting is covered (provider_contract::retry_token_allowance_blocks_transmission_and_preserves_unknown_spend, runner_retry_exhaustion_retains_first_attempt_and_sends_once). Missing: seeded/deterministic jitter -- grep for seed in provider/*.rs returns nothing."
+      "decision": "Retry-After is already parsed (transport.rs 754/756) and every attempt is accounted (provider_contract::retry_token_allowance_blocks_transmission_and_preserves_unknown_spend, runner_retry_exhaustion_retains_first_attempt_and_sends_once, failed_provider_call_reports_its_real_wire_attempts). The missing piece was testable jitter: ChannelPolicy gains Option<JitterPolicy> (percent + seed), and backoff_for_attempt now adds a spread derived from xorshift64* over (seed, attempt), so production can spread retries while a report still states the plan. Default stays None, so existing timing is unchanged. Test seeded_jitter_is_reproducible_and_spreads pins: same seed+attempt gives the same delay, jitter only adds, the 50% bound holds, and different seeds actually differ. The overall deadline is not reset per attempt (backoff() caps against the remaining timeout)."
     },
     "KR-L05": {
       "status": "VERIFIED",
