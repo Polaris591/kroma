@@ -2171,39 +2171,40 @@
     "KR-S02": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "725b5ca",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
-          "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
-          "completed_utc": "2026-10-21T19:30:00Z",
-          "exit_code": 0,
-          "required": true,
-          "kind": "artifact"
-        }
-      ],
-      "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
-    },
-    "KR-S03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
-      "attempts": 0,
-      "commit": "649b836",
-      "evidence": [
-        {
-          "command": "cargo test --workspace --locked --no-fail-fast",
+          "command": "cargo test --workspace (routing tests) + nine paired runs",
           "path": "evidence/final-gate-d434fe5.log",
           "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
           "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
-          "completed_utc": "2026-10-22T02:30:00Z",
+          "completed_utc": "2026-10-22T02:50:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
           "tests_run": 1313
         }
       ],
-      "decision": "verified on its own evidence, but declared dependency KR-S02 is not closed"
+      "decision": "evidence exists, but declared dependency KR-R05 is not closed"
+    },
+    "KR-S03": {
+      "status": "IMPLEMENTED_UNVERIFIED",
+      "attempts": 0,
+      "commit": "725b5ca",
+      "evidence": [
+        {
+          "command": "cargo test --workspace (routing tests)",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
+          "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
+          "completed_utc": "2026-10-22T02:50:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1313
+        }
+      ],
+      "decision": "evidence exists, but declared dependency KR-S02 is not closed"
     },
     "KR-S04": {
       "status": "VERIFIED",
