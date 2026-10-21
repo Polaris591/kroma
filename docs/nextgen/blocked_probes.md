@@ -70,12 +70,12 @@ no deployment present
 ## KR-T04 独立最终验收
 
 依赖 KR-A03 / KR-Q06 / KR-T02 / KR-T03 / KR-F06。Q06、T02 外部阻塞（T03 现已 VERIFIED，此处描述的是当时状态），
-F06 的负实验登记为空。任务卡要求"所有 mandatory 适用门禁 VERIFIED 才可称发布候选验收通过；
+F06 的负实验登记已有真实条目（candidate-on-demand-tools 因 dev/holdout 方向相反不晋升）。任务卡要求"所有 mandatory 适用门禁 VERIFIED 才可称发布候选验收通过；
 仍有 blocked 必须醒目标出"——当前仍有 blocked，故不能通过，只能如实标出。
 
 ## KR-R01 资源基线（已修正误判）
 
-p0（`kroma --version`）三次重复可复现：wall 4.70ms 中位数，树 PSS 2.2–3.5MB。
+p0（`kroma --version`，release，三次重复）：wall 4.197ms 中位数（4.384/4.197/3.391），树 PSS 2.5–3.1MB。
 
 p2/p3/p4 曾经在 60 秒超时，我一度记成「ACP 的 workspace.graph 挂住」。**那是误判。** 真实原因是
 ACP 在没有 owner spend envelope 时 fail-closed 退出（KR-E04 引入的安全行为），而测量脚本是那之前
@@ -84,9 +84,9 @@ ACP 在没有 owner spend envelope 时 fail-closed 退出（KR-E04 引入的安�
 修好脚本参数后，同一台机器上：
 
 ```
-p2  graph 3296ms 中位数 / init 11ms / 树 PSS 75MB   (本仓 560 文件)
+p2  graph 397.6ms 中位数 / init 6.7ms / 树 PSS 62–65MB   (本仓 1200 文件，release)
 p3  graph 245ms  中位数 / 树 PSS 25MB               (生成的小树)
-p4  4 个并发 acp 会话，树 PSS 269MB
+p4  4 个并发 acp 会话，树 PSS 228.9MB 中位数（228.0–234.6，release）
 ```
 
 全部 `exit_zero=True, timed_out=False`。源码没有改动，改的是 `scripts/measure-local-baseline.py`。

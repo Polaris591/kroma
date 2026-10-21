@@ -12,7 +12,7 @@
 | 单次成本 | dev 套件 53k–150k token/arm，中位约 115k；每次 7–9 分钟墙钟 |
 | 成本/成功 | 中位 arm 115k token / 6 个成功 ≈ 19k token 每任务成功 |
 | 稳定性 | 同 baseline 同套件不同轮次 6/6 与 4/6，单次漂移约 2 个任务；小于 5% 的 token 差异算无结论 |
-| 资源（release，3 次中位） | p0 4.384ms / 3.1MB；p2 图 397.6ms / 65MB；p3 34.0ms / 15.6MB；p4 四会话 234MB |
+| 资源（release，3 次中位） | p0 4.197ms / 2.7–3.1MB；p2 图 397.6ms / 62–65MB（1200 文件）；p3 34.0ms / 15.6MB；p4 四会话 228.9MB |
 
 ## 2. Pareto 权衡（token vs 质量）
 
@@ -62,9 +62,9 @@
 - 无 Windows / macOS 真机：T02 阻塞，跨平台只做了 Linux 交叉构建（PE32+ x86_64 39.79s）。
 - 无第三方安全工具链（semgrep/cargo-audit/cargo-deny）与独立评审方：Q06 阻塞，T04 依赖它。
 - 无部署实例可灰度：S06 阻塞。
-- 27 个 harness 里 2 个可运行（pi，以及 /usr/local/lib/nodejs/bin/codex 的 codex-cli 0.163.0），25 个不可得；
-  逐项处置在 `f05_disposition.md`，探测在 `f05_availability.txt`。可比子集要出排行榜还需 codex 的 OpenAI 凭据，
-  本机没有配置，所以记为「可比但未排名」。
+- 27 个 harness 里 3 个已安装可运行（pi 1.5.0、codex-cli 0.163.0、mini-swe-agent 2.4.6），7 个在 pypi/npm 上可解析但本轮没装，
+  17 个没有尝试、标为 unverified（不再声称不可得）。mini-swe-agent 是任务书点名的可控臂，本轮真装了并在 fix-off-by-one 上跑通
+  （`f05_msw_run.txt`）；逐项处置在 `f05_disposition.md`。可比子集要出完整排行榜还需 codex 的 OpenAI 凭据，本机没配。
 - 端点不支持 provider-native compaction 与 tool search：J06/L06 阻塞，探测在 `j06_l06_probe.txt`。
 - 未实现（范围外，5 项）：KR-I06, KR-J03, KR-J04, KR-J05, KR-O02。
 

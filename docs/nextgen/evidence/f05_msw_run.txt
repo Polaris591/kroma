@@ -1,0 +1,19 @@
+# F05 arm run: mini-SWE-agent 2.4.6 on the taskbook's fix-off-by-one
+
+$ python3 -m venv /tmp/msw-venv && /tmp/msw-venv/bin/pip install mini-swe-agent
+installed: 2.4.6
+
+$ MSWEA_CONFIGURED=1 MSWEA_MODEL_NAME=openai/gpt-6.1-sol OPENAI_API_BASE=https://cobblemon.asia/v1 \\
+  /tmp/msw-venv/bin/mini -t "tests/test_calc.py fails: total(3) returns 3, expected 6. Fix src/calc.py ..." -y --exit-immediately
+
+trajectory: evidence/f05_msw_mini_trajectory.json
+resulting src/calc.py:
+def total(n):
+    return sum(range(n + 1))
+
+$ cd /tmp/f05-arm && python3 -m pytest tests/test_calc.py -q
+.                                                                        [100%]
+1 passed in 0.00s
+
+Verdict: mini-SWE-agent installs and runs here, and it solved the same task the Kroma arms run.
+The earlier 'only pi is available' claim was wrong: the probe never attempted an install.

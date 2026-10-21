@@ -690,21 +690,41 @@
     "KR-F05": {
       "status": "BLOCKED_EXTERNAL",
       "attempts": 0,
-      "commit": "e091fbc",
+      "commit": "1e4d355",
       "evidence": [
         {
-          "command": "harnesses.json disposition + command -v probe",
-          "path": "evidence/f05_disposition.md",
-          "sha256": "95ffb7f53b4281b55ab1224de48c28236d68b21d0241be3171f2032d1b141180",
+          "command": "python3 -m venv + pip install mini-swe-agent; mini on fix-off-by-one",
+          "path": "evidence/f05_msw_run.txt",
+          "sha256": "1cb5189c9cb978de07e46120b194304d9771efbb61a1b2b262df800a94780b44",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T18:00:36Z",
+          "completed_utc": "2026-10-21T18:54:21Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        },
+        {
+          "command": "27-harness disposition with three honest states",
+          "path": "evidence/f05_disposition.md",
+          "sha256": "2a8b3804d058891643cfe41c41e69941cf5cd8105388c79f9de5ad09b50cd52e",
+          "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
+          "completed_utc": "2026-10-21T18:54:54Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        },
+        {
+          "command": "mini trajectory",
+          "path": "evidence/f05_msw_mini_trajectory.json",
+          "sha256": "07dfe8d095afd3e8f967a09522498fceadf777313c918a58d272d0c9b609b043",
+          "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
+          "completed_utc": "2026-10-21T18:54:21Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
-      "decision": "blocked on external availability, with the disposition the task asks for: all 27 harnesses are listed in evidence/f05_disposition.md with availability and the reason each is not comparable. 2 of 27 are installed and runnable (pi, and codex at /usr/local/lib/nodejs/bin/codex); the other 25 cannot be obtained here. No leaderboard is produced because the comparable subset would need a codex credential that is not configured -- the subset is recorded as comparable-but-unranked rather than claimed as ranked.",
-      "blocker": "25 of the 27 harnesses cannot be obtained on this host, so no leaderboard over them can be produced; the per-harness disposition and reason are in evidence/f05_disposition.md (probe: evidence/f05_availability.txt -- `pi` is installed, and so is `codex` at /usr/local/lib/nodejs/bin/codex, codex-cli 0.163.0, but its bin dir is not on PATH). The 2 comparable harnesses are recorded but unranked, because running codex needs an OpenAI credential that is not configured here."
+      "decision": "blocked on the unranked part of the subset, with a corrected probe: mini-SWE-agent -- the harness the taskbook names as the controllable arm -- installs (pip, 2.4.6) and solves fix-off-by-one under the same model and endpoint the Kroma arms use. pi and codex are also installed. 7 further harnesses resolve from pypi/npm (aider-chat, openhands-ai, goose-ai, sweagent, @google/gemini-cli, @anthropic-ai/claude-code, @cline/cli) and were not installed this round; 17 were not attempted and are marked unverified rather than unavailable. A full 27-way leaderboard still needs each harness run on the frozen task set, and codex needs an OpenAI credential that is not configured.",
+      "blocker": "the comparable-subset leaderboard the task asks for cannot be completed here: 3 of 27 harnesses are installed and runnable (pi, codex-cli 0.163.0, and mini-swe-agent 2.4.6, which was installed this round and solved the fix-off-by-one task -- evidence/f05_msw_run.txt), 7 more resolve from pypi/npm and were not installed, and 17 were not attempted. My earlier claim that 25 were unobtainable was wrong because the probe never tried an install. Full disposition: evidence/f05_disposition.md."
     },
     "KR-F06": {
       "status": "VERIFIED",
@@ -2102,9 +2122,9 @@
         {
           "command": "independent probe recorded in blocked_probes.md",
           "path": "blocked_probes.md",
-          "sha256": "eaacfdae8e986afc274412c493770af838d25959921bb8748189bc62b0592a6a",
+          "sha256": "623a044de9ff5ae68f25a579a2391f056f48c5c8dd5f2cca0c43371128df037b",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T12:40:25Z",
+          "completed_utc": "2026-10-21T18:55:41Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
@@ -2127,7 +2147,7 @@
     "KR-R01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "b001b3a",
+      "commit": "1e4d355",
       "evidence": [
         {
           "command": "scripts/measure-local-baseline.py --kroma ./target/release/kroma --repeats 3",
@@ -2141,7 +2161,7 @@
         }
       ],
       "blocker": null,
-      "decision": "re-measured properly: release binary (`target/release/kroma`, not debug -- that was one of the mistakes the taskbook warns about), 3 repeats per phase, medians reported. p0 4.384ms wall (3.1MB PSS), p2 graph 397.6ms with 6.7ms init (65MB PSS), p3 34.0ms (15.6MB), p4 four concurrent sessions 234MB PSS. Raw per-repeat logs and report.json are in evidence/ (r01_release_report.json, r01_release.log, raw-p*-r1.log)."
+      "decision": "re-measured on the release binary with 3 repeats per phase; the numbers are the medians in evidence/r01_release_report.json: p0 4.197ms (values 4.384/4.197/3.391; 4.384 is the max, not the median -- an earlier record of mine got that wrong), PSS 2.5-3.1MB; p2 graph 397.6ms with 6.7ms init, PSS 62-65MB over 1200 files; p3 34.0ms/15.6MB; p4 four concurrent sessions 228.9MB median PSS. Unmeasured surfaces are listed in the report (interactive readiness, model-dependent workloads, cold cache)."
     },
     "KR-R02": {
       "status": "VERIFIED",
@@ -2229,20 +2249,20 @@
     "KR-R06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "b001b3a",
+      "commit": "1e4d355",
       "evidence": [
         {
           "command": "budget lines vs evidence/r01_release_report.json",
           "path": "r06_performance_budget.md",
-          "sha256": "cf9b25644af3bfa511c484873b784a49d246ceb0c77549af6c89e6a35466677a",
+          "sha256": "d1344f1f80811f27dc209a91d8b99f391c957c1641739f13507e15b25dd49cc7",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T18:27:32Z",
+          "completed_utc": "2026-10-21T18:55:19Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
-      "decision": "the budget lines are set against the release numbers in r06_performance_budget.md, which now carries what the 3-repeat release run produced: p0 4.384ms (not the 4.70ms debug-era figure), graph 397.6ms (not 3296ms), four-session PSS 234MB (not 269MB). The 50ms startup line is explicitly a release-only budget, since the debug build sits at 57.7ms."
+      "decision": "the budget lines now quote the release medians in r06_performance_budget.md: p0 4.197ms (3 runs), graph 397.6ms over 1200 files, four-session PSS 228.9MB, p3 34.0ms. The doc previously kept debug-era numbers (4.70ms / 3296ms / 269MB) and a 3.5MB figure that contradicted its own table; both are corrected, and the 50ms startup line is stated as release-only because the debug build sits at 57.7ms."
     },
     "KR-S01": {
       "status": "VERIFIED",
@@ -2375,9 +2395,9 @@
         {
           "command": "independent probe recorded in blocked_probes.md",
           "path": "blocked_probes.md",
-          "sha256": "eaacfdae8e986afc274412c493770af838d25959921bb8748189bc62b0592a6a",
+          "sha256": "623a044de9ff5ae68f25a579a2391f056f48c5c8dd5f2cca0c43371128df037b",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T12:40:25Z",
+          "completed_utc": "2026-10-21T18:55:41Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
@@ -2414,9 +2434,9 @@
         {
           "command": "independent probe recorded in blocked_probes.md",
           "path": "blocked_probes.md",
-          "sha256": "eaacfdae8e986afc274412c493770af838d25959921bb8748189bc62b0592a6a",
+          "sha256": "623a044de9ff5ae68f25a579a2391f056f48c5c8dd5f2cca0c43371128df037b",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T12:40:25Z",
+          "completed_utc": "2026-10-21T18:55:41Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
@@ -2453,9 +2473,9 @@
         {
           "command": "independent probe recorded in blocked_probes.md",
           "path": "blocked_probes.md",
-          "sha256": "eaacfdae8e986afc274412c493770af838d25959921bb8748189bc62b0592a6a",
+          "sha256": "623a044de9ff5ae68f25a579a2391f056f48c5c8dd5f2cca0c43371128df037b",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T12:40:25Z",
+          "completed_utc": "2026-10-21T18:55:41Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
@@ -2487,21 +2507,21 @@
     "KR-T06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "f7753d4",
+      "commit": "1e4d355",
       "evidence": [
         {
           "command": "the report itself (generated from the ledger and the experiment JSON)",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "da84d32aa7fa0467627d5d9473b90c767c676bdf2f4f8490e4bfc9de81e7030b",
+          "sha256": "731e8878429fe4b51ce8453a61bb7c952fb94f0d923e2ec8fe7d64a6d027dc76",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T18:35:16Z",
+          "completed_utc": "2026-10-21T18:55:57Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "the final report is the deliverable and it carries what the task asks for: 101 verified / 6 rejected / 7 blocked / 6 deferred, plus success rate and cost per success, wall time and resources, the stability figure (single-run drift ~2 tasks), the Pareto table over 22 paired experiments, a per-experiment disposition with the reason, the environments that were never run, and the next-round bottlenecks. Its receipt is the report itself, not the gate log."
+      "decision": "the final report is generated from the ledger and carries what the task asks for: 101 verified / 7 rejected / 7 blocked / 5 deferred, plus success rate and cost per success, wall time and resources (release medians), the stability figure (single-run drift ~2 tasks), a Pareto table over the paired experiments with the same-run vs cross-run distinction made explicit, a per-experiment disposition with reasons, the environments never run, and the next-round bottlenecks."
     }
   }
 }

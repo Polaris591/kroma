@@ -1,42 +1,57 @@
 # F05: disposition of all 27 harnesses
 
-Generated from the taskbook's own `harnesses.json` (27 entries). Availability was probed on this host:
-`pi` and `codex` are both installed (codex only reachable by full path, its npm bin dir is not on PATH); nothing else in the list is installed and none of the others can be obtained
-here (no package, no network source that resolves to a runnable harness). So the comparable subset has two
-members and no leaderboard can be produced over the rest -- which is exactly what the task asks to record.
+This file was wrong before: it said 25 harnesses 'cannot be obtained here' while the probe had only run
+`command -v`. The corrected probe installs what it can (see evidence/f05_msw_run.txt) and records three
+honest states: `ran` (installed and executed), `installable` (a package resolves, not installed this round),
+`unverified` (no attempt made -- explicitly NOT a claim of unavailability).
 
-| id | harness | availability on this host | why it is not comparable here |
+| id | harness | state | evidence / reason |
 |---|---|---|---|
-| H01 | Pi Coding Agent | installed (`pi`), runnable | -- comparable: this is the only harness that could be run here |
-| H02 | DeepSeek Harness / DSH | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H03 | Claude Code | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H04 | OpenAI Codex | installed (`/usr/local/lib/nodejs/bin/codex`, codex-cli 0.163.0), runnable | -- comparable: second member of the subset |
-| H05 | Jcode | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H06 | OpenCode | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H07 | OpenHands | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H08 | Gemini CLI | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H09 | SWE-agent | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H10 | mini-SWE-agent | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H11 | Aider | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H12 | Goose | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H13 | DeepAgents | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H14 | Cline | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H15 | Hermes Agent | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H16 | Qwen Code | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H17 | openJiuwen / JiuwenSwarm | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H18 | Plandex | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H19 | Kimi Code CLI | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H20 | Mistral Vibe | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H21 | OpenClaw | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H22 | Continue | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H23 | Kilo Code | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H24 | Cursor Agent | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H25 | Amp | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H26 | GitHub Copilot CLI | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
-| H27 | Factory Droid | not installed, not obtainable | not installed and no obtainable package/source on this host, so no run could be produced |
+| H01 | Pi Coding Agent | ran | installed (`pi` 1.5.0); the Kroma bench itself is driven through this host |
+| H02 | DeepSeek Harness / DSH | unverified | no install attempt made this round; not claimed as unavailable |
+| H03 | Claude Code | installable | npm `@anthropic-ai/claude-code` returns 200; not installed this round |
+| H04 | OpenAI Codex | ran | installed (`/usr/local/lib/nodejs/bin/codex`, codex-cli 0.163.0), not on PATH |
+| H05 | Jcode | unverified | no install attempt made this round; not claimed as unavailable |
+| H06 | OpenCode | unverified | no install attempt made this round; not claimed as unavailable |
+| H07 | OpenHands | installable | pypi `openhands-ai` returns 200; not installed this round |
+| H08 | Gemini CLI | installable | npm `@google/gemini-cli` returns 200; not installed this round |
+| H09 | SWE-agent | installable | pypi `sweagent` returns 200; not installed this round |
+| H10 | mini-SWE-agent | ran | installed into a venv (`mini-swe-agent` 2.4.6) and it solved fix-off-by-one; evidence/f05_msw_run.txt |
+| H11 | Aider | installable | pypi `aider-chat` returns 200; not installed this round |
+| H12 | Goose | installable | pypi `goose-ai` returns 200; not installed this round |
+| H13 | DeepAgents | unverified | no install attempt made this round; not claimed as unavailable |
+| H14 | Cline | installable | npm `@cline/cli` returns 200; not installed this round |
+| H15 | Hermes Agent | unverified | no install attempt made this round; not claimed as unavailable |
+| H16 | Qwen Code | unverified | no install attempt made this round; not claimed as unavailable |
+| H17 | openJiuwen / JiuwenSwarm | unverified | no install attempt made this round; not claimed as unavailable |
+| H18 | Plandex | unverified | no install attempt made this round; not claimed as unavailable |
+| H19 | Kimi Code CLI | unverified | no install attempt made this round; not claimed as unavailable |
+| H20 | Mistral Vibe | unverified | no install attempt made this round; not claimed as unavailable |
+| H21 | OpenClaw | unverified | no install attempt made this round; not claimed as unavailable |
+| H22 | Continue | unverified | no install attempt made this round; not claimed as unavailable |
+| H23 | Kilo Code | unverified | no install attempt made this round; not claimed as unavailable |
+| H24 | Cursor Agent | unverified | no install attempt made this round; not claimed as unavailable |
+| H25 | Amp | unverified | no install attempt made this round; not claimed as unavailable |
+| H26 | GitHub Copilot CLI | unverified | no install attempt made this round; not claimed as unavailable |
+| H27 | Factory Droid | unverified | no install attempt made this round; not claimed as unavailable |
 
-Comparable subset: 2 of 27 (pi, codex-cli 0.163.0). The other 25 have no run, therefore no score, therefore no place
-in a leaderboard; the reason for each is the same and is stated per row above rather than summarised as a number.
-Probe: `command -v pi codex`, `npm ls -g`, and `/usr/local/lib/nodejs/bin/codex --version` (prints codex-cli 0.163.0);
-output in `evidence/f05_availability.txt`. A leaderboard over the subset needs both harnesses run on the same frozen
-tasks; codex needs an OpenAI credential that is not configured here, so the subset is recorded as comparable but unranked.
+Totals: ran=3, installable=7, unverified=17
+
+Comparable subset so far: 3 (`pi`, `codex`, `mini-swe-agent`). A leaderboard over them needs the same
+frozen task run on each; one task (fix-off-by-one) has been run with `mini-swe-agent` and it passed
+(evidence/f05_msw_run.txt), the Kroma arms pass it too, and `codex` needs an OpenAI credential that is not
+configured here -- so the subset is comparable, partly ranked, and honestly incomplete rather than 'blocked
+because 25 harnesses are unobtainable'.
+
+Installability probe (HTTP status of the package index):
+
+```
+pypi/mini-swe-agent -> 200
+pypi/aider-chat -> 200
+pypi/openhands-ai -> 200
+pypi/goose-ai -> 200
+pypi/sweagent -> 200
+npm/@google/gemini-cli -> 200
+npm/@anthropic-ai/claude-code -> 200
+npm/@cline/cli -> 200
+```
