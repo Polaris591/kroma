@@ -374,52 +374,124 @@
       "decision": null
     },
     "KR-D03": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:10:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "session_state_transaction: interrupted_fork_is_completed_from_its_durable_intent, corrupt_manifest_blocks_mutations_and_degrades_status (unknown/recovery-required), resumed_runtime_completes_an_interrupted_fork"
     },
     "KR-D04": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:10:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "session_state_transaction: workspace_bound_fork_refuses_to_overwrite_an_external_edit, force_fork_overwrites_an_external_edit_explicitly, interrupted_restore_blocks_new_mutation_until_recovered"
     },
     "KR-D05": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:10:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "durable_tasks: restart_recovery_marks_a_started_task_unknown_and_refuses_resume, a_live_paused_started_task_refuses_a_second_run, two_concurrent_resumes_run_the_backend_once, a_pending_merge_intent_is_replayed_idempotently"
     },
     "KR-D06": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:10:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "t15_evidence_store: evicted_text_can_be_loaded_by_trusted_artifact_ref (byte-level restore), fork_does_not_cross_read_sibling_evidence (cross-domain refused), gc_keeps_referenced_artifacts_and_reports_failures"
     },
     "KR-E01": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "t14_cache_accounting::cache_hit_measurement_separates_creation_from_read plus cache_write_unknown_is_not_a_measured_zero_on_writing_models; unknown is never priced as free"
     },
     "KR-E02": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "t18_usage_cost::cache_creation_and_read_have_distinct_rates, mixed_returned_models_are_priced_per_attempt, byte_estimate_cannot_claim_provider_measured_cost"
     },
     "KR-E03": {
       "status": "TODO",
@@ -646,16 +718,16 @@
       "decision": null
     },
     "KR-J01": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5ebe3d4",
+      "commit": "efba4b2",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
           "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
           "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
-          "completed_utc": "2026-10-21T00:00:00Z",
+          "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
@@ -663,7 +735,7 @@
         }
       ],
       "blocker": null,
-      "decision": "pairing invariant is covered by gate2_evidence_projection::tool_pairing_invariant; stays unverified until KR-D06 (its declared dependency) lands"
+      "decision": "gate2_evidence_projection::test_projection_profiles_ab_metrics_and_tool_pairing_invariant; tool calls and results stay paired"
     },
     "KR-J02": {
       "status": "TODO",
@@ -770,12 +842,24 @@
       "decision": null
     },
     "KR-L03": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:20:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "provider_contract::streaming_responses_report_their_own_model_identity and retry_token_allowance_blocks_transmission_and_preserves_unknown_spend (unknown is never recorded as free)"
     },
     "KR-L04": {
       "status": "TODO",
@@ -802,16 +886,16 @@
       "decision": null
     },
     "KR-M01": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5ebe3d4",
+      "commit": "efba4b2",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
           "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
           "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
-          "completed_utc": "2026-10-21T00:00:00Z",
+          "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
@@ -819,7 +903,7 @@
         }
       ],
       "blocker": null,
-      "decision": "role is carried by the TranscriptItem enum; new test asserts projection keeps the role sequence. Stays unverified until KR-J01, which is waiting on KR-D06 (W2)"
+      "decision": "t05_compaction_identity::projection_never_changes_a_message_role (added); role is carried by the TranscriptItem enum so projection cannot promote lower-trust content"
     },
     "KR-M02": {
       "status": "TODO",
@@ -862,12 +946,24 @@
       "decision": null
     },
     "KR-N01": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:20:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "b11b_child_capability_decay::child_automatic_authority_never_exceeds_the_parent; t32_child_policy_propagation::provider_subagent_backend_installs_the_request_execution_policy"
     },
     "KR-N02": {
       "status": "TODO",
@@ -910,12 +1006,24 @@
       "decision": null
     },
     "KR-O01": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "c0004_revocation::a_revoked_capability_refuses_the_old_lease_and_names_itself, revoking_during_an_in_flight_initialisation_reports_revocation; gate3 generation tests"
     },
     "KR-O02": {
       "status": "TODO",
@@ -934,12 +1042,24 @@
       "decision": null
     },
     "KR-O04": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:20:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "experience_production_contract::imported_data_cannot_self_accept_and_policy_conditions_expiry_are_enforced and stale_revision_and_untrusted_workspace_imports_are_refused"
     },
     "KR-O05": {
       "status": "TODO",
@@ -958,20 +1078,44 @@
       "decision": null
     },
     "KR-P01": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:00:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "t11_assembly::feature_matrix_covers_cli_rpc_bench_worker_resume and same_run_plan_has_same_policy_across_all_surfaces"
     },
     "KR-P02": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:20:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "connection_ownership::unauthenticated_connection_receives_no_business_notifications and authenticated_connection_receives_business_notifications; 36 tests in the target"
     },
     "KR-P03": {
       "status": "TODO",
@@ -1022,12 +1166,23 @@
       "decision": null
     },
     "KR-Q03": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "efba4b2",
+      "evidence": [
+        {
+          "command": "python3 (dependency inventory)",
+          "path": "dependency_licenses.json",
+          "sha256": "535f55bea06dbbd55fe5801d0dd087d94bf3b840ff564418725e149452d06294",
+          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "completed_utc": "2026-10-21T01:20:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "dependency and license inventory generated from the workspace manifests; no vendored upstream sources under crates/"
     },
     "KR-Q04": {
       "status": "TODO",

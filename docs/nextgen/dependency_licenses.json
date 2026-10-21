@@ -1,0 +1,28 @@
+{
+  "task": "KR-Q03",
+  "project_license": "MIT",
+  "license_file_present": true,
+  "direct_dependency_count": 15,
+  "direct_dependencies": [
+    "jsonschema",
+    "kroma-core",
+    "libc",
+    "native-tls",
+    "path",
+    "regex",
+    "resolver",
+    "serde",
+    "serde_json",
+    "sha2",
+    "thiserror",
+    "tokio",
+    "tokio-native-tls",
+    "uuid",
+    "windows-sys"
+  ],
+  "declared_license_claims": [
+    "MIT"
+  ],
+  "note": "Only direct dependencies declared in the workspace manifests are listed; the authoritative license text for each crate lives in the vendored registry, not in this tree. No upstream source was copied into Kroma: the mechanisms are reimplemented, and the taskbook's RESEARCH.md citations are references, not vendored code.",
+  "copied_upstream_code": "none identified; no vendored third-party sources under crates/"
+}
