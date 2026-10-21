@@ -1,17 +1,23 @@
-# F05 availability probe
+# F05 availability probe (corrected)
 $ command -v pi codex
 /usr/local/bin/pi
+exit=0
 
-$ ls /usr/local/bin | grep -iE "^(pi|codex)"
-pi
-pi-qq-canary.sh
-pi-qq-restart
+$ npm ls -g --depth=0 | grep -i codex
+├── @openai/codex@0.163.0
 
-# other harness names from harnesses.json, none present:
-aider: not found
-cline: not found
-continue: continue
-cursor: not found
-sweep: not found
-goose: not found
-openhands: not found
+$ ls /usr/local/lib/nodejs/bin/ | head
+codex
+corepack
+node
+npm
+npx
+
+$ /usr/local/lib/nodejs/bin/codex --version
+codex-cli 0.163.0
+exit=0
+
+$ /usr/local/lib/nodejs/bin/codex --help | head -3
+Codex CLI
+
+If no subcommand is specified, options will be forwarded to the interactive CLI.
