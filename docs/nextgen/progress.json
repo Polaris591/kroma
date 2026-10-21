@@ -804,22 +804,23 @@
       "decision": "three arms measured (off / implicit / explicit) on the dev suite over openai-responses: cache hit ratio rises 0.299 -> 0.665 -> 0.76, but tokens rise too (86147 -> 89162 -> 87557), so on short histories the write cost exceeds the read saving. explicit beats implicit on both hit ratio and total tokens, so if caching is ever enabled it should be explicit. The shipped default stays off, and this data supports that default. Caveat: three separate runs (mode is provider-level), and the implicit run passed 5/6 where the others passed 6/6 -- inside the known single-repetition noise band."
     },
     "KR-G04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "33c3b60",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:45:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (context_cache_stability, t14_cache_accounting, repeated_read_runner), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "unsupported combinations are refused or degraded explicitly, with evidence, and no cross-model promise is made: each protocol adapter declares what it can express (message_semantics) and the client refuses what it cannot honour -- sse_contract covers missing done / truncated length / multi-block reasoning / indexless tool calls / unterminated done, and anthropic cache breakpoints are only sent when the adapter declares support (the adapter refuses rather than silently dropping them, per the cache_breakpoints gate in agent_loop). The three-mode OpenAI cache arms were measured in KR-G03. What is NOT claimed: a general \"compatible with every model\" statement."
     },
     "KR-G05": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -2200,22 +2201,23 @@
       "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-S04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "33c3b60",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:45:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "AHE is not free self-modification: a probe action runs only on an isolated copy (adaptive_production_contract::a_probe_action_runs_only_on_an_isolated_copy), an unauthorised or unisolated probe is never executed (unauthorized_or_unisolated_probes_are_never_executed), a cancelled adaptive run does not merge late-completed candidate bytes, and a completed adaptive run records its usage plus the merged revision with undo (adaptive_runtime_records_completion_usage_and_merged_revision_with_undo). Attribution and reversibility are therefore structural, and self_repair_guard (KR-Q02) blocks candidates that touch the scorer, gate or promotion rules."
     },
     "KR-S05": {
       "status": "IMPLEMENTED_UNVERIFIED",
