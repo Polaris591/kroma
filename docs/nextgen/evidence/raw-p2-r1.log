@@ -1,0 +1,9 @@
+# argv=['acp', '--max-tokens', '100000'] exit=0 timed_out=False
+## stdout
+
+## stderr
+kroma: plan d4cd30989eb3 (3 features eligible)
+kroma: features
+context_compaction: configured=1 eligible=1 executed=0 skipped=[]
+snapshot_store: configured=1 eligible=1 executed=0 skipped=[]
+tool_discovery: configured=1 eligible=1 executed=0 skipped=[]

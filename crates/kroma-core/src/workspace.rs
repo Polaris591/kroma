@@ -191,6 +191,12 @@ impl WorkspaceCap {
         self
     }
 
+    /// Flip the stat fast path on an existing capability, so a measurement can compare both paths
+    /// against the same warm cache instead of two independently cold ones.
+    pub fn set_graph_stat_cache(&mut self, enabled: bool) {
+        self.graph_stat_cache_enabled = enabled;
+    }
+
     pub fn graph_stat_cache_enabled(&self) -> bool {
         self.graph_stat_cache_enabled
     }

@@ -7,13 +7,13 @@
     "KR-A01": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -27,13 +27,13 @@
     "KR-A02": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -42,18 +42,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-A02: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (gate0_config_and_events + t03_context_budget); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-A03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -62,18 +62,18 @@
         }
       ],
       "blocker": null,
-      "decision": "all 49 host-blocked failures clear on a capable host: 1295 passed / 0 failed, 0 ignored, no tests removed or ignored"
+      "decision": "all 49 host-blocked failures clear on a capable host: 1314 passed / 0 failed, 0 ignored, no tests removed or ignored"
     },
     "KR-A04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -87,13 +87,13 @@
     "KR-A05": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -102,18 +102,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-A05: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (t03_context_budget + t38_prereg_oracle_authority); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-A06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -127,13 +127,13 @@
     "KR-B01": {
       "status": "VERIFIED",
       "attempts": 3,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -147,13 +147,13 @@
     "KR-B02": {
       "status": "VERIFIED",
       "attempts": 2,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -167,13 +167,13 @@
     "KR-B03": {
       "status": "VERIFIED",
       "attempts": 2,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -187,13 +187,13 @@
     "KR-B04": {
       "status": "VERIFIED",
       "attempts": 4,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -207,13 +207,13 @@
     "KR-B05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -222,18 +222,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-B05: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (t06_bounded_io); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-B06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -242,18 +242,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-B06: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (t16_repo_graph_budget); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-C01": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -262,18 +262,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-C01: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (gate3_reversible_extensions); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-C02": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -282,18 +282,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-C02: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (c0008_deferred_failure + gate3_reversible_extensions); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-C03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -307,13 +307,13 @@
     "KR-C04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -322,18 +322,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-C04: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (gate3_reversible_extensions); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-C05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -342,18 +342,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-C05: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (c00_07_taskstate_binding); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-C06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -367,13 +367,13 @@
     "KR-D01": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -382,18 +382,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-D01: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (session_ownership); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-D02": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -402,18 +402,18 @@
         }
       ],
       "blocker": null,
-      "decision": "KR-D02: closed on the batch gate receipt plus its own target tests; see evidence/final-gate-cb8f764.log."
+      "decision": "the mechanism is implemented and the batch gate on cb8f764 runs its own targets (c00_07_taskstate_binding); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
     },
     "KR-D03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -427,13 +427,13 @@
     "KR-D04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -447,13 +447,13 @@
     "KR-D05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -467,13 +467,13 @@
     "KR-D06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -487,13 +487,13 @@
     "KR-E01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -507,13 +507,13 @@
     "KR-E02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -527,13 +527,13 @@
     "KR-E03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -547,13 +547,13 @@
     "KR-E04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -567,13 +567,13 @@
     "KR-E05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -587,13 +587,13 @@
     "KR-E06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -607,13 +607,13 @@
     "KR-F01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -627,13 +627,13 @@
     "KR-F02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -647,13 +647,13 @@
     "KR-F03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -667,13 +667,13 @@
     "KR-F04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -684,7 +684,7 @@
       "decision": "orthogonal-factor experiment: the tool menu size is the dominant cost factor, and it is explainable rather than a mystery. Full menu: 6/6 at 119568 tokens. Minimal menu (read/edit/write/ls/find/grep): 6/6 at 53276 tokens -- a 55% reduction with identical quality, because every tool schema is part of the static prefix (measured earlier at 8.7 KB of a 9.4 KB prefix). The interaction is explicit: these dev tasks need only file tools, so dropping the rest costs nothing here; a task needing code_graph or delegation would pay for it. That is why the result is \"the factor is large and shaped by task type\", not \"always send 7 tools\"."
     },
     "KR-F05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "959e6c4",
       "evidence": [
@@ -699,19 +699,18 @@
           "kind": "artifact"
         }
       ],
-      "decision": "not done; blocked on an external capability (see blocker). No test receipt, so not verified.",
-      "blocker": "26 other harnesses are not obtainable here; only pi and codex exist (which pi dsh / npm ls -g). Comparing harnesses run on different models or budgets is what the task forbids, so this is blocked on external tooling."
+      "decision": "deferred with rationale: the task asks for a disposition of all 27 harnesses plus incomparability reasons, and harnesses.json ships that metadata, so the disposition is offline work, not an external block. What cannot be produced here is a leaderboard over the comparable subset, because 26 of 27 harnesses are unobtainable in this environment; the ADR records each as incomparable with its reason."
     },
     "KR-F06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -725,13 +724,13 @@
     "KR-G01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -745,13 +744,13 @@
     "KR-G02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -765,13 +764,13 @@
     "KR-G03": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -784,13 +783,13 @@
     "KR-G04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -803,13 +802,13 @@
     "KR-G05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -822,13 +821,13 @@
     "KR-G06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -842,13 +841,13 @@
     "KR-H01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -862,13 +861,13 @@
     "KR-H02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -882,13 +881,13 @@
     "KR-H03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -901,13 +900,13 @@
     "KR-H04": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -920,13 +919,13 @@
     "KR-H05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb84680",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -958,13 +957,13 @@
     "KR-I01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1013,15 +1012,15 @@
       "decision": "implemented as an opt-in read-result cache in tools/read.rs and verified with a randomised state-change test: ten rewrites at random offsets/limits, each read replayed with the cache on and off, every pair identical and each round proving the entry was not stale. Two real defects were caught while building it -- keying on (mtime,len) served round-3 bytes at round 6, and ctime did not help because tmpfs ticks coarsely, so the key also hashes the first 8 KiB. The cache stays off by default until a paired run shows it pays (the taskbook rule) and is NOT read_dedup: dedup suppresses a repeated body, this returns the same bytes cheaply."
     },
     "KR-I04": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "bb77c5b",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1029,7 +1028,7 @@
           "tests_run": 1314
         }
       ],
-      "decision": "truncation is reported, and ranking is task-seeded rather than lexicographic-only: budget_excluded_workspace_is_reported_as_truncated_not_empty and changed_early_file_plus_cached_tail_is_bounded pin that a partial index is labelled partial (the model is told the boundary) and that cached and uncached builds obey the same total cap; RepoGraph exposes RankedFile/score and personalized_pagerank (repo_graph.rs:928) so candidates are ranked against the query rather than by walk order. Not measured: a recall@K comparison of ranked vs unranked on real tasks -- that needs a task set with known relevant files, which this round did not build."
+      "decision": "truncation is reported, and ranking is task-seeded rather than lexicographic-only: budget_excluded_workspace_is_reported_as_truncated_not_empty and changed_early_file_plus_cached_tail_is_bounded pin that a partial index is labelled partial (the model is told the boundary) and that cached and uncached builds obey the same total cap; RepoGraph exposes RankedFile/score and personalized_pagerank (repo_graph.rs:928) so candidates are ranked against the query rather than by walk order. Not measured: a recall@K comparison of ranked vs unranked on real tasks -- that needs a task set with known relevant files, which this round did not build. [status corrected: the acceptance metric of this task was not measured, so mechanism tests alone do not make it verified; it is implemented-unverified until its own paired measurement exists.]"
     },
     "KR-I05": {
       "status": "VERIFIED",
@@ -1071,13 +1070,13 @@
     "KR-J01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1091,13 +1090,13 @@
     "KR-J02": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1147,13 +1146,13 @@
     "KR-J05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1185,13 +1184,13 @@
     "KR-K01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1205,13 +1204,13 @@
     "KR-K02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1225,13 +1224,13 @@
     "KR-K03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1245,13 +1244,13 @@
     "KR-K04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1264,13 +1263,13 @@
     "KR-K05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1284,13 +1283,13 @@
     "KR-K06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1304,13 +1303,13 @@
     "KR-L01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1324,13 +1323,13 @@
     "KR-L02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1343,13 +1342,13 @@
     "KR-L03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1363,13 +1362,13 @@
     "KR-L04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1383,13 +1382,13 @@
     "KR-L05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1422,13 +1421,13 @@
     "KR-M01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1442,13 +1441,13 @@
     "KR-M02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1462,13 +1461,13 @@
     "KR-M03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1480,7 +1479,7 @@
       "decision": "HandoffArtifact was dead code -- nothing in the crate called it. Added HandoffArtifact::from_task_state, which derives the artifact from the typed TaskState: the goal is the user's verbatim quote (never a summary), verified items keep both the claim and the check that verified them, unchecked hypotheses stay open questions, contradicted ones are not reopened, and constraints plus path mentions become evidence pointers. Two tests: the full derivation with a JSON round trip (which is how a later segment actually reads it) and the contradicted-hypothesis case. A new work segment can now resume from the ledger instead of depending on the model to remember the taskbook."
     },
     "KR-M04": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "959e6c4",
       "evidence": [
@@ -1496,18 +1495,18 @@
           "tests_run": 3
         }
       ],
-      "decision": "four of five steps are implemented and covered by their own tests: cross-session correction is an explicit accept/revoke API, records carry version and expiry and expired ones stop applying, scope limits follow the source, and revocation orders correctly with evidence. The fifth step -- the 25% latency gain on a deterministic task -- is priced into cost rather than measured, so this rests on mechanism tests, not on a live timing claim."
+      "decision": "four of five steps are implemented and covered by their own tests: cross-session correction is an explicit accept/revoke API, records carry version and expiry and expired ones stop applying, scope limits follow the source, and revocation orders correctly with evidence. The fifth step -- the 25% latency gain on a deterministic task -- is priced into cost rather than measured, so this rests on mechanism tests, not on a live timing claim. [status corrected: the acceptance metric of this task was not measured, so mechanism tests alone do not make it verified; it is implemented-unverified until its own paired measurement exists.]"
     },
     "KR-M05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1540,13 +1539,13 @@
     "KR-N01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1560,13 +1559,13 @@
     "KR-N02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1580,13 +1579,13 @@
     "KR-N03": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1598,15 +1597,15 @@
       "decision": "two measurements decide this. Tournament k=2: quality identical (6/6 both), cost +17% (126948 vs 108459), so multi-candidate competition is NOT enabled. Subagents: disabling them (max_subagents=0) saves 13.3% tokens (103835 vs 119802) with identical quality, because none of the dev tasks need delegation -- so delegation stays available but is not free, and the default is not justified by these tasks. No advisor/exploration/competition feature is switched on without a measured gain."
     },
     "KR-N04": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "07557a2",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1614,18 +1613,18 @@
           "tests_run": 1314
         }
       ],
-      "decision": "stagnation detection exists with a recoverable trail: LoopGuard::check_and_record computes a signature over (tool, arguments) and tracks repeated ping-pong plus edit-failure streaks per path (context_cache_stability::test_loop_guard_repeated_ping_pong_and_edit_streak), rollback_recorded undoes what the guard recorded, and the stop is emitted as EventPayload::LoopGuardTriggered so the reason lands in the log rather than ending silently. Not measured: the false-stop rate on a genuinely long task -- that needs a long-running fixture, which this round did not build."
+      "decision": "stagnation detection exists with a recoverable trail: LoopGuard::check_and_record computes a signature over (tool, arguments) and tracks repeated ping-pong plus edit-failure streaks per path (context_cache_stability::test_loop_guard_repeated_ping_pong_and_edit_streak), rollback_recorded undoes what the guard recorded, and the stop is emitted as EventPayload::LoopGuardTriggered so the reason lands in the log rather than ending silently. Not measured: the false-stop rate on a genuinely long task -- that needs a long-running fixture, which this round did not build. [status corrected: the acceptance metric of this task was not measured, so mechanism tests alone do not make it verified; it is implemented-unverified until its own paired measurement exists.]"
     },
     "KR-N05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1639,13 +1638,13 @@
     "KR-N06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1659,13 +1658,13 @@
     "KR-O01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1697,13 +1696,13 @@
     "KR-O03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "07557a2",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1716,13 +1715,13 @@
     "KR-O04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1736,13 +1735,13 @@
     "KR-O05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "07557a2",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -1755,13 +1754,13 @@
     "KR-O06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1775,13 +1774,13 @@
     "KR-P01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1795,13 +1794,13 @@
     "KR-P02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1815,13 +1814,13 @@
     "KR-P03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1835,13 +1834,13 @@
     "KR-P04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1855,13 +1854,13 @@
     "KR-P05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1875,13 +1874,13 @@
     "KR-P06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1895,13 +1894,13 @@
     "KR-Q01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1915,13 +1914,13 @@
     "KR-Q02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1935,13 +1934,13 @@
     "KR-Q03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1955,13 +1954,13 @@
     "KR-Q04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1975,13 +1974,13 @@
     "KR-Q05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2014,13 +2013,13 @@
     "KR-R01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2037,29 +2036,29 @@
       "commit": "cb8f764",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
+          "command": "cargo test --test r02_graph_stat_cache -- --nocapture",
+          "path": "evidence/r02_graph_stat_cache.log",
+          "sha256": "56e67f6d639dfc40ed52295b2c37a8245f3914dac6f20d99f0a7d578982cf0dd",
           "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T09:35:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1314
+          "tests_run": 1
         }
       ],
-      "decision": "measured the hot spot instead of guessing. Code fact: the graph cache looked up freshness with (len, mtime, content_sha256), and the hash can only be computed after reading the whole file -- so a warm cache saved parsing but not I/O. Measured on this repo, two consecutive graph builds in one ACP session: hash path cold 3279ms / warm 1217ms; with the opt-in (len, mtime) fast path cold 3296ms / warm 891ms. So reading+hashing the unchanged files was 326ms of a 1217ms warm build (27%), and skipping it is the fix. Implementation: RepoGraphCache::get_by_stat, WorkspaceCap::with_graph_stat_cache, KROMA_GRAPH_STAT_CACHE=1. Default stays on the content-hash path because trusting mtime is a correctness trade-off, not a free win. No regression: full suite 1312 passed / 0 failed."
+      "decision": "measured with its own test, and the honest result is narrower than the earlier claim: on 200 x ~16 KiB sources a cold graph build costs 991ms and a warm rebuild 442ms (-55%), which is the per-file parse cache doing its job. The stat fast path I added (`get_by_stat`) does NOT pay as wired -- it lands at 936ms, slower than the warm hash path, because the (len, mtime_ns) hit is not taken on this path. The 27% in an earlier report came from one hand run and is not reproducible; it is withdrawn. The code stays (tested, and it cannot make things worse when it does hit) but nothing claims a win for it."
     },
     "KR-R03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2072,13 +2071,13 @@
     "KR-R04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2091,13 +2090,13 @@
     "KR-R05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5e9665f",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2108,34 +2107,34 @@
       "decision": "mechanism and batch-gate tests exist, but there is no held-out paired measurement of its own, so it stays implemented-unverified. The previous VERIFIED label came from a batch restore and its text still said it could not close."
     },
     "KR-R06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
-      "attempts": 0,
-      "commit": "5e9665f",
-      "evidence": [
-        {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-22T07:40:00Z",
-          "exit_code": 0,
-          "required": true,
-          "kind": "test",
-          "tests_run": 1314
-        }
-      ],
-      "decision": "mechanism and batch-gate tests exist, but there is no held-out paired measurement of its own, so it stays implemented-unverified. The previous VERIFIED label came from a batch restore and its text still said it could not close."
-    },
-    "KR-S01": {
       "status": "VERIFIED",
       "attempts": 0,
       "commit": "cb8f764",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
+          "command": "scripts/measure-local-baseline.py --kroma ./target/debug/kroma --repeats 1",
+          "path": "evidence/r06_baseline.log",
+          "sha256": "7a0e912cb7aac293a1b5de83acabb066173bb31d9b91e013151fea9bf6f53912",
           "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "completed_utc": "2026-10-22T09:05:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 4
+        }
+      ],
+      "decision": "budget lines and stop rules backed by a fresh run of scripts/measure-local-baseline.py: p0 wall 57.69ms, p2 graph 3410ms / peak RSS 77MB, p3 graph 238ms, p4 peak PSS 264MB (raw per-phase logs in evidence/raw-p*-r1.log). The budget in r06_performance_budget.md is set against these numbers, so this item no longer rests on a document that cites nothing."
+    },
+    "KR-S01": {
+      "status": "VERIFIED",
+      "attempts": 0,
+      "commit": "69678a2",
+      "evidence": [
+        {
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2149,13 +2148,13 @@
     "KR-S02": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "725b5ca",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2168,13 +2167,13 @@
     "KR-S03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "725b5ca",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
@@ -2187,13 +2186,13 @@
     "KR-S04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2206,13 +2205,13 @@
     "KR-S05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2244,13 +2243,13 @@
     "KR-T01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2283,13 +2282,13 @@
     "KR-T03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2322,13 +2321,13 @@
     "KR-T05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -2342,13 +2341,13 @@
     "KR-T06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "cb8f764",
+      "commit": "69678a2",
       "evidence": [
         {
-          "command": "cargo test --workspace (in nextgen_rust_gate.sh) + run-sandbox-tests.sh on cb8f764",
-          "path": "evidence/final-gate-cb8f764.log",
-          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
-          "source_tree_sha256": "eeb2ac9d302ec86d30c9d55e6db1a726764969c6134285d4cf60f767805727f5",
+          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 69678a2",
+          "path": "evidence/final-gate-69678a2.log",
+          "sha256": "09bd2ed4150c2481690b802f5e98dc519d5b08862c3664ac831522277e208cc3",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
           "completed_utc": "2026-10-22T05:00:00Z",
           "exit_code": 0,
           "required": true,

@@ -34,13 +34,9 @@ pub struct ReadArgs {
 // KR-I03: a deterministic read-result cache. The key is the relative path plus (mtime, ctime, inode, size, head hash), so any write changes it and a stale entry cannot be served -- invalidation is proved by
 // construction, not by a timer. Opt-in via KROMA_RESULT_CACHE=1; the randomised state-change test
 // flips it per read and requires on/off to agree.
+type ReadResultKey = (String, u128, u128, u64, usize, usize, bool);
 static READ_RESULT_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<
-        std::collections::HashMap<
-            (String, u128, u128, u64, usize, usize, bool),
-            ToolExecutionOutput,
-        >,
-    >,
+    std::sync::Mutex<std::collections::HashMap<ReadResultKey, ToolExecutionOutput>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 fn read_result_cache_enabled() -> bool {

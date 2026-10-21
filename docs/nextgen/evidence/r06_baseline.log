@@ -1,0 +1,5 @@
+/tmp/r06-baseline.json/report.json
+p0 repeats=1 exit_zero=True timed_out=False {"tree_peak_pss_kb": {"max": 7375, "values": [7375]}, "tree_peak_rss_kb": {"max": 10040, "values": [10040]}, "wall_ms": {"max": 57.69, "median": 57.69, "min": 57.69, "values": [57.69]}}
+p2 repeats=1 exit_zero=True timed_out=False {"graph_ms": {"max": 3410.483, "median": 3410.483, "min": 3410.483, "values": [3410.483]}, "init_ms": {"max": 119.96, "median": 119.96, "min": 119.96, "values": [119.96]}, "tree_peak_pss_kb": {"max": 74438, "values": [74438]}, "tree_peak_rss_kb": {"max": 77236, "values": [77236]}}
+p3 repeats=1 exit_zero=True timed_out=False {"graph_ms": {"max": 238.319, "median": 238.319, "min": 238.319, "values": [238.319]}, "init_ms": {"max": 9.102, "median": 9.102, "min": 9.102, "values": [9.102]}, "tree_peak_pss_kb": {"max": 24350, "values": [24350]}, "tree_peak_rss_kb": {"max": 27148, "values": [27148]}}
+p4 repeats=1 exit_zero=True timed_out=False {"tree_peak_pss_kb": {"max": 263967, "values": [263967]}}
