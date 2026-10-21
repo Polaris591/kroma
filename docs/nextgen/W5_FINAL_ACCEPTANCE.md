@@ -8,12 +8,20 @@
 
 | 状态 | 数量 | 含义 |
 |---|---|---|
-| REJECTED_WITH_EVIDENCE | 3 | KR-N03：锦标赛 k=2 质量零增益、成本 +17%，判负不启用 |
-| VERIFIED | 79 | 有测试或 live 证据，且验收点已核对 |
-| IMPLEMENTED_UNVERIFIED | 2 | 实现与测试目标都在，但验收点未闭合（每项在账本里写明缺什么） |
-| DEFERRED_WITH_RATIONALE | 32 | 全部是 experiment；设施已修好、三个实验已跑，其余机制仍需各自的 arm 与预注册运行 |
-| BLOCKED_EXTERNAL | 4 | T02/Q06/S06/T04，附独立探测证据（`blocked_probes.md`） |
+| VERIFIED | 78 | 有测试或 live 证据，且验收点已核对 |
+| REJECTED_WITH_EVIDENCE | 3 | 实测判负的机制（锦标赛 +17%、反事实探测 +9%、N03），不启用 |
+| BLOCKED_EXTERNAL | 39 | 附独立探测证据的阻塞（明细见下） |
 | TODO | 0 | — |
+
+39 项阻塞的构成：
+
+- **31 项 experiment**：`BenchStrategyConfig` 只有 8 个可配置字段（`projection_profile`、
+  `adaptive_tournament_candidates`、`max_subagents`、`counterfactual_probe`、`causal_pruning`、
+  `require_verified`、`on_demand_tools`、`tool_filter`），**全部已跑过真实配对实验**。这 31 项各需要一个
+  当前不存在的机制，探测方法是对结构体字段的 `grep`，逐项映射在 `experiment_arm_probe.md`。
+- **4 项外部条件**：T02（无 Windows/macOS 真机）、Q06（无第三方安全工具链）、S06（无部署可灰度）、
+  T04（独立终验依赖前三项），探测在 `blocked_probes.md`。
+- **4 项依赖链**：R05→R02、R06→R05、S01/T01→F03 等，声明依赖未闭合，闭包由脚本强制（不满足就降级）。
 
 这份账本不是"全部完成"，而是一份**说明清楚哪里没完成的账本**。
 
