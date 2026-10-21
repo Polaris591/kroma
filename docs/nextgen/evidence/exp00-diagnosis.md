@@ -42,3 +42,23 @@ Verified: `python3 -m pytest -q tests/test_calc.py` — **1 passed**.
 因此 35 个 experiment 任务不能标 REJECTED（那会谎称"候选被判负"），只能标
 DEFERRED_WITH_RATIONALE，并把"设施缺陷 + 三次真实运行 + 手工成功对照"作为理由证据。
 需要修 bench executor 才能产出统计结论。
+
+## 追加诊断（返工轮）：bench 的 policy 未反映 --allow-shell
+
+三次运行里 CLI 都传了 `--allow-write --allow-shell`，但 bench 自己打印：
+
+```
+[kroma] note: bash is not enabled for this bench run (policy 'allow-write')
+```
+
+`main.rs:1732` 的条件是 `!cli.policy_mode.allows_shell_auto()`，而
+`PolicyMode::from_flags(None, true, true)` 按代码应当返回 `FullAutonomous`
+（`as_str()` = "allow-write+allow-shell"）。打印出来的却是 "allow-write"，说明
+`cli.policy_mode` 在 bench 分支拿到的不是 `from_flags(.., true, true)` 的结果。
+
+未定位：可能是参数解析顺序问题，或 bench 分支在别处重新计算了 policy。需要单独复现
+（最小 `kroma bench` 加 `--allow-shell` 并打印 `cli.policy_mode`）。
+
+影响面：agent 侧 bash 不可用。但 `verify_command` 由 gate 跑、不受该 policy 约束，所以
+"12 个 job 全 rejected" 不能全部归因于这一点——模型在 bench 环境里是否改对了文件仍未确认。
+这也意味着"修好 bench 执行器"比我先前估计的更靠前：先确认 policy 传递，再看 gate 判定。

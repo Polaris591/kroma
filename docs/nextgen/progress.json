@@ -1868,24 +1868,24 @@
       "decision": "the daemon already bounds this: a 16-permit semaphore drops the stream when try_acquire_owned fails (no queue), and connections idle past 60s are terminated. Added connection_ownership::connections_beyond_the_cap_are_refused_not_queued, which holds all 16 permits and then requires the next sockets to be closed (EOF/error) rather than served. Existing b02_idle_timeout_terminates_quiet_connection_without_active_run and acp_owner_run_completion_releases_its_connection_permit cover the other two halves: a quiet client is reaped, and permits are not leaked. Measured, not a constant reading."
     },
     "KR-P04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "c988007",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/q04-workspace-test.log",
+          "sha256": "5bb3b82f658fa8d7dc43cb80be4b5f67d198e0a13939dcace87b9aa82ea8cfa8",
+          "source_tree_sha256": "e16e9393ee2ebbe4def4da1450310ff3f7ff894b3c41b2fb9bcff44b67ff4aaf",
+          "completed_utc": "2026-10-21T12:25:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1309
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (gate6_multi_surface_runtime, multi_session_daemon, acp_contract, repl_terminal_ux) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "validate_daemon_listen_endpoint strictly rejects non-loopback TCP binds (0.0.0.0, LAN IPs, [::]) unless a non-empty --auth-token is configured, so a plaintext control plane cannot be exposed by accident; test_daemon_non_loopback_warning_emitted_and_does_not_leak_token covers the warning path and that the token is not echoed, and connection_ownership covers unauthenticated refusal. CAPABILITIES.md states plainly that the transport is plaintext and must only be used on a trusted network, which is the explicit deployment contract the task asks for."
     },
     "KR-P05": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -1948,24 +1948,24 @@
       "decision": "no paired prompt-injection attack set with a normal-task control was built. Missing: the corpus and the pairing."
     },
     "KR-Q02": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "c988007",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/q04-workspace-test.log",
+          "sha256": "5bb3b82f658fa8d7dc43cb80be4b5f67d198e0a13939dcace87b9aa82ea8cfa8",
+          "source_tree_sha256": "e16e9393ee2ebbe4def4da1450310ff3f7ff894b3c41b2fb9bcff44b67ff4aaf",
+          "completed_utc": "2026-10-21T12:10:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1309
         }
       ],
       "blocker": null,
-      "decision": "not verified this round: self-repair cannot rewrite the judge is asserted in docs but not proven by a test that tries to. Missing: the adversarial test."
+      "decision": "self_repair_guard::protected_artifacts() protects exactly what the task names: tool/policy.rs (the permission ceiling), bench.rs (scorer and paired/cluster statistics), completion_gate.rs (what counts as done), ahe.rs (self-repair verdict rules), experiment.rs (promotion rules), the whole crates/kroma-core/tests/ prefix (a candidate that can edit the suite can edit its grade), provenance.rs, secure_fs.rs, sandbox.rs, the guard itself, and the release trust root plus signing tool. check() refuses a candidate touching any of them, including a protected file inside an allowed prefix (self_repair_guard::protected_artifacts_are_refused_even_inside_an_allowed_prefix), and t19_ahe_isolation exercises the isolation end to end. Keys are covered by path protection plus the existing credential scrub; a candidate cannot lower the standard it is graded against."
     },
     "KR-Q03": {
       "status": "VERIFIED",
@@ -2164,22 +2164,22 @@
     "KR-S01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "c988007",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/q04-workspace-test.log",
+          "sha256": "5bb3b82f658fa8d7dc43cb80be4b5f67d198e0a13939dcace87b9aa82ea8cfa8",
+          "source_tree_sha256": "e16e9393ee2ebbe4def4da1450310ff3f7ff894b3c41b2fb9bcff44b67ff4aaf",
+          "completed_utc": "2026-10-21T12:25:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1309
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (adaptive_production_contract, t27_control_policy, t29_harness_evolution, t19_ahe_isolation) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "implementation and tests are in place, but the declared dependency KR-F03 is not verified, so this cannot close"
     },
     "KR-S02": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2279,21 +2279,22 @@
     "KR-T01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "c988007",
       "evidence": [
         {
-          "command": "docs/CAPABILITY_MATRIX.md + CAPABILITIES.md inspection (see A06 record)",
-          "path": "a06_doc_drift_fix.md",
-          "sha256": "6d10d2cbd1b38cfce79ec6cd83e9f65cc7af2ac9e8fba7b261aad82c7d381184",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:00:00Z",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/q04-workspace-test.log",
+          "sha256": "5bb3b82f658fa8d7dc43cb80be4b5f67d198e0a13939dcace87b9aa82ea8cfa8",
+          "source_tree_sha256": "e16e9393ee2ebbe4def4da1450310ff3f7ff894b3c41b2fb9bcff44b67ff4aaf",
+          "completed_utc": "2026-10-21T12:25:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1309
         }
       ],
       "blocker": null,
-      "decision": "defaults are verified in source (projection_profile None/P2, projection_candidate None, causal_pruning false, on_demand_tools false) and CAPABILITY_MATRIX.md documents them, but the task depends on KR-S01 (strategy catalogue + activation receipts) which is still unverified, so this cannot be closed"
+      "decision": "implementation and tests are in place, but the declared dependency KR-S01 is not verified, so this cannot close"
     },
     "KR-T02": {
       "status": "BLOCKED_EXTERNAL",
