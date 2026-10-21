@@ -8,17 +8,16 @@
 
 | 状态 | 数量 | 含义 |
 |---|---|---|
-| VERIFIED | 70 | 有测试或 live 证据，且验收点已核对 |
-| IMPLEMENTED_UNVERIFIED | 11 | 实现与测试目标都在，但验收点未闭合（每项在账本里写明缺什么） |
+| VERIFIED | 74 | 有测试或 live 证据，且验收点已核对 |
+| IMPLEMENTED_UNVERIFIED | 7 | 实现与测试目标都在，但验收点未闭合（每项在账本里写明缺什么） |
 | DEFERRED_WITH_RATIONALE | 35 | 全部是 experiment；理由是实验设施缺陷（见第六节），不是无理由搁置 |
 | BLOCKED_EXTERNAL | 4 | T02/Q06/S06/T04，附独立探测证据（`blocked_probes.md`） |
 | TODO | 0 | — |
 
 这份账本不是"全部完成"，而是一份**说明清楚哪里没完成的账本**。
 
-11 项未闭合的具体缺口（账本里逐条写明）：F03（实验执行器两层缺陷：`--allow-write` flag 不生效需改用 `--policy allow-write`；修好后仍 0/1，
-第二层未定位，缺 keep-workspace 诊断开关）、F06/M06/S01/T01（依赖 F03）、N06（子代理崩溃压力测试未做）、
-Q01（注入攻击配对集需要真模型参与）、R04（模块提取缺证据）、R06（决策规则文档已成，但依赖 R05/F06 未闭合）、
+7 项未闭合的具体缺口（账本里逐条写明）：M06（长程约束测评需要真任务跑，bench 已可用但该测评未做）、N06（子代理崩溃压力测试未做）、
+Q01（注入攻击配对集需要真模型参与）、R04（模块提取缺收益证据）、R06（决策规则文档已成，但依赖 R05 未闭合）、
 T03（升级/回滚未演练）。
 
 ## 二、最终门禁
@@ -61,11 +60,16 @@ T03（升级/回滚未演练）。
   `PE32+ executable for MS Windows 5.02, x86-64`，223 MB。运行证据仍缺（无真机），所以 T02 保持 BLOCKED。
 - **实验**：见第六节。
 
-## 六、实验为什么没有统计结论
+## 六、实验：设施已修好，已有一次真实配对结论
 
-跑了三次真实配对实验（2 arms × 6 dev tasks，gpt-6.1-sol），三次都是 0/6、`gate_status=rejected`。
-原始报告在 `evidence/exp00-dev-run1.json`、`-run2-noshell.json`、`-run3.json`，诊断在
-`evidence/exp00-diagnosis.md`。
+前三次跑出 0/6 全部 rejected，根因有三层（全部记录在 `evidence/exp00-diagnosis.md`）：
+`--allow-write` 在 bench 分支不生效（要用 `--policy allow-write`）；verify 的解释器必须在 bwrap 沙箱里可见
+（原来指向 `/tmp/kv/bin/python`，而 `/tmp` 在沙箱里是空 tmpfs）；verifier 二进制必须按真实路径声明为可信文件
+（`--verifier-file /usr/bin/python3.13`，软链会被拒）。
+
+修好之后：dev 6/6、holdout 2/2 全部 approved，0 个无判定。配对结果是
+**质量相同（100% vs 100%），dev 说候选多花 8% token（126349 vs 117015），holdout 说候选省 10%
+（43680 vs 48635）**。两个集合结论相反，样本也小，所以 on_demand_tools **不晋升**——这是负实验登记的第一条。
 
 关键对照：把同一个任务手工 materialize 后用同一个二进制跑 `kroma run`，模型**真的修好了**
 （`range(n + 1)`），自己跑 pytest 1 passed，缓存命中 87–93%。verify 命令在沙箱内也验证可用

@@ -2162,24 +2162,24 @@
       "decision": "implementation exists and its referenced targets (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-S01": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "c988007",
+      "commit": "327d280",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/q04-workspace-test.log",
-          "sha256": "5bb3b82f658fa8d7dc43cb80be4b5f67d198e0a13939dcace87b9aa82ea8cfa8",
-          "source_tree_sha256": "e16e9393ee2ebbe4def4da1450310ff3f7ff894b3c41b2fb9bcff44b67ff4aaf",
-          "completed_utc": "2026-10-21T12:25:00Z",
+          "command": "kroma bench --executor provider (dev + holdout)",
+          "path": "evidence/exp00-real-dev.json",
+          "sha256": "d8860489a47e0bdb1873e21c5d5c1be1e51a38d5caea67757a88bf1d007102dd",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T14:25:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1309
+          "tests_run": 12
         }
       ],
       "blocker": null,
-      "decision": "implementation and tests are in place, but the declared dependency KR-F03 is not verified, so this cannot close"
+      "decision": "strategy execution leaves a real receipt and the catalogue is not a list of names: the paired experiment ran the on_demand_tools arm and reported per-arm tokens, pass rate, CI, cache ratio and ttft; adaptive_production_contract covers activation with usage and merged revision, and refuses probes that are not isolated or not activated; provider_bench_arms_use_a_development_gate_without_leaking_the_final_scorer. A strategy that runs leaves evidence; one that does not is not counted."
     },
     "KR-S02": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2277,24 +2277,24 @@
       "decision": "implementation exists and its referenced targets (adaptive_production_contract, t27_control_policy, t29_harness_evolution, t19_ahe_isolation) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-T01": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "c988007",
+      "commit": "327d280",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/q04-workspace-test.log",
-          "sha256": "5bb3b82f658fa8d7dc43cb80be4b5f67d198e0a13939dcace87b9aa82ea8cfa8",
-          "source_tree_sha256": "e16e9393ee2ebbe4def4da1450310ff3f7ff894b3c41b2fb9bcff44b67ff4aaf",
-          "completed_utc": "2026-10-21T12:25:00Z",
+          "command": "kroma bench --executor provider (dev + holdout)",
+          "path": "evidence/exp00-real-dev.json",
+          "sha256": "d8860489a47e0bdb1873e21c5d5c1be1e51a38d5caea67757a88bf1d007102dd",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T14:25:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1309
+          "tests_run": 12
         }
       ],
       "blocker": null,
-      "decision": "implementation and tests are in place, but the declared dependency KR-S01 is not verified, so this cannot close"
+      "decision": "an operator can tell exactly what is on, and a completed experiment does not flip a default: defaults are still projection_profile None (P2), projection_candidate None, causal_pruning false, on_demand_tools false, cache-aware compaction off unless KROMA_CACHE_AWARE_COMPACTION=1. The one experiment that ran (on_demand_tools) was NOT promoted -- dev and holdout disagreed on cost -- so the default stayed off, which is the property this task asks for. docs/CAPABILITY_MATRIX.md and CAPABILITIES.md state the enabled set; A06 records the drift that was fixed."
     },
     "KR-T02": {
       "status": "BLOCKED_EXTERNAL",
