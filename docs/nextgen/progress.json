@@ -823,22 +823,23 @@
       "decision": "unsupported combinations are refused or degraded explicitly, with evidence, and no cross-model promise is made: each protocol adapter declares what it can express (message_semantics) and the client refuses what it cannot honour -- sse_contract covers missing done / truncated length / multi-block reasoning / indexless tool calls / unterminated done, and anthropic cache breakpoints are only sent when the adapter declares support (the adapter refuses rather than silently dropping them, per the cache_breakpoints gate in agent_loop). The three-mode OpenAI cache arms were measured in KR-G03. What is NOT claimed: a general \"compatible with every model\" statement."
     },
     "KR-G05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "cb84680",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "three cache-mode runs + quality",
+          "path": "evidence/g03-cache-breakpoint-arms.md",
+          "sha256": "f317622226b13c83a1f44c6ce5100fa2071afcbc3ebc7fa91318b46d07599113",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:55:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (context_cache_stability, t14_cache_accounting, repeated_read_runner), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "the joint cost is measured per successful task, and the cache hit ratio is explicitly not the objective: G03 showed hit ratio rising 0.299 -> 0.665 -> 0.76 while tokens also rose (86147 -> 89162 -> 87557), i.e. optimising hit ratio alone would have made things worse. Quality stayed 6/6 in both off and explicit runs. So the disposition is \"no cache mode is promoted on hit-ratio grounds\", which is exactly what this task asks."
     },
     "KR-G06": {
       "status": "VERIFIED",
@@ -939,22 +940,23 @@
       "decision": "measured and rejected: the efficient-candidate prompt profile costs MORE, not less. Two runs on the same dev suite: default 120324 tokens (6/6), efficient-candidate 146405 tokens (6/6) -- +22% for identical quality. So the \"task-aware navigation prompt\" does not pay off on these tasks and stays off (the CLI already marks it experimental). This is the same shape as the v4 E04 finding (dev looked good, holdout reversed); here even dev disagrees."
     },
     "KR-H05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "cb84680",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:55:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "parallel read-only work keeps serial semantics and bounded resources: read-only batches run in parallel while mutations take the inode lock, t06_bounded_io covers the bounded-output and registry-overflow cases, and context_cache_stability::test_readonly_parallel_batch_ordering_steering_and_completion_gate pins ordering plus the completion gate on a parallel batch. Not measured: an end-to-end speed-up claim on a real task -- the task explicitly forbids claiming acceleration from a sleep fixture, and this round did not build a real-task timing comparison."
     },
     "KR-H06": {
       "status": "VERIFIED",
