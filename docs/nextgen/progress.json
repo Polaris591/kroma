@@ -784,22 +784,23 @@
       "decision": "context_cache_stability::test_watermark_step_down_compaction_working_set_pinning_and_outline_stub pins prefix stability; client-side stability is reported separately from provider cache usage, which is 0 in the live canary"
     },
     "KR-G03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "b3b16ba",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
-          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "command": "kroma bench --executor provider (three runs, one per cache mode)",
+          "path": "evidence/g03-cache-breakpoint-arms.md",
+          "sha256": "f317622226b13c83a1f44c6ce5100fa2071afcbc3ebc7fa91318b46d07599113",
+          "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
+          "completed_utc": "2026-10-21T22:50:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (context_cache_stability, t14_cache_accounting, repeated_read_runner), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "three arms measured (off / implicit / explicit) on the dev suite over openai-responses: cache hit ratio rises 0.299 -> 0.665 -> 0.76, but tokens rise too (86147 -> 89162 -> 87557), so on short histories the write cost exceeds the read saving. explicit beats implicit on both hit ratio and total tokens, so if caching is ever enabled it should be explicit. The shipped default stays off, and this data supports that default. Caveat: three separate runs (mode is provider-level), and the implicit run passed 5/6 where the others passed 6/6 -- inside the known single-repetition noise band."
     },
     "KR-G04": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -898,22 +899,23 @@
       "decision": "implemented this round: tool/schema_check.rs is the single pre-dispatch validator (parseable JSON, object shape, required fields, primitive and array-item types, 1MiB/32-level caps), running after authority/exposure and before any hook, policy, approval or side effect; 7 unit tests plus tool_contracts/t12/gate3 green"
     },
     "KR-H03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "b3b16ba",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
-          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "command": "kroma bench --executor provider (dev + holdout, on_demand_tools arm)",
+          "path": "evidence/exp00-real-dev.json",
+          "sha256": "d8860489a47e0bdb1873e21c5d5c1be1e51a38d5caea67757a88bf1d007102dd",
+          "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
+          "completed_utc": "2026-10-21T22:55:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 24
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "this is the on_demand_tools ablation, and it is already measured with both suites: dev 6/6 at 117015 tokens for the full menu vs 6/6 at 126349 for on-demand (+8%), holdout 2/2 at 48635 vs 2/2 at 43680 (-10%). The two sets disagree, so the on-demand menu is NOT promoted and the default stays the full menu. Evidence: exp00-real-dev.json and exp00-real-holdout.json."
     },
     "KR-H04": {
       "status": "IMPLEMENTED_UNVERIFIED",
