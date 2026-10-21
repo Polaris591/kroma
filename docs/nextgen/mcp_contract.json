@@ -1,0 +1,29 @@
+{
+  "task": "KR-K01",
+  "protocol_revision": "2026-07-28",
+  "transports": {
+    "stdio": {
+      "module": "mcp.rs",
+      "evidence": "b05_execution_context, mcp_config"
+    },
+    "streamable_http": {
+      "module": "mcp_http.rs",
+      "evidence": "mcp_http_2026 (36 tests)"
+    }
+  },
+  "response_content_types": [
+    "application/json",
+    "text/event-stream"
+  ],
+  "fail_closed": [
+    "unsupported response content-type",
+    "JSON-RPC id/version mismatch",
+    "unbounded annotated headers rejected before transport",
+    "unsupported native tool-search event flow is not replayed"
+  ],
+  "not_claimed": [
+    "mcp_http_2026 passing is NOT evidence of full third-party server compatibility",
+    "no live external MCP server matrix has been run (see KR-K06)"
+  ],
+  "scope_note": "feature claims are per revision and per transport, as the task requires; the table is extracted from the adapter source, not from test names."
+}

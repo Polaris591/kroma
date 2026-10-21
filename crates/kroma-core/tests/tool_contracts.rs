@@ -177,3 +177,50 @@ async fn test_read_write_ls_find_grep_contracts() {
 
     let _ = fs::remove_dir_all(&tmp_ws);
 }
+
+/// KR-H01: every registered tool must declare a complete contract.
+///
+/// `tool_contracts` covers the five file tools in detail. This is the catalogue-level check: walk
+/// the whole registry and require that each entry has a stable name, a description the model can act
+/// on, an object-shaped JSON schema, a timeout and an output cap. A tool that reaches the model with
+/// no declared limits is a tool whose cost and side effects are unknown.
+#[test]
+fn every_registered_tool_declares_a_complete_contract() {
+    use kroma_core::tool::registry::ToolRegistry;
+
+    let registry = ToolRegistry::new(None);
+    let tools = registry.all_registered();
+    assert!(
+        tools.len() >= 5,
+        "expected at least the builtin file tools, got {}",
+        tools.len()
+    );
+
+    for tool in &tools {
+        let name = &tool.definition.name;
+        assert!(!name.is_empty(), "a tool must have a stable name");
+        assert!(
+            !tool.definition.description.is_empty(),
+            "{name} must describe itself to the model"
+        );
+        assert!(
+            tool.definition.parameters.is_object(),
+            "{name} parameters must be a JSON object schema, got {}",
+            tool.definition.parameters
+        );
+        assert!(
+            tool.metadata.default_timeout_sec > 0,
+            "{name} must declare a timeout"
+        );
+        assert!(
+            tool.metadata.inline_output_cap_bytes > 0,
+            "{name} must declare an inline output cap"
+        );
+    }
+
+    let mut names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
+    names.sort_unstable();
+    let total = names.len();
+    names.dedup();
+    assert_eq!(total, names.len(), "tool names must be unique");
+}

@@ -13,7 +13,7 @@
           "command": "python3 scripts/nextgen_baseline_identity.py . <archive.zip>",
           "path": "baseline.json",
           "sha256": "0b74f9fb6265af9f923820389b38c8d4aacb34e0f660f6b6d55cb6a0ffe1fb05",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -23,7 +23,7 @@
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w0-workspace-test.log",
           "sha256": "5a6b35f322297b3b9741f53916d56b2bb4b22f693fef10cd620454c5e37252ef",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -43,7 +43,7 @@
           "command": "python3 scripts/nextgen_host_capability.py .",
           "path": "host_capabilities.json",
           "sha256": "8b42ace0583dccd350dd97887d7e0bc96ea6ce991225f1b7e19b0caaaa1e712a",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -53,7 +53,7 @@
           "command": "bash scripts/run-sandbox-tests.sh",
           "path": "evidence/w0-sandbox.log",
           "sha256": "1d94c62c4ca23854695dfa369ab7bb5af9107f7991ce18d2537c823193b4f756",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -64,7 +64,7 @@
           "command": "sh scripts/nextgen_rust_gate.sh",
           "path": "evidence/w0-nextgen-gate.log",
           "sha256": "93d15e7c868ee842fb3a94026423e4b9ce2a1b2598791d41a84595a922e057c1",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -99,7 +99,7 @@
           "command": "python3 scripts/nextgen_coverage_ledger.py .",
           "path": "coverage_ledger.json",
           "sha256": "47756b0754f770750812cf8690eadb2a4962d86c9ca17fb39a26e62f9de8b2a6",
-          "source_tree_sha256": "9a8c9fe7a07b61792fffe229cde78dd1d09d0827107625ee4d79fd5695930bcc",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-20T22:53:11Z",
           "exit_code": 0,
           "required": true,
@@ -125,8 +125,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -145,8 +145,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -165,8 +165,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -185,8 +185,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -205,8 +205,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -225,8 +225,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -245,8 +245,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -265,8 +265,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -293,8 +293,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -313,8 +313,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -341,8 +341,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -361,8 +361,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T00:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -381,8 +381,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -401,8 +401,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -421,8 +421,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -441,8 +441,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -461,8 +461,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -481,8 +481,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -622,20 +622,44 @@
       "decision": null
     },
     "KR-H01": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "d55b6c9",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "completed_utc": "2026-10-21T01:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "added tool_contracts::every_registered_tool_declares_a_complete_contract: walks the whole registry and requires name, description, object schema, timeout and output cap, plus unique names"
     },
     "KR-H02": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "d55b6c9",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "completed_utc": "2026-10-21T01:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "each tool validates its own input before acting and returns ErrorCode::InvalidArguments (e.g. recall_evidence, codemode); there is no shared schema-validation layer, so the \"structured error for every tool\" part is not proven"
     },
     "KR-H03": {
       "status": "TODO",
@@ -725,8 +749,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -778,12 +802,34 @@
       "decision": null
     },
     "KR-K01": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "d55b6c9",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "completed_utc": "2026-10-21T01:50:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        },
+        {
+          "command": "python3 (mcp contract extraction)",
+          "path": "mcp_contract.json",
+          "sha256": "95adaa664470df54b1cd998688a65131e1640f9e5f2ab856f8ea97c6a1265b5d",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "completed_utc": "2026-10-21T01:50:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "docs/nextgen/mcp_contract.json extracted from the adapter source: revision 2026-07-28, stdio + streamable HTTP, fail-closed list, and an explicit not_claimed section"
     },
     "KR-K02": {
       "status": "TODO",
@@ -849,8 +895,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -893,8 +939,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:10:00Z",
           "exit_code": 0,
           "required": true,
@@ -953,8 +999,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -1013,8 +1059,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1049,8 +1095,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -1070,12 +1116,24 @@
       "decision": null
     },
     "KR-O06": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "d55b6c9",
+      "evidence": [
+        {
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/w1-workspace-test.log",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
+          "completed_utc": "2026-10-21T01:50:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 1293
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "t31_codemode_execution: codemode_runs_inside_the_isolation_backend_with_the_guest_root, codemode_refuses_arguments_outside_the_schema, codemode_enforces_its_declared_timeout, a_model_supplied_call_id_cannot_write_outside_the_state_directory"
     },
     "KR-P01": {
       "status": "VERIFIED",
@@ -1085,8 +1143,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:00:00Z",
           "exit_code": 0,
           "required": true,
@@ -1105,8 +1163,8 @@
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
           "path": "evidence/w1-workspace-test.log",
-          "sha256": "e751723d300adf2090f5539e0f35d516ee444a8729c3d6b97e53b98e973b3ae3",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "sha256": "67cc44b8be1f622000ed1f147586e19ad94a91e6bd77f507d5c9e43086be3dd9",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
@@ -1174,7 +1232,7 @@
           "command": "python3 (dependency inventory)",
           "path": "dependency_licenses.json",
           "sha256": "535f55bea06dbbd55fe5801d0dd087d94bf3b840ff564418725e149452d06294",
-          "source_tree_sha256": "836b0ec633d1d5bd50da5a2a4ab2abf5ed64dbb30eb545bbd7b1c1bc364af4d1",
+          "source_tree_sha256": "4346c1dd05e50405318e643e07831a4053255de2918f9f0dc89a59fc9bd05283",
           "completed_utc": "2026-10-21T01:20:00Z",
           "exit_code": 0,
           "required": true,
