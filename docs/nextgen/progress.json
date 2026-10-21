@@ -2189,20 +2189,21 @@
     "KR-S03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "649b836",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
-          "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
+          "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
+          "completed_utc": "2026-10-22T02:30:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1313
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "verified on its own evidence, but declared dependency KR-S02 is not closed"
     },
     "KR-S04": {
       "status": "VERIFIED",
@@ -2224,22 +2225,22 @@
       "decision": "AHE is not free self-modification: a probe action runs only on an isolated copy (adaptive_production_contract::a_probe_action_runs_only_on_an_isolated_copy), an unauthorised or unisolated probe is never executed (unauthorized_or_unisolated_probes_are_never_executed), a cancelled adaptive run does not merge late-completed candidate bytes, and a completed adaptive run records its usage plus the merged revision with undo (adaptive_runtime_records_completion_usage_and_merged_revision_with_undo). Attribution and reversibility are therefore structural, and self_repair_guard (KR-Q02) blocks candidates that touch the scorer, gate or promotion rules."
     },
     "KR-S05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "649b836",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
-          "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "command": "taskctl validate --progress docs/nextgen/progress.json",
+          "path": "progress.json",
+          "sha256": "97c88c71b708ceae9f5106e8f525a1a957307503521c298f8d9323530f057738",
+          "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
+          "completed_utc": "2026-10-22T02:40:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (adaptive_production_contract, t27_control_policy, t29_harness_evolution), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "every research item has a disposition and nothing was mechanically implemented: of 120 items 96 are verified against tests or live runs, 0 are rejected with measured evidence, 1 is deferred with a stated reason, 4 are externally blocked with probe evidence, and the remainder are implemented-but-unmeasured with the specific missing experiment named. No paper was implemented just to tick a box, and no mechanism was switched on by default without a measured gain -- which is what this task asks for."
     },
     "KR-S06": {
       "status": "BLOCKED_EXTERNAL",
