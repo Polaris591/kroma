@@ -1272,22 +1272,23 @@
       "decision": "mcp_config: an_untrusted_workspace_config_cannot_declare_mcp_servers (a directory cannot widen its own authority), a_wedged_mcp_server_times_out_and_is_cleaned_up, a_timed_out_call_never_executes_a_queued_mutation, unmount_during_a_call_is_bounded_and_reaps_the_child"
     },
     "KR-K04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "ed4bfdf",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/k04-workspace-test.log",
+          "sha256": "8bc70ef527b0eaee1b66bc5f45da982e7b2557db02010ea16d2671c2eac64f0c",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T02:10:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1313
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (mcp_http_2026, mcp_config, t13_mcp_handshake), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "MRTR is explicitly NOT supported, and the adapter says so instead of faking it: a response whose resultType is input_required is refused with a Protocol error naming MRTR (mcp_http.rs:251-256) rather than being discarded and returned as a final result the model would misread. Added mcp_http_2026_refuses_an_input_required_response to pin that refusal (server returns resultType=input_required, client must error and the message must name what is unsupported). This is the task's own rule -- \"do not treat field acceptance as protocol implementation\" -- satisfied by declaring the gap rather than by claiming partial support."
     },
     "KR-K05": {
       "status": "VERIFIED",

@@ -228,3 +228,43 @@ async fn local_loopback_protocol_cost_is_measured() {
         "loopback protocol cost should be small, got {median:?}"
     );
 }
+
+/// KR-K04: an MRTR / InputRequired response is refused, not silently accepted.
+///
+/// The task's rule is "only claim support when the complete state machine and real interop pass; do not
+/// treat field acceptance as protocol implementation". Kroma does not implement MRTR, and the adapter
+/// says so by refusing a response whose `resultType` is `input_required` instead of discarding the
+/// input request and returning a result the model would misread as final.
+#[tokio::test]
+async fn mcp_http_2026_refuses_an_input_required_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/mcp",
+        listener.local_addr().unwrap().port()
+    );
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let (_headers, req) = accept_json(&mut stream);
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": req["id"],
+            "result": {
+                "resultType": "input_required",
+                "inputRequests": [{"kind": "text", "prompt": "approve?"}]
+            }
+        });
+        reply(stream, "application/json", &response.to_string());
+    });
+
+    let mut client = McpHttpClient::new(&url, None, Duration::from_secs(10)).unwrap();
+    let error = client
+        .list_tools()
+        .await
+        .expect_err("an input_required response must be refused");
+    let text = format!("{error:?}");
+    assert!(
+        text.contains("MRTR") || text.contains("InputRequired") || text.contains("input_required"),
+        "the refusal must name what is unsupported, got: {text}"
+    );
+    server.join().unwrap();
+}
