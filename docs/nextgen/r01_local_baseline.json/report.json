@@ -1,0 +1,797 @@
+{
+  "binary": {
+    "mtime_utc": "2026-10-21T00:36:08Z",
+    "path": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/target/debug/kroma",
+    "sha256": "75a0938ace79803bcdb2c8ee4a74cf59b33d11ed4e48181b156a0b4bdded84c5",
+    "size_bytes": 132754056
+  },
+  "finished_at": "2026-10-21T00:46:38Z",
+  "hardware": {
+    "cpu_count": 4,
+    "cpu_model": "AMD EPYC 7K62 48-Core Processor",
+    "kernel": "6.12.95+deb13-amd64",
+    "machine": "x86_64",
+    "mem_total_kb": 3818804,
+    "python": "3.13.5"
+  },
+  "method": {
+    "cache_state": "warm (page cache not dropped; cold-cache start unmeasured)",
+    "order": "fixed per repeat: p0,p2,p3,p4",
+    "per_run_deadline_s": 60.0,
+    "repeats": 3,
+    "resource_accounting": "sum over the /proc process tree; Rss double counts shared pages, Pss apportions them; children shorter than one sample are missed; main_process_maxrss_kb covers the main PID only",
+    "thresholds": "none: numbers only, no SLO is set here"
+  },
+  "records": [
+    {
+      "argv": [
+        "--version"
+      ],
+      "case": "p0",
+      "exit_code": 0,
+      "main_process_maxrss_kb": 18856,
+      "order": 1,
+      "raw_log": "raw-p0-r1.log",
+      "repeat": 1,
+      "sample_interval_ms": 2.0,
+      "stderr_bytes": 0,
+      "stdout_bytes": 12,
+      "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 7041,
+      "tree_peak_rss_kb": 9540,
+      "tree_pss_unavailable": false,
+      "tree_samples": 13,
+      "version_line": "kroma 1.5.0",
+      "wall_ms": 61.195,
+      "workspace": null
+    },
+    {
+      "argv": [
+        "acp"
+      ],
+      "case": "p2",
+      "exit_code": 2,
+      "init_ms": null,
+      "init_ok": false,
+      "main_process_maxrss_kb": 18984,
+      "order": 2,
+      "raw_log": "raw-p2-r1.log",
+      "repeat": 1,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 509,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 13805,
+      "tree_peak_rss_kb": 16304,
+      "tree_pss_unavailable": false,
+      "tree_samples": 7,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "acp",
+        "--workspace",
+        "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+      ],
+      "case": "p3",
+      "exit_code": 2,
+      "init_ms": null,
+      "init_ok": false,
+      "main_process_maxrss_kb": 18984,
+      "order": 3,
+      "raw_log": "raw-p3-r1.log",
+      "repeat": 1,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 509,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 2231,
+      "tree_peak_rss_kb": 3500,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "workspace": "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+    },
+    {
+      "all_graph_ok": false,
+      "argv": [
+        "acp"
+      ],
+      "case": "p4",
+      "exit_code": 1,
+      "order": 4,
+      "per_session": [
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20140,
+          "order": 4,
+          "raw_log": "raw-p2-r1.log",
+          "repeat": 1,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 4647,
+          "tree_peak_rss_kb": 7012,
+          "tree_pss_unavailable": false,
+          "tree_samples": 1,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20140,
+          "order": 5,
+          "raw_log": "raw-p2-r1.log",
+          "repeat": 1,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20396,
+          "order": 6,
+          "raw_log": "raw-p2-r1.log",
+          "repeat": 1,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20396,
+          "order": 7,
+          "raw_log": "raw-p2-r1.log",
+          "repeat": 1,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        }
+      ],
+      "repeat": 1,
+      "sample_interval_ms": 10.0,
+      "sessions": 4,
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_pss_kb": 4647,
+      "wall_ms": null,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "--version"
+      ],
+      "case": "p0",
+      "exit_code": 0,
+      "main_process_maxrss_kb": 20780,
+      "order": 5,
+      "raw_log": "raw-p0-r2.log",
+      "repeat": 2,
+      "sample_interval_ms": 2.0,
+      "stderr_bytes": 0,
+      "stdout_bytes": 12,
+      "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 2547,
+      "tree_peak_rss_kb": 3816,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "version_line": "kroma 1.5.0",
+      "wall_ms": 4.282,
+      "workspace": null
+    },
+    {
+      "argv": [
+        "acp"
+      ],
+      "case": "p2",
+      "exit_code": 2,
+      "init_ms": null,
+      "init_ok": false,
+      "main_process_maxrss_kb": 20780,
+      "order": 6,
+      "raw_log": "raw-p2-r2.log",
+      "repeat": 2,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 509,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 3357,
+      "tree_peak_rss_kb": 4920,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "acp",
+        "--workspace",
+        "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+      ],
+      "case": "p3",
+      "exit_code": 2,
+      "init_ms": null,
+      "init_ok": false,
+      "main_process_maxrss_kb": 20780,
+      "order": 7,
+      "raw_log": "raw-p3-r2.log",
+      "repeat": 2,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 509,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 3119,
+      "tree_peak_rss_kb": 4388,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "workspace": "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+    },
+    {
+      "all_graph_ok": false,
+      "argv": [
+        "acp"
+      ],
+      "case": "p4",
+      "exit_code": 1,
+      "order": 8,
+      "per_session": [
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20780,
+          "order": 8,
+          "raw_log": "raw-p2-r2.log",
+          "repeat": 2,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20780,
+          "order": 9,
+          "raw_log": "raw-p2-r2.log",
+          "repeat": 2,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20780,
+          "order": 10,
+          "raw_log": "raw-p2-r2.log",
+          "repeat": 2,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20780,
+          "order": 11,
+          "raw_log": "raw-p2-r2.log",
+          "repeat": 2,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        }
+      ],
+      "repeat": 2,
+      "sample_interval_ms": 10.0,
+      "sessions": 4,
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_pss_kb": null,
+      "wall_ms": null,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "--version"
+      ],
+      "case": "p0",
+      "exit_code": 0,
+      "main_process_maxrss_kb": 20780,
+      "order": 9,
+      "raw_log": "raw-p0-r3.log",
+      "repeat": 3,
+      "sample_interval_ms": 2.0,
+      "stderr_bytes": 0,
+      "stdout_bytes": 12,
+      "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 2483,
+      "tree_peak_rss_kb": 3752,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "version_line": "kroma 1.5.0",
+      "wall_ms": 4.065,
+      "workspace": null
+    },
+    {
+      "argv": [
+        "acp"
+      ],
+      "case": "p2",
+      "exit_code": 2,
+      "init_ms": null,
+      "init_ok": false,
+      "main_process_maxrss_kb": 20780,
+      "order": 10,
+      "raw_log": "raw-p2-r3.log",
+      "repeat": 3,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 509,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 4122,
+      "tree_peak_rss_kb": 6240,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "acp",
+        "--workspace",
+        "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+      ],
+      "case": "p3",
+      "exit_code": 2,
+      "init_ms": null,
+      "init_ok": false,
+      "main_process_maxrss_kb": 20780,
+      "order": 11,
+      "raw_log": "raw-p3-r3.log",
+      "repeat": 3,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 509,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 3514,
+      "tree_peak_rss_kb": 5476,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "workspace": "docs/nextgen/r01_local_baseline.json/_p3_workspace"
+    },
+    {
+      "all_graph_ok": false,
+      "argv": [
+        "acp"
+      ],
+      "case": "p4",
+      "exit_code": 1,
+      "order": 12,
+      "per_session": [
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20780,
+          "order": 12,
+          "raw_log": "raw-p2-r3.log",
+          "repeat": 3,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20780,
+          "order": 13,
+          "raw_log": "raw-p2-r3.log",
+          "repeat": 3,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20780,
+          "order": 14,
+          "raw_log": "raw-p2-r3.log",
+          "repeat": 3,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp"
+          ],
+          "case": "p2",
+          "exit_code": 2,
+          "init_ms": null,
+          "init_ok": false,
+          "main_process_maxrss_kb": 20780,
+          "order": 15,
+          "raw_log": "raw-p2-r3.log",
+          "repeat": 3,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 509,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": true,
+          "timeout_s": 60.0,
+          "tree_peak_processes": null,
+          "tree_peak_pss_kb": null,
+          "tree_peak_rss_kb": null,
+          "tree_pss_unavailable": false,
+          "tree_samples": 0,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        }
+      ],
+      "repeat": 3,
+      "sample_interval_ms": 10.0,
+      "sessions": 4,
+      "timed_out": true,
+      "timeout_s": 60.0,
+      "tree_peak_pss_kb": null,
+      "wall_ms": null,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    }
+  ],
+  "schema": "kroma.local-performance.v1",
+  "source": {
+    "branch": {
+      "exit": 0,
+      "stdout": [
+        "main"
+      ]
+    },
+    "commit": {
+      "exit": 0,
+      "stdout": [
+        "15dd82dd2a401bc7f217a174d239739ba128e9e5"
+      ]
+    },
+    "dirty_paths": {
+      "exit": 0,
+      "stdout": [
+        "M docs/CAPABILITIES.md",
+        "?? docs/nextgen/gate_receipt.json",
+        "?? docs/nextgen/r01_local_baseline.json/",
+        "?? scripts/nextgen_gate_receipt.py"
+      ]
+    },
+    "repo": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2",
+    "tree": {
+      "exit": 0,
+      "stdout": [
+        "da4b873e6c38215c77d876a1a78df458eb5e30f0"
+      ]
+    }
+  },
+  "started_at": "2026-10-21T00:46:38Z",
+  "summary": {
+    "p0": {
+      "all_exit_zero": true,
+      "main_process_maxrss_kb": {
+        "max": 20780,
+        "values": [
+          18856,
+          20780,
+          20780
+        ]
+      },
+      "repeats": 3,
+      "timed_out": false,
+      "tree_peak_pss_kb": {
+        "max": 7041,
+        "values": [
+          7041,
+          2547,
+          2483
+        ]
+      },
+      "tree_peak_rss_kb": {
+        "max": 9540,
+        "values": [
+          9540,
+          3816,
+          3752
+        ]
+      },
+      "wall_ms": {
+        "max": 61.195,
+        "median": 4.282,
+        "min": 4.065,
+        "values": [
+          61.195,
+          4.282,
+          4.065
+        ]
+      }
+    },
+    "p2": {
+      "all_exit_zero": false,
+      "main_process_maxrss_kb": {
+        "max": 20780,
+        "values": [
+          18984,
+          20780,
+          20780
+        ]
+      },
+      "repeats": 3,
+      "timed_out": true,
+      "tree_peak_pss_kb": {
+        "max": 13805,
+        "values": [
+          13805,
+          3357,
+          4122
+        ]
+      },
+      "tree_peak_rss_kb": {
+        "max": 16304,
+        "values": [
+          16304,
+          4920,
+          6240
+        ]
+      }
+    },
+    "p3": {
+      "all_exit_zero": false,
+      "main_process_maxrss_kb": {
+        "max": 20780,
+        "values": [
+          18984,
+          20780,
+          20780
+        ]
+      },
+      "repeats": 3,
+      "timed_out": true,
+      "tree_peak_pss_kb": {
+        "max": 3514,
+        "values": [
+          2231,
+          3119,
+          3514
+        ]
+      },
+      "tree_peak_rss_kb": {
+        "max": 5476,
+        "values": [
+          3500,
+          4388,
+          5476
+        ]
+      }
+    },
+    "p4": {
+      "all_exit_zero": false,
+      "repeats": 3,
+      "timed_out": true,
+      "tree_peak_pss_kb": {
+        "max": 4647,
+        "values": [
+          4647
+        ]
+      }
+    }
+  },
+  "toolchain": {
+    "cargo": {
+      "exit": 0,
+      "stdout": [
+        "cargo 1.85.1 (d73d2caf9 2024-12-31)"
+      ]
+    },
+    "rustc": {
+      "exit": 0,
+      "stdout": [
+        "rustc 1.85.1 (4eb161250 2025-03-15)"
+      ]
+    }
+  },
+  "unmeasured": [
+    {
+      "id": "P1-startup-ready",
+      "reason": "no reliable model-free readiness signal was demonstrated inside the bounded deadline, so startup-to-accepting-input is unmeasured; `--help`/`--version` are not substituted for interactive readiness"
+    },
+    {
+      "id": "P2-single-file-edit",
+      "reason": "the blueprint's P2 edit workload needs an agent turn (model); not measured"
+    },
+    {
+      "id": "cold-cache-start",
+      "reason": "cold page cache cannot be produced without drop_caches; repeats are warm"
+    },
+    {
+      "id": "P5-long-output",
+      "reason": "a huge single tool output needs an agent turn to produce it; the model-free surfaces expose no way to inject one, so P5 is not measured here"
+    },
+    {
+      "id": "P6-compaction",
+      "reason": "repeated compaction needs a long model conversation; measuring the projector alone would not be the P6 workload the blueprint describes"
+    },
+    {
+      "id": "P7-end-to-end",
+      "reason": "fixed-model full success cost and human interventions need a real provider run; that is the M1-06 pilot, not this package"
+    }
+  ]
+}

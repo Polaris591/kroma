@@ -1,0 +1,43 @@
+{
+  "task": "KR-A04",
+  "generated_utc": "2026-10-21T00:45:30Z",
+  "source_tree_sha256": "4e65f9166f5a5f60cf9b1b94e43c61d0e3a66a2b2c04e44fc342b5e7c26ce34f",
+  "gates": [
+    {
+      "gate": "fmt",
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0,
+      "duration_s": 1.9,
+      "stdout_tail": "",
+      "stderr_tail": ""
+    },
+    {
+      "gate": "check",
+      "command": "cargo check --workspace --locked",
+      "exit_code": 0,
+      "duration_s": 15.0,
+      "stdout_tail": "",
+      "stderr_tail": "Checking serde v1.0.229\n    Checking uuid v1.15.1\n    Checking kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)\n    Checking kroma-cli v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.94s"
+    },
+    {
+      "gate": "clippy",
+      "command": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "exit_code": 0,
+      "duration_s": 32.03,
+      "stdout_tail": "",
+      "stderr_tail": "Checking kroma-core v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-core)\n    Checking kroma-cli v1.5.0 (/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/crates/kroma-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 31.88s"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/nextgen/evidence/w2-workspace-test.log",
+      "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3"
+    },
+    {
+      "path": "docs/nextgen/evidence/w2-sandbox.log",
+      "sha256": "7b000e79428b722dbba97550a5d3bd053136bd0848442ce9ba69bb8a4c688086"
+    }
+  ],
+  "all_passed": true,
+  "note": "The three fast gates are executed by this script so CI and a local run cannot drift. The workspace test suite is expensive and is bound by evidence hash instead: a receipt whose log has changed no longer matches."
+}

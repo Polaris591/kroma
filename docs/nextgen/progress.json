@@ -95,12 +95,23 @@
       "decision": "all 49 host-blocked failures clear on a capable host: 1295 passed / 0 failed, 0 ignored, no tests removed or ignored"
     },
     "KR-A04": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "python3 scripts/nextgen_gate_receipt.py .",
+          "path": "gate_receipt.json",
+          "sha256": "4a792d16755b51b5b72fb922597a22be40ce63252ce80545eeae41feed1c5c79",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:45:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "scripts/nextgen_gate_receipt.py runs fmt/check/clippy itself (so CI and local cannot drift) and binds the workspace-test and sandbox logs by hash; gate_receipt.json all_passed=true"
     },
     "KR-A05": {
       "status": "VERIFIED",
@@ -122,12 +133,23 @@
       "decision": null
     },
     "KR-A06": {
-      "status": "TODO",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "docs/CAPABILITIES.md license drift corrected (superseded note kept)",
+          "path": "a06_doc_drift_fix.md",
+          "sha256": "6d10d2cbd1b38cfce79ec6cd83e9f65cc7af2ac9e8fba7b261aad82c7d381184",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:45:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "docs/CAPABILITIES.md license section corrected to MIT (matching LICENSE and Cargo.toml); the stale sentence is kept as a superseded note so the drift itself stays auditable"
     },
     "KR-B01": {
       "status": "VERIFIED",
@@ -350,12 +372,24 @@
       "decision": null
     },
     "KR-C06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (b08_shared_launch, t09_execution_boundary, t31_codemode_execution, t33_bench_execution_boundary, t35_surface_execution_boundary) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-D01": {
       "status": "VERIFIED",
@@ -575,12 +609,24 @@
       "decision": "three live protocols against https://cobblemon.asia/v1: chat-completions (in 1904/cached 0/out 5, ttft 3336ms), openai-responses (1898/0/5, 1789ms), anthropic-messages (1973/0/5, 1819ms); all provider_reported model gpt-6.1-sol, each with request_identity_sha256"
     },
     "KR-E06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (t14_cache_accounting, t18_usage_cost, m105_ledger, live_channel_contract) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-F01": {
       "status": "VERIFIED",
@@ -643,20 +689,44 @@
       "decision": "three-protocol live receipts and the latency breakdown exist, but a paired A/B (baseline arm vs candidate arm) needs a candidate, and candidates come from W4 experiments. Nothing is promoted on single-arm evidence"
     },
     "KR-F04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-F05": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-F06": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -719,36 +789,84 @@
       "decision": "context_cache_stability::test_watermark_step_down_compaction_working_set_pinning_and_outline_stub pins prefix stability; client-side stability is reported separately from provider cache usage, which is 0 in the live canary"
     },
     "KR-G03": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-G04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-G05": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-G06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (context_cache_stability, t14_cache_accounting, repeated_read_runner) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-H01": {
       "status": "VERIFIED",
@@ -791,84 +909,204 @@
       "decision": "each tool validates its own input before acting and returns ErrorCode::InvalidArguments (e.g. recall_evidence, codemode); there is no shared schema-validation layer, so the \"structured error for every tool\" part is not proven"
     },
     "KR-H03": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-H04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-H05": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-H06": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-I01": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (t06_bounded_io, t16_repo_graph_budget, t26_localization, filesystem_security, edit_diagnostics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-I02": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-I03": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-I04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-I05": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-I06": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-J01": {
       "status": "VERIFIED",
@@ -891,44 +1129,104 @@
       "decision": "gate2_evidence_projection::test_projection_profiles_ab_metrics_and_tool_pairing_invariant; tool calls and results stay paired"
     },
     "KR-J02": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-J03": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-J04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-J05": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-J06": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-K01": {
       "status": "VERIFIED",
@@ -1001,20 +1299,44 @@
       "decision": "mcp_config: an_untrusted_workspace_config_cannot_declare_mcp_servers (a directory cannot widen its own authority), a_wedged_mcp_server_times_out_and_is_cleaned_up, a_timed_out_call_never_executes_a_queued_mutation, unmount_during_a_call_is_bounded_and_reaps_the_child"
     },
     "KR-K04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-K05": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (mcp_http_2026, mcp_config, t13_mcp_handshake, t37_mcp_deadline_classification) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-K06": {
       "status": "VERIFIED",
@@ -1037,20 +1359,44 @@
       "decision": "real third-party MCP server (@modelcontextprotocol/server-everything over stdio via npx): 3 successful mcp__everything__echo calls, 6 discover_tools, 4 model turns, model_stop. Independent implementation, not the local fixture. No remote HTTP MCP endpoint was available, so that part is not claimed"
     },
     "KR-L01": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (provider_contract, sse_contract, live_channel_contract) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-L02": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-L03": {
       "status": "VERIFIED",
@@ -1073,28 +1419,64 @@
       "decision": "provider_contract::streaming_responses_report_their_own_model_identity and retry_token_allowance_blocks_transmission_and_preserves_unknown_spend (unknown is never recorded as free)"
     },
     "KR-L04": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (provider_contract, sse_contract, live_channel_contract) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-L05": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (provider_contract, sse_contract, live_channel_contract) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-L06": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-M01": {
       "status": "VERIFIED",
@@ -1117,44 +1499,104 @@
       "decision": "t05_compaction_identity::projection_never_changes_a_message_role (added); role is carried by the TranscriptItem enum so projection cannot promote lower-trust content"
     },
     "KR-M02": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (c00_07_taskstate_binding, t25_task_state, c0006_message_semantics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-M03": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (c00_07_taskstate_binding, t25_task_state, c0006_message_semantics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-M04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-M05": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (c00_07_taskstate_binding, t25_task_state, c0006_message_semantics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-M06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (c00_07_taskstate_binding, t25_task_state, c0006_message_semantics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-N01": {
       "status": "VERIFIED",
@@ -1197,36 +1639,84 @@
       "decision": "test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_parent_untouched; test_worker_subagent_runs_in_isolated_worktree_and_merges_cleanly_with_revision; cancelled_adaptive_run_does_not_merge_late_completed_candidate_bytes"
     },
     "KR-N03": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-N04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-N05": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (gate5_controlled_subagents, t32_child_policy_propagation, t02_tournament_intent, m104_arm_children) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-N06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (gate5_controlled_subagents, t32_child_policy_propagation, t02_tournament_intent, m104_arm_children) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-O01": {
       "status": "VERIFIED",
@@ -1249,20 +1739,44 @@
       "decision": "c0004_revocation::a_revoked_capability_refuses_the_old_lease_and_names_itself, revoking_during_an_in_flight_initialisation_reports_revocation; gate3 generation tests"
     },
     "KR-O02": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-O03": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-O04": {
       "status": "VERIFIED",
@@ -1285,12 +1799,24 @@
       "decision": "experience_production_contract::imported_data_cannot_self_accept_and_policy_conditions_expiry_are_enforced and stale_revision_and_untrusted_workspace_imports_are_refused"
     },
     "KR-O05": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-O06": {
       "status": "VERIFIED",
@@ -1353,52 +1879,124 @@
       "decision": "connection_ownership::unauthenticated_connection_receives_no_business_notifications and authenticated_connection_receives_business_notifications; 36 tests in the target"
     },
     "KR-P03": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (gate6_multi_surface_runtime, multi_session_daemon, acp_contract, repl_terminal_ux) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-P04": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (gate6_multi_surface_runtime, multi_session_daemon, acp_contract, repl_terminal_ux) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-P05": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (gate6_multi_surface_runtime, multi_session_daemon, acp_contract, repl_terminal_ux) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-P06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (gate6_multi_surface_runtime, multi_session_daemon, acp_contract, repl_terminal_ux) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-Q01": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-Q02": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-Q03": {
       "status": "VERIFIED",
@@ -1420,172 +2018,423 @@
       "decision": "dependency and license inventory generated from the workspace manifests; no vendored upstream sources under crates/"
     },
     "KR-Q04": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-Q05": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-Q06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-R01": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "gate receipt / measurement",
+          "path": "r01_local_baseline.json/report.json",
+          "sha256": "d6b7abdc394ed01e6312be1b0cbcfddfa24c28b90fc0b426d609c6e9eb1cbba4",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:20:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "p0 baseline reproducible over 3 repeats (wall 4.1/4.3/61.2ms, tree PSS 2.5-7.0MB). p2/p3/p4 (kroma acp + workspace.graph) time out even at a 60s limit on a 560-file repo -- an independent probe, recorded rather than smoothed over; the ACP graph path needs its own investigation"
     },
     "KR-R02": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-R03": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-R04": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-R05": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-R06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-S01": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (adaptive_production_contract, t27_control_policy, t29_harness_evolution, t19_ahe_isolation) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-S02": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-S03": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-S04": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-S05": {
-      "status": "TODO",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "the 48-job preregistered evaluation needs scripts/run-exp00.js, which experiments/exp-00/README.md itself marks as not implemented. The manifest digest is reproducible (05757bf3) and one diagnostic task ran live (4 turns, 9 tools, cache hit 8.9%), which proves the plumbing but is explicitly not a statistical result. Deferred rather than run as a fake experiment."
     },
     "KR-S06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (adaptive_production_contract, t27_control_policy, t29_harness_evolution, t19_ahe_isolation) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-T01": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-T02": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-T03": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-T04": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-T05": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-T06": {
-      "status": "TODO",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": null,
-      "evidence": [],
+      "commit": "15dd82d",
+      "evidence": [
+        {
+          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
+          "path": "evidence/w4-todo-targets.log",
+          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "source_tree_sha256": "38b20d4ea18e92ee97b1ca088e6372537d54cac80030a10b0bae86956c534d88",
+          "completed_utc": "2026-10-21T04:40:00Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "test",
+          "tests_run": 362
+        }
+      ],
       "blocker": null,
-      "decision": null
+      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     }
   }
 }

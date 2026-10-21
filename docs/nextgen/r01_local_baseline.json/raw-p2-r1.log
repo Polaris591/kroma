@@ -1,0 +1,11 @@
+# argv=['acp'] exit=2 timed_out=True
+## stdout
+
+## stderr
+kroma: plan 17959a4bc274 (3 features eligible)
+kroma: features
+context_compaction: configured=1 eligible=1 executed=0 skipped=[]
+snapshot_store: configured=1 eligible=1 executed=0 skipped=[]
+tool_discovery: configured=1 eligible=1 executed=0 skipped=[]
+error: no owner spend envelope was declared, so a paid run may not start
+hint: pass --max-tokens <N>, set KROMA_MAX_TOKENS, or set max_tokens in ~/.kroma/config.toml to declare what this run may spend; a workspace .kroma.toml can only tighten that ceiling
