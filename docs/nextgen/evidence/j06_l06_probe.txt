@@ -1,0 +1,19 @@
+# J06 / L06 probe: does this endpoint support provider-native compaction or tool search?
+
+$ grep -rn "native_compaction\|provider_compaction\|tool_search\|native_tool_search" crates/kroma-core/src --include=*.rs
+crates/kroma-core/src/provider/openai_responses.rs:70:    pub hosted_tool_search_replay: bool,
+crates/kroma-core/src/provider/openai_responses.rs:82:        hosted_tool_search_replay: false,
+crates/kroma-core/src/provider/openai_responses.rs:442:                Some("tool_search_call" | "tool_search_output" | "additional_tools") => {
+crates/kroma-core/src/provider/openai_responses.rs:523:        Some("tool_search_call" | "tool_search_output" | "additional_tools") => {
+crates/kroma-core/src/provider/openai_responses.rs:1236:mod native_tool_search_replay_guard_tests {
+(no hits = no adapter field declares either capability)
+
+$ grep -rn "compaction" crates/kroma-core/src/provider/*.rs | head -5
+
+$ curl -s -o /dev/null -w "%{http_code}" https://cobblemon.asia/v1/models -H "Authorization: Bearer $KROMA_API_KEY"
+200
+
+$ python3 -c "json keys of /v1/models response"
+models: 32
+fields present: ['created', 'id', 'object', 'owned_by']
+any compaction/tool_search field: none

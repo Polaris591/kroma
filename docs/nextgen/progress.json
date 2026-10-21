@@ -527,18 +527,17 @@
     "KR-E03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/report.json",
+          "sha256": "75d9711dcb71db3552b6f0c421ba11f1a08e46f4468fef416a67db3278f90e94",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -547,18 +546,17 @@
     "KR-E04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/e05-canary-chat-completions.jsonl",
+          "sha256": "179e0669030b2f66dce5f92d6ca3c22758c9492a5554a5c1bca6f5ab4e53c2cc",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -567,18 +565,17 @@
     "KR-E05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/e05-canary-chat-completions.jsonl",
+          "sha256": "179e0669030b2f66dce5f92d6ca3c22758c9492a5554a5c1bca6f5ab4e53c2cc",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -647,18 +644,17 @@
     "KR-F03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/exp00-diagnosis.md",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -667,18 +663,17 @@
     "KR-F04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/exp-minimal-tools-dev.json",
+          "sha256": "3988ab091128164c97fd0f745b93ea9a2171e3a7ff8d93f416dcffa1858afbb2",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "decision": "orthogonal-factor experiment: the tool menu size is the dominant cost factor, and it is explainable rather than a mystery. Full menu: 6/6 at 119568 tokens. Minimal menu (read/edit/write/ls/find/grep): 6/6 at 53276 tokens -- a 55% reduction with identical quality, because every tool schema is part of the static prefix (measured earlier at 8.7 KB of a 9.4 KB prefix). The interaction is explicit: these dev tasks need only file tools, so dropping the rest costs nothing here; a task needing code_graph or delegation would pay for it. That is why the result is \"the factor is large and shaped by task type\", not \"always send 7 tools\"."
@@ -686,37 +681,36 @@
     "KR-F05": {
       "status": "BLOCKED_EXTERNAL",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "harnesses.json disposition + command -v probe",
+          "path": "evidence/f05_disposition.md",
+          "sha256": "2b102cefd3437b32973223eefced5c44271481330cf10381b8c1502d134d39d1",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T03:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
       "decision": "deferred with rationale: the task asks for a disposition of all 27 harnesses plus incomparability reasons, and harnesses.json ships that metadata, so the disposition is offline work, not an external block. What cannot be produced here is a leaderboard over the comparable subset, because 26 of 27 harnesses are unobtainable in this environment; the ADR records each as incomparable with its reason.",
-      "blocker": "26 of the 27 harnesses in harnesses.json cannot be obtained in this environment, so the comparable-subset leaderboard the task asks for cannot be produced here; the per-harness disposition and incomparability reasons are written in the ADR."
+      "blocker": "26 of the 27 harnesses cannot be obtained on this host, so the comparable-subset leaderboard the task asks for cannot be produced; the per-harness disposition and the reason for each is written out in evidence/f05_disposition.md, and the availability probe is evidence/f05_availability.txt (only `pi` resolves)."
     },
     "KR-F06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/exp-causal-dev.json",
+          "sha256": "ad001bf589e34b6330a694196254e7dbaf28842ccf6f6bfcd89959a4b56b068c",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -765,17 +759,17 @@
     "KR-G03": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
-          "path": "evidence/exp-g03-off.json",
-          "sha256": "1c3e3907d19577b6733cec740fd09125c9638eabe350b1dd49d240cb987f0196",
+          "path": "evidence/exp-g03-implicit.json",
+          "sha256": "c3e07c721c22e3a4773b7a3f5d13c680db89db741003bb4a68100fd8bc64cfaa",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "three arms measured (off / implicit / explicit) on the dev suite over openai-responses: cache hit ratio rises 0.299 -> 0.665 -> 0.76, but tokens rise too (86147 -> 89162 -> 87557), so on short histories the write cost exceeds the read saving. explicit beats implicit on both hit ratio and total tokens, so if caching is ever enabled it should be explicit. The shipped default stays off, and this data supports that default. Caveat: three separate runs (mode is provider-level), and the implicit run passed 5/6 where the others passed 6/6 -- inside the known single-repetition noise band."
@@ -881,18 +875,17 @@
     "KR-H03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/exp-requireverified.json",
+          "sha256": "3c858fb983b64246b535dd1dc8c656fd2eca2b1a93bc5053b2d32f12e91aed86",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "decision": "this task IS the on_demand_tools ablation: dev 6/6 at 117015 tokens for the full menu vs 6/6 at 126349 for on-demand (+8%), holdout 2/2 at 48635 vs 2/2 at 43680 (-10%). The two suites disagree, so on-demand is not promoted. F04 now explains why the menu matters at all: tool schemas are 8.7 KB of the 9.4 KB static prefix, and a minimal menu saves 55% tokens on tasks that need only file tools."
@@ -900,17 +893,17 @@
     "KR-H04": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
-          "path": "evidence/exp-h04-default.json",
-          "sha256": "0f1f9bb9db3a935774faa4631883cabb72cd02ec8a8c436c23b89cc35d6987ce",
+          "path": "evidence/exp-h04-efficient-candidate.json",
+          "sha256": "002ec503b39cf29ffa99a5d411108fda38fb42439c8e88b9f450d5b31529929f",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "measured and rejected: the efficient-candidate prompt profile costs MORE, not less. Two runs on the same dev suite: default 120324 tokens (6/6), efficient-candidate 146405 tokens (6/6) -- +22% for identical quality. So the \"task-aware navigation prompt\" does not pay off on these tasks and stays off (the CLI already marks it experimental). This is the same shape as the v4 E04 finding (dev looked good, holdout reversed); here even dev disagrees."
@@ -937,17 +930,17 @@
     "KR-H06": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/exp-h06-inline.json",
           "sha256": "bff74d8acfdb31715678632f6ad3878aeeb76739a499a64e02910ef6404cf06f",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "measured and rejected: halving the inline window (32 KiB inline, 8 KiB head / 16 KiB tail) moved dev tokens 120066 -> 119869 (-0.16%, inside the ~2-task drift this suite shows between identical runs) at 6/6 vs 6/6. Nothing to gain; the shipped 64 KiB default stays. Implemented as an arm (max_tool_inline_output_bytes + bash_head_bytes + bash_tail_bytes) so the claim is reproducible."
@@ -955,18 +948,17 @@
     "KR-I01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/exp-minimal-tools-dev.json",
+          "sha256": "3988ab091128164c97fd0f745b93ea9a2171e3a7ff8d93f416dcffa1858afbb2",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -993,17 +985,17 @@
     "KR-I03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/i03_result_cache.log",
           "sha256": "ae17c0f59599500e3fc5948a8769ded07775162932137bbaca75033c5e9ebb48",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "implemented as an opt-in read-result cache in tools/read.rs and verified with a randomised state-change test: ten rewrites at random offsets/limits, each read replayed with the cache on and off, every pair identical and each round proving the entry was not stale. Two real defects were caught while building it -- keying on (mtime,len) served round-3 bytes at round 6, and ctime did not help because tmpfs ticks coarsely, so the key also hashes the first 8 KiB. The cache stays off by default until a paired run shows it pays (the taskbook rule) and is NOT read_dedup: dedup suppresses a repeated body, this returns the same bytes cheaply."
@@ -1011,17 +1003,17 @@
     "KR-I04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/i04_t26_localization.log",
           "sha256": "6f0ac61fd8f4e5f0da7bff418400625ca71b50f7c4cdbec20b321386682f672d",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "verified by its own recall@K comparison, which already existed as t26_localization: `natural_language_issues_beat_symbol_name_search` ranks the corpus with the graph (personalized pagerank over the reference graph, task-seeded) and with a symbol-name baseline and requires the graph to win; `truncated_index_falls_back_to_lexical_search` pins that a truncated index degrades to lexical search and says so instead of silently returning less. Both pass. No arm was needed because the comparison is deterministic."
@@ -1029,17 +1021,17 @@
     "KR-I05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/exp-graphcache-dev.json",
           "sha256": "d6f3fa44a3b90114e64dfa0aa3e80aa23a84e340b74b52b2373c27f5452f1860",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "verified with a live paired run: with the workspace graph cache the dev suite finished in 250s, with the cache disabled (KR-I05 arm graph_cache=false) 383s, same 6/6 and same tokens within noise (116943 vs 116106). The difference is the repeated parse cost itself, which is what this task asks to remove; cache stays on by default."
@@ -1085,39 +1077,38 @@
     "KR-J02": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/exp-j02-p1-vs-p2.json",
           "sha256": "4cc1a838d45c80e7ab42a78fc53b04445d5a4b7d2b4bab0e4ba17a846bbd05b7",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "the strong baseline was measured against the shipped profile, not against a strawman: P2 (stub + evidence graph) 6/6 at 114156 tokens vs P1 (stub without the evidence graph -- the masking-style baseline) 6/6 at 117679 tokens, i.e. the lighter profile is 3% MORE expensive with identical quality. So P2 stays the default and the masking candidate is not promoted. Recovery is quantified separately: the evidence graph is what makes evicted text retrievable (KR-D06: evicted_text_can_be_loaded_by_trusted_artifact_ref), so P1 would have dropped recoverability and still cost more."
     },
     "KR-J03": {
-      "status": "REJECTED_WITH_EVIDENCE",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "kroma bench --arms arms-p3.json (p3 vs baseline)",
+          "path": "evidence/exp-p3-dev.json",
+          "sha256": "76a97805594eaf8d88421c1f1d6342e3524a76ae782d6e3323d93c2b3324aeb4",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T06:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
-      "decision": "measured and rejected: P3 -2.6% and P1 +3% are the two candidate planners tested, and neither beats the fixed heuristic at equal quality, so the fixed constants stay. A hard window still cannot be bypassed for economic reasons (KR-B04 runs before dispatch)."
+      "decision": "not implemented, so this is deferred rather than rejected: there is no economic planner in the tree (no keep/commit/reason/interval state), so the acceptance condition was never tested. The projection-profile numbers that an earlier record mislabelled as a planner comparison are: p3 116926 vs baseline 120061 (p3 2.6% cheaper, both 6/6), which is a projection result, not a planner verdict."
     },
     "KR-J04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1138,42 +1129,41 @@
       "decision": "deferred with rationale, decided not to implement (adr_j06_l06_o02_f05.md): object cards are a candidate with no held-out evidence, and inheriting the paper number is exactly what the taskbook forbids."
     },
     "KR-J05": {
-      "status": "VERIFIED",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "the stub baseline this item would have to beat",
+          "path": "evidence/exp-j02-p1-vs-p2.json",
+          "sha256": "4cc1a838d45c80e7ab42a78fc53b04445d5a4b7d2b4bab0e4ba17a846bbd05b7",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
-      "decision": "the conservative stub baseline is measured, and no candidate beats it: P2 (stub + evidence) 6/6 at 114156 tokens vs P1 (lighter, no evidence) 6/6 at 117679 -- the lighter one costs 3% more and loses recoverability, so \"fewer characters\" is not a win. A semantic-summary candidate would have to beat 114156 tokens at equal quality AND keep the evidence pointers; neither was demonstrated, so nothing replaces the stub baseline. [status corrected: G03 was a measured rejection, and a rejected dependency continues on the conservative baseline rather than blocking the downstream conclusion.]"
+      "decision": "not demonstrated, so not verified: a semantic-summary candidate would have to beat the conservative stub baseline (114156 tokens) with fidelity and cost both acceptable, and no candidate was built or run. The tree has no summary implementation; context_economy.rs is cost accounting and says so itself. Deferred rather than claimed."
     },
     "KR-J06": {
       "status": "BLOCKED_EXTERNAL",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "grep for native compaction/tool-search fields + curl /v1/models",
+          "path": "evidence/j06_l06_probe.txt",
+          "sha256": "224d70661d8f0a92c7e01b99c7882e5c1118290cd2d90e206616a59a8bd4a357",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T03:20:00Z",
+          "completed_utc": "2026-10-22T12:50:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
       "decision": "not done; blocked on an external capability (see blocker). No test receipt, so not verified.",
-      "blocker": "server-side compaction is not declared by the endpoint in use; implementing a provider-native state machine without endpoint support would be a fabricated protocol claim (the K04 rule). Blocked on provider support."
+      "blocker": "the endpoint exposes no provider-native compaction: no adapter field declares one (grep over src finds no native_compaction/provider_compaction), and /v1/models returns only created/id/object/owned_by for its 32 models. Probe: evidence/j06_l06_probe.txt."
     },
     "KR-K01": {
       "status": "VERIFIED",
@@ -1277,18 +1267,17 @@
     "KR-K06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/k06-live-mcp-everything.jsonl",
+          "sha256": "6719faac92fa3bb92dab37c77bede4b866839190c757d50da9cc09381cc0e332",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -1297,18 +1286,17 @@
     "KR-L01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/report.json",
+          "sha256": "75d9711dcb71db3552b6f0c421ba11f1a08e46f4468fef416a67db3278f90e94",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -1396,21 +1384,21 @@
     "KR-L06": {
       "status": "BLOCKED_EXTERNAL",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "grep for native compaction/tool-search fields + curl /v1/models",
+          "path": "evidence/j06_l06_probe.txt",
+          "sha256": "224d70661d8f0a92c7e01b99c7882e5c1118290cd2d90e206616a59a8bd4a357",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T03:20:00Z",
+          "completed_utc": "2026-10-22T12:50:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
       "decision": "not done; blocked on an external capability (see blocker). No test receipt, so not verified.",
-      "blocker": "provider-native tool search is unavailable on the supported protocols and openai_responses fails closed on it. Blocked on provider support, not decided away."
+      "blocker": "the endpoint exposes no provider-native tool search: no adapter field declares one and /v1/models carries no search capability field. Probe: evidence/j06_l06_probe.txt."
     },
     "KR-M01": {
       "status": "VERIFIED",
@@ -1475,17 +1463,17 @@
     "KR-M04": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/exp-m04-experience.json",
           "sha256": "aff26b35011fc1ec32a7064bd9fac91428fa7f78dfe74aaf674b3ca1528ffb3e",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "measured and rejected as an optimisation: an arm that starts with one operator-accepted record injected (experience=true) costs 120522 tokens on the dev suite against 115319 without it (+4.5%), with both arms at 6/6. So the record did not improve action quality and it made the run slightly more expensive; the mechanism stays available (accept/revoke/expiry are unchanged and tested) but nothing claims a win for injecting it. The earlier \"25% faster\" figure was never measured and is not repeated here."
@@ -1513,17 +1501,17 @@
     "KR-M06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/exp-constraint.json",
           "sha256": "1cc1125750d7bd6b53ed76632da62cef1fad0d92ccaf7ef249b5b7c155b1f603",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "verified with two live fixture runs: with the on-demand tool menu the constraint suite costs 17631 tokens and the trap suite 22211, against baseline 22222 and 20572 -- so the candidate is not uniformly cheaper, and the trap suite is exactly the verifier control that catches a change which only looks cheap. Policy conditions and expiry are enforced by both suites."
@@ -1571,17 +1559,17 @@
     "KR-N03": {
       "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
-          "path": "evidence/exp-tournament-dev.json",
-          "sha256": "b542b5be72c36143f12bd9aaaa31eb9a5e6feae441692d93fd6c9334984a586c",
+          "path": "evidence/exp-subagents.json",
+          "sha256": "5d849b7451c949751d18e6858da05bb73e6c21508a3a87406cb17598bee7365c",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -1590,17 +1578,17 @@
     "KR-N04": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/exp-n04-loopguard.json",
           "sha256": "fb895ce7d51c00903e413a95c0de888a9b460af6dea45e20d4fa244af7e5b19c",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "verified with a paired run (arm loop_guard on/off, added for this task): on 113811 tokens at 6/6, off 117459 at 6/6 -- 3.1% cheaper with the guard on, which is inside this suite's own drift, so the honest reading is \"no measurable harm and a mild edge\", not a proven saving. The guard stays on. The mechanism itself (signature over tool+args, recoverable trail, per-file edit failure counting) is unchanged; this run only prices the switch."
@@ -1884,18 +1872,17 @@
     "KR-Q01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/q01-injection-paired-set.md",
+          "sha256": "12329917e502f1014a955f995e5a3d97ec6e8397f977f6adcc99f808764af7ef",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -2003,18 +1990,17 @@
     "KR-R01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
-          "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
-          "path": "evidence/final-gate-8f63776.log",
-          "sha256": "f7e2dfe423cc441b741fbedf229904788adc48ea0095aec14a2e291c968e6a50",
+          "command": "measured (see decision)",
+          "path": "evidence/report.json",
+          "sha256": "75d9711dcb71db3552b6f0c421ba11f1a08e46f4468fef416a67db3278f90e94",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T05:00:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1410
+          "kind": "artifact"
         }
       ],
       "blocker": null,
@@ -2023,20 +2009,20 @@
     "KR-R02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/r02_graph_stat_cache.log",
           "sha256": "56e67f6d639dfc40ed52295b2c37a8245f3914dac6f20d99f0a7d578982cf0dd",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
-      "decision": "measured with its own test, and the honest result is narrower than the earlier claim: on 200 x ~16 KiB sources a cold graph build costs 991ms and a warm rebuild 442ms (-55%), which is the per-file parse cache doing its job. The stat fast path I added (`get_by_stat`) does NOT pay as wired -- it lands at 936ms, slower than the warm hash path, because the (len, mtime_ns) hit is not taken on this path. The 27% in an earlier report came from one hand run and is not reproducible; it is withdrawn. The code stays (tested, and it cannot make things worse when it does hit) but nothing claims a win for it."
+      "decision": "measured by its own test, and the numbers are the ones in evidence/r02_graph_stat_cache.log: cold 1030271us, warm rebuild with the content-hash check 448052us, warm with the stat fast path 1003794us. So the parse cache makes a warm rebuild 56.5% cheaper, and the stat fast path I added does NOT hit on this path (it lands at cold cost). The 27% in an earlier report came from a single hand run and is withdrawn; nothing claims a win for the stat path."
     },
     "KR-R03": {
       "status": "VERIFIED",
@@ -2079,17 +2065,17 @@
     "KR-R05": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/exp-r05-pareto.json",
           "sha256": "0301ea158646ab24ff63ad40d7bcae41638515dc6ab33221642a560ffda7c8f1",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "verified with a combination run: every mechanism that won or tied on its own local measurement switched on at once (p3 + tournament k=2 + counterfactual probe + causal pruning + on-demand tools + experience) costs 128821 tokens at 6/6, against 119832 at 6/6 for the default. Turning on all local optima is 7.5% more expensive and no better, which is exactly the rule this task states: the product default follows the whole-run result, not the sum of local wins. This is also the regression guard -- if a future change makes the combined arm win, the numbers move."
@@ -2097,17 +2083,17 @@
     "KR-R06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/r06_baseline.log",
           "sha256": "7a0e912cb7aac293a1b5de83acabb066173bb31d9b91e013151fea9bf6f53912",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "budget lines and stop rules backed by a fresh run of scripts/measure-local-baseline.py: p0 wall 57.69ms, p2 graph 3410ms / peak RSS 77MB, p3 graph 238ms, p4 peak PSS 264MB (raw per-phase logs in evidence/raw-p*-r1.log). The budget in r06_performance_budget.md is set against these numbers, so this item no longer rests on a document that cites nothing."
@@ -2135,17 +2121,17 @@
     "KR-S02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/s02_shadow_selector.log",
           "sha256": "b32d2a4f8267f50b28616a1fff0ec6ddc132c06f558107fb5d07dd9bb898e228",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "implemented as a shadow-only selector (`shadow_selector.rs`): it reads three task features, records what it would have chosen, and its record carries `applied: false` -- nothing in the run reads the advice, so it cannot change a result. Promotion is gated by `promotion_verdict(dev_gain, holdout_gain)`, which refuses unless the held-out set also wins by >5%; on our own measurements no mechanism cleared that bar (the combined arm is 7.5% worse, single mechanisms are in the noise or negative), so the simple strategy stays in force, which is exactly what the acceptance rule asks for. Three tests pin the shadow property, the fixed-strategy default and the promotion gate."
@@ -2153,17 +2139,17 @@
     "KR-S03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "8f63776",
+      "commit": "e091fbc",
       "evidence": [
         {
           "command": "measured (see decision)",
           "path": "evidence/s03_routing.log",
           "sha256": "32c55e115c8769808c6885b5dc28fe3ac1e54a3817b819d06e15a1da7a9ad9be",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-22T12:20:00Z",
+          "completed_utc": "2026-10-22T12:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test"
+          "kind": "artifact"
         }
       ],
       "decision": "verified by the switching tests: `a_wobbling_run_switches_once_not_once_per_turn` (an alternating signal cannot flip the strategy every turn -- that is the hysteresis band), `dwell_and_switch_cap_bound_the_run` and `the_run_switch_cap_is_enforced` (a hard cap on switches per run, so a switch can never become a hidden retry loop), and `dwell_and_cooldown_block_early_switches` (activation cooldown). All four pass. The router records every switch with a reason, so the action is explainable, not implicit."
@@ -2204,7 +2190,7 @@
           "tests_run": 1410
         }
       ],
-      "decision": "every research item has a disposition and nothing was mechanical: 90 verified, 5 rejected with measured evidence, 18 implemented-but-unmeasured, 7 blocked with probe evidence."
+      "decision": "every research item has a disposition: 101 verified, 6 rejected on their own measurements, 7 blocked with probes, 6 deferred with reasons."
     },
     "KR-S06": {
       "status": "BLOCKED_EXTERNAL",
@@ -2341,7 +2327,7 @@
         }
       ],
       "blocker": null,
-      "decision": "the report is the deliverable and it is generated from the ledger: 90 verified / 18 implemented-unverified / 7 blocked / 5 rejected-with-evidence, the same numbers in the table, the open-item list and the prose. It claims neither 120 nor a finished review."
+      "decision": "generated from the ledger, not written by hand: 101 verified / 6 rejected-with-evidence / 7 blocked / 6 deferred / 0 implemented-unverified / 0 todo, and the W5 table, the open-item list and the prose carry those same numbers."
     }
   }
 }

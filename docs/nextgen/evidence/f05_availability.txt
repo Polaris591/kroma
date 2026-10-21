@@ -1,0 +1,17 @@
+# F05 availability probe
+$ command -v pi codex
+/usr/local/bin/pi
+
+$ ls /usr/local/bin | grep -iE "^(pi|codex)"
+pi
+pi-qq-canary.sh
+pi-qq-restart
+
+# other harness names from harnesses.json, none present:
+aider: not found
+cline: not found
+continue: continue
+cursor: not found
+sweep: not found
+goose: not found
+openhands: not found
