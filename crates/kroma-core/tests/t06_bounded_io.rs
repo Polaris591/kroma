@@ -318,3 +318,45 @@ fn the_four_file_tools_have_measured_output_costs() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// KR-I02: how much of a short read's cost is the whole-file I/O it does not need?
+///
+/// `read` with a `limit` still streams the file (up to 8 MiB) and only then slices lines, so a
+/// 10-line read of a 2 MiB file pays for 2 MiB. This measures the gap between a tiny file and a large
+/// one for the same `limit`, which is the ceiling a line-offset index could recover.
+#[test]
+fn a_short_read_of_a_large_file_pays_for_the_whole_file() {
+    use kroma_core::tools::read::execute_read;
+
+    let root = scratch("i02-cost");
+    let small = "line\n".repeat(10);
+    std::fs::write(root.join("small.txt"), &small).unwrap();
+    let big = "fn filler() {}\n".repeat(160_000); // ~2 MiB
+    std::fs::write(root.join("big.txt"), &big).unwrap();
+    let ws = WorkspaceCap::new(&root).unwrap();
+
+    let time_read = |path: &str| {
+        let started = Instant::now();
+        for _ in 0..5 {
+            let out = execute_read(&ws, &format!(r#"{{"path":"{path}","offset":1,"limit":10}}"#));
+            assert!(matches!(out.outcome, kroma_core::messages::ToolOutcome::Success));
+        }
+        started.elapsed() / 5
+    };
+
+    let small_t = time_read("small.txt");
+    let big_t = time_read("big.txt");
+    println!(
+        "KR-I02 short-read cost: small={:?} big={:?} ratio={:.0}x",
+        small_t,
+        big_t,
+        big_t.as_secs_f64() / small_t.as_secs_f64().max(1e-9)
+    );
+    assert!(
+        big_t > small_t * 10,
+        "a 2 MiB file must cost far more than a 100-byte one for the same limit (would mean the short \
+         path is already cheap): small={small_t:?} big={big_t:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

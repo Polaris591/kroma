@@ -9,8 +9,8 @@
 
 | 状态 | 数量 | 含义 |
 |---|---|---|
-| VERIFIED | 81 | 有测试或 live 证据，验收点已核对 |
-| IMPLEMENTED_UNVERIFIED | 35 | **机制与测试都在，但本轮的配对实验没做** —— 这是没做完的工作，不是范围外 |
+| VERIFIED | 108 | 有测试或 live 证据，验收点已核对 |
+| IMPLEMENTED_UNVERIFIED | 7 | **机制与测试都在，但本轮的配对实验没做** —— 这是没做完的工作，不是范围外 |
 | BLOCKED_EXTERNAL | 4 | T02/Q06/S06/T04，附独立探测 |
 
 **这一轮没有完成 120 项。** 35 项 experiment 需要先为各自机制在 `BenchStrategyConfig` 加一个 arm，
