@@ -92,3 +92,34 @@ workspace 与 event log（bench 跑完会清理），当前没有 `--keep-worksp
 
 因此 35 项 experiment 仍然保持 DEFERRED，理由从"缺运行器"更新为"执行器有两层缺陷：
 flag 传递 + 第二层未定位"，并且两次真实运行的数据都在（exp00-dev-run*.json）。
+
+## 根因（最终定位，已修复）
+
+`bench` 的 `BenchArmResult.verdict_unknown` 一直写着原因，只是 CLI 的文本报告把它归并成了一句
+含糊的 caveat。用 `--json` 直接读就看到了：
+
+```
+verify_command the held-out verifier needs '/usr/bin/python3', which is not a declared
+trusted verifier file; declare it explicitly (trusted_verifier_files) or the run has no verdict
+```
+
+三层原因，逐个排除后 pass_rate 从 0.0 变成 1.0：
+
+1. **`--allow-write` 这个 flag 在 `kroma bench` 分支里不生效**，得用 `--policy allow-write`
+   （否则 agent 的 edit 被 `deny: mutating tool requires --allow-write in non-interactive mode`）。
+2. **verify_command 的解释器必须在沙箱里可见**：原来指向 `/tmp/kv/bin/python`，而 bwrap 把
+   `/tmp` 换成空 tmpfs，所以解释器根本不存在。改成 `/usr/bin/python3`。
+3. **verifier 二进制必须显式声明为可信文件**，且不能用软链：`--verifier-file /usr/bin/python3`
+   报 "must be a regular file reached without symlinks"，改用真实路径 `/usr/bin/python3.13`。
+
+验证（单任务）：
+
+```
+$ kroma bench ... --policy allow-write --verifier-file /usr/bin/python3.13 --json
+baseline                pass_rate 1.0  resolved 1
+candidate-on-demand-tools pass_rate 1.0  resolved 1
+fix-off-by-one | approved | VERDICT OK
+```
+
+所以前三次"全 rejected"既不是模型失败，也不是候选判负，而是**验证器没有交付到沙箱**。
+之前把 35 项标 DEFERRED 是对的（不能把器材故障写成候选失败），现在器材修好了，实验可以真跑。

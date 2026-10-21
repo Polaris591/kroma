@@ -668,24 +668,24 @@
       "decision": "t38_prereg_oracle_authority::rewriting_the_prereg_after_admission_does_not_widen_the_gate and changing_the_oracle_bytes_after_admission_is_refused; t34_evaluation_authorization (2). The agent cannot widen its own gate or oracle"
     },
     "KR-F03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "eef778d",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "command": "kroma bench --executor provider (dev + holdout)",
+          "path": "evidence/exp00-real-dev.json",
+          "sha256": "d8860489a47e0bdb1873e21c5d5c1be1e51a38d5caea67757a88bf1d007102dd",
+          "source_tree_sha256": "2a389c820050881e2e26a333d68e26f18be0282922b2c400eb1bd28ce772a493",
+          "completed_utc": "2026-10-21T14:10:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 12
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs exist (evidence/exp00-dev-run1/2/3.json) but the bench provider executor rejected all 12 jobs while the same task succeeded through kroma run, so no paired statistic exists. Missing: a working bench executor."
+      "decision": "the executor works now. Root cause was three layers, all recorded in evidence/exp00-diagnosis.md: --allow-write is not honoured in the bench branch (use --policy allow-write); the verify interpreter must be visible inside the bwrap sandbox (it was /tmp/kv/bin/python, and /tmp is an empty tmpfs there); and the verifier binary must be declared as a trusted file at its real path (--verifier-file /usr/bin/python3.13, a symlink is refused). With those fixed: dev suite 6/6 approved both arms, holdout 2/2 approved both arms, 0 unknown verdicts. Paired result: quality identical (100%/100%); dev candidate costs +8% tokens (126349 vs 117015), holdout candidate costs -10% (43680 vs 48635) -- the two sets disagree, so nothing is promoted."
     },
     "KR-F04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -695,7 +695,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -704,7 +704,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-F05": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -714,7 +714,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -723,27 +723,27 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-F06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "eef778d",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/w2-workspace-test.log",
-          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:05:00Z",
+          "command": "kroma bench --executor provider (holdout)",
+          "path": "evidence/exp00-real-holdout.json",
+          "sha256": "68f67c1dc81cc2ffa90e6f19d8488f543feaa386b81afe50a434321199b2e922",
+          "source_tree_sha256": "2a389c820050881e2e26a333d68e26f18be0282922b2c400eb1bd28ce772a493",
+          "completed_utc": "2026-10-21T14:10:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1295
+          "tests_run": 12
         }
       ],
       "blocker": null,
-      "decision": "bench_prereg_gate (6: prereg admission, refuses dev/holdout collision, report records the prereg), release-attestation.js and release-pipeline.js both exit 0. Signing and re-run machinery exist; the negative-experiment registry is empty because no W4 experiment has run yet"
+      "decision": "negative-experiment registry now has its first real entry: candidate-on-demand-tools is NOT promoted because dev and holdout disagree on cost (+8% vs -10% tokens) while quality is equal. Both raw reports are kept (evidence/exp00-real-dev.json, exp00-real-holdout.json) with the prereg sha recorded by bench, and release-attestation.js / release-pipeline.js still pass. REJECTED_WITH_EVIDENCE here means \"researched and not promoted\", not \"shipped capability\"."
     },
     "KR-G01": {
       "status": "VERIFIED",
@@ -793,7 +793,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -802,7 +802,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-G04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -812,7 +812,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -821,7 +821,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-G05": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -831,7 +831,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -840,7 +840,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-G06": {
       "status": "VERIFIED",
@@ -910,7 +910,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -919,7 +919,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-H04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -929,7 +929,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -938,7 +938,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-H05": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -948,7 +948,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -957,7 +957,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-H06": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -967,7 +967,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -976,7 +976,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-I01": {
       "status": "VERIFIED",
@@ -1005,7 +1005,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1014,7 +1014,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-I03": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1024,7 +1024,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1033,7 +1033,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-I04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1043,7 +1043,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1052,7 +1052,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-I05": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1062,7 +1062,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1071,7 +1071,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-I06": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1081,7 +1081,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1090,7 +1090,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-J01": {
       "status": "VERIFIED",
@@ -1120,7 +1120,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1129,7 +1129,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-J03": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1139,7 +1139,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1148,7 +1148,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-J04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1158,7 +1158,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1167,7 +1167,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-J05": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1177,7 +1177,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1186,7 +1186,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-J06": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1196,7 +1196,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1205,7 +1205,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-K01": {
       "status": "VERIFIED",
@@ -1285,7 +1285,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1294,7 +1294,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-K05": {
       "status": "VERIFIED",
@@ -1363,7 +1363,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1372,7 +1372,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-L03": {
       "status": "VERIFIED",
@@ -1442,7 +1442,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1451,7 +1451,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-M01": {
       "status": "VERIFIED",
@@ -1521,7 +1521,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1530,7 +1530,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-M05": {
       "status": "VERIFIED",
@@ -1620,7 +1620,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1629,7 +1629,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-N04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1639,7 +1639,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1648,7 +1648,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-N05": {
       "status": "VERIFIED",
@@ -1718,7 +1718,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1727,7 +1727,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-O03": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1737,7 +1737,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1746,7 +1746,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-O04": {
       "status": "VERIFIED",
@@ -1776,7 +1776,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1785,7 +1785,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-O06": {
       "status": "VERIFIED",
@@ -2072,7 +2072,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2081,7 +2081,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-R03": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2091,7 +2091,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2100,7 +2100,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-R04": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -2130,7 +2130,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2139,7 +2139,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-R06": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -2189,7 +2189,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2198,7 +2198,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-S03": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2208,7 +2208,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2217,7 +2217,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-S04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2227,7 +2227,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2236,7 +2236,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-S05": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2246,7 +2246,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
+          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2255,7 +2255,7 @@
         }
       ],
       "blocker": null,
-      "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
+      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
     },
     "KR-S06": {
       "status": "BLOCKED_EXTERNAL",
@@ -2362,7 +2362,7 @@
         {
           "command": "delivery package inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "3cf29e76f1b43926bb9bda76724a4606b1968a5c1bbd77ff44d12dcab1b9666a",
+          "sha256": "13066597f56fa48ce2fec1452bcceb136402d6d92c94f6dc853364ca52699519",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
@@ -2381,7 +2381,7 @@
         {
           "command": "final report inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "3cf29e76f1b43926bb9bda76724a4606b1968a5c1bbd77ff44d12dcab1b9666a",
+          "sha256": "13066597f56fa48ce2fec1452bcceb136402d6d92c94f6dc853364ca52699519",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T08:15:00Z",
           "exit_code": 0,
