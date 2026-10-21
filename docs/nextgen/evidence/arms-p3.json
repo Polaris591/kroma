@@ -1,0 +1,4 @@
+[
+  { "name": "baseline" },
+  { "name": "projection_p3", "projection_profile": "p3" }
+]

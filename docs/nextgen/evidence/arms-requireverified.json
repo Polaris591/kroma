@@ -1,0 +1,4 @@
+[
+  { "name": "baseline", "require_verified": false },
+  { "name": "require_verified", "require_verified": true }
+]

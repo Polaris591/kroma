@@ -29,17 +29,25 @@ pub enum ShadowChoice {
 }
 
 /// One shadow decision, kept for offline comparison against the fixed strategy.
+///
+/// The three fields the taskbook asks for are all present: what the selector *recommended*, what the
+/// run *actually* used, and the selector's estimate of what the other choice would have cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShadowRecord {
     pub features: TaskFeatures,
     pub choice: ShadowChoice,
-    /// Always true in this build: the record is advice, not control flow.
+    /// The strategy the run actually used (the fixed one, unless a canary was promoted).
+    pub actual: String,
+    /// The selector's own estimate of the alternative's cost in tokens; `None` when it has no basis
+    /// to estimate, which is the honest answer rather than a fabricated number.
+    pub counterfactual_estimate: Option<i64>,
+    /// Always false in this build: the record is advice, not control flow.
     pub applied: bool,
 }
 
 /// Decide, without applying. The rules are intentionally boring: they exist so the offline
 /// comparison has something to compare against, not because they are believed to be better.
-pub fn observe(features: TaskFeatures) -> ShadowRecord {
+pub fn observe(features: TaskFeatures, actual: &str) -> ShadowRecord {
     let choice = if features.planning_task && features.mentioned_files >= 3 {
         ShadowChoice::Suggested("p3".to_string())
     } else if features.mentioned_files >= 5 && features.has_verification {
@@ -50,6 +58,10 @@ pub fn observe(features: TaskFeatures) -> ShadowRecord {
     ShadowRecord {
         features,
         choice,
+        actual: actual.to_string(),
+        // No basis to price the alternative without running it, so this stays None rather than
+        // inventing a delta.
+        counterfactual_estimate: None,
         applied: false,
     }
 }
@@ -72,11 +84,18 @@ mod tests {
 
     #[test]
     fn a_shadow_record_never_claims_to_have_applied() {
-        let rec = observe(TaskFeatures {
-            mentioned_files: 6,
-            planning_task: true,
-            has_verification: true,
-        });
+        let rec = observe(
+            TaskFeatures {
+                mentioned_files: 6,
+                planning_task: true,
+                has_verification: true,
+            },
+            "p2",
+        );
+        assert_eq!(
+            rec.actual, "p2",
+            "the record must say what the run actually used"
+        );
         assert!(
             !rec.applied,
             "shadow advice must never be reported as applied"
@@ -86,11 +105,14 @@ mod tests {
 
     #[test]
     fn a_small_edit_task_gets_the_fixed_strategy() {
-        let rec = observe(TaskFeatures {
-            mentioned_files: 1,
-            planning_task: false,
-            has_verification: true,
-        });
+        let rec = observe(
+            TaskFeatures {
+                mentioned_files: 1,
+                planning_task: false,
+                has_verification: true,
+            },
+            "p2",
+        );
         assert_eq!(rec.choice, ShadowChoice::Fixed);
     }
 

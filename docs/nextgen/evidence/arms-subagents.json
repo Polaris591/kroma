@@ -1,0 +1,4 @@
+[
+  { "name": "baseline", "max_subagents": 8 },
+  { "name": "no_subagents", "max_subagents": 0 }
+]

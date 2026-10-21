@@ -1,0 +1,4 @@
+[
+  {"name":"loop_guard_on","projection_profile":"p2","loop_guard":true},
+  {"name":"loop_guard_off","projection_profile":"p2","loop_guard":false}
+]

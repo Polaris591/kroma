@@ -2440,6 +2440,30 @@ impl AgentRunner {
         &mut self,
         mut logger: EventLogger,
     ) -> Result<(TurnState, EventLogger), (RunSummary, EventLogger)> {
+        // KR-S02: record what the shadow selector would have chosen, alongside what this run actually
+        // uses. The record is written to the run's state dir and is never read back as control flow.
+        {
+            let lower = self.config.task.to_ascii_lowercase();
+            let features = crate::shadow_selector::TaskFeatures {
+                mentioned_files: lower.matches(".rs").count(),
+                planning_task: lower.contains("plan") || lower.contains("design"),
+                has_verification: lower.contains("test"),
+            };
+            let actual = format!("{:?}", self.config.projection_profile);
+            let record = crate::shadow_selector::observe(features, &actual);
+            if let Ok(line) = serde_json::to_string(&record) {
+                let dir = self.tool_runtime.env().state_dir();
+                let _ = std::fs::create_dir_all(dir);
+                use std::io::Write;
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("shadow_selector.jsonl"))
+                {
+                    let _ = writeln!(file, "{}", line);
+                }
+            }
+        }
         let budget_tracker = match BudgetTracker::new(self.config.budget.clone()) {
             Ok(b) => b,
             Err(e) => {

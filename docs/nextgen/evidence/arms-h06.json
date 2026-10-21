@@ -1,0 +1,4 @@
+[
+  {"name":"inline_64k","projection_profile":"p2"},
+  {"name":"inline_32k","projection_profile":"p2","max_tool_inline_output_bytes":32768,"bash_head_bytes":8192,"bash_tail_bytes":16384}
+]

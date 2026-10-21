@@ -1,0 +1,4 @@
+[
+  { "name": "baseline" },
+  { "name": "no_graph_cache", "graph_cache": false }
+]

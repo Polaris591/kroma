@@ -1,0 +1,4 @@
+[
+  { "name": "baseline" },
+  { "name": "causal_pruning", "causal_pruning": true }
+]

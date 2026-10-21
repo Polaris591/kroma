@@ -1,0 +1,4 @@
+[
+  { "name": "baseline" },
+  { "name": "minimal_tools", "tool_filter": ["read", "edit", "write", "ls", "find", "grep"] }
+]

@@ -1,0 +1,4 @@
+[
+  { "name": "baseline" },
+  { "name": "counterfactual_probe", "counterfactual_probe": true }
+]

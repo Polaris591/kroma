@@ -1,0 +1,4 @@
+[
+  {"name":"default","projection_profile":"p2"},
+  {"name":"all_local_optima_on","projection_profile":"p3","adaptive_tournament_candidates":2,"counterfactual_probe":true,"causal_pruning":true,"on_demand_tools":true,"experience":true}
+]

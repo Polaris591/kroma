@@ -1,0 +1,4 @@
+[
+  { "name": "baseline_full_context", "projection_profile": "p2" },
+  { "name": "masking_p1", "projection_profile": "p1" }
+]

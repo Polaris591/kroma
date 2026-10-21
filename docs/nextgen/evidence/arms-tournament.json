@@ -1,0 +1,4 @@
+[
+  { "name": "baseline" },
+  { "name": "adaptive_tournament_2", "adaptive_tournament_candidates": 2 }
+]
