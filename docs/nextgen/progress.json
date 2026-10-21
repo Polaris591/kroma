@@ -919,22 +919,23 @@
       "decision": "this task IS the on_demand_tools ablation: dev 6/6 at 117015 tokens for the full menu vs 6/6 at 126349 for on-demand (+8%), holdout 2/2 at 48635 vs 2/2 at 43680 (-10%). The two suites disagree, so on-demand is not promoted. F04 now explains why the menu matters at all: tool schemas are 8.7 KB of the 9.4 KB static prefix, and a minimal menu saves 55% tokens on tasks that need only file tools."
     },
     "KR-H04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "09166b3",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "kroma bench --executor provider --prompt-profile {default,efficient-candidate}",
+          "path": "evidence/exp-h04-efficient-candidate.json",
+          "sha256": "002ec503b39cf29ffa99a5d411108fda38fb42439c8e88b9f450d5b31529929f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:05:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 24
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (tool_contracts, t12_tool_discovery_loop, c0008_exposure_wiring), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "measured and rejected: the efficient-candidate prompt profile costs MORE, not less. Two runs on the same dev suite: default 120324 tokens (6/6), efficient-candidate 146405 tokens (6/6) -- +22% for identical quality. So the \"task-aware navigation prompt\" does not pay off on these tasks and stays off (the CLI already marks it experimental). This is the same shape as the v4 E04 finding (dev looked good, holdout reversed); here even dev disagrees."
     },
     "KR-H05": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -2084,22 +2085,22 @@
       "decision": "fairness and throttling are testable and measured, not asserted: channel_governor covers queued callers rechecking the breaker after capacity returns, in_flight never exceeding the policy, a failure storm opening the breaker before further calls, the cooldown admitting exactly one probe, and a dropped half-open probe not wedging the channel (7 tests). Tail latency measured over 20 consecutive graph builds in one session: p50 1166ms, p95 3312ms, min 1148ms. The p95 is the single cold build (the first request); the warm path stays at ~1150-1200ms, so throttling is not what inflates the tail. Concurrency stays bounded: 4 simultaneous ACP sessions peak at 269MB tree PSS (KR-R01 p4)."
     },
     "KR-R04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "d434fe5",
+      "commit": "09166b3",
       "evidence": [
         {
-          "command": "source size + function census + test suite",
+          "command": "source size + function census + full suite",
           "path": "r04_module_extraction_assessment.md",
           "sha256": "20d21ce12a5c159006b25465eb07a62a1af24b4139863887b59e9a209aa9d7bc",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:05:00Z",
+          "completed_utc": "2026-10-22T00:40:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
-      "decision": "evidence exists, but declared dependency KR-R02 is not verified, so this cannot close"
+      "decision": "assessed and deliberately not split, which the task allows when there is no evidence of lower maintenance cost. run_provider_turn (~893 lines) has ten strictly sequential stages that share state, and this round's B01-B04 bugs came from those stages having been separated before. Contrast: surface.rs (12 modules), secure_fs consolidation and run_inner 1104 -> 23 lines were splits along real invariant boundaries. R02 is now verified, so the dependency is closed."
     },
     "KR-R05": {
       "status": "IMPLEMENTED_UNVERIFIED",
