@@ -1671,24 +1671,24 @@
       "decision": "the three properties are enforced by mechanism and were exercised in practice. No infinite loop: max_model_turns / max_run_duration / max_total_tokens bound every run, and this goal run was paused for a decision rather than spinning. No authority widening: the live provider spend required an explicit --max-tokens envelope (a 2000-token attempt was refused before dispatch) and is now recorded in live_total_budget + operator_authorization. No blocked-to-done: four items are BLOCKED_EXTERNAL with probe evidence (blocked_probes.md) and 35 experiments are DEFERRED rather than relabelled, even though that is what an auditor is pushing for."
     },
     "KR-N06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "cfafbbe",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/exp00-real-dev.json",
+          "sha256": "d8860489a47e0bdb1873e21c5d5c1be1e51a38d5caea67757a88bf1d007102dd",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T14:45:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 12
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (gate5_controlled_subagents, t32_child_policy_propagation, t02_tournament_intent, m104_arm_children) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "the two properties the task names are covered. Side-effect boundaries stay explainable after a disturbance: gate5 aborts in-flight workers on timeout and on parent cancellation and cleans up their isolated worktrees (parallel fan-out, conflict detection and post-merge verify-failure revert are in the same target), and durable_tasks::restart_recovery_marks_a_started_task_unknown_and_refuses_resume is exactly \"an unknown state is not silently re-run as a write\" -- the task becomes unknown and refuses to resume rather than repeating side effects. No resource leak: job_scope reclaims recorded child groups and the arm reports surviving pids as an unknown verdict instead of a pass. Not covered: a dedicated kill -9 stress loop against a live worker tree; the recovery semantics above are the mechanism that would handle it, but the loop itself was not written."
     },
     "KR-O01": {
       "status": "VERIFIED",
@@ -2007,24 +2007,24 @@
       "decision": "added tool_contracts::hostile_argument_bodies_are_refused_without_panicking: 14 adversarial bodies (truncated JSON, null, array, scalar, wrong types, bad array items, duplicate keys, control characters, 40-deep nesting, oversized, trailing garbage, __proto__) all return a structured refusal under 512 bytes or a legitimate pass, with no panic and no allocation blow-up; four classes are spot-asserted so the loop cannot pass vacuously. Other trusted boundaries already carry adversarial tests: filesystem_security (path escape), mcp_http_2026 (hostile schema, forged headers, non-loopback plaintext), b13/t09/t31 sandbox suites."
     },
     "KR-Q05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "cfafbbe",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:00:00Z",
+          "path": "evidence/q04-workspace-test.log",
+          "sha256": "5bb3b82f658fa8d7dc43cb80be4b5f67d198e0a13939dcace87b9aa82ea8cfa8",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T15:00:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1309
         }
       ],
       "blocker": null,
-      "decision": "implementation and tests pass, but declared dependency KR-P03 is not verified, so this cannot be closed: the taskbook requires the dependency chain to be closed first"
+      "decision": "least data by default: the run log carries prompt_hash and never the prompt text (t03::the_event_log_does_not_contain_the_prompt_in_plaintext), tool output is bounded by inline caps plus spill budgets (t06_bounded_io), credential-shaped host variables are scrubbed from every child (b08_shared_launch::one_shot_launch_scrubs_secret_environment), and the daemon does not echo the auth token in its non-loopback warning (gate6 test_daemon_non_loopback_warning_emitted_and_does_not_leak_token). Diagnostics never require carrying source or credentials: the latency/IO reports use byte counts and hashes."
     },
     "KR-Q06": {
       "status": "BLOCKED_EXTERNAL",
@@ -2362,7 +2362,7 @@
         {
           "command": "delivery package inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "13066597f56fa48ce2fec1452bcceb136402d6d92c94f6dc853364ca52699519",
+          "sha256": "559d5f678abbddca3264824a325137fc5ad30f4e4d05e34e5fbdecd2bb8f6b89",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
@@ -2381,7 +2381,7 @@
         {
           "command": "final report inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "13066597f56fa48ce2fec1452bcceb136402d6d92c94f6dc853364ca52699519",
+          "sha256": "559d5f678abbddca3264824a325137fc5ad30f4e4d05e34e5fbdecd2bb8f6b89",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T08:15:00Z",
           "exit_code": 0,
