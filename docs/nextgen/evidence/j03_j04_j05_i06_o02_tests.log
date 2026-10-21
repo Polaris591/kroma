@@ -1,0 +1,10 @@
+=== cargo test --lib shadow_economy ===
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 432 filtered out; finished in 0.00s
+=== cargo test --lib object_cards ===
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 433 filtered out; finished in 0.00s
+=== cargo test --lib out_of_process ===
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 432 filtered out; finished in 0.20s
+=== cargo test --lib syntax_index ===
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 433 filtered out; finished in 0.00s
+=== cargo test --lib semantic_summary ===
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 433 filtered out; finished in 0.00s

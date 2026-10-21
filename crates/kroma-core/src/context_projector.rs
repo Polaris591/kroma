@@ -260,6 +260,11 @@ pub struct ContextProjector {
     compacted_indices: HashSet<usize>,
     compacted_file_paths: HashSet<String>,
     compaction_reread_count: u64,
+    /// KR-J03: shadow economic decisions recorded for this run (advice only; nothing reads them back
+    /// as control flow, and `applied` is always false).
+    economy_decisions: Vec<crate::shadow_economy::EconomyDecision>,
+    /// KR-J03 planner configuration; defaults reproduce the shipped heuristic.
+    economy_config: crate::shadow_economy::EconomyConfig,
     last_pinned_baseline_end: usize,
     last_touched_turns: HashMap<String, usize>,
     /// Raw tool output retained for `recall_evidence`, keyed by `source_entry_id`.
@@ -311,6 +316,8 @@ impl ContextProjector {
             compacted_indices: HashSet::new(),
             compacted_file_paths: HashSet::new(),
             compaction_reread_count: 0,
+            economy_decisions: Vec::new(),
+            economy_config: crate::shadow_economy::EconomyConfig::default(),
             last_pinned_baseline_end: 0,
             last_touched_turns: HashMap::new(),
             evidence: HashMap::new(),
@@ -386,6 +393,11 @@ impl ContextProjector {
 
     pub fn recall_counts(&self) -> (u64, u64) {
         (self.recall_hit_count, self.recall_miss_count)
+    }
+
+    /// KR-J03: the shadow planner's decisions for this run.
+    pub fn economy_decisions(&self) -> &[crate::shadow_economy::EconomyDecision] {
+        &self.economy_decisions
     }
 
     pub fn compaction_reread_count(&self) -> u64 {
@@ -1238,6 +1250,16 @@ impl ContextProjector {
                             raw_evidence = Some(raw);
                         }
                         compacted_now = true;
+                        // KR-J03: record what the shadow planner would have said about this item.
+                        // The window check that forced this compaction already ran upstream, which is
+                        // why HardWindow can appear here as the reason and still never be overridden.
+                        let window_remaining = target_history_bytes.saturating_sub(current_bytes);
+                        self.economy_decisions.push(crate::shadow_economy::plan(
+                            &self.economy_config,
+                            old_bytes,
+                            current_turn.saturating_sub(idx),
+                            window_remaining,
+                        ));
                         if reason == CompactionReason::DeadEnd {
                             self.dead_end_compactions = self.dead_end_compactions.saturating_add(1);
                         }

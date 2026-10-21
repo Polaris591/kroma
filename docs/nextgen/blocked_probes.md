@@ -85,7 +85,7 @@ ACP 在没有 owner spend envelope 时 fail-closed 退出（KR-E04 引入的安�
 
 ```
 p2  graph 397.6ms 中位数 / init 6.7ms / 树 PSS 62–65MB   (本仓 1200 文件，release)
-p3  graph 245ms  中位数 / 树 PSS 25MB               (生成的小树)
+p3  graph 33.968ms 中位数 / 树 PSS 15.5MB            (生成的小树, release; debug 曾测得 245ms/25.4MB)
 p4  4 个并发 acp 会话，树 PSS 228.9MB 中位数（228.0–234.6，release）
 ```
 
