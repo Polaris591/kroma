@@ -244,6 +244,47 @@ impl HandoffArtifact {
         self.unresolved.push(question.into());
     }
 
+    /// KR-M03: derive a handoff artifact from the typed task state.
+    ///
+    /// A new work segment can resume from the ledger -- the goal verbatim, what was actually
+    /// verified (with the check that verified it), what is still open, and the evidence pointers --
+    /// instead of depending on the model to remember the whole taskbook. Nothing is summarised: the
+    /// goal is the user's quote, and unresolved items stay questions.
+    pub fn from_task_state(state: &crate::task_state::TaskState) -> Self {
+        use crate::task_state::HypothesisStatus;
+        let goal = state
+            .goal
+            .as_ref()
+            .map(|p| p.quote.clone())
+            .unwrap_or_default();
+        let mut artifact = Self::new(goal);
+        for item in &state.verification {
+            artifact.verify(
+                item.statement.clone(),
+                format!(
+                    "task-state verification (user quote: {})",
+                    item.provenance.quote
+                ),
+            );
+        }
+        for hypothesis in &state.failure_hypotheses {
+            if hypothesis.status != HypothesisStatus::Contradicted {
+                artifact.open(format!(
+                    "{} [{}]",
+                    hypothesis.statement,
+                    hypothesis.status.as_str()
+                ));
+            }
+        }
+        for constraint in &state.constraints {
+            artifact.cite(format!("constraint: {}", constraint.statement));
+        }
+        for mention in &state.path_mentions {
+            artifact.cite(format!("path mentioned: {}", mention.path));
+        }
+        artifact
+    }
+
     pub fn cite(&mut self, evidence: impl Into<String>) {
         self.evidence.push(evidence.into());
     }
@@ -502,5 +543,109 @@ mod tests {
         assert!(rendered
             .text
             .ends_with("handoff truncated at the byte cap]\n"));
+    }
+}
+
+#[cfg(test)]
+mod handoff_from_state_tests {
+    use super::*;
+    use crate::task_state::{
+        Constraint, FailureHypothesis, PathMention, Provenance, TaskState, VerificationItem,
+    };
+
+    fn quote(text: &str, index: usize) -> Provenance {
+        Provenance {
+            canonical_index: index,
+            entry_id: None,
+            quote: text.to_string(),
+        }
+    }
+
+    /// KR-M03: a new work segment must be able to resume from the ledger, not from memory.
+    ///
+    /// The artifact is built from the typed task state, carries the user's goal verbatim, keeps
+    /// verified items with the check that verified them, keeps open items as questions, and survives
+    /// a JSON round trip -- which is exactly how a later segment reads it.
+    #[test]
+    fn a_handoff_artifact_carries_goal_verified_and_open_items() {
+        let state = TaskState {
+            goal: Some(quote("fix the off-by-one in src/calc.py", 0)),
+            constraints: vec![Constraint {
+                statement: "do not edit tests/".to_string(),
+                provenance: quote("do not edit tests/", 1),
+            }],
+            verification: vec![VerificationItem {
+                statement: "total(3) == 6".to_string(),
+                provenance: quote("total(3) must be 6", 2),
+            }],
+            failure_hypotheses: vec![FailureHypothesis::new("the loop bound is wrong")],
+            path_mentions: vec![PathMention {
+                path: "src/calc.py".to_string(),
+                canonical_index: 0,
+                mention_only: true,
+            }],
+            ..Default::default()
+        };
+
+        let artifact = HandoffArtifact::from_task_state(&state);
+
+        assert_eq!(
+            artifact.goal, "fix the off-by-one in src/calc.py",
+            "the goal must be the user's quote, never a summary"
+        );
+        assert!(
+            artifact.verified.iter().any(|v| v.claim == "total(3) == 6"),
+            "a verified item must keep its claim: {:?}",
+            artifact.verified
+        );
+        assert!(
+            artifact
+                .verified
+                .iter()
+                .any(|v| v.check.contains("total(3) must be 6")),
+            "a verified item must keep what verified it"
+        );
+        assert!(
+            artifact
+                .unresolved
+                .iter()
+                .any(|u| u.contains("loop bound") && u.contains("unverified")),
+            "an unchecked hypothesis must stay an open question: {:?}",
+            artifact.unresolved
+        );
+        assert!(
+            artifact
+                .evidence
+                .iter()
+                .any(|e| e.contains("do not edit tests/")),
+            "constraints must be carried as evidence pointers: {:?}",
+            artifact.evidence
+        );
+
+        let json = serde_json::to_string(&artifact).expect("artifact serializes");
+        let back: HandoffArtifact = serde_json::from_str(&json).expect("artifact round-trips");
+        assert_eq!(back.goal, artifact.goal);
+        assert_eq!(back.verified.len(), artifact.verified.len());
+        assert_eq!(back.unresolved.len(), artifact.unresolved.len());
+    }
+
+    /// A contradicted hypothesis is closed, not left as an open question for the next segment.
+    #[test]
+    fn a_contradicted_hypothesis_is_not_reopened() {
+        use crate::task_state::HypothesisStatus;
+        let mut closed = FailureHypothesis::new("the cache is stale");
+        closed.status = HypothesisStatus::Contradicted;
+        let state = TaskState {
+            goal: Some(quote("task", 0)),
+            failure_hypotheses: vec![closed],
+            ..Default::default()
+        };
+
+        let artifact = HandoffArtifact::from_task_state(&state);
+        assert!(
+            artifact.unresolved.is_empty(),
+            "a contradicted hypothesis must not be reopened: {:?}",
+            artifact.unresolved
+        );
     }
 }

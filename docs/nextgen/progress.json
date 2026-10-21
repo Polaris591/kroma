@@ -1494,24 +1494,24 @@
       "decision": "t25_task_state::unsupported_summary_claim_is_not_promoted_to_fact (a model claim does not become state) and path_mentions_do_not_claim_causal_truth; task state is rebuilt from the transcript events"
     },
     "KR-M03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "2be53f0",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/m03-workspace-test.log",
+          "sha256": "323dfd590c2a8046eb9f63374633d70b5ca75c160a32454a5e06802bcd2f6c4a",
+          "source_tree_sha256": "e16e9393ee2ebbe4def4da1450310ff3f7ff894b3c41b2fb9bcff44b67ff4aaf",
+          "completed_utc": "2026-10-21T12:55:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1311
         }
       ],
       "blocker": null,
-      "decision": "handoff.rs has HandoffArtifact, but resuming a work segment from the ledger was not exercised end to end. Missing: the recovery run that proves a new segment can continue without the model remembering the taskbook."
+      "decision": "HandoffArtifact was dead code -- nothing in the crate called it. Added HandoffArtifact::from_task_state, which derives the artifact from the typed TaskState: the goal is the user's verbatim quote (never a summary), verified items keep both the claim and the check that verified them, unchecked hypotheses stay open questions, contradicted ones are not reopened, and constraints plus path mentions become evidence pointers. Two tests: the full derivation with a JSON round trip (which is how a later segment actually reads it) and the contradicted-hypothesis case. A new work segment can now resume from the ledger instead of depending on the model to remember the taskbook."
     },
     "KR-M04": {
       "status": "DEFERRED_WITH_RATIONALE",

@@ -62,3 +62,33 @@ DEFERRED_WITH_RATIONALE，并把"设施缺陷 + 三次真实运行 + 手工成�
 影响面：agent 侧 bash 不可用。但 `verify_command` 由 gate 跑、不受该 policy 约束，所以
 "12 个 job 全 rejected" 不能全部归因于这一点——模型在 bench 环境里是否改对了文件仍未确认。
 这也意味着"修好 bench 执行器"比我先前估计的更靠前：先确认 policy 传递，再看 gate 判定。
+
+## 追加诊断 2：`--allow-write` 这个 flag 在 bench 里不生效
+
+最小复现（1 task）：
+
+```
+$ kroma bench ... --allow-write --allow-shell
+  baseline  bash=on                     # SideEffect 放行
+  # 但 agent 的 edit 被拒：
+  # {"tool_name":"edit","decision":"deny:mutating tool requires --allow-write in non-interactive mode"}
+```
+
+而用显式 base 就正常：
+
+```
+$ kroma bench ... --policy allow-write
+[kroma] note: ... (policy 'allow-write')   bash=off     # 符合预期
+$ kroma bench ... --policy allow-write --allow-shell
+  baseline  bash=on                     # FullAutonomous
+```
+
+结论：`--allow-write` 这个 flag 在 `kroma bench` 分支里没有进入 `cli.policy_mode`，而
+`--policy <base>` 可以。这是 CLI 参数解析的缺口，与 bench 执行逻辑无关。
+
+**但修好 policy 之后 pass_rate 仍是 0/1**，说明还有第二层原因。要定位它需要保留 arm 的
+workspace 与 event log（bench 跑完会清理），当前没有 `--keep-workspace` 之类的开关，需要在
+下一次改动里加一个诊断开关，否则只能靠猜测——而猜测不是证据。
+
+因此 35 项 experiment 仍然保持 DEFERRED，理由从"缺运行器"更新为"执行器有两层缺陷：
+flag 传递 + 第二层未定位"，并且两次真实运行的数据都在（exp00-dev-run*.json）。
