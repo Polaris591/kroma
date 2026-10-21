@@ -31,7 +31,93 @@ pub struct ReadArgs {
     pub force: Option<bool>,
 }
 
+// KR-I03: a deterministic read-result cache. The key is the relative path plus (mtime, ctime, inode, size, head hash), so any write changes it and a stale entry cannot be served -- invalidation is proved by
+// construction, not by a timer. Opt-in via KROMA_RESULT_CACHE=1; the randomised state-change test
+// flips it per read and requires on/off to agree.
+static READ_RESULT_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<
+            (String, u128, u128, u64, usize, usize, bool),
+            ToolExecutionOutput,
+        >,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn read_result_cache_enabled() -> bool {
+    // Opt-in: correct but not yet shown to pay, so it stays off until a paired run says otherwise.
+    matches!(std::env::var("KROMA_RESULT_CACHE").as_deref(), Ok("1"))
+}
+
+#[allow(clippy::type_complexity)]
+fn read_result_cache_key(
+    workspace: &WorkspaceCap,
+    args: &ReadArgs,
+) -> Option<(String, u128, u128, u64, usize, usize, bool)> {
+    use std::os::unix::fs::MetadataExt;
+    let (norm_rel, file) = workspace.open_existing_no_symlink(&args.path).ok()?;
+    let meta = file.metadata().ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    // mtime alone is not enough: two same-length writes inside one filesystem timestamp tick keep
+    // mtime and size, so the key would hit a stale entry (the randomised test caught exactly this).
+    // ctime changes on every metadata update, including a write of identical length.
+    // Timestamps are not enough on filesystems whose clock ticks coarsely: two same-length writes in
+    // one tick keep mtime, ctime, inode and size identical, and the cache would serve stale bytes
+    // (the randomised test caught it). Hashing the first 8 KiB is far cheaper than the read this
+    // cache avoids and changes on any content edit inside that window.
+    use std::io::Read;
+    let mut head = [0u8; 8192];
+    let mut open = file;
+    let mut filled = 0usize;
+    while filled < head.len() {
+        match open.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return None,
+        }
+    }
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut hasher, &head[..filled]);
+    let head_hash =
+        u128::from_be_bytes(<[u8; 16]>::try_from(&sha2::Digest::finalize(hasher)[..16]).ok()?);
+    let ctime = meta.ctime() as u128 * 1_000_000_000 + meta.ctime_nsec() as u128;
+    Some((
+        norm_rel.to_string_lossy().replace('\\', "/"),
+        mtime,
+        ctime ^ (meta.ino() as u128) ^ head_hash,
+        meta.len(),
+        args.offset.unwrap_or(1),
+        args.limit.unwrap_or(MAX_READ_LINES),
+        args.force.unwrap_or(false),
+    ))
+}
+
 pub fn execute_read(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOutput {
+    if !read_result_cache_enabled() {
+        return execute_read_inner(workspace, raw_args);
+    }
+    let key = serde_json::from_str::<ReadArgs>(raw_args)
+        .ok()
+        .and_then(|a| read_result_cache_key(workspace, &a));
+    if let Some(ref k) = key {
+        if let Some(hit) = READ_RESULT_CACHE.lock().unwrap().get(k).cloned() {
+            return hit;
+        }
+    }
+    let out = execute_read_inner(workspace, raw_args);
+    if let Some(k) = key {
+        if matches!(out.outcome, crate::messages::ToolOutcome::Success) {
+            READ_RESULT_CACHE.lock().unwrap().insert(k, out.clone());
+        }
+    }
+    out
+}
+
+fn execute_read_inner(workspace: &WorkspaceCap, raw_args: &str) -> ToolExecutionOutput {
     let started = Instant::now();
     let args: ReadArgs = match serde_json::from_str(raw_args) {
         Ok(a) => a,

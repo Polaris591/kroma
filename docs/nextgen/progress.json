@@ -994,22 +994,23 @@
       "decision": "no implementation exists: both attempts were reverted (see i02_line_index_attempt.md). Only the measurement (1732x) and the correct refactor order exist. The acceptance measurement cannot be run because the feature is absent."
     },
     "KR-I03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
-          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "command": "cargo test --test i03_result_cache (+ full suite)",
+          "path": "evidence/i03_result_cache.log",
+          "sha256": "31cf41248a01b1a9452d43eae13265eabe1d4ecf67df061532232c335fa7f718",
+          "source_tree_sha256": "91dc8644b93b5b1cf922c9fa1ffbe5d5691cf9697f22129f13e515b242f7bcc4",
+          "completed_utc": "2026-10-22T08:05:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1275
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "implemented as an opt-in read-result cache in tools/read.rs and verified with a randomised state-change test: ten rewrites at random offsets/limits, each read replayed with the cache on and off, every pair identical and each round proving the entry was not stale. Two real defects were caught while building it -- keying on (mtime,len) served round-3 bytes at round 6, and ctime did not help because tmpfs ticks coarsely, so the key also hashes the first 8 KiB. The cache stays off by default until a paired run shows it pays (the taskbook rule) and is NOT read_dedup: dedup suppresses a repeated body, this returns the same bytes cheaply."
     },
     "KR-I04": {
       "status": "VERIFIED",
