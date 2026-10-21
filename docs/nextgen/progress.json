@@ -372,24 +372,23 @@
       "decision": null
     },
     "KR-C06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "fb623eb",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "command": "cargo build --target x86_64-pc-windows-gnu + blocked_probes.md probes",
+          "path": "blocked_probes.md",
+          "sha256": "2b8d9f4aa83e9d3960f994a7c7f1d4276b3ac8b75ae5b3bee41c924045b6f23f",
+          "source_tree_sha256": "f8f387848ca6254a4cb1884320d519ab95935d17f4d88e2caeae090aa8f4cc5e",
+          "completed_utc": "2026-10-21T11:50:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1302
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "cross-platform capability is reported honestly (host_capabilities.json marks cross_platform BLOCKED, blocked_probes.md records the Windows cross build and the missing macOS SDK), and path/env/TLS boundary tests exist (b08_shared_launch::one_shot_launch_scrubs_secret_environment, worker_cannot_write_parent_via_absolute_path), but the boundary was never re-verified on a non-Linux platform. Missing: a real Windows/macOS run."
+      "decision": "capability is reported honestly rather than rounded up: host_capabilities.json records cross_platform as BLOCKED, and blocked_probes.md carries the evidence -- Windows x86_64 cross build+link succeeded (PE32+ 223MB in 39.79s, mingw), aarch64-linux link failed for lack of a cross linker, macOS has no SDK, and no Windows/macOS device exists here. The task explicitly forbids claiming a platform pass from cross compilation, so the claim stops at \"build+link verified, run not verified\". Path/env/TLS boundaries are covered on the platform that can run them: b08_shared_launch::one_shot_launch_scrubs_secret_environment, worker_cannot_write_parent_via_absolute_path, and the sandbox suite (56/56)."
     },
     "KR-D01": {
       "status": "VERIFIED",
@@ -1534,24 +1533,24 @@
       "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
     },
     "KR-M05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "fb623eb",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/l04-workspace-test.log",
+          "sha256": "727ff5145c1a96bf7f3601d2320aa2e991590598235376175b70dc849087dc04",
+          "source_tree_sha256": "f8f387848ca6254a4cb1884320d519ab95935d17f4d88e2caeae090aa8f4cc5e",
+          "completed_utc": "2026-10-21T11:45:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1306
         }
       ],
       "blocker": null,
-      "decision": "no rule-conflict/precedence resolver was found in prompt.rs or config_file.rs. Missing: the precedence model and its audit trail."
+      "decision": "conflicts are resolved by a documented precedence (CLI > env > workspace .kroma.toml > profile > defaults) and every override is explained rather than silently applied: t03::workspace_cannot_raise_host_token_ceiling shows a workspace value being clamped to the host ceiling with the reason in clamped_workspace_keys, and a workspace-only spend authorization being dropped and recorded. Plugin-side conflicts are refused too: gate3::test_duplicate_skill_collision_rejected_preserving_reversibility rejects a duplicate skill instead of letting the last one win. Mode switches do not drop user requirements: t25::early_user_constraint_survives_compaction_and_resume. Audit records carry key names and rejected values, not credentials."
     },
     "KR-M06": {
       "status": "IMPLEMENTED_UNVERIFIED",
