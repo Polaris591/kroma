@@ -53,6 +53,7 @@ pub mod self_repair_guard;
 pub mod sensitive_paths;
 pub mod session;
 pub mod session_ownership;
+pub mod shadow_selector;
 pub mod subagents;
 pub mod surface;
 pub mod task_host;

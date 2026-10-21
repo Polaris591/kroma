@@ -757,6 +757,12 @@ pub struct BenchStrategyConfig {
     /// E08: arm ablation — let a router decide the strategy from each turn's own tool activity.
     #[serde(default)]
     pub routing: bool,
+    /// KR-M04: arm ablation -- run with the learned-experience store injected (`false`/absent = off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experience: Option<bool>,
+    /// KR-N04: arm ablation -- `false` disables stagnation detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_guard: Option<bool>,
     /// KR-H06: arm ablation — how many bytes of a tool result are inlined before it becomes a
     /// re-readable artifact. Smaller values cut prompt tokens and force paged reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -792,6 +798,8 @@ impl BenchStrategyConfig {
             graph_cache: true,
             tool_filter: None,
             routing: false,
+            loop_guard: None,
+            experience: None,
             max_tool_inline_output_bytes: None,
             bash_head_bytes: None,
             bash_tail_bytes: None,
@@ -813,6 +821,8 @@ impl BenchStrategyConfig {
             graph_cache: true,
             tool_filter: None,
             routing: false,
+            loop_guard: None,
+            experience: None,
             max_tool_inline_output_bytes: None,
             bash_head_bytes: None,
             bash_tail_bytes: None,
@@ -2739,8 +2749,35 @@ impl ProviderBenchExecutor {
             .with_projection_candidate(strategy.resolved_projection_candidate())
             // Capability gap #3 (`v1.5.2`): the arm-level causal-pruning ablation switch.
             .with_causal_pruning(strategy.causal_pruning)
+            // KR-N04: stagnation detection on/off.
+            .with_loop_guard(strategy.loop_guard.unwrap_or(true))
             // Capability gap #6 (`v1.5.2`): the arm-level on-demand-schema ablation switch.
             .with_on_demand_tools(strategy.on_demand_tools);
+        // KR-M04: an arm can run with a learned-experience store seeded from one operator-accepted
+        // record, so "with experience" and "without" are comparable on the same task set.
+        let cfg = if strategy.experience.unwrap_or(false) {
+            let mut store = crate::experience::ExperienceStore::new();
+            let actor = crate::experience::TrustedActor::new("local-host");
+            match store.propose(
+                "read-before-edit",
+                crate::experience::ExperienceScope::Repo,
+                "edit-rust-code",
+                "read the target range before editing, then re-run the failing test",
+                "seeded for the M04 arm",
+                "v1",
+                crate::experience::ExperienceSource::Operator,
+            ) {
+                Ok(id) => {
+                    let _ = store.accept(&id, &actor);
+                    cfg.with_experience(std::sync::Arc::new(std::sync::Mutex::new(
+                        crate::experience_runtime::ExperienceSession::from_store(store, true),
+                    )))
+                }
+                Err(_) => cfg,
+            }
+        } else {
+            cfg
+        };
         let cfg = if strategy.routing {
             cfg.with_routing(crate::routing::RoutingPolicy::default_policy())
         } else {

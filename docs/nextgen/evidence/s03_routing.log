@@ -1,0 +1,5 @@
+test routing::tests::a_wobbling_run_switches_once_not_once_per_turn ... ok
+test activation::tests::the_run_switch_cap_is_enforced ... ok
+test routing::tests::dwell_and_switch_cap_bound_the_run ... ok
+test activation::tests::dwell_and_cooldown_block_early_switches ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 408 filtered out; finished in 0.10s

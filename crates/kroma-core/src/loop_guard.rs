@@ -25,6 +25,9 @@ pub enum LoopGuardVerdict {
 pub struct LoopGuard {
     recent_signatures: VecDeque<String>,
     per_file_edit_failures: HashMap<String, usize>,
+    /// KR-N04: arm ablation. `false` disables stagnation detection entirely so a paired run can
+    /// measure what the guard prevents (and what it costs in false stops).
+    enabled: bool,
 }
 
 /// Normalize relative path arguments so `./src//a.rs` and `src/a.rs` map to the same canonical path.
@@ -53,7 +56,18 @@ pub fn clean_relative_path(raw: &str) -> String {
 
 impl LoopGuard {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+
+    /// KR-N04: construct a guard that records nothing and never blocks.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
     }
 
     /// Compute canonical call signature: `SHA256(tool_name + "\0" + canonical_json(args))`.
@@ -85,6 +99,11 @@ impl LoopGuard {
         raw_arguments: &str,
         relative_path: Option<&str>,
     ) -> LoopGuardVerdict {
+        if !self.enabled {
+            return LoopGuardVerdict::Allow {
+                signature: String::new(),
+            };
+        }
         let sig = Self::compute_signature(tool_name, raw_arguments);
 
         // 1. Check per-file edit failure circuit breaker if calling `edit` on a circuit-broken file

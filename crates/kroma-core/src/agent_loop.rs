@@ -149,6 +149,10 @@ pub struct AgentRunConfig {
     pub stream: bool,
     pub allow_tool_calls_on_stop: bool,
     pub strict_log: bool,
+    /// KR-N04: arm ablation -- `false` disables stagnation detection (LoopGuard).
+    pub loop_guard: bool,
+    /// KR-M04: an arm may start with a learned-experience store already loaded.
+    pub experience: Option<Arc<std::sync::Mutex<crate::experience_runtime::ExperienceSession>>>,
     /// B2 (`v1.4.0`): context projection profile (`baseline`/`p1`/`p2`/`p3`), configurable via
     /// `config.toml` / `.kroma.toml` / `/config set projection_profile <p>`. `None` = default (`P2`).
     pub projection_profile: Option<crate::context_projector::ProjectionProfile>,
@@ -201,6 +205,8 @@ impl AgentRunConfig {
             stream: true,
             allow_tool_calls_on_stop: false,
             strict_log: false,
+            loop_guard: true,
+            experience: None,
             projection_profile: None,
             projection_candidate: None,
             causal_pruning: false,
@@ -254,6 +260,21 @@ impl AgentRunConfig {
     /// on-demand discovery (`discover_tools`).
     pub fn with_on_demand_tools(mut self, enabled: bool) -> Self {
         self.on_demand_tools = enabled;
+        self
+    }
+
+    /// KR-N04: arm ablation switch for stagnation detection.
+    pub fn with_loop_guard(mut self, enabled: bool) -> Self {
+        self.loop_guard = enabled;
+        self
+    }
+
+    /// KR-M04: seed this run with a learned-experience session.
+    pub fn with_experience(
+        mut self,
+        experience: Arc<std::sync::Mutex<crate::experience_runtime::ExperienceSession>>,
+    ) -> Self {
+        self.experience = Some(experience);
         self
     }
 }
@@ -413,6 +434,7 @@ impl AgentRunner {
         tool_runtime: ToolRuntime,
         cancel_rx: watch::Receiver<bool>,
     ) -> Self {
+        let experience = config.experience.clone();
         let subagent_backend = Arc::new(ProviderSubagentBackend::new(Arc::clone(&provider)));
         // F05 (`v1.5.1`): seed the shared token ledger from the unified cap carried on the run's
         // `BudgetConfig` (set by the CLI, config file or RPC surface).
@@ -462,7 +484,7 @@ impl AgentRunner {
             children_tokens_pending_output: 0,
             children_tokens_pending_cached: 0,
             children_usage_pending: None,
-            experience: None,
+            experience,
             adaptive_tournament_candidates: 0,
             adaptive_tournament_attempted: false,
             tournament_require_verified: true,
@@ -2680,7 +2702,11 @@ impl AgentRunner {
         // stubs compacted in an earlier process. The WAL keeps the pre-overlay (raw) item for every
         // entry while `active_entries()` yields the compacted stub, so the raw bytes survive resume.
         self.seed_evidence_from_journal(&mut projector);
-        let loop_guard = LoopGuard::new();
+        let loop_guard = if self.config.loop_guard {
+            LoopGuard::new()
+        } else {
+            LoopGuard::disabled()
+        };
         // Reconstruct dirty files from the selected session branch so a resumed run cannot
         // bypass CompletionGate merely because the write happened before this process started.
         let modified_files_set: HashSet<String> = self

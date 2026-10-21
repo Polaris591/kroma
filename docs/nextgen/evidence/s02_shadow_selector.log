@@ -1,0 +1,5 @@
+=== cargo test -p kroma-core --lib shadow_selector ===
+test shadow_selector::tests::a_small_edit_task_gets_the_fixed_strategy ... ok
+test shadow_selector::tests::a_shadow_record_never_claims_to_have_applied ... ok
+test shadow_selector::tests::promotion_requires_a_held_out_win ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 412 filtered out; finished in 0.00s

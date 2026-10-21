@@ -1,0 +1,3 @@
+test truncated_index_falls_back_to_lexical_search ... ok
+test natural_language_issues_beat_symbol_name_search ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

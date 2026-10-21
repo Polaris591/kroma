@@ -62,6 +62,16 @@ pub struct ExperienceSession {
 }
 
 impl ExperienceSession {
+    /// KR-M04: build a session from an in-memory store, so a paired run can compare "with learned
+    /// experience" against "without" using the same task set.
+    pub fn from_store(store: ExperienceStore, enabled: bool) -> Self {
+        Self {
+            enabled,
+            store,
+            ..Self::default()
+        }
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
