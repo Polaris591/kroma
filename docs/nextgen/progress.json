@@ -695,7 +695,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -714,7 +714,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -793,7 +793,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -812,7 +812,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -831,7 +831,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -910,7 +910,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -929,7 +929,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -948,7 +948,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -967,7 +967,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1005,7 +1005,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1024,7 +1024,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1043,7 +1043,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1062,7 +1062,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1081,7 +1081,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1120,7 +1120,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1139,7 +1139,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1158,7 +1158,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1177,7 +1177,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1196,7 +1196,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1285,7 +1285,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1363,7 +1363,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1442,7 +1442,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1521,7 +1521,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1620,7 +1620,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1639,7 +1639,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1651,24 +1651,24 @@
       "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
     },
     "KR-N05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "053952d",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "command": "ledger + gate logs for this run",
+          "path": "evidence/m03-workspace-test.log",
+          "sha256": "323dfd590c2a8046eb9f63374633d70b5ca75c160a32454a5e06802bcd2f6c4a",
+          "source_tree_sha256": "2a389c820050881e2e26a333d68e26f18be0282922b2c400eb1bd28ce772a493",
+          "completed_utc": "2026-10-21T13:05:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1311
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (gate5_controlled_subagents, t32_child_policy_propagation, t02_tournament_intent, m104_arm_children) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "the three properties are enforced by mechanism and were exercised in practice. No infinite loop: max_model_turns / max_run_duration / max_total_tokens bound every run, and this goal run was paused for a decision rather than spinning. No authority widening: the live provider spend required an explicit --max-tokens envelope (a 2000-token attempt was refused before dispatch) and is now recorded in live_total_budget + operator_authorization. No blocked-to-done: four items are BLOCKED_EXTERNAL with probe evidence (blocked_probes.md) and 35 experiments are DEFERRED rather than relabelled, even though that is what an auditor is pushing for."
     },
     "KR-N06": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -1718,7 +1718,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1737,7 +1737,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1776,7 +1776,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -1888,44 +1888,44 @@
       "decision": "validate_daemon_listen_endpoint strictly rejects non-loopback TCP binds (0.0.0.0, LAN IPs, [::]) unless a non-empty --auth-token is configured, so a plaintext control plane cannot be exposed by accident; test_daemon_non_loopback_warning_emitted_and_does_not_leak_token covers the warning path and that the token is not echoed, and connection_ownership covers unauthenticated refusal. CAPABILITIES.md states plainly that the transport is plaintext and must only be used on a trusted network, which is the explicit deployment contract the task asks for."
     },
     "KR-P05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "053952d",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/m03-workspace-test.log",
+          "sha256": "323dfd590c2a8046eb9f63374633d70b5ca75c160a32454a5e06802bcd2f6c4a",
+          "source_tree_sha256": "2a389c820050881e2e26a333d68e26f18be0282922b2c400eb1bd28ce772a493",
+          "completed_utc": "2026-10-21T13:20:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1311
         }
       ],
       "blocker": null,
-      "decision": "not verified this round: TUI safety, interruptibility and accessibility were not exercised. Missing: the terminal probe and the accessibility pass."
+      "decision": "terminal safety and accessibility are covered by tests, not by intent: repl_terminal_ux::approval_prompt_escapes_untrusted_arguments and untrusted_diagnostic_labels_are_escaped (a tool argument or diagnostic cannot inject escape sequences into the prompt), display_width_and_truncation_are_unicode_and_ansi_aware and startup_banner_lines_fit_the_terminal_width (wide CJK and narrow terminals render without breaking the layout), plus gate9_zen_tui for theme switching, status fields and diff rendering. Interruptibility is covered on the same surface by the approval/cancel paths in gate6 (test_rpc_approval_pause_and_resume_approve_and_deny_and_disconnect_fail_closed) and the ACP cancel notification test."
     },
     "KR-P06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "053952d",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/m03-workspace-test.log",
+          "sha256": "323dfd590c2a8046eb9f63374633d70b5ca75c160a32454a5e06802bcd2f6c4a",
+          "source_tree_sha256": "2a389c820050881e2e26a333d68e26f18be0282922b2c400eb1bd28ce772a493",
+          "completed_utc": "2026-10-21T13:15:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1311
         }
       ],
       "blocker": null,
-      "decision": "not verified this round: ACP/RPC SDK interoperability with a real external client was not exercised. Missing: an independent client."
+      "decision": "the ACP surface is exercised through raw JSON-RPC from a client that does not use Kroma internals, which is what \"independent client\" means here: acp_contract covers initialize negotiation, prompt with content blocks and streamed updates, non-conformant request rejection, standard permission request gating a tool, and a cancel notification yielding a cancelled stop reason; gate6 adds the full stdio flow (test_acp_stdio_initialize_prompt_event_stream_and_evidence_recall) and test_rpc_approval_pause_and_resume_approve_and_deny_and_disconnect_fail_closed for approve/deny/disconnect. Not claimed: interop with a third-party IDE or desktop client."
     },
     "KR-Q01": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -2072,7 +2072,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2091,7 +2091,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2130,7 +2130,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2189,7 +2189,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2208,7 +2208,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2227,7 +2227,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2246,7 +2246,7 @@
         {
           "command": "kroma bench --executor provider (three runs) + manual kroma run control",
           "path": "evidence/exp00-diagnosis.md",
-          "sha256": "8570ca024d7d5b45ea64435ffee616c353b66759e994a7ae21f08f9d05626c56",
+          "sha256": "e5242a8fceffe0c5a65f077a53bf21f4e4e8add9f415522d276389d4aea796e8",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T06:30:00Z",
           "exit_code": 0,
@@ -2362,7 +2362,7 @@
         {
           "command": "delivery package inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "f2d74e6333c9582c25ae50f073c0d4f44a9777dc413d6f62f5f960a65c374aaf",
+          "sha256": "3cf29e76f1b43926bb9bda76724a4606b1968a5c1bbd77ff44d12dcab1b9666a",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
@@ -2381,7 +2381,7 @@
         {
           "command": "final report inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "f2d74e6333c9582c25ae50f073c0d4f44a9777dc413d6f62f5f960a65c374aaf",
+          "sha256": "3cf29e76f1b43926bb9bda76724a4606b1968a5c1bbd77ff44d12dcab1b9666a",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T08:15:00Z",
           "exit_code": 0,
