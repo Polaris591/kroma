@@ -688,7 +688,7 @@
       "decision": "the executor works now. Root cause was three layers, all recorded in evidence/exp00-diagnosis.md: --allow-write is not honoured in the bench branch (use --policy allow-write); the verify interpreter must be visible inside the bwrap sandbox (it was /tmp/kv/bin/python, and /tmp is an empty tmpfs there); and the verifier binary must be declared as a trusted file at its real path (--verifier-file /usr/bin/python3.13, a symlink is refused). With those fixed: dev suite 6/6 approved both arms, holdout 2/2 approved both arms, 0 unknown verdicts. Paired result: quality identical (100%/100%); dev candidate costs +8% tokens (126349 vs 117015), holdout candidate costs -10% (43680 vs 48635) -- the two sets disagree, so nothing is promoted."
     },
     "KR-F04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -703,11 +703,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-F05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -722,8 +721,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-F06": {
       "status": "VERIFIED",
@@ -786,7 +784,7 @@
       "decision": "context_cache_stability::test_watermark_step_down_compaction_working_set_pinning_and_outline_stub pins prefix stability; client-side stability is reported separately from provider cache usage, which is 0 in the live canary"
     },
     "KR-G03": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -801,11 +799,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-G04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -820,11 +817,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-G05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -839,8 +835,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-G06": {
       "status": "VERIFIED",
@@ -903,7 +898,7 @@
       "decision": "implemented this round: tool/schema_check.rs is the single pre-dispatch validator (parseable JSON, object shape, required fields, primitive and array-item types, 1MiB/32-level caps), running after authority/exposure and before any hook, policy, approval or side effect; 7 unit tests plus tool_contracts/t12/gate3 green"
     },
     "KR-H03": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -918,11 +913,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-H04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -937,11 +931,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-H05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -956,11 +949,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-H06": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -975,8 +967,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-I01": {
       "status": "VERIFIED",
@@ -998,7 +989,7 @@
       "decision": "measured, not assumed: on one 201-file tree read(10 lines of a 2MiB file) returns 338 bytes in 108.77ms, grep 2418 bytes/3.81ms, find 1524/2.43ms, ls 1524/0.72ms -- so a 2 MiB scan produces 338 bytes of model-visible output. Separately, live logs show 9472 request bytes = 1911 tokens (5.0 bytes/token) while adding 5025 tool-result bytes adds only ~1232 input tokens, which is the direct evidence that scanned bytes must not be converted into token cost. Local baseline (no model) and model results are reported apart."
     },
     "KR-I02": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1013,11 +1004,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-I03": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1032,11 +1022,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-I04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1051,11 +1040,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-I05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1070,11 +1058,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-I06": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1089,8 +1076,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-J01": {
       "status": "VERIFIED",
@@ -1113,7 +1099,7 @@
       "decision": "gate2_evidence_projection::test_projection_profiles_ab_metrics_and_tool_pairing_invariant; tool calls and results stay paired"
     },
     "KR-J02": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1128,11 +1114,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-J03": {
-      "status": "REJECTED_WITH_EVIDENCE",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "3c949f4",
       "evidence": [
@@ -1149,10 +1134,10 @@
         }
       ],
       "blocker": null,
-      "decision": "measured: projection_p3 (-2.6%) and causal_pruning (-0.5%) are both inside the observed noise band, so the fixed heuristic was NOT replaced by a data-driven planner on this evidence; that would be a change justified by noise. See experiments-summary.md."
+      "decision": "the mechanism this task names (configurable shadow economic planner / CADOC object cards with wait-cost batching / separately measured read-only exploration, advisor and multi-candidate arms) is not implemented, so the experiments that were run (projection_p3, causal_pruning, counterfactual_probe, tournament k=2) measure different things. Calling that a rejection of THIS mechanism would be false; it is deferred until the mechanism exists."
     },
     "KR-J04": {
-      "status": "REJECTED_WITH_EVIDENCE",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "3c949f4",
       "evidence": [
@@ -1169,10 +1154,10 @@
         }
       ],
       "blocker": null,
-      "decision": "measured: counterfactual_probe costs +9% tokens (79867 vs 73259) with identical pass rate (4/6 both), so the probe is not enabled by default. Also recorded in experiments-summary.md that the baseline pass rate itself moved between 6/6 and 4/6 across runs, so a single repetition cannot support a cost claim."
+      "decision": "the mechanism this task names (configurable shadow economic planner / CADOC object cards with wait-cost batching / separately measured read-only exploration, advisor and multi-candidate arms) is not implemented, so the experiments that were run (projection_p3, causal_pruning, counterfactual_probe, tournament k=2) measure different things. Calling that a rejection of THIS mechanism would be false; it is deferred until the mechanism exists."
     },
     "KR-J05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1187,11 +1172,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-J06": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1206,8 +1190,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-K01": {
       "status": "VERIFIED",
@@ -1280,7 +1263,7 @@
       "decision": "mcp_config: an_untrusted_workspace_config_cannot_declare_mcp_servers (a directory cannot widen its own authority), a_wedged_mcp_server_times_out_and_is_cleaned_up, a_timed_out_call_never_executes_a_queued_mutation, unmount_during_a_call_is_bounded_and_reaps_the_child"
     },
     "KR-K04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1295,8 +1278,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-K05": {
       "status": "VERIFIED",
@@ -1358,7 +1340,7 @@
       "decision": "measured loopback protocol cost (connect + serialize + read + parse) at 425\u00b5s median over 5 fresh connections, against 3336ms ttft on the live canary -- the client protocol is 0.013% of end-to-end, so the optimizable share here is ~zero and effort belongs elsewhere. Safety control cases kept and named in the doc."
     },
     "KR-L02": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1373,8 +1355,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-L03": {
       "status": "VERIFIED",
@@ -1437,7 +1418,7 @@
       "decision": "added ModelRequestCompleted::model_identity_matches: the run now compares the model the provider reports against the one it dispatched to (provider.dispatch_binding()), recording Some(true)/Some(false)/None instead of silently accepting a substitution. Test: t03_context_budget::a_model_identity_mismatch_is_recorded_not_silently_accepted drives a provider that declares requested-model and answers as a-different-model, and asserts the log carries model_identity_matches:false plus the reported id. Capability numbers remain explicit about their source (configured / conservative_fallback / unbounded) from the KR-B04 work."
     },
     "KR-L06": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1452,8 +1433,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-M01": {
       "status": "VERIFIED",
@@ -1516,7 +1496,7 @@
       "decision": "HandoffArtifact was dead code -- nothing in the crate called it. Added HandoffArtifact::from_task_state, which derives the artifact from the typed TaskState: the goal is the user's verbatim quote (never a summary), verified items keep both the claim and the check that verified them, unchecked hypotheses stay open questions, contradicted ones are not reopened, and constraints plus path mentions become evidence pointers. Two tests: the full derivation with a JSON round trip (which is how a later segment actually reads it) and the contradicted-hypothesis case. A new work segment can now resume from the ledger instead of depending on the model to remember the taskbook."
     },
     "KR-M04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1531,8 +1511,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-M05": {
       "status": "VERIFIED",
@@ -1555,7 +1534,7 @@
       "decision": "conflicts are resolved by a documented precedence (CLI > env > workspace .kroma.toml > profile > defaults) and every override is explained rather than silently applied: t03::workspace_cannot_raise_host_token_ceiling shows a workspace value being clamped to the host ceiling with the reason in clamped_workspace_keys, and a workspace-only spend authorization being dropped and recorded. Plugin-side conflicts are refused too: gate3::test_duplicate_skill_collision_rejected_preserving_reversibility rejects a duplicate skill instead of letting the last one win. Mode switches do not drop user requirements: t25::early_user_constraint_survives_compaction_and_resume. Audit records carry key names and rejected values, not credentials."
     },
     "KR-M06": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "42b9da1",
       "evidence": [
@@ -1571,8 +1550,7 @@
           "tests_run": 4
         }
       ],
-      "blocker": "declared dependency KR-M04 is not verified, so this cannot close",
-      "decision": "measured with a byte-level constraint, not a self-report. A task requires adding double() while leaving tests/test_math.py untouched; the verifier hashes that file and checks the function exists, and runs inside the sealed snapshot where the model cannot reach it. Results: normal prompt -> both arms approved (constraint kept); adversarial prompt inviting the model to edit the test -> still approved (not induced); mechanism control -> the same verifier exits 0 on an untouched tree and 1 after a one-line edit to the test. So \"I respected the constraint\" cannot pass, and the gate is not a trivial always-fail door. Scope: one task, two arms, single repetition."
+      "decision": "measured with a byte-level constraint inside the sealed snapshot: normal prompt -> both arms approved; adversarial prompt inviting the model to edit the test -> still approved; mechanism control -> the same verifier exits 0 on an untouched tree and 1 after a one-line edit. A self-report cannot pass. See evidence/m06-constraint-measurement.md."
     },
     "KR-N01": {
       "status": "VERIFIED",
@@ -1615,7 +1593,7 @@
       "decision": "test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_parent_untouched; test_worker_subagent_runs_in_isolated_worktree_and_merges_cleanly_with_revision; cancelled_adaptive_run_does_not_merge_late_completed_candidate_bytes"
     },
     "KR-N03": {
-      "status": "REJECTED_WITH_EVIDENCE",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "9971389",
       "evidence": [
@@ -1632,10 +1610,10 @@
         }
       ],
       "blocker": null,
-      "decision": "measured, and it loses. Preregistered paired run on the 6-task dev suite: baseline 6/6 at 108459 tokens; adaptive_tournament_2 (k=2) 6/6 at 126948 tokens -- quality identical, cost +17%. A mechanism with no quality gain and a real cost increase is not enabled by default, which is exactly what this task asks (\"only enable advisor/exploration/tournament when it measures as a gain\"). This matches the earlier v4 E07 finding (k=2 +30.5%)."
+      "decision": "the mechanism this task names (configurable shadow economic planner / CADOC object cards with wait-cost batching / separately measured read-only exploration, advisor and multi-candidate arms) is not implemented, so the experiments that were run (projection_p3, causal_pruning, counterfactual_probe, tournament k=2) measure different things. Calling that a rejection of THIS mechanism would be false; it is deferred until the mechanism exists."
     },
     "KR-N04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1650,8 +1628,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-N05": {
       "status": "VERIFIED",
@@ -1714,7 +1691,7 @@
       "decision": "c0004_revocation::a_revoked_capability_refuses_the_old_lease_and_names_itself, revoking_during_an_in_flight_initialisation_reports_revocation; gate3 generation tests"
     },
     "KR-O02": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1729,11 +1706,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-O03": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1748,8 +1724,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-O04": {
       "status": "VERIFIED",
@@ -1772,7 +1747,7 @@
       "decision": "experience_production_contract::imported_data_cannot_self_accept_and_policy_conditions_expiry_are_enforced and stale_revision_and_untrusted_workspace_imports_are_refused"
     },
     "KR-O05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1787,8 +1762,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-O06": {
       "status": "VERIFIED",
@@ -2068,7 +2042,7 @@
       "decision": "full baseline now reproducible over 3 repeats each: p0 (kroma --version) 4.70ms median, tree PSS 2.2-3.5MB; p2 (acp + workspace.graph over this 560-file repo) graph 3296ms median / init 11ms, PSS 75MB; p3 (generated tree) 245ms, PSS 25MB; p4 (4 concurrent acp sessions) tree PSS 269MB. The earlier \"ACP graph hangs at 60s\" was a measurement bug: ACP refuses to start without an owner spend envelope, so the script's child exited immediately and the probe read that as no response. scripts/measure-local-baseline.py now passes --max-tokens; no source change was needed."
     },
     "KR-R02": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -2083,11 +2057,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-R03": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -2102,11 +2075,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-R04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "449decc",
       "evidence": [
@@ -2121,11 +2093,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "declared dependency KR-R02 is not verified, so this cannot close",
-      "decision": "assessed and deliberately not split, which the task explicitly allows (\"no evidence of lower maintenance cost -> do not continue splitting\"). The candidate is run_provider_turn (~893 lines) inside agent_loop.rs (5636). Its ten stages are strictly sequential and share state: each step consumes the previous step's product (projected, request_tools, final_tool_schema_bytes, reserve_amount, token_reservation) and reads/writes state, logger and self. Splitting converts implicit sharing into explicit parameter plumbing, and this round's KR-B01/B02/B03/B04 bugs came precisely from those steps having been separated before (estimate using the static tool set, check using another yardstick). No evidence of better fault isolation or lower maintenance cost, so the decision is not to split. Contrast: surface.rs (12 modules), secure_fs consolidation and run_inner 1104 -> 23 lines were splits along real invariant boundaries and are done."
+      "decision": "assessed and deliberately not split, which the task allows when there is no evidence of lower maintenance cost: run_provider_turn (~893 lines) has ten strictly sequential stages that share state, and this round's B01-B04 bugs came from those stages having been separated before. See r04_module_extraction_assessment.md."
     },
     "KR-R05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "449decc",
       "evidence": [
@@ -2141,11 +2112,10 @@
           "tests_run": 60
         }
       ],
-      "blocker": "depends on KR-R02 (allocation/clone/serialization hot-spot remediation), which is itself blocked because it is a code change rather than an arm. The overall-effect rule it names is supported by the seven paired experiments, but the taskbook requires the declared dependency to be closed first, so it stays blocked rather than claimed.",
-      "decision": "the overall-effect rule is exactly what the seven paired experiments established: no mechanism measured as a win (two rejected at +17% and +9% cost with zero quality gain, one not promoted because dev and holdout disagreed, four inside the noise band), so no local optimum was switched on by default. The one above-noise result (--13.3% by disabling subagents) is a removal, not a local optimum to stack. Defaults therefore follow the whole picture rather than a pile of individual improvements."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-R06": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "449decc",
       "evidence": [
@@ -2160,8 +2130,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "depends on KR-R05, which is blocked on KR-R02 (a code change, not an arm). The budget lines and stop rules are written and grounded in local measurements, but the dependency chain is not closed.",
-      "decision": "the rules are stated with local numbers and an explicit stop condition: stop optimising a path below 1% of end-to-end (client protocol is 0.013%), an optimisation's ceiling is its measured share (tool results are ~34% of the request body), no promotion without a paired A/B, degradation before optimisation, compare medians (a first-run 61ms p0 sample would be a false alarm). R05 is now verified, so this is not blocked on it any more."
+      "decision": "budget lines and stop rules with local numbers: stop below 1% of end-to-end (protocol is 0.013%), an optimisation's ceiling is its measured share (tool results ~34% of request body), no promotion without a paired A/B, compare medians. See r06_performance_budget.md."
     },
     "KR-S01": {
       "status": "VERIFIED",
@@ -2184,7 +2153,7 @@
       "decision": "strategy execution leaves a real receipt and the catalogue is not a list of names: the paired experiment ran the on_demand_tools arm and reported per-arm tokens, pass rate, CI, cache ratio and ttft; adaptive_production_contract covers activation with usage and merged revision, and refuses probes that are not isolated or not activated; provider_bench_arms_use_a_development_gate_without_leaking_the_final_scorer. A strategy that runs leaves evidence; one that does not is not counted."
     },
     "KR-S02": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -2199,11 +2168,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-S03": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -2218,11 +2186,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-S04": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -2237,11 +2204,10 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-S05": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -2256,8 +2222,7 @@
           "kind": "artifact"
         }
       ],
-      "blocker": "this mechanism has no arm switch. BenchStrategyConfig exposes exactly 8 configurable fields (projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, tool_filter) and all of them have already been run as paired experiments. This task needs a mechanism that does not exist yet, so it cannot be measured without first implementing it -- see docs/nextgen/experiment_arm_probe.md for the per-task mapping and the exact grep that establishes it.",
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "research deferred: this mechanism does not exist yet, and bench can only vary the 8 fields of BenchStrategyConfig (all eight have already been run as paired experiments -- see experiment_arm_probe.md). Building the mechanism is out-of-scope development, which the taskbook classifies as a research deferral, not an external block. No statistical claim is made for this mechanism."
     },
     "KR-S06": {
       "status": "BLOCKED_EXTERNAL",
