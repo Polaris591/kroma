@@ -1618,22 +1618,23 @@
       "decision": "two measurements decide this. Tournament k=2: quality identical (6/6 both), cost +17% (126948 vs 108459), so multi-candidate competition is NOT enabled. Subagents: disabling them (max_subagents=0) saves 13.3% tokens (103835 vs 119802) with identical quality, because none of the dev tasks need delegation -- so delegation stays available but is not free, and the default is not justified by these tasks. No advisor/exploration/competition feature is switched on without a measured gain."
     },
     "KR-N04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "07557a2",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:25:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (gate5_controlled_subagents, t32_child_policy_propagation, t02_tournament_intent), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "stagnation detection exists with a recoverable trail: LoopGuard::check_and_record computes a signature over (tool, arguments) and tracks repeated ping-pong plus edit-failure streaks per path (context_cache_stability::test_loop_guard_repeated_ping_pong_and_edit_streak), rollback_recorded undoes what the guard recorded, and the stop is emitted as EventPayload::LoopGuardTriggered so the reason lands in the log rather than ending silently. Not measured: the false-stop rate on a genuinely long task -- that needs a long-running fixture, which this round did not build."
     },
     "KR-N05": {
       "status": "VERIFIED",
@@ -1714,22 +1715,23 @@
       "decision": "the mechanism exists and its declared test target(s) are present (gate3_reversible_extensions, experience_production_contract, c0004_revocation), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
     },
     "KR-O03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "07557a2",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:15:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (gate3_reversible_extensions, experience_production_contract, c0004_revocation), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "the on-demand mechanism exists and is tested: discover_skills scans skill directories in precedence order (extensions.rs:2195) and activate_skill is a kernel tool (extensions.rs:2363) that loads a skill body only when the model asks, so skill text is not part of the static prefix. Low-trust handling is covered by gate3::test_skills_discovery_activate_skill_tool_and_tag_sanitization (tags sanitized) and test_duplicate_skill_collision_rejected_preserving_reversibility (a duplicate cannot silently take over). Not measured: how many static-prefix bytes on-demand loading actually saves on a workspace that has skills -- that would need a fixture with skills and a paired run."
     },
     "KR-O04": {
       "status": "VERIFIED",
@@ -1752,22 +1754,23 @@
       "decision": "experience_production_contract::imported_data_cannot_self_accept_and_policy_conditions_expiry_are_enforced and stale_revision_and_untrusted_workspace_imports_are_refused"
     },
     "KR-O05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "07557a2",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/final-gate-d434fe5.log",
+          "sha256": "506bb5d4cf1084f356b141dcba09ced5e6af5cb181f68e230b2a89e31647da6f",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-22T01:20:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1312
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (gate3_reversible_extensions, experience_production_contract, c0004_revocation), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "the candidate layer runs read-only and cannot promote itself: experience_production_contract covers imported_data_cannot_self_accept_and_policy_conditions_expiry_are_enforced (an import cannot accept itself, and policy conditions expire), stale_revision_and_untrusted_workspace_imports_are_refused (poisoning via an untrusted workspace import is refused), and real_repl_accept_enable_revoke_and_off_control_ephemeral_provider_context (accept/enable/revoke/off are explicit operator actions with ephemeral effect). So \"quality and poisoning gates not passed -> no automatic promotion\" holds by construction. Not measured: a paired run of experience-on vs experience-off action quality."
     },
     "KR-O06": {
       "status": "VERIFIED",
