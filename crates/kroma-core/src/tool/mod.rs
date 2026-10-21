@@ -7,3 +7,4 @@ pub mod output_buffer;
 pub mod policy;
 pub mod registry;
 pub mod runtime;
+pub mod schema_check;

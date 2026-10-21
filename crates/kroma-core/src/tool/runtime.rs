@@ -923,6 +923,29 @@ impl ToolRuntime {
             }
         }
 
+        // KR-H02: validate the arguments against the tool's own published schema before any hook,
+        // policy decision, approval prompt or side effect. A schema the model is shown but never
+        // enforced is decoration: a call that cannot be parsed must not reach the tool at all, and
+        // the model must get a message it can act on rather than a mid-side-effect failure.
+        if let Err(detail) = crate::tool::schema_check::validate_arguments(
+            &registered.definition,
+            &call.raw_arguments,
+        ) {
+            let out = ToolExecutionOutput::error(
+                ErrorCode::InvalidArguments,
+                format!("INVALID_ARGUMENTS: {detail}"),
+                ToolResultMeta {
+                    relative_path: Self::extract_relative_path(&call.raw_arguments),
+                    ..Default::default()
+                },
+            );
+            return (
+                Self::into_message(call, out),
+                "reject_invalid_arguments".to_string(),
+                Vec::new(),
+            );
+        }
+
         // Gate 3: PreToolUse policy hooks run BEFORE the kernel policy engine and are fail-closed.
         // A hook may only ever restrict; the kernel `PolicyEngine::evaluate` below is evaluated
         // independently, so a hook can never turn a kernel denial into an allow.

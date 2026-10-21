@@ -1,0 +1,35 @@
+{
+  "format": "kroma.prereg/1",
+  "experiment": "EXP-00",
+  "status": "PREREGISTERED_NOT_RUN",
+  "task_cluster_definition": {
+    "cluster": "exp-00 frozen task set",
+    "independence": "task is the sampling unit",
+    "dev_suite": "/opt/pi-qq/workspace/kroma-exp-suites/suite-dev.json",
+    "holdout_suite": "/opt/pi-qq/workspace/kroma-exp-suites/suite-holdout.json"
+  },
+  "model_identity_observability": {
+    "requested": "gpt-6.1-sol"
+  },
+  "quality_margin": {
+    "primary_metric": "quality_pass_rate",
+    "delta": "5 percentage points",
+    "rule": "non-inferiority on quality; a candidate that fails this is not promoted regardless of token savings"
+  },
+  "noise_and_power_plan": {
+    "plan": "2 arms x 8 tasks x 1 repeat = 16 paired runs (underpowered; reported as such)",
+    "interval": "95% Wilson per arm"
+  },
+  "cache_order_design": {
+    "order": "arms run in manifest order",
+    "warmup": "none"
+  },
+  "budget": {
+    "plan": "16 runs, 200k tokens per arm"
+  },
+  "stopping_rule": "stop at 16 runs or on any hard budget breach",
+  "holdout_policy": {
+    "queries": 1,
+    "verifier_path": "/opt/pi-qq/workspace/kroma-verifier.py"
+  }
+}
