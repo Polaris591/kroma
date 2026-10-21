@@ -1,0 +1,27 @@
+=== BenchStrategyConfig 可配置字段（kroma bench 唯一的数据面）===
+  name, projection_profile, adaptive_tournament_candidates, max_subagents, counterfactual_probe, causal_pruning, require_verified, on_demand_tools, graph_cache, tool_filter, routing
+
+=== 18 项未完成项所需机制 vs 现有字段 ===
+  KR-H05: needs 'read-only parallel scheduling knobs'; matching field: NONE
+  KR-H06: needs 'structured/bounded result knobs'; matching field: NONE
+  KR-I02: needs 'line-index / short-range read knob'; matching field: NONE
+  KR-I03: needs 'result-cache knob'; matching field: NONE
+  KR-I04: needs 'graph candidate selection knob'; matching field: ['graph_cache']
+  KR-I06: needs 'syntax-aware parser knob'; matching field: NONE
+  KR-M04: needs 'experience on/off knob'; matching field: NONE
+  KR-M06: needs 'constraint-version measurement knob'; matching field: NONE
+  KR-N04: needs 'stagnation detector knob'; matching field: NONE
+  KR-O02: needs 'out-of-process extension knob'; matching field: NONE
+  KR-O03: needs 'skill loading knob'; matching field: NONE
+  KR-O05: needs 'experience maintenance knob'; matching field: NONE
+  KR-R05: needs 'global Pareto knob'; matching field: NONE
+  KR-R06: needs 'perf budget knob'; matching field: NONE
+  KR-S02: needs 'selector knob'; matching field: NONE
+  KR-S03: needs 'switch hysteresis knob'; matching field: NONE
+  KR-I05: needs 'incremental graph knob'; matching field: NONE
+  KR-J04: needs 'object-card knob'; matching field: NONE
+
+=== J06 / L06 端点能力（代码事实）===
+  openai_responses MessageSemantics fields present: explicit_prompt_cache, cache_write_usage, hosted_tool_search_replay
+  native server-side compaction support in adapter: False
+  native tool-search support: True

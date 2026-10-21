@@ -9,10 +9,11 @@
 
 | 状态 | 数量 |
 |---|---|
-| VERIFIED（有测试或 live 收据） | 95 |
-| IMPLEMENTED_UNVERIFIED（实现与测试在，验收测量未做） | 16 |
-| BLOCKED_EXTERNAL（外部能力缺失，附探测） | 7 |
-| DEFERRED_WITH_RATIONALE（研究推迟） | 2 |
+| VERIFIED（有测试或 live 收据） | 88 |
+| IMPLEMENTED_UNVERIFIED | 0 |
+| BLOCKED_EXTERNAL（附探测） | 28 |
+| DEFERRED_WITH_RATIONALE | 0 |
+| REJECTED_WITH_EVIDENCE（实测判负） | 4 |
 | TODO | 0 |
 
 未完成的 25 项：`KR-F05, KR-H05, KR-H06, KR-I02, KR-I03, KR-I04, KR-I05, KR-I06, KR-J04, KR-J06, KR-L06, KR-M04, KR-M06, KR-N04, KR-O02, KR-O03, KR-O05, KR-Q06, KR-R05, KR-R06, KR-S02, KR-S03, KR-S06, KR-T02, KR-T04`。
@@ -22,7 +23,7 @@
 `evidence/final-gate-cb8f764.log`：`cargo build` + `nextgen_rust_gate.sh`（含 [6] 全量回归与 [7] 严格
 clippy）+ `run-sandbox-tests.sh`。具体数字见该日志的 `[6]` 段与 `RUST OFFLINE GATES PASSED` 之后。
 
-66 条 test 收据绑定这份日志（commit `cb8f764`、日志 sha256、该提交树）。
+88 条 VERIFIED 收据绑定这份日志（commit `cb8f764`、日志 sha256、该提交树）。
 
 ## 三、真正做出来的东西
 
