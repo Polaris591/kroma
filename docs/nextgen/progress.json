@@ -976,34 +976,34 @@
       "decision": "measured, not assumed: on one 201-file tree read(10 lines of a 2MiB file) returns 338 bytes in 108.77ms, grep 2418 bytes/3.81ms, find 1524/2.43ms, ls 1524/0.72ms -- so a 2 MiB scan produces 338 bytes of model-visible output. Separately, live logs show 9472 request bytes = 1911 tokens (5.0 bytes/token) while adding 5025 tool-result bytes adds only ~1232 input tokens, which is the direct evidence that scanned bytes must not be converted into token cost. Local baseline (no model) and model results are reported apart."
     },
     "KR-I02": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "07102b1",
       "evidence": [
         {
           "command": "code inspection of tools/read.rs + t06_bounded_io measurement",
           "path": "evidence/i02_root_cause.md",
           "sha256": "151cf00463615aa829b87552d836c7e9346a2ac8268080d5835e6963f9993ee2",
           "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
-          "completed_utc": "2026-10-22T08:20:00Z",
+          "completed_utc": "2026-10-22T08:30:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test"
         }
       ],
-      "decision": "no implementation, and the measurement says one would not have paid. Reading the code shows the 110.4ms for a 2 MiB file is whole-file I/O plus the whole-file SHA256 identity and NUL scan, not line scanning (the reader is already 8 KiB chunked). A version-keyed line index would only remove the parse step and cannot touch the dominant terms without changing what read reports. See evidence/i02_root_cause.md. Reopening this needs the SHA256-on-short-read contract change first, not an index."
+      "decision": "deferred with rationale, not implemented: the measurement says a line index would not pay. The 110.4ms for a 2 MiB file is whole-file I/O plus whole-file SHA256 identity and the NUL scan (the reader is already 8 KiB chunked), so the dominant cost is outside what a version-keyed index removes. Reopening needs the SHA256-on-short-read contract change first."
     },
     "KR-I03": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "5f6ccae",
       "evidence": [
         {
-          "command": "cargo test --test i03_result_cache (+ full suite)",
+          "command": "cargo test --test i03_result_cache (+ full suite on 5f6ccae)",
           "path": "evidence/i03_result_cache.log",
-          "sha256": "31cf41248a01b1a9452d43eae13265eabe1d4ecf67df061532232c335fa7f718",
-          "source_tree_sha256": "91dc8644b93b5b1cf922c9fa1ffbe5d5691cf9697f22129f13e515b242f7bcc4",
-          "completed_utc": "2026-10-22T08:05:00Z",
+          "sha256": "ae17c0f59599500e3fc5948a8769ded07775162932137bbaca75033c5e9ebb48",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
+          "completed_utc": "2026-10-22T08:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
@@ -1051,7 +1051,7 @@
       "decision": "verified with a live paired run: with the workspace graph cache the dev suite finished in 250s, with the cache disabled (KR-I05 arm graph_cache=false) 383s, same 6/6 and same tokens within noise (116943 vs 116106). The difference is the repeated parse cost itself, which is what this task asks to remove; cache stays on by default."
     },
     "KR-I06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "99da6d3",
       "evidence": [
@@ -1066,7 +1066,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "not implemented, and the mechanism is absent from the tree: there is no tree-sitter or syntax-aware parser dependency anywhere (grep over Cargo.toml and src finds none), so \"selective syntax parsing\" would be a new subsystem, not an arm. The current candidate ranking is the graph/heuristic one. The acceptance rule (beat the existing rule on localisation AND total cost) cannot even be evaluated without building the parser first."
+      "decision": "deferred with rationale, not implemented: the tree has no syntax parser at all (no tree-sitter dependency, no syntax-aware module), so selective syntax parsing is a new subsystem, not an arm; its acceptance rule (beat the existing rule on localisation AND total cost) cannot be evaluated before it exists."
     },
     "KR-J01": {
       "status": "VERIFIED",
@@ -1127,7 +1127,7 @@
       "decision": "measured and rejected: P3 -2.6% and P1 +3% are the two candidate planners tested, and neither beats the fixed heuristic at equal quality, so the fixed constants stay. A hard window still cannot be bypassed for economic reasons (KR-B04 runs before dispatch)."
     },
     "KR-J04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "959e6c4",
       "evidence": [
@@ -1142,7 +1142,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "not implemented by decision (adr_j06_l06_o02_f05.md): candidate only, no held-out evidence, and the task forbids inheriting the paper number. Nothing to measure."
+      "decision": "deferred with rationale, decided not to implement (adr_j06_l06_o02_f05.md): object cards are a candidate with no held-out evidence, and inheriting the paper number is exactly what the taskbook forbids."
     },
     "KR-J05": {
       "status": "VERIFIED",
@@ -1677,7 +1677,7 @@
       "decision": "c0004_revocation::a_revoked_capability_refuses_the_old_lease_and_names_itself, revoking_during_an_in_flight_initialisation_reports_revocation; gate3 generation tests"
     },
     "KR-O02": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
       "commit": "959e6c4",
       "evidence": [
@@ -1692,7 +1692,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "not implemented by decision (adr_j06_l06_o02_f05.md): hooks already run in an isolated process group and MCP sidecars are separate processes; the remaining question was never turned into a measurable arm."
+      "decision": "deferred with rationale, decided not to implement (adr_j06_l06_o02_f05.md): hooks already run in an isolated process group and MCP sidecars are separate processes, so the original motivation is already met; the remaining question was never turned into a measurable arm."
     },
     "KR-O03": {
       "status": "VERIFIED",
@@ -2089,7 +2089,7 @@
       "decision": "assessed and deliberately not split, which the task allows when there is no evidence of lower maintenance cost. run_provider_turn (~893 lines) has ten strictly sequential stages that share state, and this round's B01-B04 bugs came from those stages having been separated before. Contrast: surface.rs (12 modules), secure_fs consolidation and run_inner 1104 -> 23 lines were splits along real invariant boundaries. R02 is now verified, so the dependency is closed."
     },
     "KR-R05": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "5e9665f",
       "evidence": [
@@ -2105,10 +2105,10 @@
           "tests_run": 1314
         }
       ],
-      "decision": "measured, but declared dependency KR-G05 is not verified so it cannot close"
+      "decision": "mechanism and batch-gate tests exist, but there is no held-out paired measurement of its own, so it stays implemented-unverified. The previous VERIFIED label came from a batch restore and its text still said it could not close."
     },
     "KR-R06": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "5e9665f",
       "evidence": [
@@ -2124,7 +2124,7 @@
           "tests_run": 1314
         }
       ],
-      "decision": "measured, but declared dependency KR-R05 is not verified so it cannot close"
+      "decision": "mechanism and batch-gate tests exist, but there is no held-out paired measurement of its own, so it stays implemented-unverified. The previous VERIFIED label came from a batch restore and its text still said it could not close."
     },
     "KR-S01": {
       "status": "VERIFIED",
@@ -2147,7 +2147,7 @@
       "decision": "strategy execution leaves a real receipt and the catalogue is not a list of names: the paired experiment ran the on_demand_tools arm and reported per-arm tokens, pass rate, CI, cache ratio and ttft; adaptive_production_contract covers activation with usage and merged revision, and refuses probes that are not isolated or not activated; provider_bench_arms_use_a_development_gate_without_leaking_the_final_scorer. A strategy that runs leaves evidence; one that does not is not counted."
     },
     "KR-S02": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "725b5ca",
       "evidence": [
@@ -2163,10 +2163,10 @@
           "tests_run": 1314
         }
       ],
-      "decision": "evidence exists, but declared dependency KR-R05 is not closed"
+      "decision": "mechanism and batch-gate tests exist, but there is no held-out paired measurement of its own, so it stays implemented-unverified. The previous VERIFIED label came from a batch restore and its text still said it could not close."
     },
     "KR-S03": {
-      "status": "VERIFIED",
+      "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
       "commit": "725b5ca",
       "evidence": [
@@ -2182,7 +2182,7 @@
           "tests_run": 1314
         }
       ],
-      "decision": "evidence exists, but declared dependency KR-S02 is not closed"
+      "decision": "mechanism and batch-gate tests exist, but there is no held-out paired measurement of its own, so it stays implemented-unverified. The previous VERIFIED label came from a batch restore and its text still said it could not close."
     },
     "KR-S04": {
       "status": "VERIFIED",

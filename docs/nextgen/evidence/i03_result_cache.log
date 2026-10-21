@@ -2,4 +2,4 @@
 test cached_and_uncached_reads_agree_across_randomised_rewrites ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 === full: cargo test -p kroma-core --all-targets ===
-1274 passed / 0 failed (run on 14a1acd)
+1274 passed / 0 failed (run on 5f6ccae)
