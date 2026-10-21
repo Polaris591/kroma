@@ -695,7 +695,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -715,7 +715,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -795,7 +795,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -815,7 +815,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -835,7 +835,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -915,7 +915,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -935,7 +935,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -955,7 +955,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -975,7 +975,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1014,7 +1014,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1034,7 +1034,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1054,7 +1054,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1074,7 +1074,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1094,7 +1094,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1134,7 +1134,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1154,7 +1154,7 @@
         {
           "command": "kroma bench --executor provider (five paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T17:40:00Z",
           "exit_code": 0,
@@ -1174,7 +1174,7 @@
         {
           "command": "kroma bench --executor provider (five paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T17:40:00Z",
           "exit_code": 0,
@@ -1194,7 +1194,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1214,7 +1214,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1304,7 +1304,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1383,7 +1383,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1463,7 +1463,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1543,7 +1543,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1663,7 +1663,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1743,7 +1743,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1763,7 +1763,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -1803,7 +1803,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -2100,7 +2100,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -2120,7 +2120,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -2160,7 +2160,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -2220,7 +2220,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -2240,7 +2240,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -2260,7 +2260,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
@@ -2280,7 +2280,7 @@
         {
           "command": "kroma bench --executor provider (three paired experiments)",
           "path": "evidence/experiments-summary.md",
-          "sha256": "800a085af21717c03b4e131254121212853d934c744d35731e4cf2b32f568db5",
+          "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
           "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
           "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
