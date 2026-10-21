@@ -8,9 +8,10 @@
 
 | 状态 | 数量 | 含义 |
 |---|---|---|
+| REJECTED_WITH_EVIDENCE | 1 | KR-N03：锦标赛 k=2 质量零增益、成本 +17%，判负不启用 |
 | VERIFIED | 76 | 有测试或 live 证据，且验收点已核对 |
 | IMPLEMENTED_UNVERIFIED | 5 | 实现与测试目标都在，但验收点未闭合（每项在账本里写明缺什么） |
-| DEFERRED_WITH_RATIONALE | 35 | 全部是 experiment；理由是实验设施缺陷（见第六节），不是无理由搁置 |
+| DEFERRED_WITH_RATIONALE | 34 | 全部是 experiment；设施已修好、三个实验已跑，其余机制仍需各自的 arm 与预注册运行 |
 | BLOCKED_EXTERNAL | 4 | T02/Q06/S06/T04，附独立探测证据（`blocked_probes.md`） |
 | TODO | 0 | — |
 
@@ -59,16 +60,23 @@ R04（模块提取缺收益证据）、R06（决策规则文档已成，但依�
   `PE32+ executable for MS Windows 5.02, x86-64`，223 MB。运行证据仍缺（无真机），所以 T02 保持 BLOCKED。
 - **实验**：见第六节。
 
-## 六、实验：设施已修好，已有一次真实配对结论
+## 六、实验：设施已修好，三个机制已有真实结论
 
 前三次跑出 0/6 全部 rejected，根因有三层（全部记录在 `evidence/exp00-diagnosis.md`）：
 `--allow-write` 在 bench 分支不生效（要用 `--policy allow-write`）；verify 的解释器必须在 bwrap 沙箱里可见
 （原来指向 `/tmp/kv/bin/python`，而 `/tmp` 在沙箱里是空 tmpfs）；verifier 二进制必须按真实路径声明为可信文件
 （`--verifier-file /usr/bin/python3.13`，软链会被拒）。
 
-修好之后：dev 6/6、holdout 2/2 全部 approved，0 个无判定。配对结果是
-**质量相同（100% vs 100%），dev 说候选多花 8% token（126349 vs 117015），holdout 说候选省 10%
-（43680 vs 48635）**。两个集合结论相反，样本也小，所以 on_demand_tools **不晋升**——这是负实验登记的第一条。
+修好之后跑了三个机制，全部 6/6 或 2/2 通过、0 个无判定（明细见 `evidence/experiments-summary.md`）：
+
+| 机制 | 质量 | 成本 | 处置 |
+|---|---|---|---|
+| on_demand_tools | 相同 | dev +8% / holdout −10% | 不晋升（两个集合矛盾） |
+| adaptive_tournament k=2 | 相同 | +17% | **判负**，不启用 |
+| projection_p3 | 相同 | −2.6%（噪声内） | 无结论 |
+
+三个机制没有一个支持"打开它更好"，所以默认配置不变。剩下 34 项 experiment 各指一个不同机制，
+需要各自的 arm 与预注册运行，不能靠这三次实验代替。
 
 关键对照：把同一个任务手工 materialize 后用同一个二进制跑 `kroma run`，模型**真的修好了**
 （`range(n + 1)`），自己跑 pytest 1 passed，缓存命中 87–93%。verify 命令在沙箱内也验证可用

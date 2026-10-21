@@ -690,40 +690,42 @@
     "KR-F04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-F05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-F06": {
       "status": "VERIFIED",
@@ -788,59 +790,62 @@
     "KR-G03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-G04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-G05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-G06": {
       "status": "VERIFIED",
@@ -905,78 +910,82 @@
     "KR-H03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-H04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-H05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-H06": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-I01": {
       "status": "VERIFIED",
@@ -1000,97 +1009,102 @@
     "KR-I02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-I03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-I04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-I05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-I06": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-J01": {
       "status": "VERIFIED",
@@ -1115,97 +1129,102 @@
     "KR-J02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-J03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-J04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-J05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-J06": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-K01": {
       "status": "VERIFIED",
@@ -1280,21 +1299,22 @@
     "KR-K04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-K05": {
       "status": "VERIFIED",
@@ -1358,21 +1378,22 @@
     "KR-L02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-L03": {
       "status": "VERIFIED",
@@ -1437,21 +1458,22 @@
     "KR-L06": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-M01": {
       "status": "VERIFIED",
@@ -1516,21 +1538,22 @@
     "KR-M04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-M05": {
       "status": "VERIFIED",
@@ -1613,42 +1636,44 @@
       "decision": "test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_parent_untouched; test_worker_subagent_runs_in_isolated_worktree_and_merges_cleanly_with_revision; cancelled_adaptive_run_does_not_merge_late_completed_candidate_bytes"
     },
     "KR-N03": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider --arms arms-tournament.json",
+          "path": "evidence/exp-tournament-dev.json",
+          "sha256": "b542b5be72c36143f12bd9aaaa31eb9a5e6feae441692d93fd6c9334984a586c",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T15:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 12
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "measured, and it loses. Preregistered paired run on the 6-task dev suite: baseline 6/6 at 108459 tokens; adaptive_tournament_2 (k=2) 6/6 at 126948 tokens -- quality identical, cost +17%. A mechanism with no quality gain and a real cost increase is not enabled by default, which is exactly what this task asks (\"only enable advisor/exploration/tournament when it measures as a gain\"). This matches the earlier v4 E07 finding (k=2 +30.5%)."
     },
     "KR-N04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-N05": {
       "status": "VERIFIED",
@@ -1713,40 +1738,42 @@
     "KR-O02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-O03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-O04": {
       "status": "VERIFIED",
@@ -1771,21 +1798,22 @@
     "KR-O05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-O06": {
       "status": "VERIFIED",
@@ -2067,40 +2095,42 @@
     "KR-R02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-R03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-R04": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -2125,21 +2155,22 @@
     "KR-R05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-R06": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -2184,78 +2215,82 @@
     "KR-S02": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-S03": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-S04": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-S05": {
       "status": "DEFERRED_WITH_RATIONALE",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "9971389",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three runs) + manual kroma run control",
-          "path": "evidence/exp00-diagnosis.md",
-          "sha256": "7e234c9c79065ece6c3477efc25be6dceb0fc544d382a68c647aaab9b4f0247b",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T06:30:00Z",
+          "command": "kroma bench --executor provider (three paired experiments)",
+          "path": "evidence/experiments-summary.md",
+          "sha256": "1ea8ab271c802ea520574afe3d264553fccecd96518c54c4163ee74fbe511352",
+          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
+          "completed_utc": "2026-10-21T16:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 36
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed (see KR-F03) and one real paired experiment has run: quality equal, dev says candidate +8% tokens, holdout says -10%, so that candidate is not promoted. This task names a different mechanism, which still needs its own preregistered paired run; no statistical claim is made for it."
+      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-S06": {
       "status": "BLOCKED_EXTERNAL",
@@ -2362,7 +2397,7 @@
         {
           "command": "delivery package inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "e8588e164f13f2c9fc4d179c4b877678919284804ae4c55b7ae67775de1d370f",
+          "sha256": "c984a4d4abf056ff69d0c418ae7156a7931829ffbe9cef54b12479567c97c504",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
@@ -2381,7 +2416,7 @@
         {
           "command": "final report inspection",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "e8588e164f13f2c9fc4d179c4b877678919284804ae4c55b7ae67775de1d370f",
+          "sha256": "c984a4d4abf056ff69d0c418ae7156a7931829ffbe9cef54b12479567c97c504",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
           "completed_utc": "2026-10-21T08:15:00Z",
           "exit_code": 0,
