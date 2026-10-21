@@ -374,22 +374,22 @@
     "KR-C06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (b08_shared_launch, t09_execution_boundary, t31_codemode_execution, t33_bench_execution_boundary, t35_surface_execution_boundary) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "cross-platform capability is reported honestly (host_capabilities.json marks cross_platform BLOCKED, blocked_probes.md records the Windows cross build and the missing macOS SDK), and path/env/TLS boundary tests exist (b08_shared_launch::one_shot_launch_scrubs_secret_environment, worker_cannot_write_parent_via_absolute_path), but the boundary was never re-verified on a non-Linux platform. Missing: a real Windows/macOS run."
     },
     "KR-D01": {
       "status": "VERIFIED",
@@ -611,22 +611,22 @@
     "KR-E06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (t14_cache_accounting, t18_usage_cost, m105_ledger, live_channel_contract) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "credential_broker.rs states plainly that a hostname is not resolved there and that a deployment needing to prove the resolved destination must bind it at the connect layer; transport.rs has no resolve/pin either. Missing: IP pinning at connect, so a DNS rebind between authorization and connection is not prevented."
     },
     "KR-F01": {
       "status": "VERIFIED",
@@ -671,22 +671,22 @@
     "KR-F03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/w2-workspace-test.log",
-          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:05:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1295
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "three-protocol live receipts and the latency breakdown exist, but a paired A/B (baseline arm vs candidate arm) needs a candidate, and candidates come from W4 experiments. Nothing is promoted on single-arm evidence"
+      "decision": "three real paired runs exist (evidence/exp00-dev-run1/2/3.json) but the bench provider executor rejected all 12 jobs while the same task succeeded through kroma run, so no paired statistic exists. Missing: a working bench executor."
     },
     "KR-F04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -846,22 +846,22 @@
     "KR-G06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (context_cache_stability, t14_cache_accounting, repeated_read_runner) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "context_cache_stability covers watermark step-down, working-set pinning and loop guard, and t14 separates creation from read cost. Missing: a measured bound on memory and recovery time under cache pressure (the acceptance asks for that number, not for the invariant tests)."
     },
     "KR-H01": {
       "status": "VERIFIED",
@@ -884,24 +884,24 @@
       "decision": "added tool_contracts::every_registered_tool_declares_a_complete_contract: walks the whole registry and requires name, description, object schema, timeout and output cap, plus unique names"
     },
     "KR-H02": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/w2-workspace-test.log",
-          "sha256": "8f735bdd82a48a655cd6712f36f4412fc7c2cb5f92f4f2dd1dadc288cc07a1d3",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T01:40:00Z",
+          "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1295
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "each tool validates its own input before acting and returns ErrorCode::InvalidArguments (e.g. recall_evidence, codemode); there is no shared schema-validation layer, so the \"structured error for every tool\" part is not proven"
+      "decision": "implemented this round: tool/schema_check.rs is the single pre-dispatch validator (parseable JSON, object shape, required fields, primitive and array-item types, 1MiB/32-level caps), running after authority/exposure and before any hook, policy, approval or side effect; 7 unit tests plus tool_contracts/t12/gate3 green"
     },
     "KR-H03": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -982,22 +982,22 @@
     "KR-I01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (t06_bounded_io, t16_repo_graph_budget, t26_localization, filesystem_security, edit_diagnostics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "no per-tool I/O cost baseline exists for read/grep/find/ls: measure-local-baseline.py measures process load (p0) and graph navigation (p2), not the four file tools. Missing: the I/O decomposition this task asks for."
     },
     "KR-I02": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1299,24 +1299,24 @@
       "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
     },
     "KR-K05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (mcp_http_2026, mcp_config, t13_mcp_handshake, t37_mcp_deadline_classification) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "mcp_http_2026::mcp_duplicate_names_and_oversized_schemas_are_refused (hostile schema refused) and rejects_non_loopback_plain_http_and_forged_newlines (a hostile server cannot smuggle headers); the client refuses rather than allocating"
     },
     "KR-K06": {
       "status": "VERIFIED",
@@ -1341,22 +1341,22 @@
     "KR-L01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (provider_contract, sse_contract, live_channel_contract) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "no controlled micro-benchmark for connect/TLS/serialization cost. The live canary only reports a blended ttft (3336ms) and nextgen_latency_breakdown.py says so explicitly. Missing: the split micro-benchmark."
     },
     "KR-L02": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1400,42 +1400,42 @@
     "KR-L04": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (provider_contract, sse_contract, live_channel_contract) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "Retry-After is parsed (transport.rs:754/756) and retry accounting is covered (provider_contract::retry_token_allowance_blocks_transmission_and_preserves_unknown_spend, runner_retry_exhaustion_retains_first_attempt_and_sends_once). Missing: seeded/deterministic jitter -- grep for seed in provider/*.rs returns nothing."
     },
     "KR-L05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (provider_contract, sse_contract, live_channel_contract) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "ModelCapabilities::resolve exists and the fallback is honest (KR-B04 work), but there is no model capability registration or /models refresh path, so \"the executor and the model both verifiable\" is not met. Missing: the refresh mechanism."
     },
     "KR-L06": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1477,44 +1477,44 @@
       "decision": "t05_compaction_identity::projection_never_changes_a_message_role (added); role is carried by the TranscriptItem enum so projection cannot promote lower-trust content"
     },
     "KR-M02": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (c00_07_taskstate_binding, t25_task_state, c0006_message_semantics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "t25_task_state::unsupported_summary_claim_is_not_promoted_to_fact (a model claim does not become state) and path_mentions_do_not_claim_causal_truth; task state is rebuilt from the transcript events"
     },
     "KR-M03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (c00_07_taskstate_binding, t25_task_state, c0006_message_semantics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "handoff.rs has HandoffArtifact, but resuming a work segment from the ledger was not exercised end to end. Missing: the recovery run that proves a new segment can continue without the model remembering the taskbook."
     },
     "KR-M04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1538,22 +1538,22 @@
     "KR-M05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (c00_07_taskstate_binding, t25_task_state, c0006_message_semantics) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "no rule-conflict/precedence resolver was found in prompt.rs or config_file.rs. Missing: the precedence model and its audit trail."
     },
     "KR-M06": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -1853,22 +1853,22 @@
     "KR-P03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (gate6_multi_surface_runtime, multi_session_daemon, acp_contract, repl_terminal_ux) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "no queue/slow-client pressure test exists in gate6_multi_surface_runtime or multi_session_daemon (grep for queue/slow/backpressure/bounded/fair returns nothing). Missing: the actual memory and queue bound measurement, which the acceptance explicitly refuses to accept as a constant."
     },
     "KR-P04": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -1893,82 +1893,82 @@
     "KR-P05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (gate6_multi_surface_runtime, multi_session_daemon, acp_contract, repl_terminal_ux) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "not verified this round: TUI safety, interruptibility and accessibility were not exercised. Missing: the terminal probe and the accessibility pass."
     },
     "KR-P06": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (gate6_multi_surface_runtime, multi_session_daemon, acp_contract, repl_terminal_ux) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "not verified this round: ACP/RPC SDK interoperability with a real external client was not exercised. Missing: an independent client."
     },
     "KR-Q01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "no paired prompt-injection attack set with a normal-task control was built. Missing: the corpus and the pairing."
     },
     "KR-Q02": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "not verified this round: self-repair cannot rewrite the judge is asserted in docs but not proven by a test that tries to. Missing: the adversarial test."
     },
     "KR-Q03": {
       "status": "VERIFIED",
@@ -2012,22 +2012,22 @@
     "KR-Q05": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (b09_scoring_security, t19_ahe_isolation, t34_evaluation_authorization, t38_prereg_oracle_authority) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "implementation and tests pass, but declared dependency KR-P03 is not verified, so this cannot be closed: the taskbook requires the dependency chain to be closed first"
     },
     "KR-Q06": {
       "status": "BLOCKED_EXTERNAL",
@@ -2051,21 +2051,22 @@
     "KR-R01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "gate receipt / measurement",
-          "path": "r01_local_baseline.json/report.json",
-          "sha256": "d6b7abdc394ed01e6312be1b0cbcfddfa24c28b90fc0b426d609c6e9eb1cbba4",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:20:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "p0 baseline reproducible over 3 repeats (wall 4.1/4.3/61.2ms, tree PSS 2.5-7.0MB). p2/p3/p4 (kroma acp + workspace.graph) time out even at a 60s limit on a 560-file repo -- an independent probe, recorded rather than smoothed over; the ACP graph path needs its own investigation"
+      "decision": "p0 (kroma --version) is reproducible over three repeats (wall 4.1/4.3/61.2ms, tree PSS 2.5-7.0MB) but p2/p3/p4 (kroma acp + workspace.graph) time out at 60s on a 560-file repo. Missing: a working graph measurement, which is most of this task."
     },
     "KR-R02": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2108,22 +2109,22 @@
     "KR-R04": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "not verified this round: no invariant-driven module extraction was done, and the acceptance says not to continue extracting without evidence that it lowers cost. Missing: the evidence."
     },
     "KR-R05": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -2282,22 +2283,21 @@
     "KR-T01": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "docs/CAPABILITY_MATRIX.md + CAPABILITIES.md inspection (see A06 record)",
+          "path": "a06_doc_drift_fix.md",
+          "sha256": "6d10d2cbd1b38cfce79ec6cd83e9f65cc7af2ac9e8fba7b261aad82c7d381184",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 362
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "defaults are verified in source (projection_profile None/P2, projection_candidate None, causal_pruning false, on_demand_tools false) and CAPABILITY_MATRIX.md documents them, but the task depends on KR-S01 (strategy catalogue + activation receipts) which is still unverified, so this cannot be closed"
     },
     "KR-T02": {
       "status": "BLOCKED_EXTERNAL",
@@ -2321,22 +2321,22 @@
     "KR-T03": {
       "status": "IMPLEMENTED_UNVERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "cargo test --workspace --locked --no-fail-fast",
+          "path": "evidence/h02-workspace-test.log",
+          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:30:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 362
+          "tests_run": 1302
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "not verified this round: upgrade/rollback and old-session compatibility were not exercised. Missing: the migration run."
     },
     "KR-T04": {
       "status": "BLOCKED_EXTERNAL",
@@ -2358,44 +2358,42 @@
       "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
     },
     "KR-T05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "delivery package inspection",
+          "path": "W5_FINAL_ACCEPTANCE.md",
+          "sha256": "0117acbaa3e729902b24ce00c49a24a390dcd780b903ac7f057cf6b85f686e29",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 362
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "the delivery is reproducible without chat history: docs/nextgen/baseline.json pins the archive sha256, the delivered tree, the toolchain and host capabilities; gate_receipt.json replays the fast gates; W5_FINAL_ACCEPTANCE.md states what is done and what is not"
     },
     "KR-T06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "68b7880",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
+          "command": "final report inspection",
+          "path": "W5_FINAL_ACCEPTANCE.md",
+          "sha256": "0117acbaa3e729902b24ce00c49a24a390dcd780b903ac7f057cf6b85f686e29",
           "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "completed_utc": "2026-10-21T07:00:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 362
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (t18_provenance_identity, t20_capability_manifest) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "W5_FINAL_ACCEPTANCE.md reports the real distribution (48 verified / 33 target-level only / 35 deferred / 4 blocked), the six fixes with red-green evidence, the three failed experiment runs and why they are not a negative result, and the remaining bottlenecks; it does not claim all open research pays off"
     }
   }
 }

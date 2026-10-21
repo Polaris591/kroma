@@ -8,13 +8,19 @@
 
 | 状态 | 数量 | 含义 |
 |---|---|---|
-| VERIFIED | 48 | 有测试或 live 证据，且验收点已核对 |
-| IMPLEMENTED_UNVERIFIED | 33 | 实现与测试目标都在、批量跑全绿，但**未逐条核对验收点** |
+| VERIFIED | 53 | 有测试或 live 证据，且验收点已核对 |
+| IMPLEMENTED_UNVERIFIED | 28 | 实现与测试目标都在、批量跑全绿，但验收点未闭合（每项在账本里写明缺什么） |
 | DEFERRED_WITH_RATIONALE | 35 | 全部是 experiment；理由是实验设施缺陷（见第六节），不是无理由搁置 |
 | BLOCKED_EXTERNAL | 4 | T02/Q06/S06/T04，附独立探测证据（`blocked_probes.md`） |
 | TODO | 0 | — |
 
 这份账本不是"全部完成"，而是一份**说明清楚哪里没完成的账本**。
+
+28 项未闭合的具体缺口（账本里逐条写明）：E06 缺 connect 层 IP pinning（DNS rebinding 窗口）、
+L01 缺连接/序列化微基准、L04 缺 seeded 抖动、L05 缺 /models 能力刷新、I01 缺 read/grep/find/ls 的
+I/O 分解、G06 缺缓存压力下的内存上界实测、P03 缺队列/慢客户端压力测试、M03 缺从账本恢复的端到端
+演练、M05 缺规则优先级解析、Q01 缺注入攻击配对集、Q02 缺"自我修复改裁判"的对抗测试、R01 的
+ACP graph 60 秒无响应、R04/T03 未做、P05/P06 未演练，其余为依赖链未闭合。
 
 ## 二、最终门禁
 
