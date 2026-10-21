@@ -609,24 +609,24 @@
       "decision": "three live protocols against https://cobblemon.asia/v1: chat-completions (in 1904/cached 0/out 5, ttft 3336ms), openai-responses (1898/0/5, 1789ms), anthropic-messages (1973/0/5, 1819ms); all provider_reported model gpt-6.1-sol, each with request_identity_sha256"
     },
     "KR-E06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "9a0c9f8",
       "evidence": [
         {
           "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "path": "evidence/e06-workspace-test.log",
+          "sha256": "51098b76872a92a7764bfa9218f3daccd94d43aab08250abd866731497011146",
+          "source_tree_sha256": "845f43321a5b6123fa4918b618b2baa4c6dd6470775dcbf525b1c6bffaf0a0bc",
+          "completed_utc": "2026-10-21T10:40:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 1302
+          "tests_run": 1306
         }
       ],
       "blocker": null,
-      "decision": "credential_broker.rs states plainly that a hostname is not resolved there and that a deployment needing to prove the resolved destination must bind it at the connect layer; transport.rs has no resolve/pin either. Missing: IP pinning at connect, so a DNS rebind between authorization and connection is not prevented."
+      "decision": "both halves implemented in provider/transport.rs. (1) The destination is resolved exactly once and the dial target is that address, so the address authorized and the address connected are the same lookup -- the rebinding window between two lookups is gone. TLS still uses endpoint.host for SNI, so certificate validation is unchanged. (2) A hostname (not an IP literal) whose resolution contains a private, non-loopback address is refused before connecting, closing the \"public name resolves into the internal network\" SSRF shape; loopback is deliberately allowed because localhost is a legitimate fixture and live_channel_contract proves that alias path still works. Credential_broker::is_private was exposed for this. Limitation recorded: there is no automated test that controls DNS answers, so the refusal path is verified by code review plus the loopback/IP-literal regressions, not by a crafted rebinding fixture."
     },
     "KR-F01": {
       "status": "VERIFIED",
@@ -980,24 +980,23 @@
       "decision": "three real paired runs (exp00-dev-run1/2/3.json, gpt-6.1-sol) all returned 0/6 with gate_status=rejected, while the same task run manually through kroma run succeeded and the model produced the correct fix (range(n + 1), cache hit 87-93%). The verify argv itself was proven working inside the sandbox. So the bench provider executor disagrees with the manual path and BenchArmResult carries no failure reason, which makes this an instrument defect, not a negative result about the candidate. Statistics cannot be produced until that executor is fixed; calling it REJECTED would falsely claim the candidate lost."
     },
     "KR-I01": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "9a0c9f8",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "command": "cargo test -p kroma-core --test t06_bounded_io the_four_file_tools -- --nocapture",
+          "path": "i01_tool_io_vs_tokens.md",
+          "sha256": "1838e3a3916390b0f6acd41af8460d325df013d9896431cd11a37646f19feaf0",
+          "source_tree_sha256": "845f43321a5b6123fa4918b618b2baa4c6dd6470775dcbf525b1c6bffaf0a0bc",
+          "completed_utc": "2026-10-21T09:55:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1302
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "no per-tool I/O cost baseline exists for read/grep/find/ls: measure-local-baseline.py measures process load (p0) and graph navigation (p2), not the four file tools. Missing: the I/O decomposition this task asks for."
+      "decision": "measured, not assumed: on one 201-file tree read(10 lines of a 2MiB file) returns 338 bytes in 108.77ms, grep 2418 bytes/3.81ms, find 1524/2.43ms, ls 1524/0.72ms -- so a 2 MiB scan produces 338 bytes of model-visible output. Separately, live logs show 9472 request bytes = 1911 tokens (5.0 bytes/token) while adding 5025 tool-result bytes adds only ~1232 input tokens, which is the direct evidence that scanned bytes must not be converted into token cost. Local baseline (no model) and model results are reported apart."
     },
     "KR-I02": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1339,24 +1338,23 @@
       "decision": "real third-party MCP server (@modelcontextprotocol/server-everything over stdio via npx): 3 successful mcp__everything__echo calls, 6 discover_tools, 4 model turns, model_stop. Independent implementation, not the local fixture. No remote HTTP MCP endpoint was available, so that part is not claimed"
     },
     "KR-L01": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "9a0c9f8",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "command": "cargo test -p kroma-core --test mcp_http_2026 local_loopback_protocol_cost -- --nocapture",
+          "path": "l01_protocol_cost.md",
+          "sha256": "265b26791a0e690033e89b0fbcd53874ed58722446e62dede34b780c6463b891",
+          "source_tree_sha256": "845f43321a5b6123fa4918b618b2baa4c6dd6470775dcbf525b1c6bffaf0a0bc",
+          "completed_utc": "2026-10-21T10:10:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1302
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "no controlled micro-benchmark for connect/TLS/serialization cost. The live canary only reports a blended ttft (3336ms) and nextgen_latency_breakdown.py says so explicitly. Missing: the split micro-benchmark."
+      "decision": "measured loopback protocol cost (connect + serialize + read + parse) at 425\u00b5s median over 5 fresh connections, against 3336ms ttft on the live canary -- the client protocol is 0.013% of end-to-end, so the optimizable share here is ~zero and effort belongs elsewhere. Safety control cases kept and named in the doc."
     },
     "KR-L02": {
       "status": "DEFERRED_WITH_RATIONALE",

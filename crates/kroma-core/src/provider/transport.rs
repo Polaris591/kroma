@@ -635,16 +635,77 @@ pub(crate) async fn send_request(
 ) -> Result<HttpResponseHead, TransportFailure> {
     let connect_to =
         step_timeout(deadline, budget.connect_timeout).map_err(TransportFailure::Transient)?;
-    let tcp =
-        match tokio::time::timeout(connect_to, TcpStream::connect(endpoint.connect_addr())).await {
-            Ok(Ok(s)) => s,
+    // KR-E06: resolve the destination exactly once and connect to that address. Letting
+    // `TcpStream::connect` resolve the name means the address that was authorized and the address
+    // that is dialed come from two separate lookups, and a DNS answer that changes between them is
+    // the rebinding window. TLS still uses `endpoint.host` for SNI, so certificate validation is
+    // unchanged -- only the dial target is pinned.
+    let addrs: Vec<std::net::SocketAddr> =
+        match tokio::time::timeout(connect_to, tokio::net::lookup_host(endpoint.connect_addr()))
+            .await
+        {
+            Ok(Ok(iter)) => iter.collect(),
             Ok(Err(e)) => {
                 return Err(TransportFailure::Transient(ProviderError::Transport(
-                    format!("connect failed: {}", e),
+                    format!("resolve failed: {}", e),
                 )));
             }
             Err(_) => return Err(TransportFailure::Transient(ProviderError::Timeout)),
         };
+    if addrs.is_empty() {
+        return Err(TransportFailure::Transient(ProviderError::Transport(
+            "resolve returned no address".to_string(),
+        )));
+    }
+    // KR-E06 (second half): a hostname is authorized by name, but the name is what resolves to an
+    // address. If a public name resolves into a private/loopback range, the request would be sent to
+    // a destination nobody approved -- that is the SSRF shape, not a rebinding race. IP literals are
+    // judged by the broker before dispatch, so only resolved names are checked here.
+    // Loopback is excluded on purpose: `localhost` is a legitimate local fixture, and an operator
+    // pointing at 127.0.0.1 has already declared that intent. What must not happen is a public name
+    // quietly resolving into a private network (10/8, 172.16/12, 192.168/16, link-local, ULA).
+    if endpoint.host.parse::<std::net::IpAddr>().is_err()
+        && addrs.iter().any(|addr| {
+            !addr.ip().is_loopback() && crate::credential_broker::is_private(&addr.ip().to_string())
+        })
+    {
+        return Err(TransportFailure::Transient(ProviderError::Transport(
+            format!(
+                "refusing to connect to {}: the name resolved to a private address ({})",
+                endpoint.host,
+                addrs
+                    .iter()
+                    .map(|a| a.ip().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )));
+    }
+    let mut last_error: Option<String> = None;
+    let mut connected: Option<TcpStream> = None;
+    for addr in &addrs {
+        let attempt_to =
+            step_timeout(deadline, budget.connect_timeout).map_err(TransportFailure::Transient)?;
+        match tokio::time::timeout(attempt_to, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => {
+                connected = Some(stream);
+                break;
+            }
+            Ok(Err(e)) => last_error = Some(e.to_string()),
+            Err(_) => return Err(TransportFailure::Transient(ProviderError::Timeout)),
+        }
+    }
+    let tcp = match connected {
+        Some(stream) => stream,
+        None => {
+            return Err(TransportFailure::Transient(ProviderError::Transport(
+                format!(
+                    "connect failed: {}",
+                    last_error.unwrap_or_else(|| "no address attempted".to_string())
+                ),
+            )));
+        }
+    };
 
     let mut transport = if endpoint.scheme == "https" {
         let tls_to =

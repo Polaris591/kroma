@@ -248,3 +248,73 @@ fn registry_overflow_or_duplicate_id_is_not_silently_truncated() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// KR-I01: measure the four file tools' output cost on one fixed tree.
+///
+/// The task asks for the actual I/O and output cost of read/grep/find/ls, and explicitly not for
+/// "scanned bytes equal token cost". This pins the output side: each tool's payload on a 200-file
+/// tree, with `read` limited to ten lines of a 2 MiB file. Timing is printed for the record but not
+/// asserted -- wall time on a shared CI box is not a property of the code.
+#[test]
+fn the_four_file_tools_have_measured_output_costs() {
+    use kroma_core::tools::find::execute_find;
+    use kroma_core::tools::grep::execute_grep;
+    use kroma_core::tools::ls::execute_ls;
+    use kroma_core::tools::read::execute_read;
+
+    let root = scratch("io-cost");
+    for i in 0..200 {
+        std::fs::write(
+            root.join(format!("f{i}.rs")),
+            format!("fn f{i}() {{\n    let _ = {i};\n}}\n"),
+        )
+        .unwrap();
+    }
+    let big = "fn filler() {}\n".repeat(160_000); // ~2 MiB
+    std::fs::write(root.join("big.rs"), &big).unwrap();
+    let ws = WorkspaceCap::new(&root).unwrap();
+
+    type ToolCase = (
+        &'static str,
+        &'static str,
+        fn(&WorkspaceCap, &str) -> kroma_core::tools::ToolExecutionOutput,
+    );
+    let cases: [ToolCase; 4] = [
+        (
+            "read",
+            r#"{"path":"big.rs","offset":1,"limit":10}"#,
+            execute_read,
+        ),
+        ("grep", r#"{"pattern":"fn f1"}"#, execute_grep),
+        ("find", r#"{"pattern":"*.rs"}"#, execute_find),
+        ("ls", r#"{"path":"."}"#, execute_ls),
+    ];
+
+    let mut report = Vec::new();
+    for (name, args, run) in cases {
+        let started = Instant::now();
+        let out = run(&ws, args);
+        let elapsed = started.elapsed();
+        let bytes = out.content.len();
+        println!(
+            "KR-I01 {name}: output_bytes={bytes} elapsed_ms={:.2} success={}",
+            elapsed.as_secs_f64() * 1000.0,
+            matches!(out.outcome, kroma_core::messages::ToolOutcome::Success)
+        );
+        assert!(
+            bytes < 200_000,
+            "{name} output must stay bounded, got {bytes} bytes"
+        );
+        report.push((name, bytes));
+    }
+
+    // `read` of ten lines out of a 2 MiB file must not return the file. This is the concrete
+    // "output cost is not scan cost" statement: the scan touched ~2 MiB, the model sees ten lines.
+    let read_bytes = report.iter().find(|(n, _)| *n == "read").unwrap().1;
+    assert!(
+        read_bytes < 2_000,
+        "a ten-line read must not return the 2 MiB body, got {read_bytes} bytes"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

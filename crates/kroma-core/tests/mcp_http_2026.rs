@@ -172,3 +172,59 @@ async fn http_mcp_2026_sse_terminal_response_ends_the_call_without_connection_cl
     );
     drop(server);
 }
+
+/// KR-L01: how much of a request's cost is protocol plumbing, and how much is not.
+///
+/// The acceptance asks to "confirm the optimizable share". This measures the loopback protocol cost
+/// (connect + request write + response read + parse) with the same client used against real
+/// endpoints, so it can be compared against the live canary's 3336 ms ttft on the same machine.
+/// Whatever is left over is network + provider, which no client-side change can remove.
+#[tokio::test]
+async fn local_loopback_protocol_cost_is_measured() {
+    const REPEATS: usize = 5;
+    let mut samples = Vec::new();
+
+    for _ in 0..REPEATS {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/mcp",
+            listener.local_addr().unwrap().port()
+        );
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (_headers, req) = accept_json(&mut stream);
+            let response = json!({"jsonrpc":"2.0","id":req["id"],"result":{
+                "cacheScope":"private","ttlMs":60000,
+                "tools":[{"name":"echo","description":"e","inputSchema":{"type":"object"}}]
+            }});
+            reply(stream, "application/json", &response.to_string());
+        });
+
+        let mut client = McpHttpClient::new(&url, None, Duration::from_secs(10)).unwrap();
+        let started = Instant::now();
+        let catalog = client
+            .list_tools()
+            .await
+            .expect("loopback call must succeed");
+        samples.push(started.elapsed());
+        assert_eq!(catalog.len(), 1);
+        server.join().unwrap();
+    }
+
+    samples.sort();
+    let median = samples[REPEATS / 2];
+    println!(
+        "KR-L01 loopback protocol cost: median={:?} min={:?} max={:?} (n={})",
+        median,
+        samples[0],
+        samples[REPEATS - 1],
+        REPEATS
+    );
+    // Loopback plumbing is sub-millisecond to a few ms. If this ever reaches tens of ms, the client
+    // is doing real work per request and that is worth optimizing; against the live canary's
+    // 3336 ms ttft it is noise, so the optimizable share of end-to-end latency is not here.
+    assert!(
+        median < Duration::from_millis(50),
+        "loopback protocol cost should be small, got {median:?}"
+    );
+}

@@ -250,7 +250,7 @@ fn is_private_v4(address: std::net::Ipv4Addr) -> bool {
 /// local (`fc00::/7`) and unicast link-local (`fe80::/10`) are private for the same reason RFC1918
 /// is. Hostnames are still not resolved here — the URL gate cannot see the answer the connect layer
 /// will get.
-fn is_private(host: &str) -> bool {
+pub(crate) fn is_private(host: &str) -> bool {
     match host.parse::<IpAddr>() {
         Ok(IpAddr::V4(v4)) => is_private_v4(v4),
         Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
