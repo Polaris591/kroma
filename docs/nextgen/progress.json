@@ -981,17 +981,17 @@
       "commit": "99da6d3",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
-          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "command": "code inspection of tools/read.rs + t06_bounded_io measurement",
+          "path": "evidence/i02_root_cause.md",
+          "sha256": "151cf00463615aa829b87552d836c7e9346a2ac8268080d5835e6963f9993ee2",
+          "source_tree_sha256": "6eca281c04e02b08a109da553d00197d2d88250bcdda275642c8723d5a0243ec",
+          "completed_utc": "2026-10-22T08:20:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
-      "decision": "no implementation exists: both attempts were reverted (see i02_line_index_attempt.md). Only the measurement (1732x) and the correct refactor order exist. The acceptance measurement cannot be run because the feature is absent."
+      "decision": "no implementation, and the measurement says one would not have paid. Reading the code shows the 110.4ms for a 2 MiB file is whole-file I/O plus the whole-file SHA256 identity and NUL scan, not line scanning (the reader is already 8 KiB chunked). A version-keyed line index would only remove the parse step and cannot touch the dominant terms without changing what read reports. See evidence/i02_root_cause.md. Reopening this needs the SHA256-on-short-read contract change first, not an index."
     },
     "KR-I03": {
       "status": "VERIFIED",
@@ -1066,7 +1066,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "not implemented, and the mechanism is absent from the tree: there is no tree-sitter or syntax-aware parser dependency anywhere (grep over Cargo.toml and src finds none), so \"selective syntax parsing\" would be a new subsystem, not an arm. The current candidate ranking is the graph/heuristic one. The acceptance rule (beat the existing rule on localisation AND total cost) cannot even be evaluated without building the parser first."
     },
     "KR-J01": {
       "status": "VERIFIED",
