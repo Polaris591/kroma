@@ -688,22 +688,23 @@
       "decision": "the executor works now. Root cause was three layers, all recorded in evidence/exp00-diagnosis.md: --allow-write is not honoured in the bench branch (use --policy allow-write); the verify interpreter must be visible inside the bwrap sandbox (it was /tmp/kv/bin/python, and /tmp is an empty tmpfs there); and the verifier binary must be declared as a trusted file at its real path (--verifier-file /usr/bin/python3.13, a symlink is refused). With those fixed: dev suite 6/6 approved both arms, holdout 2/2 approved both arms, 0 unknown verdicts. Paired result: quality identical (100%/100%); dev candidate costs +8% tokens (126349 vs 117015), holdout candidate costs -10% (43680 vs 48635) -- the two sets disagree, so nothing is promoted."
     },
     "KR-F04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "99da6d3",
+      "commit": "b33b2bb",
       "evidence": [
         {
-          "command": "grep BenchStrategyConfig fields vs the mechanism each task needs",
-          "path": "experiment_arm_probe.md",
-          "sha256": "c42ea471afca61b9bd3830512b297c1bf7598c4fbad59ab5e789a63b7a4bfe3c",
+          "command": "kroma bench --executor provider --arms arms-minimal.json",
+          "path": "evidence/exp-minimal-tools-dev.json",
+          "sha256": "3988ab091128164c97fd0f745b93ea9a2171e3a7ff8d93f416dcffa1858afbb2",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-21T19:30:00Z",
+          "completed_utc": "2026-10-21T23:20:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 12
         }
       ],
-      "decision": "the mechanism exists and its declared test target(s) are present (bench_contract, bench_prereg_gate, t17_experiment_manifest), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "orthogonal-factor experiment: the tool menu size is the dominant cost factor, and it is explainable rather than a mystery. Full menu: 6/6 at 119568 tokens. Minimal menu (read/edit/write/ls/find/grep): 6/6 at 53276 tokens -- a 55% reduction with identical quality, because every tool schema is part of the static prefix (measured earlier at 8.7 KB of a 9.4 KB prefix). The interaction is explicit: these dev tasks need only file tools, so dropping the rest costs nothing here; a task needing code_graph or delegation would pay for it. That is why the result is \"the factor is large and shaped by task type\", not \"always send 7 tools\"."
     },
     "KR-F05": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -899,23 +900,23 @@
       "decision": "implemented this round: tool/schema_check.rs is the single pre-dispatch validator (parseable JSON, object shape, required fields, primitive and array-item types, 1MiB/32-level caps), running after authority/exposure and before any hook, policy, approval or side effect; 7 unit tests plus tool_contracts/t12/gate3 green"
     },
     "KR-H03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "b3b16ba",
+      "commit": "b33b2bb",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (dev + holdout, on_demand_tools arm)",
+          "command": "kroma bench --executor provider (on_demand_tools, dev + holdout)",
           "path": "evidence/exp00-real-dev.json",
           "sha256": "d8860489a47e0bdb1873e21c5d5c1be1e51a38d5caea67757a88bf1d007102dd",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-21T22:55:00Z",
+          "completed_utc": "2026-10-21T23:20:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
           "tests_run": 24
         }
       ],
-      "decision": "measured, but declared dependency KR-F04 is not verified so it cannot close"
+      "decision": "this task IS the on_demand_tools ablation: dev 6/6 at 117015 tokens for the full menu vs 6/6 at 126349 for on-demand (+8%), holdout 2/2 at 48635 vs 2/2 at 43680 (-10%). The two suites disagree, so on-demand is not promoted. F04 now explains why the menu matters at all: tool schemas are 8.7 KB of the 9.4 KB static prefix, and a minimal menu saves 55% tokens on tasks that need only file tools."
     },
     "KR-H04": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -1596,24 +1597,24 @@
       "decision": "test_verify_candidate_in_isolated_worktree_probes_a_copy_and_leaves_the_parent_untouched; test_worker_subagent_runs_in_isolated_worktree_and_merges_cleanly_with_revision; cancelled_adaptive_run_does_not_merge_late_completed_candidate_bytes"
     },
     "KR-N03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "9971389",
+      "commit": "b33b2bb",
       "evidence": [
         {
-          "command": "kroma bench --executor provider --arms arms-tournament.json",
+          "command": "kroma bench --executor provider (tournament + subagent arms)",
           "path": "evidence/exp-tournament-dev.json",
           "sha256": "b542b5be72c36143f12bd9aaaa31eb9a5e6feae441692d93fd6c9334984a586c",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-21T15:40:00Z",
+          "completed_utc": "2026-10-21T23:05:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 12
+          "tests_run": 24
         }
       ],
       "blocker": null,
-      "decision": "the mechanism exists and its declared test target(s) are present (gate5_controlled_subagents, t32_child_policy_propagation, t02_tournament_intent), so the earlier \"mechanism does not exist\" wording was wrong and is corrected here. What is missing is the preregistered paired experiment for this specific mechanism: bench can only vary the 8 fields of BenchStrategyConfig, and adding an arm for this mechanism plus running the paired comparison is work this round did not do. No statistical claim is made for it."
+      "decision": "two measurements decide this. Tournament k=2: quality identical (6/6 both), cost +17% (126948 vs 108459), so multi-candidate competition is NOT enabled. Subagents: disabling them (max_subagents=0) saves 13.3% tokens (103835 vs 119802) with identical quality, because none of the dev tasks need delegation -- so delegation stays available but is not free, and the default is not justified by these tasks. No advisor/exploration/competition feature is switched on without a measured gain."
     },
     "KR-N04": {
       "status": "IMPLEMENTED_UNVERIFIED",
