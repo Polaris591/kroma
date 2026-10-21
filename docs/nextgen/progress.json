@@ -27,7 +27,7 @@
     "KR-A02": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "8f63776",
+      "commit": "b001b3a",
       "evidence": [
         {
           "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
@@ -42,7 +42,7 @@
         }
       ],
       "blocker": null,
-      "decision": "the mechanism is implemented and the batch gate on 8f63776 runs its own targets (gate0_config_and_events + t03_context_budget); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
+      "decision": "implemented and covered by the batch gate on 8f63776, whose own targets for this item are t20_capability_manifest (plus gate0_config_and_events); the receipt is that gate log."
     },
     "KR-A03": {
       "status": "VERIFIED",
@@ -87,7 +87,7 @@
     "KR-A05": {
       "status": "VERIFIED",
       "attempts": 1,
-      "commit": "8f63776",
+      "commit": "b001b3a",
       "evidence": [
         {
           "command": "scripts/nextgen_rust_gate.sh + run-sandbox-tests.sh on 8f63776",
@@ -102,7 +102,7 @@
         }
       ],
       "blocker": null,
-      "decision": "the mechanism is implemented and the batch gate on 8f63776 runs its own targets (t03_context_budget + t38_prereg_oracle_authority); the receipt is that gate log, and this item adds no separate live measurement because the acceptance condition is structural."
+      "decision": "implemented and covered by the batch gate on 8f63776; its own target is t20_capability_manifest. The receipt is that gate log."
     },
     "KR-A06": {
       "status": "VERIFIED",
@@ -676,11 +676,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "b33b2bb03ba3f095a4fded50df0ccd221927903e",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 1,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 659
           }
         }
       ],
@@ -702,8 +703,8 @@
           "kind": "artifact"
         }
       ],
-      "decision": "deferred with rationale: the task asks for a disposition of all 27 harnesses plus incomparability reasons, and harnesses.json ships that metadata, so the disposition is offline work, not an external block. What cannot be produced here is a leaderboard over the comparable subset, because 26 of 27 harnesses are unobtainable in this environment; the ADR records each as incomparable with its reason.",
-      "blocker": "26 of the 27 harnesses cannot be obtained on this host, so the comparable-subset leaderboard the task asks for cannot be produced; the per-harness disposition and the reason for each is written out in evidence/f05_disposition.md, and the availability probe is evidence/f05_availability.txt (only `pi` resolves)."
+      "decision": "blocked on external availability, with the disposition the task asks for: all 27 harnesses are listed in evidence/f05_disposition.md with availability and the reason each is not comparable. 2 of 27 are installed and runnable (pi, and codex at /usr/local/lib/nodejs/bin/codex); the other 25 cannot be obtained here. No leaderboard is produced because the comparable subset would need a codex credential that is not configured -- the subset is recorded as comparable-but-unranked rather than claimed as ranked.",
+      "blocker": "25 of the 27 harnesses cannot be obtained on this host, so no leaderboard over them can be produced; the per-harness disposition and reason are in evidence/f05_disposition.md (probe: evidence/f05_availability.txt -- `pi` is installed, and so is `codex` at /usr/local/lib/nodejs/bin/codex, codex-cli 0.163.0, but its bin dir is not on PATH). The 2 comparable harnesses are recorded but unranked, because running codex needs an OpenAI credential that is not configured here."
     },
     "KR-F06": {
       "status": "VERIFIED",
@@ -721,11 +722,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "eef778de360d0b9c3aabcf57137747a777820703",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 2,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 645
           }
         }
       ],
@@ -788,11 +790,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "b3b16ba7fc2ced4e3e9d4122bd832399576d1d81",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": false,
+            "changed_paths": 0,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 655
           }
         }
       ],
@@ -912,11 +915,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "eef778de360d0b9c3aabcf57137747a777820703",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 2,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 645
           }
         }
       ],
@@ -938,11 +942,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "09166b31e13d8e89db5cd8182ce99174d3b57e31",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 1,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 661
           }
         }
       ],
@@ -983,11 +988,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "228c0684958c2a9af24b719b122958ff7c378586",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 2,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 670
           }
         }
       ],
@@ -1013,7 +1019,7 @@
       "decision": "tool I/O cost is measured, not assumed: on one 201-file tree, read(10 lines of a 2MiB file) returns 338 bytes in 108.77ms, grep is far cheaper per byte, and the four file tools have measured output costs in the gate test `the_four_file_tools_have_measured_output_costs`. The receipt binds the gate log that runs that test."
     },
     "KR-I02": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "REJECTED_WITH_EVIDENCE",
       "attempts": 0,
       "commit": "8f63776",
       "evidence": [
@@ -1028,7 +1034,7 @@
           "kind": "test"
         }
       ],
-      "decision": "deferred with rationale, not implemented: the measurement says a line index would not pay. The 110.4ms for a 2 MiB file is whole-file I/O plus whole-file SHA256 identity and the NUL scan (the reader is already 8 KiB chunked), so the dominant cost is outside what a version-keyed index removes. Reopening needs the SHA256-on-short-read contract change first."
+      "decision": "measured and rejected: the 1732x cost gap is real (100-byte file 63.8us vs 2 MiB 110.4ms) but reading the code shows it is whole-file I/O plus the whole-file SHA256 identity and NUL scan -- the reader is already 8 KiB chunked, so a version-keyed line index would only remove the parse step and cannot touch the dominant terms. Evidence: evidence/i02_root_cause.md. Reopening needs the SHA256-on-short-read contract change, not an index."
     },
     "KR-I03": {
       "status": "VERIFIED",
@@ -1082,11 +1088,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "38d575cb65ddccbfae84587cd65ec5b086814a99",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 4,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 654
           }
         }
       ],
@@ -1108,7 +1115,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "deferred with rationale, not implemented: the tree has no syntax parser at all (no tree-sitter dependency, no syntax-aware module), so selective syntax parsing is a new subsystem, not an arm; its acceptance rule (beat the existing rule on localisation AND total cost) cannot be evaluated before it exists."
+      "decision": "not implemented: the tree has no syntax parser (no tree-sitter dependency), so selective syntax parsing is a new subsystem rather than an arm. Deferred as unimplemented scope."
     },
     "KR-J01": {
       "status": "VERIFIED",
@@ -1146,11 +1153,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "959e6c4f681f502b2c67a2f6d206ec75bb9af06b",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 3,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 666
           }
         }
       ],
@@ -1172,15 +1180,16 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "99713896d86394dd99df6e53785a78ddee58ed1c",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 2,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 648
           }
         }
       ],
-      "decision": "not implemented, so this is deferred rather than rejected: there is no economic planner in the tree (no keep/commit/reason/interval state), so the acceptance condition was never tested. The projection-profile numbers that an earlier record mislabelled as a planner comparison are: p3 116926 vs baseline 120061 (p3 2.6% cheaper, both 6/6), which is a projection result, not a planner verdict."
+      "decision": "not implemented: there is no economic planner in the tree (no keep/commit/reason/interval state), so the acceptance condition was never testable. The projection numbers an earlier record mislabelled as a planner comparison are p3 116926 vs baseline 120061 (p3 2.6% cheaper, both 6/6) -- a projection result. Deferred as unimplemented scope."
     },
     "KR-J04": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1198,7 +1207,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "deferred with rationale, decided not to implement (adr_j06_l06_o02_f05.md): object cards are a candidate with no held-out evidence, and inheriting the paper number is exactly what the taskbook forbids."
+      "decision": "not implemented by decision (adr_j06_l06_o02_f05.md): object cards are a candidate with no held-out evidence, and inheriting the paper number is what the taskbook forbids. Deferred as unimplemented scope."
     },
     "KR-J05": {
       "status": "DEFERRED_WITH_RATIONALE",
@@ -1216,15 +1225,16 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "959e6c4f681f502b2c67a2f6d206ec75bb9af06b",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 3,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 666
           }
         }
       ],
-      "decision": "not demonstrated, so not verified: a semantic-summary candidate would have to beat the conservative stub baseline (114156 tokens) with fidelity and cost both acceptable, and no candidate was built or run. The tree has no summary implementation; context_economy.rs is cost accounting and says so itself. Deferred rather than claimed."
+      "decision": "not implemented: no semantic-summary candidate exists in the tree, so it was never run against the stub baseline (114156 tokens). Deferred as unimplemented scope, not as a measured rejection."
     },
     "KR-J06": {
       "status": "BLOCKED_EXTERNAL",
@@ -1556,11 +1566,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "208d27107f70f1c6c42f49386a0ac6a9ec1d01fc",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 7,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 2685
           }
         }
       ],
@@ -1602,11 +1613,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "42b9da16e79d0aae94263810f1db999ac487b384",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": false,
+            "changed_paths": 0,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "224cfcd4345b85e81c659196b74e3693cbfd7d9e55a45947695ae3b413ebb351"
+            "prereg_sha256": "224cfcd4345b85e81c659196b74e3693cbfd7d9e55a45947695ae3b413ebb351",
+            "source_files": 650
           }
         }
       ],
@@ -1668,11 +1680,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "99713896d86394dd99df6e53785a78ddee58ed1c",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": false,
+            "changed_paths": 0,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 647
           }
         }
       ],
@@ -1695,11 +1708,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "208d27107f70f1c6c42f49386a0ac6a9ec1d01fc",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 3,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 2683
           }
         }
       ],
@@ -1781,7 +1795,7 @@
           "kind": "artifact"
         }
       ],
-      "decision": "deferred with rationale, decided not to implement (adr_j06_l06_o02_f05.md): hooks already run in an isolated process group and MCP sidecars are separate processes, so the original motivation is already met; the remaining question was never turned into a measurable arm."
+      "decision": "not implemented by decision (adr_j06_l06_o02_f05.md): hooks already run in an isolated process group and MCP sidecars are separate processes, so the original motivation is already met. Deferred as unimplemented scope."
     },
     "KR-O03": {
       "status": "VERIFIED",
@@ -2113,21 +2127,21 @@
     "KR-R01": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "f7753d4",
+      "commit": "b001b3a",
       "evidence": [
         {
-          "command": "scripts/measure-local-baseline.py --repeats 1",
-          "path": "evidence/report.json",
-          "sha256": "75d9711dcb71db3552b6f0c421ba11f1a08e46f4468fef416a67db3278f90e94",
+          "command": "scripts/measure-local-baseline.py --kroma ./target/release/kroma --repeats 3",
+          "path": "evidence/r01_release_report.json",
+          "sha256": "91f3430f6418b85c64cd7d701cf63fab0a609353a8ef08b550ef70d7d74ef2b8",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T14:33:59Z",
+          "completed_utc": "2026-10-21T18:27:15Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "baseline reproducible with the measurement script in the tree: evidence/report.json records p0 (kroma --version) 57.69ms, p2 graph 3410ms with peak RSS 77MB, p3 graph 238ms, p4 peak PSS 264MB for one repeat. An earlier version of this record claimed 3 repeats and 4.70ms from a different run; the receipt now points at the file that holds the numbers being quoted, so the two cannot drift apart again."
+      "decision": "re-measured properly: release binary (`target/release/kroma`, not debug -- that was one of the mistakes the taskbook warns about), 3 repeats per phase, medians reported. p0 4.384ms wall (3.1MB PSS), p2 graph 397.6ms with 6.7ms init (65MB PSS), p3 34.0ms (15.6MB), p4 four concurrent sessions 234MB PSS. Raw per-repeat logs and report.json are in evidence/ (r01_release_report.json, r01_release.log, raw-p*-r1.log)."
     },
     "KR-R02": {
       "status": "VERIFIED",
@@ -2201,11 +2215,12 @@
           "kind": "artifact",
           "provenance": {
             "measured_commit": "208d27107f70f1c6c42f49386a0ac6a9ec1d01fc",
-            "dirty": null,
-            "changed_paths": null,
+            "dirty": true,
+            "changed_paths": 9,
             "endpoint": "https://cobblemon.asia",
             "model": "gpt-6.1-sol",
-            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2"
+            "prereg_sha256": "d65dd323d50a8d52e95fc798c0f17e6f7276aadd4a2f730529bd9f8f8fea0ee2",
+            "source_files": 2687
           }
         }
       ],
@@ -2214,20 +2229,20 @@
     "KR-R06": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e091fbc",
+      "commit": "b001b3a",
       "evidence": [
         {
-          "command": "measured (see decision)",
-          "path": "evidence/r06_baseline.log",
-          "sha256": "7a0e912cb7aac293a1b5de83acabb066173bb31d9b91e013151fea9bf6f53912",
+          "command": "budget lines vs evidence/r01_release_report.json",
+          "path": "r06_performance_budget.md",
+          "sha256": "cf9b25644af3bfa511c484873b784a49d246ceb0c77549af6c89e6a35466677a",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T14:33:59Z",
+          "completed_utc": "2026-10-21T18:27:32Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
         }
       ],
-      "decision": "budget lines and stop rules backed by a fresh run of scripts/measure-local-baseline.py: p0 wall 57.69ms, p2 graph 3410ms / peak RSS 77MB, p3 graph 238ms, p4 peak PSS 264MB (raw per-phase logs in evidence/raw-p*-r1.log). The budget in r06_performance_budget.md is set against these numbers, so this item no longer rests on a document that cites nothing."
+      "decision": "the budget lines are set against the release numbers in r06_performance_budget.md, which now carries what the 3-repeat release run produced: p0 4.384ms (not the 4.70ms debug-era figure), graph 397.6ms (not 3296ms), four-session PSS 234MB (not 269MB). The 50ms startup line is explicitly a release-only budget, since the debug build sits at 57.7ms."
     },
     "KR-S01": {
       "status": "VERIFIED",
@@ -2252,18 +2267,8 @@
     "KR-S02": {
       "status": "VERIFIED",
       "attempts": 0,
-      "commit": "e091fbc",
+      "commit": "b001b3a",
       "evidence": [
-        {
-          "command": "measured (see decision)",
-          "path": "evidence/s02_shadow_selector.log",
-          "sha256": "b32d2a4f8267f50b28616a1fff0ec6ddc132c06f558107fb5d07dd9bb898e228",
-          "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T16:21:17Z",
-          "exit_code": 0,
-          "required": true,
-          "kind": "artifact"
-        },
         {
           "command": "kroma bench --arms arms-s02.json (produces the shadow record per run)",
           "path": "evidence/s02_shadow_selector_run.jsonl",
@@ -2273,9 +2278,39 @@
           "exit_code": 0,
           "required": true,
           "kind": "artifact"
+        },
+        {
+          "command": "kroma bench --arms evidence/arms-s02.json --suite suite-holdout",
+          "path": "evidence/s02_shadow_bench.json",
+          "sha256": "1a8a6bc909162b3df31184946b2a50674fd993fe7b4a64afc65cc0dcbc5be807",
+          "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
+          "completed_utc": "2026-10-21T18:34:30Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        },
+        {
+          "command": "the arm definition the run used",
+          "path": "evidence/arms-s02.json",
+          "sha256": "baaecb5960f00e8a076a47c89a4a1e097f579bf7faaee1c6eb4255630c08d74f",
+          "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
+          "completed_utc": "2026-10-21T18:27:42Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
+        },
+        {
+          "command": "cargo test --lib shadow_selector (3 tests)",
+          "path": "evidence/s02_shadow_selector.log",
+          "sha256": "b32d2a4f8267f50b28616a1fff0ec6ddc132c06f558107fb5d07dd9bb898e228",
+          "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
+          "completed_utc": "2026-10-21T16:21:17Z",
+          "exit_code": 0,
+          "required": true,
+          "kind": "artifact"
         }
       ],
-      "decision": "implemented and wired: `prepare_run` extracts three task features, asks the selector what it would choose and appends a record with recommended / actual / counterfactual estimate (None -- no basis to price the alternative without running it) / applied:false. A real bench run produces one line per task: evidence/s02_shadow_selector_run.jsonl. Promotion is gated on a >5% held-out win, which nothing has cleared, so the fixed strategy stays in force. Three unit tests pin the shadow property, the default and the gate."
+      "decision": "implemented, wired and run: prepare_run extracts three task features, asks the selector, and appends a record with recommended / actual / counterfactual estimate (None -- no basis to price the alternative without running it) / applied:false. A real bench run (evidence/s02_shadow_bench.json, commit b001b3a, arms in evidence/arms-s02.json) produced the per-task records; one line is kept in evidence/s02_shadow_selector_run.jsonl because the bench state dirs are temporary. Promotion needs a >5% held-out win, which nothing cleared, so the fixed strategy stays in force."
     },
     "KR-S03": {
       "status": "VERIFIED",
@@ -2457,9 +2492,9 @@
         {
           "command": "the report itself (generated from the ledger and the experiment JSON)",
           "path": "W5_FINAL_ACCEPTANCE.md",
-          "sha256": "370986e833c1c453d43f584306c7c3a50d52b9690e4195001d953372b3b6c30b",
+          "sha256": "da84d32aa7fa0467627d5d9473b90c767c676bdf2f4f8490e4bfc9de81e7030b",
           "source_tree_sha256": "a810fced95fb1d6a02dfc2998a99527994503a09f9f2adda56fb175bdc9e8018",
-          "completed_utc": "2026-10-21T17:53:12Z",
+          "completed_utc": "2026-10-21T18:35:16Z",
           "exit_code": 0,
           "required": true,
           "kind": "artifact"

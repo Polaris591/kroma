@@ -1,0 +1,1073 @@
+{
+  "binary": {
+    "mtime_utc": "2026-10-21T18:18:47Z",
+    "path": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2/target/release/kroma",
+    "sha256": "b5933fa7566c31b3e32e9209956b4213d6e1de262f37fbe6d2fa1817358e4e4d",
+    "size_bytes": 16708224
+  },
+  "finished_at": "2026-10-21T18:22:41Z",
+  "hardware": {
+    "cpu_count": 4,
+    "cpu_model": "AMD EPYC 7K62 48-Core Processor",
+    "kernel": "6.12.95+deb13-amd64",
+    "machine": "x86_64",
+    "mem_total_kb": 3818812,
+    "python": "3.13.5"
+  },
+  "method": {
+    "cache_state": "warm (page cache not dropped; cold-cache start unmeasured)",
+    "order": "fixed per repeat: p0,p2,p3,p4",
+    "per_run_deadline_s": 60.0,
+    "repeats": 3,
+    "resource_accounting": "sum over the /proc process tree; Rss double counts shared pages, Pss apportions them; children shorter than one sample are missed; main_process_maxrss_kb covers the main PID only",
+    "thresholds": "none: numbers only, no SLO is set here"
+  },
+  "records": [
+    {
+      "argv": [
+        "--version"
+      ],
+      "case": "p0",
+      "exit_code": 0,
+      "main_process_maxrss_kb": 18508,
+      "order": 1,
+      "raw_log": "raw-p0-r1.log",
+      "repeat": 1,
+      "sample_interval_ms": 2.0,
+      "stderr_bytes": 0,
+      "stdout_bytes": 12,
+      "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 2493,
+      "tree_peak_rss_kb": 3820,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "version_line": "kroma 1.5.0",
+      "wall_ms": 4.384,
+      "workspace": null
+    },
+    {
+      "argv": [
+        "acp",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p2",
+      "exit_code": 0,
+      "graph_ms": 672.26,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "process",
+          "supervisor"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 6362
+      },
+      "init_ms": 22.024,
+      "init_ok": true,
+      "main_process_maxrss_kb": 65400,
+      "order": 2,
+      "raw_log": "raw-p2-r1.log",
+      "repeat": 1,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 253,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 62852,
+      "tree_peak_rss_kb": 65644,
+      "tree_pss_unavailable": false,
+      "tree_samples": 55,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "acp",
+        "--workspace",
+        "/tmp/r01-rel.json/_p3_workspace",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p3",
+      "exit_code": 0,
+      "graph_ms": 35.253,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "generated_entry_00042"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 1200
+      },
+      "init_ms": 6.814,
+      "init_ok": true,
+      "main_process_maxrss_kb": 19028,
+      "order": 3,
+      "raw_log": "raw-p3-r1.log",
+      "repeat": 1,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 253,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 15572,
+      "tree_peak_rss_kb": 18364,
+      "tree_pss_unavailable": false,
+      "tree_samples": 4,
+      "workspace": "/tmp/r01-rel.json/_p3_workspace"
+    },
+    {
+      "all_graph_ok": true,
+      "argv": [
+        "acp",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p4",
+      "exit_code": 0,
+      "order": 4,
+      "per_session": [
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 562.998,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 8.139,
+          "init_ok": true,
+          "main_process_maxrss_kb": 67068,
+          "order": 4,
+          "raw_log": "raw-p2-r1.log",
+          "repeat": 1,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 58074,
+          "tree_peak_rss_kb": 67328,
+          "tree_pss_unavailable": false,
+          "tree_samples": 33,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 598.463,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 6.67,
+          "init_ok": true,
+          "main_process_maxrss_kb": 67344,
+          "order": 5,
+          "raw_log": "raw-p2-r1.log",
+          "repeat": 1,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 58130,
+          "tree_peak_rss_kb": 67588,
+          "tree_pss_unavailable": false,
+          "tree_samples": 34,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 594.408,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 11.644,
+          "init_ok": true,
+          "main_process_maxrss_kb": 65188,
+          "order": 6,
+          "raw_log": "raw-p2-r1.log",
+          "repeat": 1,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 56348,
+          "tree_peak_rss_kb": 65492,
+          "tree_pss_unavailable": false,
+          "tree_samples": 34,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 571.65,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 11.657,
+          "init_ok": true,
+          "main_process_maxrss_kb": 65520,
+          "order": 7,
+          "raw_log": "raw-p2-r1.log",
+          "repeat": 1,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 56346,
+          "tree_peak_rss_kb": 65840,
+          "tree_pss_unavailable": false,
+          "tree_samples": 33,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        }
+      ],
+      "repeat": 1,
+      "sample_interval_ms": 10.0,
+      "sessions": 4,
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_pss_kb": 228898,
+      "wall_ms": null,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "--version"
+      ],
+      "case": "p0",
+      "exit_code": 0,
+      "main_process_maxrss_kb": 20820,
+      "order": 5,
+      "raw_log": "raw-p0-r2.log",
+      "repeat": 2,
+      "sample_interval_ms": 2.0,
+      "stderr_bytes": 0,
+      "stdout_bytes": 12,
+      "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 3146,
+      "tree_peak_rss_kb": 5728,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "version_line": "kroma 1.5.0",
+      "wall_ms": 4.197,
+      "workspace": null
+    },
+    {
+      "argv": [
+        "acp",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p2",
+      "exit_code": 0,
+      "graph_ms": 397.612,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "process",
+          "supervisor"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 6362
+      },
+      "init_ms": 6.678,
+      "init_ok": true,
+      "main_process_maxrss_kb": 67340,
+      "order": 6,
+      "raw_log": "raw-p2-r2.log",
+      "repeat": 2,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 253,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 64860,
+      "tree_peak_rss_kb": 67652,
+      "tree_pss_unavailable": false,
+      "tree_samples": 33,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "acp",
+        "--workspace",
+        "/tmp/r01-rel.json/_p3_workspace",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p3",
+      "exit_code": 0,
+      "graph_ms": 33.968,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "generated_entry_00042"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 1200
+      },
+      "init_ms": 6.334,
+      "init_ok": true,
+      "main_process_maxrss_kb": 20820,
+      "order": 7,
+      "raw_log": "raw-p3-r2.log",
+      "repeat": 2,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 253,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 15533,
+      "tree_peak_rss_kb": 18316,
+      "tree_pss_unavailable": false,
+      "tree_samples": 4,
+      "workspace": "/tmp/r01-rel.json/_p3_workspace"
+    },
+    {
+      "all_graph_ok": true,
+      "argv": [
+        "acp",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p4",
+      "exit_code": 0,
+      "order": 8,
+      "per_session": [
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 555.765,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 18.843,
+          "init_ok": true,
+          "main_process_maxrss_kb": 65372,
+          "order": 8,
+          "raw_log": "raw-p2-r2.log",
+          "repeat": 2,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 57232,
+          "tree_peak_rss_kb": 65752,
+          "tree_pss_unavailable": false,
+          "tree_samples": 32,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 498.887,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 7.97,
+          "init_ok": true,
+          "main_process_maxrss_kb": 67316,
+          "order": 9,
+          "raw_log": "raw-p2-r2.log",
+          "repeat": 2,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 58123,
+          "tree_peak_rss_kb": 67496,
+          "tree_pss_unavailable": false,
+          "tree_samples": 28,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 532.459,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 17.704,
+          "init_ok": true,
+          "main_process_maxrss_kb": 65536,
+          "order": 10,
+          "raw_log": "raw-p2-r2.log",
+          "repeat": 2,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 56409,
+          "tree_peak_rss_kb": 65800,
+          "tree_pss_unavailable": false,
+          "tree_samples": 31,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 528.832,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 8.02,
+          "init_ok": true,
+          "main_process_maxrss_kb": 65388,
+          "order": 11,
+          "raw_log": "raw-p2-r2.log",
+          "repeat": 2,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 56249,
+          "tree_peak_rss_kb": 65796,
+          "tree_pss_unavailable": false,
+          "tree_samples": 30,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        }
+      ],
+      "repeat": 2,
+      "sample_interval_ms": 10.0,
+      "sessions": 4,
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_pss_kb": 228013,
+      "wall_ms": null,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "--version"
+      ],
+      "case": "p0",
+      "exit_code": 0,
+      "main_process_maxrss_kb": 21076,
+      "order": 9,
+      "raw_log": "raw-p0-r3.log",
+      "repeat": 3,
+      "sample_interval_ms": 2.0,
+      "stderr_bytes": 0,
+      "stdout_bytes": 12,
+      "stdout_sha256": "5e738ad1dfc25d0453597c587d4f1f814ae2387d0e202985568e44b495a386be",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 2697,
+      "tree_peak_rss_kb": 4952,
+      "tree_pss_unavailable": false,
+      "tree_samples": 1,
+      "version_line": "kroma 1.5.0",
+      "wall_ms": 3.391,
+      "workspace": null
+    },
+    {
+      "argv": [
+        "acp",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p2",
+      "exit_code": 0,
+      "graph_ms": 392.951,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "process",
+          "supervisor"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 6362
+      },
+      "init_ms": 6.062,
+      "init_ok": true,
+      "main_process_maxrss_kb": 65252,
+      "order": 10,
+      "raw_log": "raw-p2-r3.log",
+      "repeat": 3,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 253,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 62872,
+      "tree_peak_rss_kb": 65664,
+      "tree_pss_unavailable": false,
+      "tree_samples": 33,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    },
+    {
+      "argv": [
+        "acp",
+        "--workspace",
+        "/tmp/r01-rel.json/_p3_workspace",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p3",
+      "exit_code": 0,
+      "graph_ms": 33.591,
+      "graph_ok": true,
+      "graph_result": {
+        "query_terms": [
+          "generated_entry_00042"
+        ],
+        "ranked": 20,
+        "total_files": 1200,
+        "total_symbols": 1200
+      },
+      "init_ms": 6.158,
+      "init_ok": true,
+      "main_process_maxrss_kb": 21076,
+      "order": 11,
+      "raw_log": "raw-p3-r3.log",
+      "repeat": 3,
+      "sample_interval_ms": 10.0,
+      "stderr_bytes": 253,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_processes": 1,
+      "tree_peak_pss_kb": 15376,
+      "tree_peak_rss_kb": 18168,
+      "tree_pss_unavailable": false,
+      "tree_samples": 4,
+      "workspace": "/tmp/r01-rel.json/_p3_workspace"
+    },
+    {
+      "all_graph_ok": true,
+      "argv": [
+        "acp",
+        "--max-tokens",
+        "100000"
+      ],
+      "case": "p4",
+      "exit_code": 0,
+      "order": 12,
+      "per_session": [
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 505.008,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 13.8,
+          "init_ok": true,
+          "main_process_maxrss_kb": 65100,
+          "order": 12,
+          "raw_log": "raw-p2-r3.log",
+          "repeat": 3,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 57034,
+          "tree_peak_rss_kb": 65512,
+          "tree_pss_unavailable": false,
+          "tree_samples": 31,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 576.943,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 9.353,
+          "init_ok": true,
+          "main_process_maxrss_kb": 67204,
+          "order": 13,
+          "raw_log": "raw-p2-r3.log",
+          "repeat": 3,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 64687,
+          "tree_peak_rss_kb": 67456,
+          "tree_pss_unavailable": false,
+          "tree_samples": 36,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 487.281,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 9.708,
+          "init_ok": true,
+          "main_process_maxrss_kb": 65528,
+          "order": 14,
+          "raw_log": "raw-p2-r3.log",
+          "repeat": 3,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 56581,
+          "tree_peak_rss_kb": 65784,
+          "tree_pss_unavailable": false,
+          "tree_samples": 27,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        },
+        {
+          "argv": [
+            "acp",
+            "--max-tokens",
+            "100000"
+          ],
+          "case": "p2",
+          "exit_code": 0,
+          "graph_ms": 456.297,
+          "graph_ok": true,
+          "graph_result": {
+            "query_terms": [
+              "process",
+              "supervisor"
+            ],
+            "ranked": 20,
+            "total_files": 1200,
+            "total_symbols": 6362
+          },
+          "init_ms": 9.776,
+          "init_ok": true,
+          "main_process_maxrss_kb": 65164,
+          "order": 15,
+          "raw_log": "raw-p2-r3.log",
+          "repeat": 3,
+          "sample_interval_ms": 10.0,
+          "stderr_bytes": 253,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timed_out": false,
+          "timeout_s": 60.0,
+          "tree_peak_processes": 1,
+          "tree_peak_pss_kb": 56274,
+          "tree_peak_rss_kb": 65528,
+          "tree_pss_unavailable": false,
+          "tree_samples": 27,
+          "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+        }
+      ],
+      "repeat": 3,
+      "sample_interval_ms": 10.0,
+      "sessions": 4,
+      "timed_out": false,
+      "timeout_s": 60.0,
+      "tree_peak_pss_kb": 234576,
+      "wall_ms": null,
+      "workspace": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2"
+    }
+  ],
+  "schema": "kroma.local-performance.v1",
+  "source": {
+    "branch": {
+      "exit": 0,
+      "stdout": [
+        "main"
+      ]
+    },
+    "commit": {
+      "exit": 0,
+      "stdout": [
+        "b001b3af1077be4839b068c5dd02a4018962e90b"
+      ]
+    },
+    "dirty_paths": {
+      "exit": 0,
+      "stdout": [
+        "M docs/nextgen/progress.json"
+      ]
+    },
+    "repo": "/opt/pi-qq/workspace/kroma-r2-fix/kroma-nextgen-r2",
+    "tree": {
+      "exit": 0,
+      "stdout": [
+        "6de1aca8e7f0ecf76fade335f4ee5988fbaf6e10"
+      ]
+    }
+  },
+  "started_at": "2026-10-21T18:22:37Z",
+  "summary": {
+    "p0": {
+      "all_exit_zero": true,
+      "main_process_maxrss_kb": {
+        "max": 21076,
+        "values": [
+          18508,
+          20820,
+          21076
+        ]
+      },
+      "repeats": 3,
+      "timed_out": false,
+      "tree_peak_pss_kb": {
+        "max": 3146,
+        "values": [
+          2493,
+          3146,
+          2697
+        ]
+      },
+      "tree_peak_rss_kb": {
+        "max": 5728,
+        "values": [
+          3820,
+          5728,
+          4952
+        ]
+      },
+      "wall_ms": {
+        "max": 4.384,
+        "median": 4.197,
+        "min": 3.391,
+        "values": [
+          4.384,
+          4.197,
+          3.391
+        ]
+      }
+    },
+    "p2": {
+      "all_exit_zero": true,
+      "graph_ms": {
+        "max": 672.26,
+        "median": 397.612,
+        "min": 392.951,
+        "values": [
+          672.26,
+          397.612,
+          392.951
+        ]
+      },
+      "init_ms": {
+        "max": 22.024,
+        "median": 6.678,
+        "min": 6.062,
+        "values": [
+          22.024,
+          6.678,
+          6.062
+        ]
+      },
+      "main_process_maxrss_kb": {
+        "max": 67340,
+        "values": [
+          65400,
+          67340,
+          65252
+        ]
+      },
+      "repeats": 3,
+      "timed_out": false,
+      "tree_peak_pss_kb": {
+        "max": 64860,
+        "values": [
+          62852,
+          64860,
+          62872
+        ]
+      },
+      "tree_peak_rss_kb": {
+        "max": 67652,
+        "values": [
+          65644,
+          67652,
+          65664
+        ]
+      }
+    },
+    "p3": {
+      "all_exit_zero": true,
+      "graph_ms": {
+        "max": 35.253,
+        "median": 33.968,
+        "min": 33.591,
+        "values": [
+          35.253,
+          33.968,
+          33.591
+        ]
+      },
+      "init_ms": {
+        "max": 6.814,
+        "median": 6.334,
+        "min": 6.158,
+        "values": [
+          6.814,
+          6.334,
+          6.158
+        ]
+      },
+      "main_process_maxrss_kb": {
+        "max": 21076,
+        "values": [
+          19028,
+          20820,
+          21076
+        ]
+      },
+      "repeats": 3,
+      "timed_out": false,
+      "tree_peak_pss_kb": {
+        "max": 15572,
+        "values": [
+          15572,
+          15533,
+          15376
+        ]
+      },
+      "tree_peak_rss_kb": {
+        "max": 18364,
+        "values": [
+          18364,
+          18316,
+          18168
+        ]
+      }
+    },
+    "p4": {
+      "all_exit_zero": true,
+      "repeats": 3,
+      "timed_out": false,
+      "tree_peak_pss_kb": {
+        "max": 234576,
+        "values": [
+          228898,
+          228013,
+          234576
+        ]
+      }
+    }
+  },
+  "toolchain": {
+    "cargo": {
+      "exit": 0,
+      "stdout": [
+        "cargo 1.85.1 (d73d2caf9 2024-12-31)"
+      ]
+    },
+    "rustc": {
+      "exit": 0,
+      "stdout": [
+        "rustc 1.85.1 (4eb161250 2025-03-15)"
+      ]
+    }
+  },
+  "unmeasured": [
+    {
+      "id": "P1-startup-ready",
+      "reason": "no reliable model-free readiness signal was demonstrated inside the bounded deadline, so startup-to-accepting-input is unmeasured; `--help`/`--version` are not substituted for interactive readiness"
+    },
+    {
+      "id": "P2-single-file-edit",
+      "reason": "the blueprint's P2 edit workload needs an agent turn (model); not measured"
+    },
+    {
+      "id": "cold-cache-start",
+      "reason": "cold page cache cannot be produced without drop_caches; repeats are warm"
+    },
+    {
+      "id": "P5-long-output",
+      "reason": "a huge single tool output needs an agent turn to produce it; the model-free surfaces expose no way to inject one, so P5 is not measured here"
+    },
+    {
+      "id": "P6-compaction",
+      "reason": "repeated compaction needs a long model conversation; measuring the projector alone would not be the P6 workload the blueprint describes"
+    },
+    {
+      "id": "P7-end-to-end",
+      "reason": "fixed-model full success cost and human interventions need a real provider run; that is the M1-06 pilot, not this package"
+    }
+  ]
+}

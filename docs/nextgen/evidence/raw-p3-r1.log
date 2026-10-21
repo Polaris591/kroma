@@ -1,4 +1,4 @@
-# argv=['acp', '--workspace', '/tmp/r06-baseline.json/_p3_workspace', '--max-tokens', '100000'] exit=0 timed_out=False
+# argv=['acp', '--workspace', '/tmp/r01-rel.json/_p3_workspace', '--max-tokens', '100000'] exit=0 timed_out=False
 ## stdout
 
 ## stderr

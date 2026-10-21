@@ -1,0 +1,6 @@
+/tmp/r01-rel.json/report.json
+p0 repeats=3 exit_zero=True timed_out=False {"tree_peak_pss_kb": {"max": 3146, "values": [2493, 3146, 2697]}, "tree_peak_rss_kb": {"max": 5728, "values": [3820, 5728, 4952]}, "wall_ms": {"max": 4.384, "median": 4.197, "min": 3.391, "values": [4.384, 4.197, 3.391]}}
+p2 repeats=3 exit_zero=True timed_out=False {"graph_ms": {"max": 672.26, "median": 397.612, "min": 392.951, "values": [672.26, 397.612, 392.951]}, "init_ms": {"max": 22.024, "median": 6.678, "min": 6.062, "values": [22.024, 6.678, 6.062]}, "tree_peak_pss_kb": {"max": 64860, "values": [62852, 64860, 62872]}, "tree_peak_rss_kb": {"max": 67652, "values": [65644, 67652, 65664]}}
+p3 repeats=3 exit_zero=True timed_out=False {"graph_ms": {"max": 35.253, "median": 33.968, "min": 33.591, "values": [35.253, 33.968, 33.591]}, "init_ms": {"max": 6.814, "median": 6.334, "min": 6.158, "values": [6.814, 6.334, 6.158]}, "tree_peak_pss_kb": {"max": 15572, "values": [15572, 15533, 15376]}, "tree_peak_rss_kb": {"max": 18364, "values": [18364, 18316, 18168]}}
+p4 repeats=3 exit_zero=True timed_out=False {"tree_peak_pss_kb": {"max": 234576, "values": [228898, 228013, 234576]}}
+MEASURE_EXIT=0

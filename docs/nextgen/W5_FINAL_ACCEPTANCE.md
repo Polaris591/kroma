@@ -6,51 +6,54 @@
 
 | 指标 | 值 |
 |---|---|
-| 任务完成 | 101/120 VERIFIED（84%），其余 6 判负 / 7 外部阻塞 / 6 研究范围不成立 |
+| 任务完成 | 101/120 VERIFIED（84%）；其余 7 实测判负 / 7 外部阻塞 / 5 未实现（范围外） |
 | 门禁 | 1410 测试通过 / 0 失败，strict clippy 通过，sandbox 56 通过 |
-| 实验数 | 22 个配对实验（dev 6 任务为主，留出集 2 任务） |
-| 单次运行成本 | dev 套件 53k–150k token/arm，中位约 115k；每次约 7–9 分钟墙钟 |
+| 实验数 | 22 个配对实验 |
+| 单次成本 | dev 套件 53k–150k token/arm，中位约 115k；每次 7–9 分钟墙钟 |
 | 成本/成功 | 中位 arm 115k token / 6 个成功 ≈ 19k token 每任务成功 |
-| 稳定性 | 同一 baseline 同套件不同轮次通过率 6/6 与 4/6，单次重复漂移约 2 个任务；小于 5% 的 token 差异只能算无结论 |
-| 资源 | p0 墙钟 57.7ms；p2 图构建 3410ms、峰值 RSS 77MB；p4 峰值 PSS 264MB |
+| 稳定性 | 同 baseline 同套件不同轮次 6/6 与 4/6，单次漂移约 2 个任务；小于 5% 的 token 差异算无结论 |
+| 资源（release，3 次中位） | p0 4.384ms / 3.1MB；p2 图 397.6ms / 65MB；p3 34.0ms / 15.6MB；p4 四会话 234MB |
 
 ## 2. Pareto 权衡（token vs 质量）
 
-下表按「相对第一臂的 token 变化」排序，质量列是各自 resolved/tasks。判据是：只有在质量不降的前提下省 token 才算赢，
-省下的百分点小于漂移（约 2 个任务）的不算证据。
+只有质量不降且省下的幅度超过漂移（约 2 个任务）才算赢。`配对 delta` 是同一次运行内的配对差值，
+`跨 run` 是不同轮次之间的比较——两者不可混用，H04 就是例子：同 run 配对 +0.2%，跨 run 曾看到 +22%。
 
-| 实验 | 第一臂 | 第二臂 | token 变化 | 质量 | 处置 |
+| 实验 | 第一臂 token | 第二臂 token | 配对 delta | 质量 | 处置 |
 |---|---|---|---|---|---|
-| g03-implicit | candidate-on-demand-tools | baseline | 149036 → 89162 (-40.2%) | 6/6 vs 5/6 | 缓存三臂，命中率涨但 token 也涨 |
-| h06-inline | inline_32k | inline_64k | 119869 → 120066 (+0.2%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
-| h04-efficient-candidate | baseline | candidate-on-demand-tools | 146405 → 146743 (+0.2%) | 6/6 vs 6/6 | 判负，不采纳 |
-| injection-file-surface | baseline | candidate-on-demand-tools | 16547 → 16588 (+0.2%) | 1/1 vs 1/1 | 候选在特定夹具上略省，未推广 |
-| causal-dev | causal_pruning | baseline | 112497 → 113068 (+0.5%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
-| graphcache-dev | no_graph_cache | baseline | 116106 → 116943 (+0.7%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
-| p3-dev | projection_p3 | baseline | 116926 → 120061 (+2.7%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
-| h04-default | candidate-on-demand-tools | baseline | 116778 → 120324 (+3.0%) | 6/6 vs 6/6 | 候选在特定夹具上略省，未推广 |
-| j02-p1-vs-p2 | baseline_full_context | masking_p1 | 114156 → 117679 (+3.1%) | 6/6 vs 6/6 | 判负，不采纳 |
-| n04-loopguard | loop_guard_on | loop_guard_off | 113811 → 117459 (+3.2%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
-| requireverified | require_verified | baseline | 112055 → 116393 (+3.9%) | 6/6 vs 6/6 | 噪声内或小收益，保持现状 |
-| m04-experience | experience_off | experience_on | 115319 → 120522 (+4.5%) | 6/6 vs 6/6 | 判负，不采纳 |
-| r05-pareto | default | all_local_optima_on | 119832 → 128821 (+7.5%) | 6/6 vs 6/6 | 判负，不采纳 |
-| constraint-trap | baseline | candidate-on-demand-tools | 20572 → 22211 (+8.0%) | 1/1 vs 1/1 | 判负，不采纳 |
-| probe-dev | baseline | counterfactual_probe | 73259 → 79867 (+9.0%) | 4/6 vs 4/6 | 判负，不采纳 |
-| subagents | no_subagents | baseline | 103835 → 119802 (+15.4%) | 6/6 vs 6/6 | 判负/仅子代理关闭略省 |
-| tournament-dev | baseline | adaptive_tournament_2 | 108459 → 126948 (+17.0%) | 6/6 vs 6/6 | 判负/仅子代理关闭略省 |
-| constraint | candidate-on-demand-tools | baseline | 17631 → 22222 (+26.0%) | 1/1 vs 1/1 | 候选在特定夹具上略省，未推广 |
-| g03-explicit | baseline | candidate-on-demand-tools | 87557 → 111823 (+27.7%) | 6/6 vs 6/6 | 缓存三臂，命中率涨但 token 也涨 |
-| g03-off | baseline | candidate-on-demand-tools | 86147 → 110139 (+27.9%) | 6/6 vs 6/6 | 缓存三臂，命中率涨但 token 也涨 |
-| injection-prompt-surface | baseline | candidate-on-demand-tools | 16804 → 22645 (+34.8%) | 1/1 vs 1/1 | 候选在特定夹具上略省，未推广 |
-| minimal-tools-dev | minimal_tools | baseline | 53276 → 119568 (+124.4%) | 6/6 vs 6/6 | 最大杠杆；不设为默认（任务类型决定） |
+| causal-dev | 112497 | 113068 | Δ通过率 +0.00 | 6/6 vs 6/6 | causal_pruning |
+| constraint-trap | 20572 | 22211 | Δ通过率 +0.00 | 1/1 vs 1/1 | baseline |
+| constraint | 17631 | 22222 | Δ通过率 +0.00 | 1/1 vs 1/1 | candidate-on-demand-tools |
+| g03-explicit | 87557 | 111823 | Δ通过率 +0.00 | 6/6 vs 6/6 | baseline |
+| g03-implicit | 149036 | 89162 | Δ通过率 +0.17 | 6/6 vs 5/6 | candidate-on-demand-tools |
+| g03-off | 86147 | 110139 | Δ通过率 +0.00 | 6/6 vs 6/6 | baseline |
+| graphcache-dev | 116106 | 116943 | Δ通过率 +0.00 | 6/6 vs 6/6 | no_graph_cache |
+| h04-default | 116778 | 120324 | Δ通过率 +0.00 | 6/6 vs 6/6 | candidate-on-demand-tools |
+| h04-efficient-candidate | 146405 | 146743 | Δ通过率 +0.00 | 6/6 vs 6/6 | baseline |
+| h06-inline | 119869 | 120066 | Δ通过率 +0.00 | 6/6 vs 6/6 | inline_32k |
+| injection-file-surface | 16547 | 16588 | Δ通过率 +0.00 | 1/1 vs 1/1 | baseline |
+| injection-prompt-surface | 16804 | 22645 | Δ通过率 +0.00 | 1/1 vs 1/1 | baseline |
+| j02-p1-vs-p2 | 114156 | 117679 | Δ通过率 +0.00 | 6/6 vs 6/6 | baseline_full_context |
+| m04-experience | 115319 | 120522 | Δ通过率 +0.00 | 6/6 vs 6/6 | experience_off |
+| minimal-tools-dev | 53276 | 119568 | Δ通过率 +0.00 | 6/6 vs 6/6 | minimal_tools |
+| n04-loopguard | 113811 | 117459 | Δ通过率 +0.00 | 6/6 vs 6/6 | loop_guard_on |
+| p3-dev | 116926 | 120061 | Δ通过率 +0.00 | 6/6 vs 6/6 | projection_p3 |
+| probe-dev | 73259 | 79867 | Δ通过率 +0.00 | 4/6 vs 4/6 | baseline |
+| r05-pareto | 119832 | 128821 | Δ通过率 +0.00 | 6/6 vs 6/6 | default |
+| requireverified | 112055 | 116393 | Δ通过率 +0.00 | 6/6 vs 6/6 | require_verified |
+| subagents | 103835 | 119802 | Δ通过率 +0.00 | 6/6 vs 6/6 | no_subagents |
+| tournament-dev | 108459 | 126948 | Δ通过率 +0.00 | 6/6 vs 6/6 | baseline |
 
-## 3. 逐实验处置与原因
+## 3. 逐实验处置
 
-- 采纳（进入默认）：无。所有默认配置保持基线值；唯一被采纳的是代码修复（7 个 bug）与 I03 的 opt-in 缓存。
-- 拒绝（有测量支撑）：H04 efficient-candidate 提示 +22%、N03 锦标赛 k=2 +17%、J02 masking/P1 +3% 且丢可恢复性、
-  G03 缓存三臂命中率涨但 token 也涨、H06 内联窗口减半 −0.16%（噪声内）、M04 经验注入 +4.5%、R05 局部最优全开 +7.5%。
+- 采纳为默认：无。默认配置全部保持基线；被采纳的是代码修复（7 个 bug）与 I03 的 opt-in 缓存。
+- 实测判负（账本 REJECTED）：H04 提示词变体（跨 run +22%，同 run 配对仅 +0.2%，不足以支持）、N03 锦标赛 k=2 +17%、
+  J02 masking/P1 +3% 且丢可恢复性、G03 缓存三臂（命中率涨、token 也涨）、H06 内联窗口减半 −0.16%（噪声内）、
+  M04 经验注入 +4.5%、I02 行索引（根因是整文件 SHA256，不是行扫描）。
 - 噪声内不晋升：P3 −2.6%、causal_pruning −0.5%、require_verified −3.7%、N04 loop_guard −3.1%、graph cache 0.7%。
-- 最大杠杆记录：工具菜单 7 个 vs 全量省 55%（119568 → 53276，6/6 对 6/6），工具 schema 占 9.4KB 前缀里的 8.7KB；
+- R05 是组合回归守卫，不是机制判负：把局部最优全开 128821 vs 默认 119832（+7.5%，都 6/6），所以默认按整体结果走；
+  账本里它仍是 VERIFIED，因为该任务验收的正是「不要全开」。
+- 最大杠杆：工具菜单 7 个 vs 全量省 55%（119568 → 53276，6/6 对 6/6），工具 schema 占 9.4KB 前缀里的 8.7KB；
   结论是「因素大且由任务类型决定」，不是「永远只给 7 个工具」。
 - 唯一超噪声收益：关掉子代理 −13.3%（103835 vs 119802），方向是减功能，未设为默认。
 
@@ -59,14 +62,17 @@
 - 无 Windows / macOS 真机：T02 阻塞，跨平台只做了 Linux 交叉构建（PE32+ x86_64 39.79s）。
 - 无第三方安全工具链（semgrep/cargo-audit/cargo-deny）与独立评审方：Q06 阻塞，T04 依赖它。
 - 无部署实例可灰度：S06 阻塞。
-- 27 个 harness 只有 `pi` 可运行：F05 阻塞，逐项处置在 `f05_disposition.md`。
+- 27 个 harness 里 2 个可运行（pi，以及 /usr/local/lib/nodejs/bin/codex 的 codex-cli 0.163.0），25 个不可得；
+  逐项处置在 `f05_disposition.md`，探测在 `f05_availability.txt`。可比子集要出排行榜还需 codex 的 OpenAI 凭据，
+  本机没有配置，所以记为「可比但未排名」。
 - 端点不支持 provider-native compaction 与 tool search：J06/L06 阻塞，探测在 `j06_l06_probe.txt`。
-- 语义摘要（J05）与经济计划器（J03）未实现；I06 需要的语法解析器不在树里；I02 的根因是整文件 SHA256。
+- 未实现（范围外，5 项）：KR-I06, KR-J03, KR-J04, KR-J05, KR-O02。
 
 ## 5. 下一轮瓶颈
 
-1. 单次重复噪声（约 2 个任务）让所有小于 5% 的收益都不可判定 —— 下一轮必须每个 arm 至少 3 次重复，否则继续是在噪声里做决定。
-2. 工具菜单是最大的成本项，但没有「按任务类型自动裁剪」的证据；这是唯一值得先做的方向。
-3. 外部能力缺口（Windows/macOS 真机、安全工具链、可灰度部署）不补齐，T02/Q06/S06/T04 无法推进。
-4. 20 个 BLOCKED/DEFERRED 项里有 6 项只差「一个 arm + 一次预注册配对」，瓶颈是运行预算而不是设计。
+1. 单次重复噪声（约 2 个任务）让小于 5% 的收益不可判定 —— 下一轮每个 arm 至少 3 次重复。
+2. 工具菜单是最大成本项，但「按任务类型自动裁剪」还没有证据；这是唯一值得先做的方向。
+3. 外部能力缺口（Windows/macOS 真机、安全工具链、可灰度部署、codex 凭据）不补齐，T02/Q06/S06/T04/F05 无法推进。
+4. 未完成 12 项（7 阻塞 + 5 未实现），
+   其中多项只差「一个 arm + 一次预注册配对」，瓶颈是运行预算而不是设计。
 
