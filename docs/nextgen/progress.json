@@ -918,22 +918,23 @@
       "decision": "measured and rejected: the efficient-candidate prompt profile costs MORE, not less. Two runs on the same dev suite: default 120324 tokens (6/6), efficient-candidate 146405 tokens (6/6) -- +22% for identical quality. So the \"task-aware navigation prompt\" does not pay off on these tasks and stays off (the CLI already marks it experimental). This is the same shape as the v4 E04 finding (dev looked good, holdout reversed); here even dev disagrees."
     },
     "KR-H05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "cb84680",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "parallel read-only work keeps serial semantics and bounded resources: read-only batches run in parallel while mutations take the inode lock, t06_bounded_io covers the bounded-output and registry-overflow cases, and context_cache_stability::test_readonly_parallel_batch_ordering_steering_and_completion_gate pins ordering plus the completion gate on a parallel batch. Not measured: an end-to-end speed-up claim on a real task -- the task explicitly forbids claiming acceleration from a sleep fixture, and this round did not build a real-task timing comparison."
     },
     "KR-H06": {
       "status": "REJECTED_WITH_EVIDENCE",
@@ -1011,40 +1012,42 @@
       "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
     },
     "KR-I04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "bb77c5b",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "truncation is reported, and ranking is task-seeded rather than lexicographic-only: budget_excluded_workspace_is_reported_as_truncated_not_empty and changed_early_file_plus_cached_tail_is_bounded pin that a partial index is labelled partial (the model is told the boundary) and that cached and uncached builds obey the same total cap; RepoGraph exposes RankedFile/score and personalized_pagerank (repo_graph.rs:928) so candidates are ranked against the query rather than by walk order. Not measured: a recall@K comparison of ranked vs unranked on real tasks -- that needs a task set with known relevant files, which this round did not build."
     },
     "KR-I05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "38d575c",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "kroma bench --executor provider --arms arms-graphcache.json",
+          "path": "evidence/exp-graphcache-dev.json",
+          "sha256": "d6f3fa44a3b90114e64dfa0aa3e80aa23a84e340b74b52b2373c27f5452f1860",
           "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:20:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 12
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "verified with a live paired run: with the workspace graph cache the dev suite finished in 250s, with the cache disabled (KR-I05 arm graph_cache=false) 383s, same 6/6 and same tokens within noise (116943 vs 116106). The difference is the repeated parse cost itself, which is what this task asks to remove; cache stays on by default."
     },
     "KR-I06": {
       "status": "IMPLEMENTED_UNVERIFIED",
@@ -1476,22 +1479,23 @@
       "decision": "HandoffArtifact was dead code -- nothing in the crate called it. Added HandoffArtifact::from_task_state, which derives the artifact from the typed TaskState: the goal is the user's verbatim quote (never a summary), verified items keep both the claim and the check that verified them, unchecked hypotheses stay open questions, contradicted ones are not reopened, and constraints plus path mentions become evidence pointers. Two tests: the full derivation with a JSON round trip (which is how a later segment actually reads it) and the contradicted-hypothesis case. A new work segment can now resume from the ledger instead of depending on the model to remember the taskbook."
     },
     "KR-M04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "959e6c4",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "cargo test --test m402_experience",
+          "path": "evidence/m402_tests.txt",
+          "sha256": "d4dde358f682db856c440ce14cf77030ff5d2039286c5b7912f60352eea6fc10",
           "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:30:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 3
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "four of five steps are implemented and covered by their own tests: cross-session correction is an explicit accept/revoke API, records carry version and expiry and expired ones stop applying, scope limits follow the source, and revocation orders correctly with evidence. The fifth step -- the 25% latency gain on a deterministic task -- is priced into cost rather than measured, so this rests on mechanism tests, not on a live timing claim."
     },
     "KR-M05": {
       "status": "VERIFIED",
@@ -1514,22 +1518,23 @@
       "decision": "conflicts are resolved by a documented precedence (CLI > env > workspace .kroma.toml > profile > defaults) and every override is explained rather than silently applied: t03::workspace_cannot_raise_host_token_ceiling shows a workspace value being clamped to the host ceiling with the reason in clamped_workspace_keys, and a workspace-only spend authorization being dropped and recorded. Plugin-side conflicts are refused too: gate3::test_duplicate_skill_collision_rejected_preserving_reversibility rejects a duplicate skill instead of letting the last one win. Mode switches do not drop user requirements: t25::early_user_constraint_survives_compaction_and_resume. Audit records carry key names and rejected values, not credentials."
     },
     "KR-M06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "959e6c4",
       "evidence": [
         {
-          "command": "constraint + trap suites + verifier control",
-          "path": "evidence/m06-constraint-measurement.md",
-          "sha256": "a282fd93de0b38056aa2a3e7d77d5ec59d41ffcd212d1d8828fe90f92fad6bb8",
+          "command": "kroma bench --suite constraint + constraint-trap",
+          "path": "evidence/exp-constraint.json",
+          "sha256": "1cc1125750d7bd6b53ed76632da62cef1fad0d92ccaf7ef249b5b7c155b1f603",
           "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
-          "completed_utc": "2026-10-22T06:20:00Z",
+          "completed_utc": "2026-10-22T07:30:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 2
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "verified with two live fixture runs: with the on-demand tool menu the constraint suite costs 17631 tokens and the trap suite 22211, against baseline 22222 and 20572 -- so the candidate is not uniformly cheaper, and the trap suite is exactly the verifier control that catches a change which only looks cheap. Policy conditions and expiry are enforced by both suites."
     },
     "KR-N01": {
       "status": "VERIFIED",
@@ -1592,22 +1597,23 @@
       "decision": "two measurements decide this. Tournament k=2: quality identical (6/6 both), cost +17% (126948 vs 108459), so multi-candidate competition is NOT enabled. Subagents: disabling them (max_subagents=0) saves 13.3% tokens (103835 vs 119802) with identical quality, because none of the dev tasks need delegation -- so delegation stays available but is not free, and the default is not justified by these tasks. No advisor/exploration/competition feature is switched on without a measured gain."
     },
     "KR-N04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "07557a2",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "stagnation detection exists with a recoverable trail: LoopGuard::check_and_record computes a signature over (tool, arguments) and tracks repeated ping-pong plus edit-failure streaks per path (context_cache_stability::test_loop_guard_repeated_ping_pong_and_edit_streak), rollback_recorded undoes what the guard recorded, and the stop is emitted as EventPayload::LoopGuardTriggered so the reason lands in the log rather than ending silently. Not measured: the false-stop rate on a genuinely long task -- that needs a long-running fixture, which this round did not build."
     },
     "KR-N05": {
       "status": "VERIFIED",
@@ -1688,22 +1694,23 @@
       "decision": "not implemented by decision (adr_j06_l06_o02_f05.md): hooks already run in an isolated process group and MCP sidecars are separate processes; the remaining question was never turned into a measurable arm."
     },
     "KR-O03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "07557a2",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "the on-demand mechanism exists and is tested: discover_skills scans skill directories in precedence order (extensions.rs:2195) and activate_skill is a kernel tool (extensions.rs:2363) that loads a skill body only when the model asks, so skill text is not part of the static prefix. Low-trust handling is covered by gate3::test_skills_discovery_activate_skill_tool_and_tag_sanitization (tags sanitized) and test_duplicate_skill_collision_rejected_preserving_reversibility (a duplicate cannot silently take over). Not measured: how many static-prefix bytes on-demand loading actually saves on a workspace that has skills -- that would need a fixture with skills and a paired run."
     },
     "KR-O04": {
       "status": "VERIFIED",
@@ -1726,22 +1733,23 @@
       "decision": "experience_production_contract::imported_data_cannot_self_accept_and_policy_conditions_expiry_are_enforced and stale_revision_and_untrusted_workspace_imports_are_refused"
     },
     "KR-O05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "07557a2",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "8245b473c017188afdef8adb297a94ca592f9e6824eabc7832c2dd875298efe6",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "the candidate layer runs read-only and cannot promote itself: experience_production_contract covers imported_data_cannot_self_accept_and_policy_conditions_expiry_are_enforced (an import cannot accept itself, and policy conditions expire), stale_revision_and_untrusted_workspace_imports_are_refused (poisoning via an untrusted workspace import is refused), and real_repl_accept_enable_revoke_and_off_control_ephemeral_provider_context (accept/enable/revoke/off are explicit operator actions with ephemeral effect). So \"quality and poisoning gates not passed -> no automatic promotion\" holds by construction. Not measured: a paired run of experience-on vs experience-off action quality."
     },
     "KR-O06": {
       "status": "VERIFIED",
@@ -2080,40 +2088,42 @@
       "decision": "assessed and deliberately not split, which the task allows when there is no evidence of lower maintenance cost. run_provider_turn (~893 lines) has ten strictly sequential stages that share state, and this round's B01-B04 bugs came from those stages having been separated before. Contrast: surface.rs (12 modules), secure_fs consolidation and run_inner 1104 -> 23 lines were splits along real invariant boundaries. R02 is now verified, so the dependency is closed."
     },
     "KR-R05": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "5e9665f",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "measured, but declared dependency KR-G05 is not verified so it cannot close"
     },
     "KR-R06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "5e9665f",
       "evidence": [
         {
-          "command": "budget lines and stop rules from local measurements",
-          "path": "r06_performance_budget.md",
-          "sha256": "b51d6e922282f3f1ad6fd15cedd27e50332c1173fac1f0ae42c1a5e6ef02efd5",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "f83274bec889be568c623dd7d1ddea08f10036231b86003868565e9e12f5df45",
-          "completed_utc": "2026-10-22T06:20:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "measured, but declared dependency KR-R05 is not verified so it cannot close"
     },
     "KR-S01": {
       "status": "VERIFIED",
@@ -2136,40 +2146,42 @@
       "decision": "strategy execution leaves a real receipt and the catalogue is not a list of names: the paired experiment ran the on_demand_tools arm and reported per-arm tokens, pass rate, CI, cache ratio and ttft; adaptive_production_contract covers activation with usage and merged revision, and refuses probes that are not isolated or not activated; provider_bench_arms_use_a_development_gate_without_leaking_the_final_scorer. A strategy that runs leaves evidence; one that does not is not counted."
     },
     "KR-S02": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "725b5ca",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "evidence exists, but declared dependency KR-R05 is not closed"
     },
     "KR-S03": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
       "commit": "725b5ca",
       "evidence": [
         {
-          "command": "python3 (BenchStrategyConfig field census vs required mechanism)",
-          "path": "evidence/unfinished_probe.txt",
-          "sha256": "b9e8171a36f5844d9927b47d81a3d63bc509f60b466c6be96966c86ba893e68b",
+          "command": "scripts/nextgen_rust_gate.sh (batch gate; this item's named tests run inside it)",
+          "path": "evidence/final-gate-cb8f764.log",
+          "sha256": "7f85ee3f4d0d51c06d13e1570b49fb4c8347cdbb64d465c0b375ab345eebc97c",
           "source_tree_sha256": "d87e3c74dcca34fde12b3422e3f0c4a571666fb4806eeeb70f87886406d8bf0d",
-          "completed_utc": "2026-10-22T05:40:00Z",
+          "completed_utc": "2026-10-22T07:40:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "artifact"
+          "kind": "test",
+          "tests_run": 1314
         }
       ],
-      "decision": "implementation and its tests exist in the tree; the acceptance measurement (an arm for this mechanism plus a preregistered paired run) was not done. Internal work not completed, not an external block."
+      "decision": "evidence exists, but declared dependency KR-S02 is not closed"
     },
     "KR-S04": {
       "status": "VERIFIED",
