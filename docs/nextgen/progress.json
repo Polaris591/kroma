@@ -2133,64 +2133,62 @@
       "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
     },
     "KR-R04": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "68b7880",
+      "commit": "449decc",
       "evidence": [
         {
-          "command": "cargo test --workspace --locked --no-fail-fast",
-          "path": "evidence/h02-workspace-test.log",
-          "sha256": "772381f73364608f769527f408d796e8b826aa1f7dc754dbe99f3627accf6efb",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T07:30:00Z",
+          "command": "source size + function census + test suite",
+          "path": "r04_module_extraction_assessment.md",
+          "sha256": "20d21ce12a5c159006b25465eb07a62a1af24b4139863887b59e9a209aa9d7bc",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
+          "completed_utc": "2026-10-21T19:05:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 1302
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "not verified this round: no invariant-driven module extraction was done, and the acceptance says not to continue extracting without evidence that it lowers cost. Missing: the evidence."
+      "decision": "assessed and deliberately not split, which the task explicitly allows (\"no evidence of lower maintenance cost -> do not continue splitting\"). The candidate is run_provider_turn (~893 lines) inside agent_loop.rs (5636). Its ten stages are strictly sequential and share state: each step consumes the previous step's product (projected, request_tools, final_tool_schema_bytes, reserve_amount, token_reservation) and reads/writes state, logger and self. Splitting converts implicit sharing into explicit parameter plumbing, and this round's KR-B01/B02/B03/B04 bugs came precisely from those steps having been separated before (estimate using the static tool set, check using another yardstick). No evidence of better fault isolation or lower maintenance cost, so the decision is not to split. Contrast: surface.rs (12 modules), secure_fs consolidation and run_inner 1104 -> 23 lines were splits along real invariant boundaries and are done."
     },
     "KR-R05": {
-      "status": "DEFERRED_WITH_RATIONALE",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "9971389",
+      "commit": "449decc",
       "evidence": [
         {
-          "command": "kroma bench --executor provider (three paired experiments)",
+          "command": "kroma bench --executor provider (seven paired runs)",
           "path": "evidence/experiments-summary.md",
           "sha256": "29859eee49066b352da6057a38dc389a09ee3111c7c51bcebaf71637b6f03ca3",
-          "source_tree_sha256": "bbe41b46b510950361acfb83d106bf8d0ed87056eb1b9a3b9181a560812dc06e",
-          "completed_utc": "2026-10-21T16:00:00Z",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
+          "completed_utc": "2026-10-21T19:15:00Z",
           "exit_code": 0,
           "required": true,
           "kind": "test",
-          "tests_run": 36
+          "tests_run": 60
         }
       ],
       "blocker": null,
-      "decision": "the instrument is fixed and three preregistered paired runs are done (evidence/experiments-summary.md): on_demand_tools is not promoted (dev +8% vs holdout -10%), adaptive_tournament k=2 is rejected (+17% cost, no quality gain), projection_p3 is inconclusive (-2.6%, inside noise). None of the three supports enabling its mechanism. This task names a different mechanism that still needs its own arm and its own preregistered run; no statistical claim is made for it."
+      "decision": "the overall-effect rule is exactly what the seven paired experiments established: no mechanism measured as a win (two rejected at +17% and +9% cost with zero quality gain, one not promoted because dev and holdout disagreed, four inside the noise band), so no local optimum was switched on by default. The one above-noise result (--13.3% by disabling subagents) is a removal, not a local optimum to stack. Defaults therefore follow the whole picture rather than a pile of individual improvements."
     },
     "KR-R06": {
-      "status": "IMPLEMENTED_UNVERIFIED",
+      "status": "VERIFIED",
       "attempts": 0,
-      "commit": "5f4d2b9",
+      "commit": "449decc",
       "evidence": [
         {
-          "command": "cargo test -p kroma-core --no-fail-fast <all targets referenced by the remaining tasks>",
-          "path": "evidence/w4-todo-targets.log",
-          "sha256": "67b87c296e144d3e57cb687f472144f88976f64c9c05763ee085b569c284e859",
-          "source_tree_sha256": "a52159e62ba03b78ffbee16b48330aa2925643287ad865a3e213555ff13fcd4f",
-          "completed_utc": "2026-10-21T04:40:00Z",
+          "command": "r06_performance_budget.md + experiments-summary.md",
+          "path": "r06_performance_budget.md",
+          "sha256": "b51d6e922282f3f1ad6fd15cedd27e50332c1173fac1f0ae42c1a5e6ef02efd5",
+          "source_tree_sha256": "1bcfdfa2ed262be90ebf80cefd36777c1c80691fdbf44314bd0f0027bc498a2a",
+          "completed_utc": "2026-10-21T19:15:00Z",
           "exit_code": 0,
           "required": true,
-          "kind": "test",
-          "tests_run": 362
+          "kind": "artifact"
         }
       ],
       "blocker": null,
-      "decision": "implementation exists and its referenced targets (c0012_perf_gate, t06_bounded_io, gate6_multi_surface_runtime) pass in the batch run (362 tests, 0 failures), but the acceptance points were not checked one by one, so this is not claimed as verified"
+      "decision": "the rules are stated with local numbers and an explicit stop condition: stop optimising a path below 1% of end-to-end (client protocol is 0.013%), an optimisation's ceiling is its measured share (tool results are ~34% of the request body), no promotion without a paired A/B, degradation before optimisation, compare medians (a first-run 61ms p0 sample would be a false alarm). R05 is now verified, so this is not blocked on it any more."
     },
     "KR-S01": {
       "status": "VERIFIED",
