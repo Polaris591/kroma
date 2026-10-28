@@ -325,11 +325,11 @@ fn key_action(
             return InputAction::None;
         }
         KeyCode::Esc => {
+            // Esc dismisses a modal/path input, never the ordinary draft.
+            // Ctrl+C remains the explicit clear/cancel/quit action.
             if state.attach_mode {
                 state.attach_mode = false;
                 state.attach_path.clear();
-            } else {
-                state.discard_draft();
             }
             return InputAction::None;
         }
@@ -359,6 +359,16 @@ fn input_event(
     model: &dyn ModelBackend,
     workdir: &std::path::Path,
 ) -> InputAction {
+    // Notifications last until a real input, not forever. Clear the previous
+    // one before processing the event so new feedback remains visible.
+    if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release)
+        || matches!(&event, Event::Paste(_))
+        || matches!(&event, Event::Mouse(mouse) if matches!(mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            | MouseEventKind::Down(_)))
+    {
+        state.dismiss_notification();
+    }
     match event {
         Event::Key(key)
             if matches!(key.code, KeyCode::Char('v' | 'V'))
@@ -616,15 +626,20 @@ async fn execute_task(
             }
         }
     };
+    let mut task_notice = None;
     let completed = match result {
         Some(Ok(_)) => true,
         Some(Err(error)) => {
-            state.note(format!("Task failed: {error:#}"));
+            let message = format!("Task failed: {error:#}");
+            state.note(&message);
+            task_notice = Some(("ERROR", message));
             false
         }
         None => {
             agent.cancel()?;
-            state.note("Task cancelled; unconfirmed commands are not replayed");
+            let message = "Task cancelled; unconfirmed commands are not replayed";
+            state.note(message);
+            task_notice = Some(("CANCELLED", message.to_owned()));
             false
         }
     };
@@ -632,6 +647,12 @@ async fn execute_task(
     while rx.try_recv().is_ok() {}
     state.load_history(agent.messages());
     state.session = agent.session_id().to_owned();
+    state.refresh_session_title();
+    if let Some((label, message)) = task_notice {
+        // The footer notification is transient; its failure explanation is
+        // still reachable by scrolling after the footer is dismissed.
+        state.info(label, message);
+    }
     screen.draw(state)?;
     Ok(completed)
 }
@@ -775,6 +796,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         agent.messages(),
     );
     state.model_catalog = Some(catalog);
+    state.refresh_session_title();
     state.model_profile = initial_profile;
     state.configure_status(agent.context_window_tokens(), model.reasoning_level());
     save_model_choice(&mut state, model.as_ref());
@@ -994,6 +1016,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             );
                         }
                         state.load_history(agent.messages());
+                        state.refresh_session_title();
                         if state.session != before
                             || matches!(text.as_str(), "/clear" | "/undo")
                             || text.starts_with("/rewind ")
@@ -1112,6 +1135,31 @@ mod tests {
             InputAction::Cancel
         ));
         assert_eq!(ui.editor.text(), "steer");
+    }
+
+    #[test]
+    fn escape_preserves_draft_and_dismisses_transient_feedback() {
+        let (mut ui, model) = setup();
+        let dir = std::env::temp_dir();
+        ui.editor.paste("a long unsent draft");
+        ui.note("Old notification");
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(
+            input_event(&mut ui, Event::Key(esc), false, &model, &dir),
+            InputAction::None
+        ));
+        assert_eq!(ui.editor.text(), "a long unsent draft");
+        assert!(ui.notification.is_empty());
+        ui.attach_mode = true;
+        ui.attach_path = "temporary-path".into();
+        input_event(&mut ui, Event::Key(esc), false, &model, &dir);
+        assert!(!ui.attach_mode);
+        assert!(ui.attach_path.is_empty());
+        assert_eq!(ui.editor.text(), "a long unsent draft");
+        // Ctrl+C remains the explicit clear operation when idle.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        input_event(&mut ui, Event::Key(ctrl_c), false, &model, &dir);
+        assert!(ui.editor.text().is_empty());
     }
 
     #[test]

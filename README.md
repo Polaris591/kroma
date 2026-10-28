@@ -90,8 +90,9 @@ RPC server or UI plugin runtime. Ratatui 0.29 / Crossterm 0.28 preserve the
 project's Rust 1.85 toolchain; Cargo.lock pins the compatible dependency set.
 
 The default interface supports streamed assistant text, formatted Markdown,
-compact Shell/MCP tool calls with expandable results, reasoning after a model
-response when the provider supplies it, conversation scrolling, persisted
+compact Shell/MCP tool calls with expandable results (failed tools show the
+reason without expanding), provider-exposed streaming reasoning collapsed by
+default, conversation scrolling, persisted
 sessions and the existing slash commands. Shortcuts:
 
 - **Enter** sends; **Shift+Enter**, **Alt+Enter** or **Ctrl+J** insert a newline.
@@ -103,7 +104,9 @@ sessions and the existing slash commands. Shortcuts:
 - **F2** cycles dark/light/mono themes; `/theme dark`, `/theme light`,
   `/theme mono` select a theme immediately, and `/theme reload` rereads the
   on-disk theme. `/help` shows the TUI command summary.
-- The footer shows **Ctx** with the available input context budget. During a
+- The footer keeps the current **model**, **Think** and **Ctx** visible at
+  ordinary terminal widths (including 80 columns), without duplicating the
+  model name in the header. **Ctx** uses the total model context window. During a
   request `~` denotes a conservative estimate including tool schemas; after
   a completed request, upstream input-token usage replaces that estimate when
   supplied. `—` means no recent request, not zero usage. The **Think** label
@@ -112,10 +115,13 @@ sessions and the existing slash commands. Shortcuts:
   The change applies to the next model request, and gateways may reject a
   level they do not support. Short terminals compact the footer automatically.
 - Model output streams as it arrives, with a subtle cursor and working/waiting
-  states. Provider-exposed reasoning deltas stream into the expanded THINKING
-  entry as they arrive; the completed reasoning reconciles the entry without
+  states. Reasoning stays collapsed by default; Ctrl+R reveals provider-exposed
+  reasoning deltas as they arrive. Completion reconciles the entry without
   duplication. Providers exposing only final reasoning show it after completion.
   Encrypted or otherwise unavailable private reasoning is never displayed.
+- **Esc** dismisses the file-path prompt or transient feedback; it never
+  silently deletes the current draft. Short notices disappear on the next
+  interaction; task errors also appear in the scrollable conversation.
 - **Ctrl+C** cancels an active task. While idle it clears the draft (including
   pending attachments); pressing it again when the input is empty exits TUI.
   While a task runs, submitted text steers it,

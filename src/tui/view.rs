@@ -15,7 +15,7 @@ use ratatui::{
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Keep continuation lines under the content, not underneath list bullets or
 /// code gutters. Terminal cells (not UTF-8 byte lengths) determine wrapping.
@@ -288,6 +288,75 @@ fn excerpt(text: &str, limit: usize) -> String {
     }
 }
 
+/// Shorten text by terminal cell width rather than UTF-8 bytes or chars.
+/// A long command must not take over the conversation's reading column.
+fn ellipsize_cells(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+    let mut output = String::new();
+    let mut used = 0;
+    for ch in value.chars() {
+        let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cells > width - 1 {
+            break;
+        }
+        output.push(ch);
+        used += cells;
+    }
+    output.push('…');
+    output
+}
+
+fn compact_line(value: &str, width: usize) -> String {
+    ellipsize_cells(
+        &value.split_whitespace().collect::<Vec<_>>().join(" "),
+        width,
+    )
+}
+
+/// Find the failure's useful diagnostic, not its full tool-result envelope.
+/// Stored and live tool results already use the same short_tool_result format.
+fn failure_summary(details: &str) -> String {
+    let lines = details
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let exit = lines.iter().find_map(|line| line.strip_prefix("exit: "));
+    let message = lines
+        .iter()
+        .find_map(|line| {
+            line.strip_prefix("stderr: ")
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| {
+            lines.iter().copied().find(|line| {
+                !line.starts_with("exit: ") && {
+                    let lower = line.to_ascii_lowercase();
+                    lower.contains("error")
+                        || lower.contains("failed")
+                        || lower.contains("exception")
+                }
+            })
+        })
+        .or_else(|| {
+            lines
+                .iter()
+                .copied()
+                .find(|line| !line.starts_with("exit: "))
+        })
+        .unwrap_or("Tool failed");
+    let message = message.trim().trim_start_matches("stderr: ");
+    match exit {
+        Some(code) => format!("exit {code} · {message}"),
+        None => message.to_owned(),
+    }
+}
+
 fn tool_arguments(name: &str, raw: &str) -> String {
     let value: Value = match serde_json::from_str(raw) {
         Ok(value) => value,
@@ -346,6 +415,7 @@ pub struct UiState {
     next_marker: u32,
     pub themes: ThemeStore,
     pub session: String,
+    session_title: Option<String>,
     pub model: String,
     pub model_profile: Option<String>,
     pub model_catalog: Option<crate::sessions::SessionCatalog>,
@@ -396,13 +466,14 @@ impl UiState {
             selection_start: None,
             selection_end: None,
             session,
+            session_title: None,
             entries: Vec::new(),
             running: false,
             notification: String::new(),
             scroll_from_bottom: 0,
             viewport_height: 0,
             tools_expanded: false,
-            reasoning_expanded: true,
+            reasoning_expanded: false,
             active_assistant: None,
             active_reasoning: None,
             context_input: None,
@@ -417,6 +488,7 @@ impl UiState {
     }
 
     pub fn add_user(&mut self, text: &str) {
+        self.dismiss_notification();
         self.history_cache = None;
         let items = self
             .attachments
@@ -629,8 +701,74 @@ impl UiState {
         }
     }
 
+    fn compact_context(&self) -> String {
+        match (self.context_input, self.context_window) {
+            (Some(input), window) if window > 0 => {
+                let percent = (input as f64 * 100.0 / window as f64).round() as u64;
+                format!("Ctx {percent}%")
+            }
+            _ => "Ctx —".into(),
+        }
+    }
+
+    fn footer_status(&self, width: usize) -> String {
+        let think = format!("Think {}", self.thinking.as_deref().unwrap_or("n/a"));
+        let context = if width >= 60 {
+            self.context_display()
+        } else {
+            self.compact_context()
+        };
+        let separator = " · ";
+        let metadata_width = UnicodeWidthStr::width(think.as_str())
+            + UnicodeWidthStr::width(context.as_str())
+            + 2 * UnicodeWidthStr::width(separator);
+        if width >= 46 && metadata_width + 8 <= width {
+            let model = ellipsize_cells(&self.model, (width - metadata_width).min(24));
+            return format!("{model}{separator}{think}{separator}{context}");
+        }
+        if width >= 30 {
+            let level = self.thinking.as_deref().unwrap_or("—");
+            let context = self.compact_context();
+            let right = format!("{level} · {context}");
+            let available = width.saturating_sub(UnicodeWidthStr::width(right.as_str()) + 3);
+            return format!("{} · {right}", ellipsize_cells(&self.model, available));
+        }
+        ellipsize_cells(
+            &format!("{} · {}", self.model, self.compact_context()),
+            width,
+        )
+    }
+
     pub fn note(&mut self, text: impl Into<String>) {
         self.notification = text.into();
+    }
+
+    /// Brief feedback is shown until the user's next interaction, not
+    /// permanently in place of the footer's normal help. Important errors
+    /// are additionally recorded as scrollable transcript events.
+    pub fn dismiss_notification(&mut self) {
+        self.notification.clear();
+    }
+
+    pub fn refresh_session_title(&mut self) {
+        self.session_title = self.model_catalog.as_ref().and_then(|catalog| {
+            catalog
+                .list()
+                .ok()?
+                .into_iter()
+                .find(|entry| entry.id == self.session)
+                .and_then(|entry| entry.name)
+        });
+    }
+
+    fn session_label(&self) -> &str {
+        self.session_title
+            .as_deref()
+            .unwrap_or(if self.session == "default" {
+                "default"
+            } else {
+                "untitled session"
+            })
     }
 
     /// Host command output is transient UI content, not part of model history.
@@ -924,24 +1062,9 @@ impl UiState {
     fn history_text(&self, theme: Theme, width: usize) -> Text<'static> {
         let mut lines = Vec::new();
         if self.entries.is_empty() {
-            lines.extend([Line::default(), Line::default(), Line::default()]);
-            lines.push(Line::from(Span::styled(
-                "   ◆  Ready when you are.",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::from(Span::styled(
-                "      A small, focused workspace for big ideas.",
-                Style::default().fg(theme.text),
-            )));
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
-                "      Try  ·  Review this project",
-                Style::default().fg(theme.muted),
-            )));
-            lines.push(Line::from(Span::styled(
-                "           Find and fix a failing test",
+                "   ◆  Ready for a task.",
                 Style::default().fg(theme.muted),
             )));
             return Text::from(lines);
@@ -1004,14 +1127,27 @@ impl UiState {
                     // A tool is activity, not a separate article. In collapsed
                     // mode show only one purposeful line, without the same
                     // Ctrl+O instruction repeated for every call.
+                    let display_name = compact_line(name, width.saturating_sub(13).min(24));
+                    let command_width =
+                        width.saturating_sub(5 + UnicodeWidthStr::width(display_name.as_str()) + 2);
+                    let command = compact_line(&entry.body, command_width);
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {marker}  "), Style::default().fg(color)),
-                        Span::styled(name.to_owned(), role_style(theme.tool)),
-                        Span::styled(
-                            format!("  {}", entry.body.replace('\n', " ")),
-                            Style::default().fg(theme.muted),
-                        ),
+                        Span::styled(display_name, role_style(theme.tool)),
+                        Span::styled(format!("  {command}"), Style::default().fg(theme.muted)),
                     ]));
+                    if entry.failed && !self.tools_expanded {
+                        lines.push(body_line(Line::from(Span::styled(
+                            format!(
+                                "↳ {}",
+                                compact_line(
+                                    &failure_summary(&entry.details),
+                                    width.saturating_sub(5)
+                                )
+                            ),
+                            Style::default().fg(theme.error),
+                        ))));
+                    }
                     if status == "running" && !entry.details.is_empty() && !self.tools_expanded {
                         let preview = entry
                             .details
@@ -1020,7 +1156,7 @@ impl UiState {
                             .find(|line| !line.trim().is_empty())
                             .unwrap_or("");
                         lines.push(body_line(Line::from(Span::styled(
-                            format!("↳ {}", excerpt(preview, 150)),
+                            format!("↳ {}", compact_line(preview, width.saturating_sub(5))),
                             Style::default().fg(theme.code),
                         ))));
                     }
@@ -1048,16 +1184,10 @@ impl UiState {
                         && self
                             .active_reasoning
                             .is_some_and(|index| std::ptr::eq(entry, &self.entries[index]));
-                    let label = if self.reasoning_expanded {
-                        if streaming {
-                            "  ◌  Thinking…  ·  Ctrl+R to hide"
-                        } else {
-                            "  ◇  Reasoning  ·  Ctrl+R to hide"
-                        }
-                    } else if streaming {
-                        "  ◌  Thinking…  ·  Ctrl+R to expand"
+                    let label = if streaming {
+                        "  ◌  Thinking…"
                     } else {
-                        "  ◇  Reasoning  ·  Ctrl+R to expand"
+                        "  ◇  Reasoning"
                     };
                     lines.push(Line::from(Span::styled(
                         label,
@@ -1130,36 +1260,46 @@ impl UiState {
         } else {
             ("● ready", colors.user)
         };
-        // Brand, context and state have a single well-defined hierarchy.
-        let header_left = Line::from(vec![
-            Span::styled("◆ ", Style::default().fg(colors.accent)),
-            Span::styled(
-                "Kroma",
-                Style::default()
-                    .fg(colors.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("   /  {}", excerpt(&self.session, 20)),
-                Style::default().fg(colors.muted),
-            ),
-        ]);
+        // Header: identity and activity only. Model, Think and Context sit
+        // together in one footer row, including the common 80-column case.
         let header_line = Rect::new(layout[0].x, layout[0].y, layout[0].width, 1);
-        frame.render_widget(Paragraph::new(header_left), header_line);
-        // Hide secondary metadata on tight terminals instead of letting it
-        // overlap the app name.
-        if layout[0].width >= 55 {
-            let mut right = Vec::new();
-            if layout[0].width >= 85 {
-                right.push(Span::styled(
-                    format!("{}  ·  ", excerpt(&self.model, 22)),
-                    Style::default().fg(colors.muted),
-                ));
-            }
-            right.push(Span::styled(status, Style::default().fg(status_color)));
+        let activity_width = UnicodeWidthStr::width(status);
+        let show_activity = header_line.width as usize >= activity_width + 25;
+        let left_width = (header_line.width as usize).saturating_sub(if show_activity {
+            activity_width + 2
+        } else {
+            0
+        });
+        let label = ellipsize_cells(self.session_label(), left_width.saturating_sub(12));
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("◆ ", Style::default().fg(colors.accent)),
+                Span::styled(
+                    "Kroma",
+                    Style::default()
+                        .fg(colors.text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  /  {label}"), Style::default().fg(colors.muted)),
+            ])),
+            Rect::new(
+                header_line.x,
+                header_line.y,
+                left_width.min(u16::MAX as usize) as u16,
+                1,
+            ),
+        );
+        if show_activity {
             frame.render_widget(
-                Paragraph::new(Line::from(right)).alignment(Alignment::Right),
-                header_line,
+                Paragraph::new(status)
+                    .style(Style::default().fg(status_color))
+                    .alignment(Alignment::Right),
+                Rect::new(
+                    header_line.right().saturating_sub(activity_width as u16),
+                    header_line.y,
+                    activity_width as u16,
+                    1,
+                ),
             );
         }
         frame.render_widget(
@@ -1329,30 +1469,7 @@ impl UiState {
             layout[3].width.saturating_sub(4),
             1,
         );
-        let ctx = self.context_display();
-        let level = self.thinking.as_deref().unwrap_or("n/a");
-        let reasoning = if status_area.width < 50 {
-            format!("Think {level}")
-        } else {
-            format!("Think {level}  ⇧Tab")
-        };
-        let left = if status_area.width < 39 {
-            match self.context_input {
-                Some(input) if self.context_window > 0 => format!(
-                    "Ctx {}%",
-                    (input as f64 * 100.0 / self.context_window as f64).round() as u64
-                ),
-                _ => "Ctx —".into(),
-            }
-        } else {
-            ctx
-        };
-        let gap = if status_area.width >= 50 {
-            "    "
-        } else {
-            "  "
-        };
-        let status_line = format!("{left}{gap}{reasoning}");
+        let status_line = self.footer_status(status_area.width as usize);
         frame.render_widget(
             Paragraph::new(status_line).style(Style::default().fg(colors.muted)),
             status_area,
@@ -1362,9 +1479,9 @@ impl UiState {
         } else if self.running {
             "Enter steer · Ctrl+C cancel · /queue follow-up".into()
         } else if status_area.width < 50 {
-            "Enter send · /help · F2 theme".into()
+            "Enter send · /help".into()
         } else {
-            "Enter send · Shift+Enter newline · /help · F2 theme".into()
+            "Enter send · /help · Ctrl+R reasoning · Ctrl+O tools".into()
         };
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(if self.notification.is_empty() {
@@ -1401,16 +1518,19 @@ mod tests {
             ThemeStore::load_at(None).unwrap(),
             &[],
         );
-        assert!(state.reasoning_expanded);
+        assert!(!state.reasoning_expanded);
         state.event(UiEvent::TaskStarted);
         state.event(UiEvent::ModelStarted);
-        state.event(UiEvent::ReasoningDelta("Thinking ".into()));
+        state.event(UiEvent::ReasoningDelta("Thinking UNIQUE_SENTINEL ".into()));
         assert_eq!(state.phase, "thinking");
         let mut terminal = Terminal::new(TestBackend::new(95, 28)).unwrap();
         terminal.draw(|frame| state.draw(frame)).unwrap();
         let visible = state.selection_rows.join("\n");
         assert!(visible.contains("Thinking…"));
-        assert!(visible.contains("Thinking"));
+        assert!(!visible.contains("UNIQUE_SENTINEL"));
+        state.reasoning_expanded = true;
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert!(state.selection_rows.join("\n").contains("UNIQUE_SENTINEL"));
 
         state.event(UiEvent::ReasoningDelta("step two".into()));
         state.event(UiEvent::Text("Answer".into()));
@@ -1430,6 +1550,156 @@ mod tests {
         state.event(UiEvent::ReasoningDelta("Next turn".into()));
         assert_eq!(state.entries.len(), 4);
         assert_eq!(state.entries[3].body, "Next turn");
+    }
+
+    #[test]
+    fn failure_is_explained_without_expanding_tools_and_command_is_one_line() {
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        state.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "build".into(),
+            args: "cargo test --offline --locked ".repeat(15),
+        });
+        state.event(UiEvent::ToolFinished {
+            id: "build".into(),
+            result: "exit: 101\nstderr: error[E0599]: method not found\nlong output".into(),
+            failed: true,
+        });
+        let lines = state.history_text(state.themes.colors, 55).lines;
+        let rows = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.iter()
+                .filter(|line| line.contains("cargo test"))
+                .count(),
+            1
+        );
+        assert!(rows
+            .iter()
+            .any(|line| line.contains("exit 101") && line.contains("E0599")));
+        assert!(!rows.join("\n").contains("long output"));
+        for row in &rows {
+            assert!(
+                UnicodeWidthStr::width(row.as_str()) <= 55,
+                "collapsed tool row must fit in the reading column: {row:?}"
+            );
+        }
+        state.tools_expanded = true;
+        let expanded = state.history_text(state.themes.colors, 55).lines;
+        assert!(expanded
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains("long output")));
+    }
+
+    #[test]
+    fn failures_remain_visible_after_reloading_durable_tool_records() {
+        let mut assistant = Message::new("assistant", "");
+        assistant.tool_calls = Some(vec![crate::protocol::ToolCall {
+            id: "call-1".into(),
+            kind: "function".into(),
+            function: crate::protocol::FunctionCall {
+                name: "shell".into(),
+                arguments: r#"{"command":"cargo test"}"#.into(),
+            },
+        }]);
+        let result = Message::tool_with_status(
+            "call-1".into(),
+            r#"{"exit_code":101,"stdout":"","stderr":"error[E0599]: broken API"}"#.into(),
+            true,
+        );
+        let state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[assistant, result],
+        );
+        let lines = state.history_text(state.themes.colors, 80).lines;
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.content.contains("E0599")),
+            "restored failure must not be a bare red cross"
+        );
+    }
+
+    #[test]
+    fn status_keeps_model_thinking_and_context_visible_at_eighty_columns() {
+        for (width, height) in [(40, 16), (80, 24), (110, 30), (160, 40)] {
+            let mut state = UiState::new(
+                "deepseek-v4.1-flash".into(),
+                "default".into(),
+                ThemeStore::load_at(None).unwrap(),
+                &[],
+            );
+            state.configure_status(128_000, Some("high".into()));
+            state.event(UiEvent::ActualInput(32_000));
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+            let output = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(
+                output.contains("Kroma"),
+                "no app identity at {width} columns"
+            );
+            let expected_context = if width >= 80 {
+                "Ctx 32k / 128k · 25%"
+            } else {
+                "Ctx 25%"
+            };
+            assert!(
+                output.contains(expected_context),
+                "no context at {width} columns"
+            );
+            assert!(
+                output.contains("high"),
+                "no thinking level at {width} columns"
+            );
+            if width >= 80 {
+                assert!(
+                    output.contains("deepseek-v4.1-flash"),
+                    "model must remain visible at {width} columns"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn notification_dismisses_without_losing_important_transcript_events() {
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        state.note("Temporary theme feedback");
+        state.info("ERROR", "Last request failed with an HTTP error");
+        state.dismiss_notification();
+        assert!(state.notification.is_empty());
+        assert!(state
+            .history_text(state.themes.colors, 80)
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains("HTTP error")));
     }
 
     #[test]
