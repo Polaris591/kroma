@@ -40,6 +40,11 @@ pub type SummaryResult = TextResult;
 /// deterministic test fake. Tools are supplied by the runtime, never chosen
 /// by the model adapter itself.
 pub trait ModelBackend: Send + Sync {
+    /// Remove metadata that this backend will not send on the wire, solely
+    /// for context planning. Never mutate the durable transcript; an adapter
+    /// without protocol-specific filtering can keep the conservative default.
+    fn project_for_budget(&self, _messages: &mut [Message]) {}
+
     /// Upstream-declared vision capability. None is unknown, not false.
     fn accepts_images(&self) -> Option<bool> {
         None

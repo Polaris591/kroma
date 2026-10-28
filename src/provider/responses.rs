@@ -11,9 +11,14 @@ pub(super) fn payload(
     tools: &[Value],
     max_output: Option<usize>,
     effort: &str,
+    origin: &str,
 ) -> Result<Value> {
     let mut input = Vec::new();
-    for msg in messages {
+    let active_turn = messages
+        .iter()
+        .rposition(|msg| msg.role == "user")
+        .unwrap_or(0);
+    for (index, msg) in messages.iter().enumerate() {
         match msg.role.as_str() {
             "system" | "developer" | "user" => {
                 let content = if msg.role == "user" {
@@ -29,7 +34,9 @@ pub(super) fn payload(
             }
             "assistant" => {
                 for item in msg.provider_items.as_deref().unwrap_or(&[]) {
-                    if item["type"] == "reasoning" {
+                    if item["type"] == "reasoning"
+                        && super::replay_opaque_reasoning(msg, index, active_turn, origin)
+                    {
                         input.push(item.clone());
                     }
                 }
@@ -267,7 +274,7 @@ mod tests {
             message,
             Message::tool("call_1".into(), "ok".into()),
         ];
-        let request = payload("test", &history, &[], Some(512), "high").unwrap();
+        let request = payload("test", &history, &[], Some(512), "high", "test-origin").unwrap();
         assert_eq!(request["input"][1]["type"], "reasoning");
         assert_eq!(request["input"][2]["type"], "function_call");
         assert_eq!(request["input"][3]["type"], "function_call_output");
@@ -313,13 +320,37 @@ mod tests {
 
     #[test]
     fn max_effort_is_not_downgraded() {
-        let request = payload("mock", &[Message::new("user", "test")], &[], None, "max").unwrap();
+        let request = payload(
+            "mock",
+            &[Message::new("user", "test")],
+            &[],
+            None,
+            "max",
+            "test-origin",
+        )
+        .unwrap();
         assert_eq!(request["reasoning"]["effort"], "max");
-        let auto = payload("mock", &[Message::new("user", "test")], &[], None, "auto").unwrap();
+        let auto = payload(
+            "mock",
+            &[Message::new("user", "test")],
+            &[],
+            None,
+            "auto",
+            "test-origin",
+        )
+        .unwrap();
         assert_eq!(auto["reasoning"]["summary"], "auto");
         assert!(auto["reasoning"].get("effort").is_none());
         assert_eq!(request["reasoning"]["summary"], "auto");
-        let off = payload("mock", &[Message::new("user", "test")], &[], None, "off").unwrap();
+        let off = payload(
+            "mock",
+            &[Message::new("user", "test")],
+            &[],
+            None,
+            "off",
+            "test-origin",
+        )
+        .unwrap();
         assert_eq!(off["reasoning"]["effort"], "none");
         assert!(off["reasoning"].get("summary").is_none());
     }

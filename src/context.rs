@@ -432,9 +432,28 @@ impl Compression {
         .to_string()
     }
 
+    #[cfg(test)]
     fn fit_unconsumed_tool_results(&self, messages: &[Message], view: &mut [Message]) -> usize {
-        if self.tokens(view) < self.budget.hard {
-            return 0;
+        self.fit_unconsumed_with_budget(messages, view, None).0
+    }
+
+    /// Compute the projected request size once; replacing a tool result only
+    /// changes one serialized message. This also avoids repeated O(history)
+    /// re-serialization when several large unconsumed outputs need previews.
+    fn fit_unconsumed_with_budget(
+        &self,
+        messages: &[Message],
+        view: &mut [Message],
+        model: Option<&Arc<dyn ModelBackend>>,
+    ) -> (usize, usize) {
+        let mut effective = view.to_vec();
+        if let Some(model) = model {
+            model.project_for_budget(&mut effective);
+        }
+        let mut bytes = serde_json::to_vec(&effective).unwrap_or_default().len();
+        let mut tokens = self.tokens_for_json_bytes(bytes);
+        if tokens < self.budget.hard {
+            return (0, tokens);
         }
         let offset = 1 + self.state.summaries.len();
         let mut candidates: Vec<_> = messages
@@ -452,12 +471,10 @@ impl Compression {
                 Some((size, index, projected))
             })
             .collect();
-        // Shrink the largest result first; small results and recent unrelated
-        // evidence stay verbatim whenever they fit.
         candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         let mut shortened = 0;
         for (_, index, projected) in candidates {
-            if self.tokens(view) < self.budget.hard {
+            if tokens < self.budget.hard {
                 break;
             }
             let summary = self.overflow_tool_preview(&messages[index], index);
@@ -468,10 +485,19 @@ impl Compression {
             {
                 continue;
             }
+            let before = serde_json::to_vec(&effective[projected])
+                .unwrap_or_default()
+                .len();
+            effective[projected].content = Some(summary.clone());
+            let after = serde_json::to_vec(&effective[projected])
+                .unwrap_or_default()
+                .len();
+            bytes = bytes.saturating_sub(before).saturating_add(after);
+            tokens = self.tokens_for_json_bytes(bytes);
             view[projected].content = Some(summary);
             shortened += 1;
         }
-        shortened
+        (shortened, tokens)
     }
 
     fn tokens(&self, view: &[Message]) -> usize {
@@ -537,13 +563,21 @@ impl Compression {
         self.state.consumed_until = self.state.consumed_until.max(message_count);
     }
 
+    #[cfg(test)]
     fn trc_plan(&self, messages: &[Message]) -> Option<CompactionState> {
+        self.trc_plan_from_view(messages, self.view(messages))
+    }
+
+    fn trc_plan_from_view(
+        &self,
+        messages: &[Message],
+        projected: Vec<Message>,
+    ) -> Option<CompactionState> {
         let mut next = self.state.clone();
         // Build the exact provider projection once. Each TRC candidate only
         // replaces one tool message, so its JSON size changes by the
         // serialized size difference of that message. Rebuilding the entire
         // view for every candidate was quadratic in the number of tools.
-        let projected = self.view(messages);
         let mut projected_bytes = serde_json::to_vec(&projected).ok()?.len();
         let current = self.tokens_for_json_bytes(projected_bytes);
         let old_tools: Vec<usize> = messages
@@ -941,9 +975,15 @@ impl Compression {
         }
         // TRC and APEC can now run concurrently: APEC snapshots raw history,
         // not the mutable TRC projection. A TRC revision cannot stale it.
-        if let Some(next) = self.trc_plan(messages) {
-            let projected_before = self.tokens(&self.view(messages));
-            let projected_after = self.tokens(&self.view_with_state(messages, &next));
+        let mut budget_view = self.view(messages);
+        model.project_for_budget(&mut budget_view);
+        if let Some(next) = self.trc_plan_from_view(messages, budget_view) {
+            let mut before_view = self.view(messages);
+            let mut after_view = self.view_with_state(messages, &next);
+            model.project_for_budget(&mut before_view);
+            model.project_for_budget(&mut after_view);
+            let projected_before = self.tokens(&before_view);
+            let projected_after = self.tokens(&after_view);
             store.commit(&PersistedContext::Builtin(next.clone()))?;
             let cleared = next
                 .cleared_tools
@@ -961,8 +1001,9 @@ impl Compression {
         }
 
         let mut view = self.view(messages);
-        let mut overflow_count = self.fit_unconsumed_tool_results(messages, &mut view);
-        if self.tokens(&view) >= self.budget.hard {
+        let (mut overflow_count, mut projected_tokens) =
+            self.fit_unconsumed_with_budget(messages, &mut view, Some(model));
+        if projected_tokens >= self.budget.hard {
             // Emergency path: wait for the in-flight snapshot or start and
             // await a synchronous compaction before sending another request.
             if self.pending.is_some() {
@@ -970,24 +1011,32 @@ impl Compression {
                 self.finish_pending(messages, store, true).await?;
             }
             view = self.view(messages);
-            overflow_count += self.fit_unconsumed_tool_results(messages, &mut view);
-            if self.tokens(&view) >= self.budget.hard && self.start_rollup(model) {
+            let (more, size) = self.fit_unconsumed_with_budget(messages, &mut view, Some(model));
+            overflow_count += more;
+            projected_tokens = size;
+            if projected_tokens >= self.budget.hard && self.start_rollup(model) {
                 self.finish_pending(messages, store, true).await?;
                 view = self.view(messages);
-                overflow_count += self.fit_unconsumed_tool_results(messages, &mut view);
+                let (more, size) =
+                    self.fit_unconsumed_with_budget(messages, &mut view, Some(model));
+                overflow_count += more;
+                projected_tokens = size;
             }
-            if self.tokens(&view) >= self.budget.hard {
+            if projected_tokens >= self.budget.hard {
                 if !self.start_apec(messages, model, true) {
-                    bail!("context near hard limit ({} of {} estimated input tokens including prompt/tool additions, {} reserved for output in a {} token model window), with no safe APEC checkpoint; history preserved", self.tokens(&view), self.budget.available_input, self.budget.output_reserve, self.budget.window);
+                    bail!("context near hard limit ({} of {} estimated input tokens including prompt/tool additions, {} reserved for output in a {} token model window), with no safe APEC checkpoint; history preserved", projected_tokens, self.budget.available_input, self.budget.output_reserve, self.budget.window);
                 }
                 self.finish_pending(messages, store, true).await?;
                 view = self.view(messages);
-                overflow_count += self.fit_unconsumed_tool_results(messages, &mut view);
-                if self.tokens(&view) >= self.budget.hard {
+                let (more, size) =
+                    self.fit_unconsumed_with_budget(messages, &mut view, Some(model));
+                overflow_count += more;
+                projected_tokens = size;
+                if projected_tokens >= self.budget.hard {
                     bail!("context still exceeds hard threshold after APEC; refusing to send an oversized request");
                 }
             }
-        } else if self.tokens(&view) >= self.budget.soft && self.background_compaction {
+        } else if projected_tokens >= self.budget.soft && self.background_compaction {
             self.start_apec(messages, model, false);
         }
         if overflow_count > 0 {
@@ -1304,6 +1353,51 @@ mod tests {
     use crate::provider::{FunctionCall, ModelClient, ToolCall};
     use std::sync::Mutex;
     use std::time::Instant;
+
+    #[tokio::test]
+    async fn incompatible_historical_reasoning_does_not_trigger_false_apec() {
+        struct NoCommit;
+        impl ContextCommit for NoCommit {
+            fn commit(&self, _: &PersistedContext) -> Result<()> {
+                Ok(())
+            }
+        }
+        let model: Arc<dyn ModelBackend> =
+            Arc::new(ModelClient::new("http://127.0.0.1:9/v1", None, "new-model".into()).unwrap());
+        let history = vec![
+            Message::new("system", "system"),
+            Message::new("user", "previous request"),
+            Message {
+                reasoning_content: Some("stale-thought".repeat(5000)),
+                ..Message::new("assistant", "old answer")
+            },
+            Message::new("user", "short followup"),
+        ];
+        let mut compaction = Compression::new(
+            CompactionState::default(),
+            ContextConfig::with_output_reserve(8192, 1024).unwrap(),
+            Path::new("/tmp/provider-budget-no-apec.json"),
+        );
+        assert!(
+            compaction.tokens(&history) >= compaction.budget.hard,
+            "raw WAL size would incorrectly trigger a compaction"
+        );
+        let view = compaction
+            .prepare_with_extra(&history, &model, &NoCommit, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            view[2].reasoning_content, history[2].reasoning_content,
+            "original provider history remains unchanged"
+        );
+        assert!(
+            compaction.state().summaries.is_empty(),
+            "no APEC request should run for unsent historical reasoning"
+        );
+        let mut effective = view;
+        model.project_for_budget(&mut effective);
+        assert!(compaction.tokens(&effective) < compaction.budget.soft);
+    }
 
     #[tokio::test]
     async fn built_in_apec_prompts_remain_owned_by_context_and_byte_stable() {

@@ -17,11 +17,26 @@ use std::sync::Arc;
 /// The one startup composition point for CLI and future plugin hosts.
 /// An extension changes components here; it never edits Agent's loop.
 pub struct RuntimeComponents {
-    pub model: Arc<dyn ModelBackend>,
+    // A model and its context budget must change together. Keep these
+    // private so an extension cannot accidentally use the previous model's
+    // window after swapping the backend.
+    model: Arc<dyn ModelBackend>,
+    context_budget: ContextConfig,
     pub tools: ToolRegistry,
     pub context_factory: Arc<dyn ContextFactory>,
     pub prompt: PromptComposer,
     pub events: Option<Arc<dyn EventSink>>,
+}
+
+impl RuntimeComponents {
+    pub fn model(&self) -> Arc<dyn ModelBackend> {
+        self.model.clone()
+    }
+
+    pub fn replace_model(&mut self, model: Arc<dyn ModelBackend>, budget: ContextConfig) {
+        self.model = model;
+        self.context_budget = budget;
+    }
 }
 
 pub struct DefaultRuntime {
@@ -50,6 +65,7 @@ pub async fn default_runtime_with(
     }
     let mut components = RuntimeComponents {
         model: Arc::new(model),
+        context_budget: budget,
         tools,
         context_factory: Arc::new(BuiltinContextFactory),
         prompt,
@@ -63,7 +79,7 @@ pub async fn default_runtime_with(
         components.prompt,
         components.events,
         config.workdir,
-        budget,
+        components.context_budget,
     )?;
     Ok(DefaultRuntime {
         agent,
@@ -129,6 +145,28 @@ pub async fn default_agent(config: Config) -> Result<Agent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_model_and_context_budget_are_one_operation() {
+        let first: Arc<dyn ModelBackend> =
+            Arc::new(ModelClient::new("http://127.0.0.1:9/v1", None, "first".into()).unwrap());
+        let next: Arc<dyn ModelBackend> =
+            Arc::new(ModelClient::new("http://127.0.0.1:9/v1", None, "next".into()).unwrap());
+        let initial = ContextConfig::with_output_reserve(16_384, 1024).unwrap();
+        let desired = ContextConfig::with_output_reserve(262_144, 8192).unwrap();
+        let mut components = RuntimeComponents {
+            model: first,
+            context_budget: initial,
+            tools: ToolRegistry::builtin(),
+            context_factory: Arc::new(BuiltinContextFactory),
+            prompt: PromptComposer::default(),
+            events: None,
+        };
+        components.replace_model(next.clone(), desired);
+        assert!(Arc::ptr_eq(&components.model(), &next));
+        assert_eq!(components.context_budget.window(), 262_144);
+        assert_eq!(components.context_budget.output_reserve(), 8192);
+    }
 
     #[tokio::test]
     async fn profile_limits_and_levels_reach_the_runtime() {

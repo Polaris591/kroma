@@ -61,6 +61,52 @@ pub struct HistoryPoint {
     pub response: String,
 }
 
+fn active_attachment_paths(
+    messages: &[Message],
+    attachments: &[serde_json::Value],
+    vision: Option<bool>,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut active: HashSet<String> = attachments
+        .iter()
+        .filter(|part| part["type"] == "kroma_attachment")
+        .filter_map(|part| part["path"].as_str().map(str::to_owned))
+        .collect();
+    if vision == Some(false) {
+        return active;
+    }
+    // A fresh log or file should not make an image from the immediately
+    // preceding user turn disappear. New attachments take precedence when
+    // the combined image allowance would be exceeded.
+    let used = attachments
+        .iter()
+        .filter(|part| part["type"] == "kroma_attachment" && part["kind"] == "image")
+        .map(|part| {
+            part["bytes"]
+                .as_u64()
+                .unwrap_or(crate::attachments::MAX_IMAGE_BYTES as u64)
+        })
+        .sum::<u64>();
+    let mut remaining = crate::attachments::MAX_ACTIVE_IMAGE_BYTES.saturating_sub(used);
+    if let Some(previous) = messages.iter().rev().find(|msg| msg.role == "user") {
+        for part in previous.provider_items.as_deref().unwrap_or(&[]) {
+            if part["type"] != "kroma_attachment" || part["kind"] != "image" {
+                continue;
+            }
+            if let Some(path) = part["path"].as_str() {
+                let bytes = part["bytes"]
+                    .as_u64()
+                    .unwrap_or(crate::attachments::MAX_IMAGE_BYTES as u64);
+                if !active.contains(path) && bytes <= remaining {
+                    active.insert(path.to_owned());
+                    remaining -= bytes;
+                }
+            }
+        }
+    }
+    active
+}
+
 fn history_points(messages: &[Message]) -> Vec<HistoryPoint> {
     let mut points = vec![HistoryPoint {
         number: 0,
@@ -668,25 +714,8 @@ impl Agent {
         self.session.ensure_writable()?;
         self.prompt.refresh_for_task(&self.workdir, user_input)?;
         self.compression.new_user_turn();
-        let mut active_attachment_paths = attachments
-            .iter()
-            .filter(|part| part["type"] == "kroma_attachment")
-            .filter_map(|part| part["path"].as_str().map(str::to_owned))
-            .collect::<std::collections::HashSet<String>>();
-        // Retain a picture for one immediate follow-up question. There is no
-        // extra state or disk mutation: only the preceding user message can
-        // supply a prior image, and the next text-only turn ends that window.
-        if active_attachment_paths.is_empty() && self.model.accepts_images() != Some(false) {
-            if let Some(previous) = self.messages.iter().rev().find(|m| m.role == "user") {
-                for part in previous.provider_items.as_deref().unwrap_or(&[]) {
-                    if part["type"] == "kroma_attachment" && part["kind"] == "image" {
-                        if let Some(path) = part["path"].as_str() {
-                            active_attachment_paths.insert(path.to_owned());
-                        }
-                    }
-                }
-            }
-        }
+        let active_attachment_paths =
+            active_attachment_paths(&self.messages, attachments, self.model.accepts_images());
         let mut message = Message::new("user", user_input);
         if !attachments.is_empty() {
             message.provider_items = Some(attachments.to_vec());
@@ -734,9 +763,14 @@ impl Agent {
                 &active_attachment_paths,
                 self.model.accepts_images(),
             );
+            // Plan with the metadata the active provider actually sends.
+            // The complete view and WAL remain untouched, including opaque
+            // reasoning from other models and human-visible thinking history.
+            let mut budget_view = view.clone();
+            self.model.project_for_budget(&mut budget_view);
             let estimated_input_tokens = self
                 .context_budget
-                .validate_final_request(&view, &tool_definitions)?;
+                .validate_final_request(&budget_view, &tool_definitions)?;
             if let Some(events) = &self.events {
                 events.on_event(RuntimeEvent::ContextPrepared {
                     messages: view.len(),
@@ -853,7 +887,7 @@ impl Agent {
             // protected until a subsequent successful model response.
             self.compression.mark_consumed(self.messages.len());
             self.compression.observe(
-                &view,
+                &budget_view,
                 completion.usage.as_ref().and_then(|usage| usage.input),
                 completion.usage.as_ref().and_then(|usage| usage.cached),
             );
@@ -1193,6 +1227,45 @@ fn add_reported(total: Option<u64>, next: Option<u64>, first: bool) -> Option<u6
 mod tests {
     use super::*;
     use crate::provider::Usage;
+    use serde_json::json;
+
+    #[test]
+    fn previous_image_survives_a_new_log_but_respects_the_image_budget() {
+        let mut previous = Message::new("user", "Inspect A");
+        previous.provider_items = Some(vec![json!({
+            "type":"kroma_attachment","kind":"image","path":"A.png","bytes":4_000_000
+        })]);
+        let history = vec![Message::new("system", "system"), previous];
+        let log = json!({"type":"kroma_attachment","kind":"log","path":"new.log"});
+        let active = active_attachment_paths(&history, std::slice::from_ref(&log), Some(true));
+        assert!(active.contains("A.png"));
+        assert!(active.contains("new.log"));
+        let mut projected = history.clone();
+        crate::attachments::project_history(&mut projected, &active, Some(true));
+        assert_ne!(
+            projected[1].provider_items.as_ref().unwrap()[0]["mode"],
+            "reference"
+        );
+
+        let big_image = json!({"type":"kroma_attachment","kind":"image",
+            "path":"B.png","bytes":13_000_000});
+        let active = active_attachment_paths(&history, &[log, big_image], Some(true));
+        assert!(
+            !active.contains("A.png"),
+            "new images take priority within the 16 MiB limit"
+        );
+        assert!(active.contains("B.png"));
+        assert!(!active_attachment_paths(&history, &[], Some(false)).contains("A.png"));
+        let history = vec![
+            history[0].clone(),
+            history[1].clone(),
+            Message::new("user", "follow-up"),
+        ];
+        assert!(
+            !active_attachment_paths(&history, &[], Some(true)).contains("A.png"),
+            "only the immediately preceding user turn can provide an image"
+        );
+    }
 
     #[tokio::test]
     async fn failed_user_wal_append_prevents_followup_model_and_tool_execution() {

@@ -741,7 +741,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     let mut model_handle: Option<Arc<dyn ModelBackend>> = None;
     let runtime = app::default_runtime_with(config, |components| {
         components.events = Some(observer);
-        model_handle = Some(components.model.clone());
+        model_handle = Some(components.model());
         Ok(())
     })
     .await?;

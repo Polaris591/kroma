@@ -249,6 +249,79 @@ async fn streamable_http_modern_mcp_sse_and_inline_metadata() -> Result<()> {
 }
 
 #[tokio::test]
+async fn independent_mcp_servers_connect_concurrently_in_stable_order() -> Result<()> {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    let dir = test_directory("mcp-parallel-startup")?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let overlapped = Arc::new(AtomicBool::new(false));
+    let mut urls = serde_json::Map::new();
+    let mut servers = Vec::new();
+    for name in ["alpha", "beta"] {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        urls.insert(
+            name.into(),
+            json!({
+                "url": format!("http://{}/mcp", listener.local_addr()?),
+                "protocolVersion": "2026-07-28"
+            }),
+        );
+        let active = active.clone();
+        let overlapped = overlapped.clone();
+        servers.push(std::thread::spawn(move || -> Result<()> {
+            let (stream, _) = listener.accept()?;
+            let (_, _, request) = read_request(&stream)?;
+            assert_eq!(request["method"], "tools/list");
+            if active.fetch_add(1, Ordering::SeqCst) > 0 {
+                overlapped.store(true, Ordering::SeqCst);
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            active.fetch_sub(1, Ordering::SeqCst);
+            reply(
+                stream,
+                json!({"jsonrpc":"2.0","id":request["id"],
+                "result":{"tools":[{"name":"ping","description":name,
+                    "inputSchema":{"type":"object","properties":{}}}]}}),
+                false,
+            )
+        }));
+    }
+    fs::write(
+        dir.join(".kroma/mcp.json"),
+        serde_json::to_vec(&json!({"mcpServers":urls}))?,
+    )?;
+    let mut registry = ToolRegistry::builtin();
+    let registered = tokio::time::timeout(
+        Duration::from_secs(5),
+        register_configured(&mut registry, &dir),
+    )
+    .await??;
+    assert_eq!(registered, 2);
+    assert!(
+        overlapped.load(Ordering::SeqCst),
+        "server handshakes must overlap"
+    );
+    let names = registry
+        .definitions()
+        .into_iter()
+        .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &names[1..],
+        ["mcp__alpha__ping", "mcp__beta__ping"],
+        "completion order must not change the model tool schema"
+    );
+    for server in servers {
+        server.join().expect("MCP fixture thread")?;
+    }
+    drop(registry);
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn skills_expose_metadata_and_load_on_demand() -> Result<()> {
     let dir = test_directory("skills-e2e")?;
     let path = dir.join(".agents/skills/code-review");

@@ -191,6 +191,11 @@ Offline UI checks: `cargo test --locked` and (on Linux/macOS)
 
 The default startup now exposes `app::default_runtime_with(config, customize)`
 and its `RuntimeComponents` (model, tools, context policy, prompt, event sink).
+Extensions read the current model with `components.model()` and replace it via
+`components.replace_model(backend, ContextConfig)`, which updates the model
+and context/output limits together. An adapter may implement
+`ModelBackend::project_for_budget` to omit provider metadata that is not
+transmitted; this affects estimates only, never durable history.
 `CommandRegistry` accepts additional slash commands without editing the CLI.
 Tools return structured `ToolResult { content, is_error }`, while only the
 original content string is persisted and sent to the model. The Agent no longer

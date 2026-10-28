@@ -203,6 +203,21 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
 
 pub use crate::protocol::{FunctionCall, Message, ToolCall};
 
+// Opaque reasoning is bound to the original model/protocol/endpoint. Legacy
+// untagged records are safe only within the current tool-use turn, where the
+// Agent cannot switch models. Older untagged turns remain in the raw WAL but
+// must not leak an unverifiable signature into a different model's request.
+fn replay_opaque_reasoning(msg: &Message, index: usize, active_turn: usize, origin: &str) -> bool {
+    let stored = msg
+        .provider_items
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|item| item["type"] == "kroma_opaque_reasoning_origin")
+        .and_then(|item| item["id"].as_str());
+    stored.map_or(index >= active_turn, |id| id == origin)
+}
+
 #[derive(Deserialize)]
 struct StreamChunk {
     #[serde(default)]
@@ -775,6 +790,7 @@ impl ModelClient {
                         .expect("reasoning lock poisoned")
                         .as_deref()
                         .unwrap_or(&self.reasoning_effort),
+                    &self.opaque_reasoning_origin(),
                 )?;
                 if self.reasoning_summary_rejected.load(Ordering::Relaxed) {
                     if let Some(reasoning) =
@@ -799,6 +815,7 @@ impl ModelClient {
                     .as_deref()
                     .unwrap_or(&self.reasoning_effort),
                 &self.model_info,
+                &self.opaque_reasoning_origin(),
             ),
         }
     }
@@ -838,6 +855,40 @@ impl ModelClient {
                 "type": "kroma_chat_reasoning_origin",
                 "id": self.chat_reasoning_origin()
             }));
+    }
+
+    fn opaque_reasoning_origin(&self) -> String {
+        let protocol = match self.protocol {
+            ApiProtocol::Chat => "chat",
+            ApiProtocol::Responses => "responses",
+            ApiProtocol::Anthropic => "anthropic",
+        };
+        format!("{protocol}-{}", self.chat_reasoning_origin())
+    }
+
+    fn tag_opaque_reasoning(&self, message: &mut Message) {
+        let has_opaque = message
+            .provider_items
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|item| match self.protocol {
+                ApiProtocol::Responses => item["type"] == "reasoning",
+                ApiProtocol::Anthropic => matches!(
+                    item["type"].as_str(),
+                    Some("thinking" | "redacted_thinking")
+                ),
+                ApiProtocol::Chat => false,
+            });
+        if has_opaque {
+            message
+                .provider_items
+                .get_or_insert_with(Vec::new)
+                .push(json!({
+                    "type": "kroma_opaque_reasoning_origin",
+                    "id": self.opaque_reasoning_origin()
+                }));
+        }
     }
 
     fn chat_payload_with_tools(&self, messages: &[Message], tools: &[Value]) -> Value {
@@ -1076,6 +1127,7 @@ impl ModelClient {
                     }
                     return result.map(|mut completion| {
                         self.tag_chat_reasoning(&mut completion.message);
+                        self.tag_opaque_reasoning(&mut completion.message);
                         completion
                     });
                 }
@@ -1132,6 +1184,7 @@ impl ModelClient {
                         &[],
                         Some(max_tokens),
                         "auto",
+                        &self.opaque_reasoning_origin(),
                     )?;
                     p["stream"] = json!(false);
                     // Tool-free memory generation does not display reasoning.
@@ -1146,6 +1199,7 @@ impl ModelClient {
                         max_tokens,
                         "auto",
                         &self.model_info,
+                        &self.opaque_reasoning_origin(),
                     )?;
                     p["stream"] = json!(false);
                     p
@@ -1323,6 +1377,61 @@ impl ModelClient {
 }
 
 impl ModelBackend for ModelClient {
+    fn project_for_budget(&self, messages: &mut [Message]) {
+        let active_turn = messages
+            .iter()
+            .rposition(|msg| msg.role == "user")
+            .unwrap_or(0);
+        let expected_chat = self.chat_reasoning_origin();
+        let expected_opaque = self.opaque_reasoning_origin();
+        let deepseek_replay = (self.deepseek_thinking.is_some()
+            || self.model.to_ascii_lowercase().contains("deepseek"))
+            && self.reasoning_level().as_deref() != Some("off");
+        for (index, message) in messages.iter_mut().enumerate() {
+            if message.role == "tool" {
+                // The tool's error bit is used by some adapters but its
+                // metadata envelope is not transmitted to any provider.
+                message.provider_items = None;
+            } else if message.role == "assistant" {
+                match self.protocol {
+                    ApiProtocol::Chat => {
+                        let stored = message
+                            .provider_items
+                            .as_deref()
+                            .unwrap_or(&[])
+                            .iter()
+                            .find(|item| item["type"] == "kroma_chat_reasoning_origin")
+                            .and_then(|item| item["id"].as_str());
+                        let matching =
+                            stored.map_or(index >= active_turn, |id| id == expected_chat);
+                        if !deepseek_replay || !matching {
+                            message.reasoning_content = None;
+                        }
+                        message.provider_items = None;
+                    }
+                    ApiProtocol::Responses | ApiProtocol::Anthropic => {
+                        message.reasoning_content = None; // visual summary, not wire history
+                        let matching =
+                            replay_opaque_reasoning(message, index, active_turn, &expected_opaque);
+                        if let Some(items) = &mut message.provider_items {
+                            items.retain(|item| {
+                                matching
+                                    && match self.protocol {
+                                        ApiProtocol::Responses => item["type"] == "reasoning",
+                                        ApiProtocol::Anthropic => matches!(
+                                            item["type"].as_str(),
+                                            Some("thinking" | "redacted_thinking")
+                                        ),
+                                        ApiProtocol::Chat => false,
+                                    }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn accepts_images(&self) -> Option<bool> {
         if self.image_rejected.load(Ordering::Relaxed) {
             return Some(false);
@@ -2304,6 +2413,73 @@ mod tests {
                 .unwrap()["max_tokens"],
             32_768
         );
+    }
+
+    #[test]
+    fn opaque_reasoning_is_not_replayed_after_a_model_switch() {
+        for protocol in ["responses", "anthropic"] {
+            let first = ModelClient::new("https://api.example/v1", None, "old-model".into())
+                .unwrap()
+                .with_protocol(protocol)
+                .unwrap();
+            let replacement = ModelClient::new("https://api.example/v1", None, "new-model".into())
+                .unwrap()
+                .with_protocol(protocol)
+                .unwrap();
+            let mut assistant = Message::new("assistant", "completed");
+            assistant.provider_items = Some(vec![if protocol == "responses" {
+                json!({"type":"reasoning","id":"rs_opaque","encrypted_content":"opaque-secret"})
+            } else {
+                json!({"type":"thinking","thinking":"analysis","signature":"opaque-secret"})
+            }]);
+            first.tag_opaque_reasoning(&mut assistant);
+            let history = vec![
+                Message::new("system", "system"),
+                Message::new("user", "first"),
+                assistant.clone(),
+                Message::new("user", "next"),
+            ];
+            let raw = serde_json::to_string(&history).unwrap();
+            assert!(
+                first
+                    .payload(&history, &[], None)
+                    .unwrap()
+                    .to_string()
+                    .contains("opaque-secret"),
+                "same model {protocol} must preserve reasoning continuity"
+            );
+            assert!(
+                !replacement
+                    .payload(&history, &[], None)
+                    .unwrap()
+                    .to_string()
+                    .contains("opaque-secret"),
+                "other model must not receive incompatible opaque reasoning"
+            );
+            assert_eq!(
+                serde_json::to_string(&history).unwrap(),
+                raw,
+                "projection must never rewrite the authoritative session"
+            );
+            // A legacy untagged message can still complete the immediate
+            // tool-use turn, but must not carry unknown provenance forward.
+            let mut legacy = assistant;
+            legacy
+                .provider_items
+                .as_mut()
+                .unwrap()
+                .retain(|item| item["type"] != "kroma_opaque_reasoning_origin");
+            let legacy_history = vec![
+                Message::new("user", "first"),
+                legacy,
+                Message::new("user", "next"),
+            ];
+            assert!(!first
+                .payload(&legacy_history, &[], None)
+                .unwrap()
+                .to_string()
+                .contains("opaque-secret"));
+        }
     }
 
     #[test]

@@ -183,15 +183,19 @@ impl PromptComposer {
                     "Your only tool is shell. Use it to inspect and work with files when needed.",
                 );
             }
-            for addition in self
+            // Append the ordered contribution block as a whole. A project
+            // prompt quoting an extension's text must not suppress that
+            // extension; `contains()` confused mentions with activation.
+            // Request projections start from the persisted system message.
+            let additions = self
                 .additions
                 .iter()
                 .chain(&self.instruction_files)
                 .chain(&self.trailing)
-            {
-                if !system.contains(addition) {
-                    system.push_str(addition);
-                }
+                .map(String::as_str)
+                .collect::<String>();
+            if !additions.is_empty() && !system.ends_with(&additions) {
+                system.push_str(&additions);
             }
         }
     }
@@ -267,6 +271,36 @@ mod tests {
         assert!(!updated.contains("GLOBAL_MARKER"));
         assert!(updated.contains("UPDATED_PROJECT_MARKER"));
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn quoted_extension_text_does_not_suppress_its_contribution() -> Result<()> {
+        let snippet = "MANDATORY_EXTRA_DIRECTIVE";
+        let composer = PromptComposer::default().with_extra(snippet)?;
+        let mut view = vec![Message::new(
+            "system",
+            format!(
+                "Example from repository documentation: '{snippet}' (not an active instruction)."
+            ),
+        )];
+        composer.apply(&mut view);
+        let first = view[0].content.clone().unwrap();
+        assert!(
+            first.ends_with(snippet),
+            "extension is an active final contribution"
+        );
+        assert_eq!(
+            first.matches(snippet).count(),
+            2,
+            "quoted mention and contribution both remain"
+        );
+        composer.apply(&mut view);
+        assert_eq!(
+            view[0].content.as_deref(),
+            Some(first.as_str()),
+            "re-applying is idempotent"
+        );
         Ok(())
     }
 

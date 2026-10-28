@@ -13,10 +13,15 @@ pub(super) fn payload(
     max_tokens: usize,
     effort: &str,
     info: &ModelInfo,
+    origin: &str,
 ) -> Result<Value> {
     let mut system = Vec::new();
     let mut items: Vec<Value> = Vec::new();
-    for msg in messages {
+    let active_turn = messages
+        .iter()
+        .rposition(|msg| msg.role == "user")
+        .unwrap_or(0);
+    for (index, msg) in messages.iter().enumerate() {
         match msg.role.as_str() {
             "system" | "developer" => {
                 if let Some(text) = &msg.content {
@@ -36,7 +41,7 @@ pub(super) fn payload(
                         matches!(
                             v.get("type").and_then(Value::as_str),
                             Some("thinking" | "redacted_thinking")
-                        )
+                        ) && super::replay_opaque_reasoning(msg, index, active_turn, origin)
                     })
                     .collect::<Vec<_>>();
                 if let Some(text) = msg.content.as_deref().filter(|s| !s.is_empty()) {
@@ -547,6 +552,7 @@ mod tests {
             4096,
             "auto",
             &ModelInfo::default(),
+            "test-origin",
         )
         .unwrap();
         assert_eq!(

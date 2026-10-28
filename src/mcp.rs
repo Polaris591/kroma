@@ -631,15 +631,21 @@ pub async fn register_configured_report(
 ) -> Result<Registration> {
     let config = configured_servers(workdir)?;
     let mut report = Registration::default();
-    for (name, server) in config {
-        // Keep startup finite on unavailable endpoints. Running tool calls
-        // remain cancelable without an arbitrary elapsed-time cutoff.
-        let connected = tokio::time::timeout(Duration::from_secs(15), async {
-            let mut connection = Connection::connect(&server, workdir).await?;
-            let tools = connection.list_tools().await?;
-            Ok::<_, anyhow::Error>((connection, tools))
-        })
+    // Probe independent servers concurrently, but register their tools in
+    // config order so the model's tool schema/prompt prefix stays stable.
+    // A broken server should cost at most one 15s startup timeout, not N.
+    let connections =
+        futures_util::future::join_all(config.into_iter().map(|(name, server)| async move {
+            let connected = tokio::time::timeout(Duration::from_secs(15), async {
+                let mut connection = Connection::connect(&server, workdir).await?;
+                let tools = connection.list_tools().await?;
+                Ok::<_, anyhow::Error>((connection, tools))
+            })
+            .await;
+            (name, connected)
+        }))
         .await;
+    for (name, connected) in connections {
         let (connection, tools) = match connected {
             Ok(Ok(value)) => value,
             Ok(Err(error)) => {
