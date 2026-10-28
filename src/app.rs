@@ -1,0 +1,190 @@
+//! Default, dependency-free application composition.
+use crate::{
+    agent::Agent,
+    config::Config,
+    context::{BuiltinContextFactory, ContextConfig, ContextFactory},
+    events::EventSink,
+    mcp,
+    model::ModelBackend,
+    prompt::PromptComposer,
+    provider::ModelClient,
+    skills::{LoadSkill, SkillCatalog},
+    tools::ToolRegistry,
+};
+use anyhow::Result;
+use std::sync::Arc;
+
+/// The one startup composition point for CLI and future plugin hosts.
+/// An extension changes components here; it never edits Agent's loop.
+pub struct RuntimeComponents {
+    pub model: Arc<dyn ModelBackend>,
+    pub tools: ToolRegistry,
+    pub context_factory: Arc<dyn ContextFactory>,
+    pub prompt: PromptComposer,
+    pub events: Option<Arc<dyn EventSink>>,
+}
+
+pub struct DefaultRuntime {
+    pub agent: Agent,
+    pub skills: SkillCatalog,
+    pub startup_warnings: Vec<String>,
+}
+
+pub async fn default_runtime_with(
+    config: Config,
+    customize: impl FnOnce(&mut RuntimeComponents) -> Result<()>,
+) -> Result<DefaultRuntime> {
+    let (model, budget) = configured_model(&config).await?;
+    let skills = SkillCatalog::discover(&config.workdir)?;
+    let mut tools = ToolRegistry::builtin();
+    if !skills.is_empty() {
+        tools.register(Arc::new(LoadSkill(skills.clone())))?;
+    }
+    let mcp_status = mcp::register_configured_report(&mut tools, &config.workdir).await?;
+    if mcp_status.tools > 0 {
+        crate::runtime_log!("[mcp] registered {} tool(s)", mcp_status.tools);
+    }
+    let mut prompt = PromptComposer::default();
+    if let Some(metadata) = skills.metadata_prompt() {
+        prompt = prompt.with_trailing(metadata)?;
+    }
+    let mut components = RuntimeComponents {
+        model: Arc::new(model),
+        tools,
+        context_factory: Arc::new(BuiltinContextFactory),
+        prompt,
+        events: None,
+    };
+    customize(&mut components)?;
+    let agent = Agent::with_runtime_budget(
+        components.model,
+        components.tools,
+        components.context_factory,
+        components.prompt,
+        components.events,
+        config.workdir,
+        budget,
+    )?;
+    Ok(DefaultRuntime {
+        agent,
+        skills,
+        startup_warnings: mcp_status.unavailable,
+    })
+}
+
+pub async fn default_runtime(config: Config) -> Result<DefaultRuntime> {
+    default_runtime_with(config, |_| Ok(())).await
+}
+
+pub async fn model_from_profile(
+    profile: &crate::profiles::ProviderProfile,
+) -> Result<(Arc<dyn ModelBackend>, ContextConfig)> {
+    let config = Config::from_profile(profile, Default::default(), None)?;
+    let (model, budget) = configured_model(&config).await?;
+    Ok((Arc::new(model), budget))
+}
+
+async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig)> {
+    let mut model = ModelClient::new(
+        &config.base_url,
+        config.api_key.clone(),
+        config.model.clone(),
+    )?
+    .with_protocol(&config.api_protocol)?
+    .with_reasoning(
+        config.reasoning_effort.clone(),
+        config.deepseek_thinking.clone(),
+    )
+    .with_output_tokens(config.max_output_tokens)
+    .with_thinking_levels(config.thinking_levels.clone());
+    // A Chat profile with an explicit context window already provides the
+    // key limit needed to budget requests. The output reserve uses the
+    // configured limit if present, otherwise Kroma's conservative default.
+    // Do not impose a synchronous, optional /models lookup
+    // on every short-lived CLI invocation (gateways can spend 4s there).
+    // Other protocols retain capability discovery for compatibility.
+    let has_context =
+        config.context_window.is_some() || std::env::var_os("KROMA_CONTEXT_WINDOW").is_some();
+    let limits = if config.api_protocol == "chat" && has_context {
+        crate::runtime_log!("[model] using configured limits; skipping optional metadata lookup");
+        None
+    } else {
+        model.discover_model().await
+    };
+    // Precedence: environment override, then the saved profile, then upstream
+    // metadata, then Kroma's conservative default.
+    let budget = ContextConfig::from_env_with_limits(
+        config
+            .context_window
+            .or_else(|| limits.as_ref().and_then(|m| m.context_window)),
+        model.effective_output_tokens(),
+    )?;
+    Ok((model, budget))
+}
+
+pub async fn default_agent(config: Config) -> Result<Agent> {
+    Ok(default_runtime(config).await?.agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn profile_limits_and_levels_reach_the_runtime() {
+        // Port 9 refuses connections immediately, so model discovery falls
+        // back to the profile exactly as it does for endpoints without
+        // metadata.
+        let profile = crate::profiles::ProviderProfile {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "mock".into(),
+            api_key: None,
+            deepseek_thinking: None,
+            api_protocol: Some("chat".into()),
+            reasoning_effort: Some("high".into()),
+            context_window: Some(500_000),
+            max_output_tokens: Some(128_000),
+            thinking_levels: Some(vec!["medium".into(), "high".into(), "xhigh".into()]),
+        };
+        let (model, budget) = model_from_profile(&profile).await.unwrap();
+        assert_eq!(budget.window(), 500_000);
+        assert_eq!(budget.output_reserve(), 128_000);
+        assert_eq!(budget.available_input(), 372_000);
+        assert_eq!(model.reasoning_level().as_deref(), Some("high"));
+        assert!(model.set_reasoning_level("low").is_err());
+        model.set_reasoning_level("xhigh").unwrap();
+        assert_eq!(model.reasoning_level().as_deref(), Some("xhigh"));
+    }
+
+    #[tokio::test]
+    async fn complete_chat_profile_skips_slow_optional_model_discovery() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let profile = crate::profiles::ProviderProfile {
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            model: "deepseek".into(),
+            api_key: None,
+            deepseek_thinking: None,
+            api_protocol: Some("chat".into()),
+            reasoning_effort: Some("high".into()),
+            context_window: Some(50_000),
+            max_output_tokens: None,
+            thinking_levels: None,
+        };
+        let (_, budget) = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            model_from_profile(&profile),
+        )
+        .await
+        .expect("fully configured profile should not wait for /models")
+        .unwrap();
+        assert_eq!(budget.window(), 50_000);
+        assert_eq!(budget.output_reserve(), 4096);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "metadata endpoint should not be contacted"
+        );
+    }
+}

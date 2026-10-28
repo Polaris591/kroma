@@ -1,0 +1,108 @@
+[
+  {
+    "messages": [
+      {
+        "content": "You are Kroma, an AI coding agent. Your only tool is shell. Use it to inspect and work with files when needed. The starting working directory is <WORKDIR>. Be accurate about command results and do not claim a command ran unless a tool result confirms it. Avoid destructive commands unless explicitly requested. Reply concisely in the user's language.\nFor coding tasks, focus inspections on relevant files; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.",
+        "role": "system"
+      },
+      {
+        "content": "Inspect and report.",
+        "role": "user"
+      }
+    ],
+    "model": "mock-thinking",
+    "reasoning_effort": "high",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "thinking": {
+      "type": "enabled"
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Run a Bash command in the project working directory with pipefail enabled, so an upstream failed test is not hidden by tail. Returns exit_code, stdout and stderr. Pipelines ending in head may report SIGPIPE (141) despite useful output; distinguish that case from failed tests. Combine independent read/search inspections into a single concise command when useful. Keep checks relevant, avoid duplicating successful checks without code changes, and verify required tests.",
+          "name": "shell",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "description": "Shell command to execute",
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "content": "You are Kroma, an AI coding agent. Your only tool is shell. Use it to inspect and work with files when needed. The starting working directory is <WORKDIR>. Be accurate about command results and do not claim a command ran unless a tool result confirms it. Avoid destructive commands unless explicitly requested. Reply concisely in the user's language.\nFor coding tasks, focus inspections on relevant files; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.",
+        "role": "system"
+      },
+      {
+        "content": "Inspect and report.",
+        "role": "user"
+      },
+      {
+        "content": "",
+        "reasoning_content": "Inspect working directory",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"command\":\"printf ok\"}",
+              "name": "shell"
+            },
+            "id": "mock-call-1",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "{\"exit_code\":0,\"stderr\":\"\",\"stdout\":\"ok\"}",
+        "role": "tool",
+        "tool_call_id": "mock-call-1"
+      }
+    ],
+    "model": "mock-thinking",
+    "reasoning_effort": "high",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "thinking": {
+      "type": "enabled"
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Run a Bash command in the project working directory with pipefail enabled, so an upstream failed test is not hidden by tail. Returns exit_code, stdout and stderr. Pipelines ending in head may report SIGPIPE (141) despite useful output; distinguish that case from failed tests. Combine independent read/search inspections into a single concise command when useful. Keep checks relevant, avoid duplicating successful checks without code changes, and verify required tests.",
+          "name": "shell",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "description": "Shell command to execute",
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  }
+]

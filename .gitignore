@@ -1,0 +1,15 @@
+/target/
+/.env
+/.env.*
+!/.env.example
+*.swp
+# Python benchmark caches
+__pycache__/
+*.py[cod]
+# Local runtime and conversation artifacts (may contain private data)
+/.kroma/
+/sessions/
+*.json.wal
+*.log
+# Environment-specific Cargo source mirror; not part of project config
+/.cargo/config.toml

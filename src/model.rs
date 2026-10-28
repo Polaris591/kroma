@@ -1,0 +1,93 @@
+//! Small runtime model boundary. No protocol registry, plugin host or ABI.
+use crate::protocol::Message;
+use anyhow::Result;
+use serde_json::Value;
+use std::{future::Future, pin::Pin, time::Duration};
+
+pub type StreamFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+pub type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Default)]
+pub struct Usage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub total: Option<u64>,
+    pub cached: Option<u64>,
+    /// Subset of output, when supplied by the provider.
+    pub reasoning: Option<u64>,
+}
+
+pub struct Completion {
+    pub message: Message,
+    pub usage: Option<Usage>,
+    pub elapsed: Duration,
+    pub first_token: Option<Duration>,
+}
+
+/// A tool-free text-generation result. The default context implementation
+/// uses this for factual memory segments and consolidation.
+pub struct TextResult {
+    pub text: String,
+    pub usage: Option<Usage>,
+    pub elapsed: Duration,
+    pub requests: usize,
+}
+
+/// Legacy internal type name retained for existing benchmark consumers.
+pub type SummaryResult = TextResult;
+
+/// An implementation may use OpenAI-compatible HTTP, another protocol, or a
+/// deterministic test fake. Tools are supplied by the runtime, never chosen
+/// by the model adapter itself.
+pub trait ModelBackend: Send + Sync {
+    /// Upstream-declared vision capability. None is unknown, not false.
+    fn accepts_images(&self) -> Option<bool> {
+        None
+    }
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion>;
+
+    /// Optional live, provider-exposed reasoning. The reasoning callback is
+    /// separate from assistant text: it must never enter the answer stream.
+    /// Existing model backends can keep implementing only `complete`.
+    fn complete_with_reasoning<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+        _on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        self.complete(messages, tools, on_text)
+    }
+
+    /// Optional live effort control. Hosts can change it between (or during)
+    /// requests without replacing the backend or rebuilding the Agent.
+    /// The provider snapshots the setting when it builds the next request.
+    fn reasoning_level(&self) -> Option<String> {
+        None
+    }
+
+    /// Canonical advertised tiers; empty means unrestricted. Hosts derive
+    /// their picker from the active backend, never a stale profile copy.
+    fn thinking_levels(&self) -> &[String] {
+        &[]
+    }
+
+    fn set_reasoning_level(&self, _level: &str) -> Result<()> {
+        anyhow::bail!("this model backend does not support live reasoning settings")
+    }
+
+    /// Tool-free text generation, with an explicitly supplied system prompt.
+    /// Compression prompt design belongs to ContextPolicy, not to the HTTP
+    /// provider. This is Send for background APEC tasks.
+    fn generate_text<'a>(
+        &'a self,
+        system: &'a str,
+        text: &'a str,
+        output_tokens: usize,
+    ) -> ModelFuture<'a, TextResult>;
+}
