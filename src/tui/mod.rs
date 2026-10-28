@@ -3,6 +3,7 @@
 mod attachments;
 mod editor;
 mod markdown;
+mod picker;
 mod theme;
 mod view;
 
@@ -27,6 +28,7 @@ use crossterm::{
 };
 use editor::EditAction;
 use futures_util::StreamExt;
+use picker::{Action as PickerAction, Item as PickerItem, Kind as PickerKind, Picker};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, process::Command, sync::Arc};
 use theme::ThemeStore;
@@ -127,6 +129,34 @@ impl Drop for TerminalScreen {
     }
 }
 
+const SLASH_COMMANDS: &[&str] = &[
+    "/help",
+    "/new",
+    "/clear",
+    "/sessions",
+    "/resume",
+    "/continue",
+    "/rename",
+    "/model",
+    "/think",
+    "/theme",
+    "/tools",
+    "/skills",
+    "/usage",
+    "/diff",
+    "/export",
+    "/history",
+    "/fork",
+    "/rewind",
+    "/undo",
+    "/pending",
+    "/queue",
+    "/steer",
+    "/editor",
+    "/exit",
+    "/quit",
+];
+
 enum InputAction {
     None,
     Quit,
@@ -221,6 +251,124 @@ fn save_model_choice(state: &mut UiState, model: &dyn ModelBackend) {
     }
 }
 
+fn picker_items(
+    state: &UiState,
+    kind: PickerKind,
+    query: &str,
+    workdir: &std::path::Path,
+) -> Result<Vec<PickerItem>> {
+    Ok(match kind {
+        PickerKind::Commands => SLASH_COMMANDS
+            .iter()
+            .map(|command| PickerItem::new(*command, *command, "command"))
+            .collect(),
+        PickerKind::Models => crate::profiles::Profiles::load()?
+            .profiles
+            .iter()
+            .map(|(name, profile)| {
+                PickerItem::new(
+                    format!("{name} · {}", profile.model),
+                    format!("/model {name}"),
+                    profile.api_protocol.as_deref().unwrap_or("chat"),
+                )
+            })
+            .collect(),
+        PickerKind::Sessions => state
+            .model_catalog
+            .as_ref()
+            .context("session catalog is unavailable")?
+            .list()?
+            .into_iter()
+            .map(|session| {
+                PickerItem::new(
+                    session.name.unwrap_or_else(|| session.id.clone()),
+                    format!("/resume {}", session.id),
+                    session.id,
+                )
+            })
+            .collect(),
+        PickerKind::Files => crate::convenience::suggestions(workdir, &format!("@{query}"))?
+            .into_iter()
+            .map(|path| {
+                // Filesystem paths are Windows backslash-separated; the
+                // query and inline @ references use portable slash syntax.
+                let path = path.replace('\\', "/");
+                PickerItem::new(&path, &path, "file")
+            })
+            .collect(),
+    })
+}
+
+fn open_picker(state: &mut UiState, kind: PickerKind, query: &str, workdir: &std::path::Path) {
+    match picker_items(state, kind, query, workdir) {
+        Ok(items) => state.picker = Some(Picker::new(kind, items, query)),
+        Err(error) => state.note(format!("{}: {error:#}", kind.title())),
+    }
+}
+
+fn picker_event(state: &mut UiState, event: Event, workdir: &std::path::Path) -> InputAction {
+    let action = match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => {
+            state.picker.as_mut().unwrap().key(key)
+        }
+        Event::Paste(text) => {
+            let picker = state.picker.as_mut().unwrap();
+            for ch in text.chars().filter(|ch| *ch != '\r' && *ch != '\n') {
+                picker.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            PickerAction::Changed
+        }
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => state
+            .picker
+            .as_mut()
+            .unwrap()
+            .key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => state
+            .picker
+            .as_mut()
+            .unwrap()
+            .key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        _ => PickerAction::None,
+    };
+    match action {
+        PickerAction::Close => state.picker = None,
+        PickerAction::NextKind => {
+            let kind = state.picker.as_ref().unwrap().kind.next();
+            open_picker(state, kind, "", workdir);
+        }
+        PickerAction::Changed => {
+            if state.picker.as_ref().unwrap().kind == PickerKind::Files {
+                let query = state.picker.as_ref().unwrap().query.clone();
+                let items = picker_items(state, PickerKind::Files, &query, workdir);
+                if let Ok(items) = items {
+                    state.picker.as_mut().unwrap().items = items;
+                }
+            }
+        }
+        PickerAction::Selected(value) => {
+            let kind = state.picker.take().unwrap().kind;
+            if kind == PickerKind::Files {
+                if value.ends_with('/') {
+                    open_picker(state, kind, value.trim_start_matches('@'), workdir);
+                } else if state.editor.word_before_caret().starts_with('@') {
+                    state.editor.replace_word_before_caret(&value);
+                } else {
+                    let separator = if state.editor.word_before_caret().is_empty() {
+                        ""
+                    } else {
+                        " "
+                    };
+                    state.editor.paste(&format!("{separator}{value}"));
+                }
+            } else {
+                return InputAction::Submit(value);
+            }
+        }
+        PickerAction::None => {}
+    }
+    InputAction::None
+}
+
 fn key_action(
     state: &mut UiState,
     key: KeyEvent,
@@ -278,40 +426,18 @@ fn key_action(
             state.scroll(state.viewport_height.max(3) as isize / 2);
             return InputAction::None;
         }
+        KeyCode::End if ctrl => {
+            state.scroll_to_bottom();
+            return InputAction::None;
+        }
         KeyCode::Tab if !running => {
             let prefix = state.editor.text().trim();
             if prefix.starts_with('/') && !prefix.contains(char::is_whitespace) {
-                let matches = [
-                    "/help",
-                    "/new",
-                    "/clear",
-                    "/sessions",
-                    "/resume",
-                    "/continue",
-                    "/rename",
-                    "/model",
-                    "/think",
-                    "/theme",
-                    "/tools",
-                    "/skills",
-                    "/usage",
-                    "/diff",
-                    "/export",
-                    "/history",
-                    "/fork",
-                    "/rewind",
-                    "/undo",
-                    "/pending",
-                    "/queue",
-                    "/steer",
-                    "/editor",
-                    "/exit",
-                    "/quit",
-                ]
-                .iter()
-                .filter(|command| command.starts_with(prefix))
-                .copied()
-                .collect::<Vec<_>>();
+                let matches = SLASH_COMMANDS
+                    .iter()
+                    .filter(|command| command.starts_with(prefix))
+                    .copied()
+                    .collect::<Vec<_>>();
                 if matches.len() == 1 {
                     state.editor.replace_all(matches[0]);
                 } else if !matches.is_empty() {
@@ -369,7 +495,18 @@ fn input_event(
     {
         state.dismiss_notification();
     }
+    if state.picker.is_some() {
+        return picker_event(state, event, workdir);
+    }
     match event {
+        Event::Key(key)
+            if !running
+                && !state.attach_mode
+                && key.code == KeyCode::Char('p')
+                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            open_picker(state, PickerKind::Commands, "", workdir);
+        }
         Event::Key(key)
             if matches!(key.code, KeyCode::Char('v' | 'V'))
                 && key.modifiers.contains(KeyModifiers::ALT) =>
@@ -414,7 +551,12 @@ fn input_event(
                         state.editor.replace_word_before_caret(&matches[0]);
                     }
                     Ok(matches) if !matches.is_empty() => {
-                        state.info("FILES", matches.join("  ·  "));
+                        open_picker(
+                            state,
+                            PickerKind::Files,
+                            word.trim_start_matches('@'),
+                            workdir,
+                        );
                     }
                     Ok(_) => state.note("No matching file"),
                     Err(error) => state.note(format!("File completion: {error:#}")),
@@ -473,17 +615,11 @@ fn input_event(
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
                 if let Some(selected) = state.selected_text() {
-                    // OSC 52 copies to the terminal's clipboard, including
-                    // supported remote/SSH terminals. No host-side X11 or
-                    // platform-specific clipboard dependency is required.
-                    let encoded = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        selected.as_bytes(),
-                    );
-                    use std::io::Write;
-                    let _ = write!(io::stdout(), "\x1b]52;c;{}\x07", encoded);
-                    let _ = io::stdout().flush();
-                    state.note("Selection copied (if terminal supports OSC 52)");
+                    match copy_selection(&selected) {
+                        Ok(true) => state.note("Copied selection to desktop clipboard"),
+                        Ok(false) => state.note("OSC 52 copy sent · terminal support required"),
+                        Err(error) => state.note(format!("Copy failed: {error}")),
+                    }
                 }
             }
             _ => {}
@@ -493,9 +629,32 @@ fn input_event(
     InputAction::None
 }
 
+/// Local desktop clipboard is more reliable than OSC 52 in Windows Terminal;
+/// remote sessions must use OSC 52 so the bytes reach the user's terminal,
+/// not the SSH server's clipboard.
+fn copy_selection(selected: &str) -> Result<bool> {
+    let remote =
+        std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some();
+    if !remote {
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            if clipboard.set_text(selected.to_owned()).is_ok() {
+                return Ok(true);
+            }
+        }
+    }
+    use std::io::Write;
+    let encoded = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        selected.as_bytes(),
+    );
+    write!(io::stdout(), "\x1b]52;c;{}\x07", encoded)?;
+    io::stdout().flush()?;
+    Ok(false)
+}
+
 fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend) -> bool {
     if input == "/help" {
-        state.info("HELP", "Enter to send; Shift+Enter or Ctrl+J to add a line.\nPgUp/PgDn or mouse wheel scroll; F2 changes theme.\nShift+Tab cycles thinking (or /think high).\nCtx shows last request: ~ estimated, otherwise API-reported input.\nCtrl+O expands tool output; Ctrl+R shows reasoning.\n/history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo\n/theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]\n/queue task · /skills · /tools\nWhile running: write steering text, or /queue task; Ctrl+C cancels.\nCtrl+Q quits when idle.");
+        state.info("HELP", "Enter to send; Shift+Enter or Ctrl+J to add a line.\nPgUp/PgDn or mouse wheel scroll; Ctrl+End returns to latest output.\nCtrl+P searches commands; Tab switches model/session/file categories.\nF2 changes theme; Shift+Tab cycles thinking (or /think high).\nCtx shows last request: ~ estimated, otherwise API-reported input.\nCtrl+O expands tool output; Ctrl+R shows reasoning.\n/history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo\n/theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]\n/queue task · /skills · /tools\nWhile running: write steering text, or /queue task; Ctrl+C cancels.\nCtrl+Q quits when idle.");
         return true;
     }
     if input == "/usage" {
@@ -873,32 +1032,11 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     continue;
                 }
                 if text == "/model" {
-                    match crate::profiles::Profiles::load() {
-                        Ok(profiles) => {
-                            let active = state.model_profile.as_deref();
-                            state.info(
-                                "MODELS",
-                                profiles
-                                    .profiles
-                                    .iter()
-                                    .map(|(name, p)| {
-                                        format!(
-                                            "{} {name} · {} · {}",
-                                            if active == Some(name.as_str()) {
-                                                "*"
-                                            } else {
-                                                " "
-                                            },
-                                            p.model,
-                                            p.api_protocol.as_deref().unwrap_or("chat")
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            );
-                        }
-                        Err(error) => state.note(format!("Models: {error:#}")),
-                    }
+                    open_picker(&mut state, PickerKind::Models, "", &workdir);
+                    continue;
+                }
+                if text == "/sessions" {
+                    open_picker(&mut state, PickerKind::Sessions, "", &workdir);
                     continue;
                 }
                 if let Some(name) = text.strip_prefix("/model ") {
@@ -1089,6 +1227,118 @@ mod tests {
         );
         assert!(matches!(action, InputAction::None));
         assert_eq!(ui.editor.text(), "/exit");
+    }
+
+    #[test]
+    fn common_picker_filters_commands_without_overwriting_unsent_draft() {
+        let (mut ui, model) = setup();
+        let dir = std::env::temp_dir();
+        ui.editor.paste("keep this unsent note");
+        let trigger = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        input_event(&mut ui, Event::Key(trigger), false, &model, &dir);
+        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::Commands);
+        for ch in "usage".chars() {
+            input_event(
+                &mut ui,
+                Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                false,
+                &model,
+                &dir,
+            );
+        }
+        let result = input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            false,
+            &model,
+            &dir,
+        );
+        assert!(matches!(result, InputAction::Submit(text) if text == "/usage"));
+        assert!(ui.picker.is_none());
+        assert_eq!(ui.editor.text(), "keep this unsent note");
+        input_event(&mut ui, Event::Key(trigger), false, &model, &dir);
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        input_event(&mut ui, Event::Key(tab), false, &model, &dir);
+        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::Models);
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            false,
+            &model,
+            &dir,
+        );
+        assert!(ui.picker.is_none());
+        assert_eq!(ui.editor.text(), "keep this unsent note");
+    }
+
+    #[test]
+    fn file_search_picker_replaces_only_the_file_word() -> Result<()> {
+        let (mut ui, model) = setup();
+        let dir = std::env::temp_dir().join(format!("kroma-picker-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src"))?;
+        for name in ["agent.rs", "app.rs"] {
+            std::fs::write(dir.join("src").join(name), "// fixture")?;
+        }
+        ui.editor.paste("Review @src/a");
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            false,
+            &model,
+            &dir,
+        );
+        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::Files);
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            false,
+            &model,
+            &dir,
+        );
+        assert!(ui.editor.text().starts_with("Review @src/"));
+        assert!(ui.editor.text().ends_with(".rs"));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn named_sessions_are_searchable_and_switch_preserves_the_draft() -> Result<()> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("kroma-picker-sessions-{nonce}"));
+        std::fs::create_dir_all(&root)?;
+        let catalog = crate::sessions::SessionCatalog::from_default(root.join("session.json"))?;
+        let (id, path) = catalog.new_path()?;
+        std::fs::write(path, "{}")?;
+        catalog.name_session(&id, "Review Kroma")?;
+        let (mut state, model) = setup();
+        state.editor.paste("my unsent task");
+        state.model_catalog = Some(catalog);
+        state.session = id.clone();
+        state.refresh_session_title();
+        assert_eq!(state.session_label(), "Review Kroma");
+        open_picker(&mut state, PickerKind::Sessions, "", &root);
+        for ch in "Review".chars() {
+            input_event(
+                &mut state,
+                Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                false,
+                &model,
+                &root,
+            );
+        }
+        let chosen = input_event(
+            &mut state,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            false,
+            &model,
+            &root,
+        );
+        assert!(matches!(chosen, InputAction::Submit(ref command)
+            if command == &format!("/resume {id}")));
+        assert_eq!(state.editor.text(), "my unsent task");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

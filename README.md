@@ -40,14 +40,16 @@ framework, a second agent loop, or a mandatory plugin system.
   **`kroma --continue`** opens that conversation directly in the TUI. Plain
   `kroma` remains unchanged; the recent session is never restored implicitly.
 - **Mouse copy:** drag-select visible conversation text, then right-click to
-  copy it using OSC 52. The terminal must permit OSC 52 clipboard writes;
-  unsupported terminals may ignore the command. Mouse-wheel scrolling stays
-  enabled and does not select or copy anything by itself.
+  copy. A local desktop uses the system clipboard directly; SSH sessions and
+  machines without a local clipboard send OSC 52 to the terminal instead.
+  OSC 52 requires compatible terminal settings, so the fallback confirms only
+  that the request was sent. Mouse-wheel scrolling stays enabled.
 - **Live Shell output** is previewed in the current tool activity while a
   command runs, with full stdout/stderr still stored by the existing Shell
   capture mechanism. The live preview is not sent to the model as extra text.
-- **`/rename title`** names the current session; **`/sessions`** lists
-  names and IDs, and **`/resume`** accepts a unique name or ID. Session names
+- **`/rename title`** names the current session; **`/sessions`** opens a
+  searchable TUI session picker (the CLI lists names and IDs), and
+  **`/resume`** accepts a unique name or ID. Session names
   are lightweight metadata; source session files and WAL are unchanged.
 - **Ctrl+Z / Ctrl+Y** undo and redo edits to the input box, not project
   files or conversation history. **Ctrl+G** edits the current unsent draft;
@@ -78,7 +80,9 @@ box. User prompts and assistant prose have distinct heading treatments;
 tools appear as compact activity lines, with Ctrl+O expanding output and
 Ctrl+R expanding reasoning. Colors are restrained and all built-in dark/light
 text and status colors are tested for at least 4.5:1 contrast against the
-page background. Custom TOML theme keys and keyboard shortcuts remain
+page background. Mono uses the terminal's default foreground/background,
+including light terminal themes; fenced code includes a language label and
+Diff additions/deletions use distinct semantic colors. Custom TOML theme keys and keyboard shortcuts remain
 compatible with V1. No UI plugin framework, layout config or additional
 renderer dependency was introduced.
 
@@ -97,10 +101,19 @@ sessions and the existing slash commands. Shortcuts:
 
 - **Enter** sends; **Shift+Enter**, **Alt+Enter** or **Ctrl+J** insert a newline.
   Bracketed multi-line paste is supported; Up/Down navigate input and history.
-- **PgUp/PgDn** or mouse wheel scroll conversation; **Ctrl+O** expands tool
-  outputs; **Ctrl+R** shows reasoning if available.
+- **PgUp/PgDn** or mouse wheel scroll conversation; scrolling up pins the
+  reading position even as the model streams, and **Ctrl+End** returns to the
+  latest output. **Ctrl+O** expands tool outputs; **Ctrl+R** shows reasoning.
+- **Ctrl+P** opens the searchable picker; **Tab** changes its category among
+  commands, model profiles, sessions, and files. Type to filter, Up/Down to
+  select, Enter to confirm, Esc to dismiss without deleting an unsent draft.
+  The **`/model`** and **`/sessions`** commands open the respective pickers;
+  typing **`@path`** and pressing Tab opens file choices when several match.
+- Input editing respects complete Unicode grapheme clusters (including joined
+  Emoji and combining marks), while inline attachment chips remain atomic.
 - Older conversation history is rendered on demand as you scroll upward.
-  Completed text layout is cached between unchanged frames.
+  Completed text layout is cached between unchanged frames; only visible rows
+  are copied to the terminal. Plain usage updates do not reflow the history.
 - **F2** cycles dark/light/mono themes; `/theme dark`, `/theme light`,
   `/theme mono` select a theme immediately, and `/theme reload` rereads the
   on-disk theme. `/help` shows the TUI command summary.

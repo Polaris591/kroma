@@ -2,7 +2,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use std::collections::HashMap;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Single private-use scalar per attachment. It behaves like one character
 /// to the caret/backspace, but renders as a readable inline chip.
@@ -26,7 +27,7 @@ struct EditSnapshot {
 #[derive(Default)]
 pub struct Editor {
     text: String,
-    caret: usize, // character index, never byte index
+    caret: usize, // Unicode char index on a grapheme boundary, never a byte index
     attachment_labels: HashMap<char, String>,
     history: Vec<HistoryEntry>,
     history_index: Option<usize>,
@@ -103,6 +104,63 @@ impl Editor {
             .char_indices()
             .nth(char_index)
             .map_or(self.text.len(), |(i, _)| i)
+    }
+
+    fn previous_grapheme(&self) -> usize {
+        let position = self.byte_index(self.caret);
+        self.text
+            .grapheme_indices(true)
+            .take_while(|(index, _)| *index < position)
+            .last()
+            .map_or(0, |(index, _)| self.text[..index].chars().count())
+    }
+
+    fn next_grapheme(&self) -> usize {
+        let position = self.byte_index(self.caret);
+        self.text
+            .grapheme_indices(true)
+            .find(|(index, grapheme)| index + grapheme.len() > position)
+            .map_or(self.text.chars().count(), |(index, grapheme)| {
+                self.text[..index + grapheme.len()].chars().count()
+            })
+    }
+
+    fn visual_width(&self, start: usize, end: usize) -> usize {
+        self.text[self.byte_index(start)..self.byte_index(end)]
+            .graphemes(true)
+            .map(|part| {
+                part.chars()
+                    .next()
+                    .and_then(|ch| self.attachment_labels.get(&ch))
+                    .filter(|_| part.chars().count() == 1)
+                    .map_or_else(
+                        || UnicodeWidthStr::width(part),
+                        |label| UnicodeWidthStr::width(label.as_str()),
+                    )
+            })
+            .sum()
+    }
+
+    fn caret_at_column(&self, start: usize, end: usize, target: usize) -> usize {
+        let mut caret = start;
+        let mut column = 0;
+        for grapheme in self.text[self.byte_index(start)..self.byte_index(end)].graphemes(true) {
+            let width = grapheme
+                .chars()
+                .next()
+                .and_then(|ch| self.attachment_labels.get(&ch))
+                .filter(|_| grapheme.chars().count() == 1)
+                .map_or_else(
+                    || UnicodeWidthStr::width(grapheme),
+                    |label| UnicodeWidthStr::width(label.as_str()),
+                );
+            if column + width > target {
+                break;
+            }
+            column += width;
+            caret += grapheme.chars().count();
+        }
+        caret
     }
 
     fn insert(&mut self, input: &str) {
@@ -249,7 +307,7 @@ impl Editor {
     fn move_vertical(&mut self, up: bool) {
         let chars: Vec<char> = self.text.chars().collect();
         let start = self.line_start();
-        let column = self.caret.saturating_sub(start);
+        let column = self.visual_width(start, self.caret);
         if up {
             if start == 0 {
                 self.history_step(true);
@@ -260,7 +318,7 @@ impl Editor {
                 .iter()
                 .rposition(|&c| c == '\n')
                 .map_or(0, |i| i + 1);
-            self.caret = previous_start + column.min(previous_end - previous_start);
+            self.caret = self.caret_at_column(previous_start, previous_end, column);
         } else {
             let end = self.line_end();
             if end == chars.len() {
@@ -272,7 +330,7 @@ impl Editor {
                 .iter()
                 .position(|&c| c == '\n')
                 .map_or(chars.len(), |i| next_start + i);
-            self.caret = next_start + column.min(next_end - next_start);
+            self.caret = self.caret_at_column(next_start, next_end, column);
         }
     }
 
@@ -344,20 +402,20 @@ impl Editor {
             KeyCode::Tab => self.insert("    "),
             KeyCode::Backspace if self.caret > 0 => {
                 self.checkpoint();
-                let start = self.byte_index(self.caret - 1);
-                let end = self.byte_index(self.caret);
-                self.text.replace_range(start..end, "");
-                self.caret -= 1;
+                let previous = self.previous_grapheme();
+                self.text
+                    .replace_range(self.byte_index(previous)..self.byte_index(self.caret), "");
+                self.caret = previous;
             }
             KeyCode::Delete if self.caret < self.text.chars().count() => {
                 self.checkpoint();
                 self.text.replace_range(
-                    self.byte_index(self.caret)..self.byte_index(self.caret + 1),
+                    self.byte_index(self.caret)..self.byte_index(self.next_grapheme()),
                     "",
                 );
             }
-            KeyCode::Left => self.caret = self.caret.saturating_sub(1),
-            KeyCode::Right => self.caret = (self.caret + 1).min(self.text.chars().count()),
+            KeyCode::Left => self.caret = self.previous_grapheme(),
+            KeyCode::Right => self.caret = self.next_grapheme(),
             KeyCode::Home => self.caret = self.line_start(),
             KeyCode::End => self.caret = self.line_end(),
             KeyCode::Up => self.move_vertical(true),
@@ -375,33 +433,34 @@ impl Editor {
         let mut rows = vec![String::new()];
         let mut col = 0usize;
         let mut cursor = (0usize, 0usize);
-        for (i, ch) in self.text.chars().enumerate() {
-            if i == self.caret {
-                cursor = (rows.len() - 1, col);
-            }
-            if ch == '\n' {
+        let mut char_index = 0;
+        for grapheme in self.text.graphemes(true) {
+            if grapheme == "\n" {
+                if char_index == self.caret {
+                    cursor = (rows.len() - 1, col);
+                }
                 rows.push(String::new());
                 col = 0;
+                char_index += 1;
                 continue;
             }
-            let label = self.attachment_labels.get(&ch);
-            let cells = label.map_or_else(
-                || UnicodeWidthChar::width(ch).unwrap_or(0),
-                |label| UnicodeWidthStr::width(label.as_str()),
-            );
+            let label = grapheme
+                .chars()
+                .next()
+                .and_then(|ch| self.attachment_labels.get(&ch))
+                .filter(|_| grapheme.chars().count() == 1);
+            let displayed = label.map_or(grapheme, String::as_str);
+            let cells = UnicodeWidthStr::width(displayed);
             if col + cells > width && col > 0 {
                 rows.push(String::new());
                 col = 0;
-                if i == self.caret {
-                    cursor = (rows.len() - 1, 0);
-                }
             }
-            if let Some(label) = label {
-                rows.last_mut().unwrap().push_str(label);
-            } else {
-                rows.last_mut().unwrap().push(ch);
+            if char_index == self.caret {
+                cursor = (rows.len() - 1, col);
             }
+            rows.last_mut().unwrap().push_str(displayed);
             col += cells;
+            char_index += grapheme.chars().count();
         }
         if self.caret == self.text.chars().count() {
             cursor = (rows.len() - 1, col);
@@ -431,6 +490,44 @@ mod tests {
     use super::*;
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn grapheme_navigation_and_deletion_keep_emoji_and_combining_marks_intact() {
+        let mut editor = Editor::default();
+        editor.paste("a e\u{301} 👩‍💻 你好");
+        editor.key(key(KeyCode::Home));
+        editor.key(key(KeyCode::Right));
+        editor.key(key(KeyCode::Right));
+        editor.key(key(KeyCode::Delete));
+        assert_eq!(
+            editor.text(),
+            "a  👩‍💻 你好",
+            "combining mark and letter delete together"
+        );
+        editor.key(key(KeyCode::Right));
+        editor.key(key(KeyCode::Backspace));
+        assert_eq!(editor.text(), "a 👩‍💻 你好");
+        editor.key(key(KeyCode::Delete));
+        assert_eq!(editor.text(), "a  你好", "ZWJ emoji deletes as one unit");
+        editor.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert!(editor.text().contains("👩‍💻"), "undo restores full grapheme");
+        let (text, col, row) = editor.viewport(12, 4);
+        assert!(text.contains("👩‍💻"));
+        assert!(col < 12 && row < 4);
+    }
+
+    #[test]
+    fn unicode_vertical_motion_matches_cell_columns_not_codepoints() {
+        let mut editor = Editor::default();
+        editor.paste("中文ab\nabcde");
+        editor.key(key(KeyCode::Home));
+        for _ in 0..3 {
+            editor.key(key(KeyCode::Right));
+        }
+        editor.key(key(KeyCode::Up));
+        editor.key(key(KeyCode::Char('!')));
+        assert_eq!(editor.text(), "中!文ab\nabcde");
     }
 
     #[test]

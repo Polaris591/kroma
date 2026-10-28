@@ -1,7 +1,7 @@
 //! Styled Markdown for a terminal. Keep the parser separate from Agent and
 //! leave layout/wrapping to Ratatui rather than maintaining our own renderer.
 use super::theme::Theme;
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -116,6 +116,7 @@ pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'
     let mut styles = vec![Style::default().fg(theme.text)];
     let mut list_depth = 0usize;
     let mut in_code = false;
+    let mut code_language: Option<String> = None;
     let mut last_blank = false;
     let mut table: Option<TableContent> = None;
 
@@ -189,12 +190,26 @@ pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'
                         .fg(theme.accent)
                         .add_modifier(Modifier::UNDERLINED),
                 ),
-                Tag::CodeBlock(_) => {
+                Tag::CodeBlock(kind) => {
                     if !spans.is_empty() {
                         emit_line(&mut lines, &mut spans, &mut last_blank);
                     }
                     blank_after(&mut lines);
                     in_code = true;
+                    code_language = match kind {
+                        CodeBlockKind::Fenced(info) => info
+                            .split_whitespace()
+                            .next()
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_ascii_lowercase),
+                        CodeBlockKind::Indented => None,
+                    };
+                    if let Some(language) = code_language.as_deref() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {language}"),
+                            Style::default().fg(theme.muted),
+                        )));
+                    }
                     styles.push(Style::default().fg(theme.code));
                 }
                 Tag::List(_) => {
@@ -243,6 +258,7 @@ pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'
                 }
                 TagEnd::CodeBlock => {
                     in_code = false;
+                    code_language = None;
                     styles.pop();
                     if !spans.is_empty() {
                         emit_line(&mut lines, &mut spans, &mut last_blank);
@@ -278,7 +294,22 @@ pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'
                         if in_code && spans.is_empty() {
                             spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
                         }
-                        spans.push(Span::styled(chunk.to_owned(), style));
+                        let code_style = if in_code && code_language.as_deref() == Some("diff") {
+                            match chunk.chars().next() {
+                                Some('+') => Style::default().fg(theme.user),
+                                Some('-') => Style::default().fg(theme.error),
+                                Some('@') => Style::default().fg(theme.accent),
+                                _ => style,
+                            }
+                        } else if in_code
+                            && (chunk.trim_start().starts_with("//")
+                                || chunk.trim_start().starts_with('#'))
+                        {
+                            Style::default().fg(theme.muted)
+                        } else {
+                            style
+                        };
+                        spans.push(Span::styled(chunk.to_owned(), code_style));
                         last_blank = false;
                     }
                 }
@@ -367,6 +398,38 @@ mod tests {
         assert!(text[table + 2].contains("架构设计") && text[table + 2].contains("9.0"));
         assert!(text[table + 3].contains("测试质量") && text[table + 3].contains("8.5"));
         assert!(text.iter().any(|line| line.contains("结论")));
+    }
+
+    #[test]
+    fn fenced_code_and_diff_have_language_labels_and_semantic_rows() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let markdown = "Before\n\n```rust\nfn greet() {}\n// comment\n```\n\n```diff\n@@ -1,1 +1,1 @@\n- old\n+ new\n unchanged\n```";
+        let rendered = render_with_width(markdown, theme, 80);
+        let lines = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(lines.iter().any(|line| line.trim() == "rust"));
+        assert!(lines.iter().any(|line| line.trim() == "diff"));
+        assert!(lines.iter().any(|line| line.contains("│ fn greet()")));
+        assert!(lines.iter().any(|line| line.contains("│ + new")));
+        let added = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("+ new"))
+            .unwrap();
+        let removed = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("- old"))
+            .unwrap();
+        assert_eq!(added.style.fg, Some(theme.user));
+        assert_eq!(removed.style.fg, Some(theme.error));
     }
 
     #[test]

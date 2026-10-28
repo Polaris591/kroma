@@ -74,14 +74,16 @@ impl Theme {
                 error: Color::Rgb(170, 50, 61),
             },
             "mono" => Self {
+                // Respect the user's native foreground/background pair.
+                // White foreground on a light terminal used to disappear.
                 background: Color::Reset,
-                text: Color::White,
-                muted: Color::Gray,
-                accent: Color::White,
+                text: Color::Reset,
+                muted: Color::Reset,
+                accent: Color::Reset,
                 border: Color::DarkGray,
-                user: Color::White,
-                tool: Color::Gray,
-                code: Color::White,
+                user: Color::Reset,
+                tool: Color::Reset,
+                code: Color::Reset,
                 error: Color::Red,
             },
             other => bail!("unknown theme '{other}'; available: dark, light, mono"),
@@ -258,6 +260,20 @@ mod tests {
             assert_ne!(colors.input_surface(), colors.background);
         }
     }
+    #[test]
+    fn monochrome_theme_uses_terminal_default_foreground_and_background() {
+        let theme = Theme::from_settings(&ThemeSettings {
+            preset: "mono".into(),
+            ..ThemeSettings::default()
+        })
+        .unwrap();
+        assert_eq!(theme.background, Color::Reset);
+        assert_eq!(theme.text, Color::Reset);
+        assert_eq!(theme.accent, Color::Reset);
+        assert_eq!(theme.code, Color::Reset);
+        assert_eq!(theme.input_surface(), Color::Reset);
+    }
+
     #[test]
     fn presets_custom_hex_and_cycle_reload() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("kroma-theme-{}", std::process::id()));

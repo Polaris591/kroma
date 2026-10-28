@@ -2,6 +2,7 @@ use super::{
     attachments::{Attachment, MAX_ATTACHMENTS},
     editor::Editor,
     markdown,
+    picker::Picker,
     theme::{Theme, ThemeStore},
 };
 use crate::{events::RuntimeEvent, protocol::Message};
@@ -15,6 +16,7 @@ use ratatui::{
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Keep continuation lines under the content, not underneath list bullets or
@@ -58,18 +60,29 @@ fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
         for span in line.spans {
             let style = span.style;
             let mut segment = String::new();
-            let mut chars = span.content.chars().peekable();
-            let mut preceding_ascii_word = false;
-            while let Some(ch) = chars.next() {
-                let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
-                // Move a short ASCII token as a unit to the next row instead
-                // of splitting `run_with_resume` or `cargo test` arbitrarily.
-                if ascii_word(ch) && !preceding_ascii_word && columns > hanging_indent {
-                    let word_length =
-                        1 + chars.clone().take_while(|next| ascii_word(*next)).count();
-                    if word_length <= width.saturating_sub(hanging_indent)
-                        && columns.saturating_add(word_length) > width
-                    {
+            if span.content.is_ascii() {
+                // Most coding-agent logs are ASCII. Keep the inexpensive
+                // char path; full grapheme segmentation is for mixed Unicode.
+                let mut chars = span.content.chars().peekable();
+                let mut preceding_ascii_word = false;
+                while let Some(ch) = chars.next() {
+                    let ascii = ascii_word(ch);
+                    if ascii && !preceding_ascii_word && columns > hanging_indent {
+                        let length = 1 + chars.clone().take_while(|next| ascii_word(*next)).count();
+                        if length <= width.saturating_sub(hanging_indent)
+                            && columns.saturating_add(length) > width
+                        {
+                            if !segment.is_empty() {
+                                spans.push(Span::styled(std::mem::take(&mut segment), style));
+                            }
+                            rows.push(Line::from(std::mem::take(&mut spans)));
+                            columns = hanging_indent;
+                            if hanging_indent > 0 {
+                                spans.push(Span::raw(" ".repeat(hanging_indent)));
+                            }
+                        }
+                    }
+                    if columns > 0 && columns + 1 > width {
                         if !segment.is_empty() {
                             spans.push(Span::styled(std::mem::take(&mut segment), style));
                         }
@@ -79,23 +92,59 @@ fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
                             spans.push(Span::raw(" ".repeat(hanging_indent)));
                         }
                     }
-                }
-                if columns > 0 && columns + cells > width {
-                    if !segment.is_empty() {
-                        spans.push(Span::styled(std::mem::take(&mut segment), style));
+                    if ch == ' ' && columns == hanging_indent {
+                        continue;
                     }
-                    rows.push(Line::from(std::mem::take(&mut spans)));
-                    columns = hanging_indent;
-                    if hanging_indent > 0 {
-                        spans.push(Span::raw(" ".repeat(hanging_indent)));
+                    segment.push(ch);
+                    columns = columns.saturating_add(1);
+                    preceding_ascii_word = ascii;
+                }
+            } else {
+                let mut graphemes = span.content.graphemes(true).peekable();
+                let mut preceding_ascii_word = false;
+                while let Some(grapheme) = graphemes.next() {
+                    let cells = UnicodeWidthStr::width(grapheme);
+                    let ascii =
+                        grapheme.len() == 1 && grapheme.chars().next().is_some_and(ascii_word);
+                    // Move a short ASCII token as a unit to the next row instead
+                    // of splitting `run_with_resume` or `cargo test` arbitrarily.
+                    if ascii && !preceding_ascii_word && columns > hanging_indent {
+                        let word_length = 1 + graphemes
+                            .clone()
+                            .take_while(|next| {
+                                next.len() == 1 && next.chars().next().is_some_and(ascii_word)
+                            })
+                            .count();
+                        if word_length <= width.saturating_sub(hanging_indent)
+                            && columns.saturating_add(word_length) > width
+                        {
+                            if !segment.is_empty() {
+                                spans.push(Span::styled(std::mem::take(&mut segment), style));
+                            }
+                            rows.push(Line::from(std::mem::take(&mut spans)));
+                            columns = hanging_indent;
+                            if hanging_indent > 0 {
+                                spans.push(Span::raw(" ".repeat(hanging_indent)));
+                            }
+                        }
                     }
+                    if columns > 0 && columns + cells > width {
+                        if !segment.is_empty() {
+                            spans.push(Span::styled(std::mem::take(&mut segment), style));
+                        }
+                        rows.push(Line::from(std::mem::take(&mut spans)));
+                        columns = hanging_indent;
+                        if hanging_indent > 0 {
+                            spans.push(Span::raw(" ".repeat(hanging_indent)));
+                        }
+                    }
+                    if grapheme == " " && columns == hanging_indent {
+                        continue;
+                    }
+                    segment.push_str(grapheme);
+                    columns = columns.saturating_add(cells);
+                    preceding_ascii_word = ascii;
                 }
-                if ch == ' ' && columns == hanging_indent {
-                    continue;
-                }
-                segment.push(ch);
-                columns = columns.saturating_add(cells);
-                preceding_ascii_word = ascii_word(ch);
             }
             if !segment.is_empty() {
                 spans.push(Span::styled(segment, style));
@@ -406,6 +455,7 @@ fn short_tool_result(raw: &str) -> String {
 
 pub struct UiState {
     pub editor: Editor,
+    pub picker: Option<Picker>,
     pub usage: crate::usage::UsageMeter,
     pub attachments: Vec<Attachment>,
     removed_drafts: Vec<Attachment>,
@@ -430,6 +480,10 @@ pub struct UiState {
     pub running: bool,
     pub notification: String,
     pub scroll_from_bottom: usize,
+    /// Pinned absolute top row while inspecting older output. A stream may
+    /// add rows below without moving the reader's selection or context.
+    scroll_anchor: Option<usize>,
+    prepend_rows_before: Option<usize>,
     pub viewport_height: u16,
     pub tools_expanded: bool,
     pub reasoning_expanded: bool,
@@ -447,6 +501,7 @@ impl UiState {
     pub fn new(model: String, session: String, themes: ThemeStore, messages: &[Message]) -> Self {
         let mut result = Self {
             editor: Editor::default(),
+            picker: None,
             usage: crate::usage::UsageMeter::default(),
             attachments: Vec::new(),
             removed_drafts: Vec::new(),
@@ -471,6 +526,8 @@ impl UiState {
             running: false,
             notification: String::new(),
             scroll_from_bottom: 0,
+            scroll_anchor: None,
+            prepend_rows_before: None,
             viewport_height: 0,
             tools_expanded: false,
             reasoning_expanded: false,
@@ -499,6 +556,7 @@ impl UiState {
         self.entries.push(Entry::user(summary));
         self.active_assistant = None;
         self.scroll_from_bottom = 0;
+        self.scroll_anchor = None;
         self.running = true;
         self.phase = "preparing";
     }
@@ -761,7 +819,7 @@ impl UiState {
         });
     }
 
-    fn session_label(&self) -> &str {
+    pub(super) fn session_label(&self) -> &str {
         self.session_title
             .as_deref()
             .unwrap_or(if self.session == "default" {
@@ -850,11 +908,25 @@ impl UiState {
             }
         }
         self.scroll_from_bottom = 0;
+        self.scroll_anchor = None;
+        self.prepend_rows_before = None;
         self.history_visible = 300;
     }
 
     pub fn event(&mut self, event: UiEvent) {
-        self.history_cache = None;
+        // Usage and token updates only change the footer. Collapsed ongoing
+        // reasoning is not rendered, so no Markdown reflow is required for
+        // each hidden reasoning delta or its final reconciliation.
+        let unchanged_history = matches!(
+            &event,
+            UiEvent::Usage { .. } | UiEvent::Context { .. } | UiEvent::ActualInput(_)
+        ) || (!self.reasoning_expanded
+            && self.active_reasoning.is_some()
+            && matches!(&event, UiEvent::ReasoningFinal(_)
+                | UiEvent::ReasoningDelta(_) if self.phase == "thinking"));
+        if !unchanged_history {
+            self.history_cache = None;
+        }
         match event {
             UiEvent::Usage {
                 input,
@@ -996,13 +1068,31 @@ impl UiState {
             self.scroll_from_bottom
                 .saturating_sub(amount.unsigned_abs())
         };
+        if self.scroll_from_bottom == 0 {
+            self.scroll_anchor = None;
+        } else {
+            self.scroll_anchor = Some(
+                self.history_max_scroll
+                    .saturating_sub(self.scroll_from_bottom.min(self.history_max_scroll)),
+            );
+        }
         if amount > 0
             && self.history_visible < self.entries.len()
             && self.scroll_from_bottom >= self.history_max_scroll.saturating_sub(35)
         {
+            self.prepend_rows_before = self
+                .history_cache
+                .as_ref()
+                .map(|cache| cache.text.lines.len());
             self.history_visible = (self.history_visible + 200).min(self.entries.len());
             self.history_cache = None;
         }
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_anchor = None;
+        self.prepend_rows_before = None;
+        self.scroll_from_bottom = 0;
     }
 
     pub fn select_start(&mut self, column: u16, row: u16) {
@@ -1046,10 +1136,10 @@ impl UiState {
             };
             let mut selected = String::new();
             let mut column = 0;
-            for ch in line.chars() {
-                let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            for grapheme in line.graphemes(true) {
+                let width = UnicodeWidthStr::width(grapheme).max(1);
                 if column < last && column + width > first {
-                    selected.push(ch);
+                    selected.push_str(grapheme);
                 }
                 column += width;
             }
@@ -1207,10 +1297,16 @@ impl UiState {
                         role_style(theme.muted),
                     )));
                     for line in entry.body.lines() {
-                        lines.push(body_line(Line::from(Span::styled(
-                            line.to_owned(),
-                            Style::default().fg(theme.text),
-                        ))));
+                        let style = if line.starts_with('+') && !line.starts_with("+++") {
+                            Style::default().fg(theme.user)
+                        } else if line.starts_with('-') && !line.starts_with("---") {
+                            Style::default().fg(theme.error)
+                        } else if line.starts_with("@@") {
+                            Style::default().fg(theme.accent)
+                        } else {
+                            Style::default().fg(theme.text)
+                        };
+                        lines.push(body_line(Line::from(Span::styled(line.to_owned(), style))));
                     }
                     lines.push(Line::default());
                 }
@@ -1340,18 +1436,30 @@ impl UiState {
                 ),
             });
         }
-        let contents = self.history_cache.as_ref().unwrap().text.clone();
+        let contents = &self.history_cache.as_ref().unwrap().text;
         let rows = contents.lines.len();
         let max_scroll = rows.saturating_sub(history.height as usize);
         self.history_max_scroll = max_scroll;
-        self.scroll_from_bottom = self.scroll_from_bottom.min(max_scroll);
+        if let Some(anchor) = self.scroll_anchor {
+            // The history window loads older entries by prepending rows.
+            // Adjust for those once; ordinary live text only appends below.
+            let prepend = self
+                .prepend_rows_before
+                .take()
+                .map_or(0, |old_rows| rows.saturating_sub(old_rows));
+            let anchored = anchor.saturating_add(prepend).min(max_scroll);
+            self.scroll_anchor = Some(anchored);
+            self.scroll_from_bottom = max_scroll.saturating_sub(anchored);
+        } else {
+            self.prepend_rows_before = None;
+            self.scroll_from_bottom = self.scroll_from_bottom.min(max_scroll);
+        }
         let start_row = max_scroll.saturating_sub(self.scroll_from_bottom);
         self.selection_area = history;
-        self.selection_rows = contents
-            .lines
+        let end_row = start_row.saturating_add(history.height as usize).min(rows);
+        let viewport_lines = contents.lines[start_row..end_row].to_vec();
+        self.selection_rows = viewport_lines
             .iter()
-            .skip(start_row)
-            .take(history.height as usize)
             .map(|line| {
                 line.spans
                     .iter()
@@ -1359,15 +1467,13 @@ impl UiState {
                     .collect::<String>()
             })
             .collect();
-        let mut paragraph =
-            Paragraph::new(contents).style(Style::default().fg(colors.text).bg(colors.background));
-        paragraph = paragraph.scroll((
-            max_scroll
-                .saturating_sub(self.scroll_from_bottom)
-                .min(u16::MAX as usize) as u16,
-            0,
-        ));
-        frame.render_widget(paragraph, history);
+        // Copy/render just the viewport, not the entire cached transcript.
+        // This also avoids u16::MAX clipping on very long conversations.
+        frame.render_widget(
+            Paragraph::new(Text::from(viewport_lines))
+                .style(Style::default().fg(colors.text).bg(colors.background)),
+            history,
+        );
         if let (Some(mut start), Some(mut end)) = (self.selection_start, self.selection_end) {
             if (start.1, start.0) > (end.1, end.0) {
                 std::mem::swap(&mut start, &mut end);
@@ -1476,6 +1582,8 @@ impl UiState {
         );
         let footer = if !self.notification.is_empty() {
             excerpt(&self.notification, usize::from(status_area.width))
+        } else if self.scroll_anchor.is_some() {
+            "↑ Reading earlier output · Ctrl+End to latest".into()
         } else if self.running {
             "Enter steer · Ctrl+C cancel · /queue follow-up".into()
         } else if status_area.width < 50 {
@@ -1496,6 +1604,9 @@ impl UiState {
                 1,
             ),
         );
+        if let Some(picker) = &self.picker {
+            picker.draw(frame, history, colors);
+        }
     }
 }
 
@@ -1634,6 +1745,48 @@ mod tests {
                 .any(|span| span.content.contains("E0599")),
             "restored failure must not be a bare red cross"
         );
+    }
+
+    #[test]
+    fn searchable_picker_renders_over_history_without_obscuring_editor() {
+        let mut state = UiState::new(
+            "deepseek".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        state.editor.paste("draft remains here");
+        state.picker = Some(Picker::new(
+            super::super::picker::Kind::Commands,
+            vec![
+                super::super::picker::Item::new("/review", "/review", "command"),
+                super::super::picker::Item::new("/resume", "/resume", "command"),
+            ],
+            "rev",
+        ));
+        for (width, height) in [(40, 16), (80, 24), (160, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let lines = buffer
+                .content()
+                .chunks(width as usize)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>();
+            let snapshot = lines.join("\n");
+            assert!(
+                snapshot.contains("Commands"),
+                "picker disappeared at {width}: {snapshot}"
+            );
+            assert!(
+                snapshot.contains("/review"),
+                "active item missing at {width}"
+            );
+            assert!(
+                snapshot.contains("draft remains here"),
+                "composer obscured at {width}"
+            );
+        }
     }
 
     #[test]
@@ -1789,6 +1942,24 @@ mod tests {
     }
 
     #[test]
+    fn history_wrapping_keeps_zwj_emoji_as_one_visible_character() {
+        let line = Line::raw(format!("{}👩‍💻z", "a".repeat(6)));
+        let wrapped = wrap_history(Text::from(vec![line]), 8);
+        let rendered = wrapped
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rendered[0], "aaaaaa👩‍💻");
+        assert_eq!(rendered[1], "z");
+    }
+
+    #[test]
     fn history_render_cache_is_reused_until_content_changes() {
         let messages = vec![Message::new("user", "A stable history entry")];
         let mut state = UiState::new(
@@ -1846,6 +2017,92 @@ mod tests {
         terminal.draw(|frame| state.draw(frame)).unwrap();
         assert_eq!(state.selected_text().as_deref(), Some("hello"));
     }
+    #[test]
+    fn scrolling_pins_visible_history_while_streaming_then_returns_to_latest() {
+        let messages = (0..60)
+            .map(|i| Message::new("assistant", format!("existing line {i:03}")))
+            .collect::<Vec<_>>();
+        let mut state = UiState::new(
+            "test".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        state.scroll(12);
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let first_visible = state.selection_rows.join("\n");
+        for _ in 0..100 {
+            state.event(UiEvent::Text(" streamed output\n".into()));
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+        }
+        assert_eq!(
+            first_visible,
+            state.selection_rows.join("\n"),
+            "new output must not move the reading viewport"
+        );
+        state.scroll_to_bottom();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert!(state.selection_rows.join("\n").contains("streamed output"));
+        assert!(state.scroll_anchor.is_none());
+    }
+
+    #[test]
+    fn copy_selection_never_breaks_a_combined_emoji_cluster() {
+        let mut state = UiState::new(
+            "test".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("user", "👩‍💻")],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let row = state
+            .selection_rows
+            .iter()
+            .position(|line| line.contains("👩‍💻"))
+            .unwrap();
+        let text = &state.selection_rows[row];
+        let cells = text.split_once("👩‍💻").unwrap().0;
+        let x = state.selection_area.x + UnicodeWidthStr::width(cells) as u16;
+        let y = state.selection_area.y + row as u16;
+        state.select_start(x, y);
+        state.select_drag(x + 1, y);
+        assert_eq!(state.selected_text().as_deref(), Some("👩‍💻"));
+    }
+
+    #[test]
+    #[ignore = "TUI draw microbenchmark; run manually for frame timings"]
+    fn bench_streaming_frame_latency_three_hundred_and_three_thousand_messages() {
+        use std::time::Instant;
+        for count in [300, 3000] {
+            let messages = (0..count).map(|i| Message::new("assistant",
+                format!("### Task {i}\n\nA short description, a path `src/provider.rs` and a result.\n\n- note one\n- note two")))
+                .collect::<Vec<_>>();
+            let mut state = UiState::new(
+                "model".into(),
+                "default".into(),
+                ThemeStore::load_at(None).unwrap(),
+                &messages,
+            );
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+            let mut samples = Vec::new();
+            for _ in 0..60 {
+                let start = Instant::now();
+                state.event(UiEvent::Text(" partial streaming response".into()));
+                terminal.draw(|frame| state.draw(frame)).unwrap();
+                samples.push(start.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            eprintln!(
+                "TUI frames messages={count} median={}us p95={}us",
+                samples[30], samples[56]
+            );
+        }
+    }
+
     #[test]
     fn older_history_is_reachable_without_rendering_it_all_initially() {
         let messages: Vec<_> = (0..700)
