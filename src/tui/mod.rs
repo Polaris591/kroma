@@ -2,6 +2,7 @@
 //! Themes are TOML data. No UI plugin runtime, RPC service or second Agent loop.
 mod attachments;
 mod editor;
+mod links;
 mod markdown;
 mod picker;
 mod theme;
@@ -607,11 +608,25 @@ fn input_event(
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => state.scroll(3),
             MouseEventKind::ScrollDown => state.scroll(-3),
+            MouseEventKind::Moved => state.hover_link(mouse.column, mouse.row),
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                state.select_start(mouse.column, mouse.row)
+                state.hover_link(mouse.column, mouse.row);
+                if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                    if let Some(target) = state.link_at(mouse.column, mouse.row) {
+                        let target = state.resolved_link(target);
+                        match links::open_target(&target, workdir) {
+                            Ok(()) => state.note(format!("Opened: {target}")),
+                            Err(error) => state.note(format!("Open link: {error:#}")),
+                        }
+                    }
+                } else {
+                    state.select_start(mouse.column, mouse.row);
+                }
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                state.select_drag(mouse.column, mouse.row)
+                if !mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                    state.select_drag(mouse.column, mouse.row);
+                }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
                 if let Some(selected) = state.selected_text() {
@@ -1227,6 +1242,43 @@ mod tests {
         );
         assert!(matches!(action, InputAction::None));
         assert_eq!(ui.editor.text(), "/exit");
+    }
+
+    #[test]
+    fn ctrl_click_on_missing_file_reports_failure_without_selecting_text() {
+        use crossterm::event::{MouseButton, MouseEvent};
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut ui, model) = setup();
+        ui.event(UiEvent::Text(
+            "Read src/nonexistent-kroma-file.rs:42".into(),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(110, 27)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let (x, y) = ui
+            .test_link_position("nonexistent-kroma-file")
+            .expect("file path should be clickable");
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        let result = input_event(
+            &mut ui,
+            Event::Mouse(mouse),
+            false,
+            &model,
+            std::env::temp_dir().as_path(),
+        );
+        assert!(matches!(result, InputAction::None));
+        assert!(
+            ui.notification.contains("file not found"),
+            "error feedback required"
+        );
+        assert!(
+            ui.selected_text().is_none(),
+            "Ctrl+click must not select text"
+        );
     }
 
     #[test]

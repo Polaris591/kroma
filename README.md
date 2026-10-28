@@ -40,7 +40,13 @@ framework, a second agent loop, or a mandatory plugin system.
   **`kroma --continue`** opens that conversation directly in the TUI. Plain
   `kroma` remains unchanged; the recent session is never restored implicitly.
 - **Mouse copy:** drag-select visible conversation text, then right-click to
-  copy. A local desktop uses the system clipboard directly; SSH sessions and
+  copy. **Hover a hyperlink and Ctrl+left-click** to open its target. Both
+  named Markdown links (e.g. `[report](./reviews/report.md)`) and bare
+  `https://` URLs, `file://` URLs, and recognizable file paths are supported.
+  Web links use your default browser; local paths resolve against the current
+  project directory and open with the system default application. The hover
+  hint and underline identify links; Ctrl+click does not start text selection.
+  A local desktop uses the system clipboard directly; SSH sessions and
   machines without a local clipboard send OSC 52 to the terminal instead.
   OSC 52 requires compatible terminal settings, so the fallback confirms only
   that the request was sent. Mouse-wheel scrolling stays enabled.
@@ -73,8 +79,9 @@ are also loaded, without scanning and injecting unrelated directories.
 
 ### V1.1 visual design
 
-Kroma uses a borderless, centered reading column on wide terminals and
-nearly full-width content on small screens. A quiet brand/context header,
+Kroma uses a borderless, terminal-width workspace with only small side
+margins on wide screens. Tables, paths, commands, code and diffs use the
+available width rather than being capped at 100 columns. A quiet brand/context header,
 editor surface and compact footer replace the old full-screen conversation
 box. User prompts and assistant prose have distinct heading treatments;
 tools appear as compact activity lines, with Ctrl+O expanding output and

@@ -1,7 +1,7 @@
 use super::{
     attachments::{Attachment, MAX_ATTACHMENTS},
     editor::Editor,
-    markdown,
+    links, markdown,
     picker::Picker,
     theme::{Theme, ThemeStore},
 };
@@ -155,23 +155,68 @@ fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
     Text::from(rows)
 }
 
-/// A comfortable reading measure on large terminals, while leaving narrow
-/// terminals almost full-width. No independent layout engine is necessary.
+/// Match the Markdown parser's labeled link fragments to the wrapped
+/// underline spans. This keeps the real destination through line wrapping,
+/// without smuggling OSC control sequences into Ratatui's character buffer.
+fn markdown_link_regions(wrapped: &Text<'_>, targets: &[(String, String)]) -> Vec<links::Region> {
+    let mut regions = Vec::new();
+    let mut index = 0usize;
+    let mut remaining = targets.first().map(|(text, _)| text.as_str()).unwrap_or("");
+    for (row, line) in wrapped.lines.iter().enumerate() {
+        let mut column = 0;
+        for span in &line.spans {
+            let content = span.content.as_ref();
+            let width = UnicodeWidthStr::width(content);
+            if span.style.add_modifier.contains(Modifier::UNDERLINED) && index < targets.len() {
+                if width > 0 {
+                    regions.push(links::Region {
+                        row,
+                        start: column,
+                        end: column + width,
+                        target: targets[index].1.clone(),
+                    });
+                }
+                // Whitespace at a wrapped line boundary is removed by the
+                // wrapping algorithm; matching by fragment keeps the next
+                // adjacent Markdown link associated with its own target.
+                remaining = remaining.trim_start();
+                if let Some(rest) = remaining.strip_prefix(content) {
+                    remaining = rest;
+                } else {
+                    let chars = content.chars().count();
+                    let offset = remaining
+                        .char_indices()
+                        .nth(chars)
+                        .map_or(remaining.len(), |(at, _)| at);
+                    remaining = &remaining[offset..];
+                }
+                if remaining.trim().is_empty() {
+                    index += 1;
+                    remaining = targets
+                        .get(index)
+                        .map(|(text, _)| text.as_str())
+                        .unwrap_or("");
+                }
+            }
+            column += width;
+        }
+    }
+    regions
+}
+
+/// Fill the available terminal width. Long tool commands, Markdown tables,
+/// code and diffs are workspace content, not newspaper paragraphs: the old
+/// 100-column limit wasted most of a maximized terminal window.
 fn reading_area(area: Rect) -> Rect {
     let margin = if area.width >= 100 {
-        4
-    } else if area.width >= 55 {
         2
-    } else {
+    } else if area.width >= 55 {
         1
+    } else {
+        0
     };
-    let width = area.width.saturating_sub(margin * 2).min(100);
-    Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y,
-        width,
-        area.height,
-    )
+    let width = area.width.saturating_sub(margin * 2);
+    Rect::new(area.x + margin, area.y, width, area.height)
 }
 
 fn body_line(line: Line<'static>) -> Line<'static> {
@@ -198,6 +243,14 @@ struct Entry {
     failed: bool,
 }
 
+#[derive(Clone, Debug)]
+struct VisibleLink {
+    x: u16,
+    y: u16,
+    end_x: u16,
+    target: String,
+}
+
 struct HistoryCache {
     width: u16,
     visible: usize,
@@ -205,6 +258,7 @@ struct HistoryCache {
     reasoning_expanded: bool,
     theme: Theme,
     text: Text<'static>,
+    links: Vec<links::Region>,
 }
 
 impl Entry {
@@ -476,6 +530,8 @@ pub struct UiState {
     selection_area: Rect,
     selection_start: Option<(u16, u16)>,
     selection_end: Option<(u16, u16)>,
+    visible_links: Vec<VisibleLink>,
+    hover_pointer: Option<(u16, u16)>,
     entries: Vec<Entry>,
     pub running: bool,
     pub notification: String,
@@ -520,6 +576,8 @@ impl UiState {
             selection_area: Rect::default(),
             selection_start: None,
             selection_end: None,
+            visible_links: Vec::new(),
+            hover_pointer: None,
             session,
             session_title: None,
             entries: Vec::new(),
@@ -1095,6 +1153,51 @@ impl UiState {
         self.scroll_from_bottom = 0;
     }
 
+    pub fn link_at(&self, column: u16, row: u16) -> Option<&str> {
+        self.visible_links
+            .iter()
+            .find(|link| link.y == row && column >= link.x && column < link.end_x)
+            .map(|link| link.target.as_str())
+    }
+
+    /// A literal URL may span multiple terminal rows. The first row only
+    /// contains its prefix, so resolve it against the unwrapped transcript
+    /// when clicked. Do not guess if two URLs share that prefix.
+    pub fn resolved_link(&self, target: &str) -> String {
+        if !target.starts_with("https://") && !target.starts_with("http://") {
+            return target.to_owned();
+        }
+        let mut found = None;
+        for entry in &self.entries {
+            for word in entry.body.split_whitespace() {
+                let word = word.trim_start_matches(['`', '"', '\'', '<', '(']);
+                let word = word.trim_end_matches(['`', '"', '\'', '>', ')', ',', '.', '，', '。']);
+                if word.starts_with(target)
+                    && word.len() > target.len()
+                    && links::normalize_target(word).is_some()
+                {
+                    if found.as_deref().is_some_and(|previous| previous != word) {
+                        return target.to_owned();
+                    }
+                    found = Some(word.to_owned());
+                }
+            }
+        }
+        found.unwrap_or_else(|| target.to_owned())
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_link_position(&self, needle: &str) -> Option<(u16, u16)> {
+        self.visible_links
+            .iter()
+            .find(|link| link.target.contains(needle))
+            .map(|link| (link.x, link.y))
+    }
+
+    pub fn hover_link(&mut self, column: u16, row: u16) {
+        self.hover_pointer = Some((column, row));
+    }
+
     pub fn select_start(&mut self, column: u16, row: u16) {
         if self.selection_area.contains((column, row).into()) {
             self.selection_start = Some((column, row));
@@ -1149,15 +1252,25 @@ impl UiState {
         (!text.trim().is_empty()).then_some(text)
     }
 
+    #[cfg(test)]
     fn history_text(&self, theme: Theme, width: usize) -> Text<'static> {
+        self.history_document(theme, width).0
+    }
+
+    fn history_document(
+        &self,
+        theme: Theme,
+        width: usize,
+    ) -> (Text<'static>, Vec<(String, String)>) {
         let mut lines = Vec::new();
+        let mut markdown_targets = Vec::new();
         if self.entries.is_empty() {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 "   ◆  Ready for a task.",
                 Style::default().fg(theme.muted),
             )));
-            return Text::from(lines);
+            return (Text::from(lines), markdown_targets);
         }
         for entry in self.entries.iter().rev().take(self.history_visible).rev() {
             let role_style = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
@@ -1181,11 +1294,19 @@ impl UiState {
                         Span::styled("  Kroma", role_style(theme.text)),
                     ]));
                     if !entry.body.is_empty() {
-                        let mut rendered = markdown::render_with_width(
+                        let (mut rendered, tags) = markdown::render_with_links(
                             &entry.body,
                             theme,
                             width.saturating_sub(3),
                         );
+                        for tag in tags {
+                            if let Some(span) = rendered
+                                .get(tag.row)
+                                .and_then(|row| row.spans.get(tag.span))
+                            {
+                                markdown_targets.push((span.content.to_string(), tag.target));
+                            }
+                        }
                         if self.running
                             && self.phase == "streaming"
                             && self.active_assistant == Some(self.entries.len() - 1)
@@ -1284,9 +1405,20 @@ impl UiState {
                         Style::default().fg(theme.muted),
                     )));
                     if self.reasoning_expanded {
-                        for line in
-                            markdown::render_with_width(&entry.body, theme, width.saturating_sub(3))
-                        {
+                        let (rendered, tags) = markdown::render_with_links(
+                            &entry.body,
+                            theme,
+                            width.saturating_sub(3),
+                        );
+                        for tag in tags {
+                            if let Some(span) = rendered
+                                .get(tag.row)
+                                .and_then(|row| row.spans.get(tag.span))
+                            {
+                                markdown_targets.push((span.content.to_string(), tag.target));
+                            }
+                        }
+                        for line in rendered {
                             lines.push(body_line(line));
                         }
                     }
@@ -1322,7 +1454,7 @@ impl UiState {
                 Style::default().fg(theme.muted),
             )));
         }
-        Text::from(lines)
+        (Text::from(lines), markdown_targets)
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -1424,16 +1556,17 @@ impl UiState {
                 && cache.theme == colors
         });
         if !cached {
+            let (raw, targets) = self.history_document(colors, usize::from(history.width));
+            let text = wrap_history(raw, usize::from(history.width));
+            let link_regions = markdown_link_regions(&text, &targets);
             self.history_cache = Some(HistoryCache {
                 width: history.width,
                 visible: self.history_visible,
                 tools_expanded: self.tools_expanded,
                 reasoning_expanded: self.reasoning_expanded,
                 theme: colors,
-                text: wrap_history(
-                    self.history_text(colors, usize::from(history.width)),
-                    usize::from(history.width),
-                ),
+                text,
+                links: link_regions,
             });
         }
         let contents = &self.history_cache.as_ref().unwrap().text;
@@ -1467,6 +1600,47 @@ impl UiState {
                     .collect::<String>()
             })
             .collect();
+
+        // Click coordinates come from the same wrapped rows used for drawing,
+        // not from source offsets. This remains correct after scrolling,
+        // terminal resizing and Unicode double-width characters.
+        let mut regions = self
+            .history_cache
+            .as_ref()
+            .unwrap()
+            .links
+            .iter()
+            .filter(|link| link.row >= start_row && link.row < end_row)
+            .map(|link| links::Region {
+                row: link.row - start_row,
+                start: link.start,
+                end: link.end,
+                target: link.target.clone(),
+            })
+            .collect::<Vec<_>>();
+        for (row, line) in self.selection_rows.iter().enumerate() {
+            for link in links::detect_visible(row, line) {
+                if !regions.iter().any(|existing| {
+                    existing.row == row && link.start < existing.end && link.end > existing.start
+                }) {
+                    regions.push(link);
+                }
+            }
+        }
+        self.visible_links = regions
+            .into_iter()
+            .filter_map(|link| {
+                let start = link.start.min(history.width as usize);
+                let end = link.end.min(history.width as usize);
+                (end > start).then_some(VisibleLink {
+                    x: history.x + start as u16,
+                    y: history.y + link.row as u16,
+                    end_x: history.x + end as u16,
+                    target: link.target,
+                })
+            })
+            .collect();
+
         // Copy/render just the viewport, not the entire cached transcript.
         // This also avoids u16::MAX clipping on very long conversations.
         frame.render_widget(
@@ -1474,6 +1648,23 @@ impl UiState {
                 .style(Style::default().fg(colors.text).bg(colors.background)),
             history,
         );
+        for link in &self.visible_links {
+            let hovered = self
+                .hover_pointer
+                .is_some_and(|(x, y)| y == link.y && x >= link.x && x < link.end_x);
+            for x in link.x..link.end_x {
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, link.y)) {
+                    let style = if hovered {
+                        Style::default()
+                            .fg(colors.accent)
+                            .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+                    } else {
+                        Style::default().add_modifier(Modifier::UNDERLINED)
+                    };
+                    cell.set_style(style);
+                }
+            }
+        }
         if let (Some(mut start), Some(mut end)) = (self.selection_start, self.selection_end) {
             if (start.1, start.0) > (end.1, end.0) {
                 std::mem::swap(&mut start, &mut end);
@@ -1580,8 +1771,14 @@ impl UiState {
             Paragraph::new(status_line).style(Style::default().fg(colors.muted)),
             status_area,
         );
+        let hovered = self.hover_pointer.and_then(|(x, y)| self.link_at(x, y));
         let footer = if !self.notification.is_empty() {
             excerpt(&self.notification, usize::from(status_area.width))
+        } else if let Some(target) = hovered {
+            format!(
+                "Ctrl+Click to open · {}",
+                compact_line(target, (status_area.width as usize).saturating_sub(22))
+            )
         } else if self.scroll_anchor.is_some() {
             "↑ Reading earlier output · Ctrl+End to latest".into()
         } else if self.running {
@@ -1745,6 +1942,149 @@ mod tests {
                 .any(|span| span.content.contains("E0599")),
             "restored failure must not be a bare red cross"
         );
+    }
+
+    #[test]
+    fn widescreen_uses_available_terminal_width_instead_of_a_hundred_columns() {
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new(
+                "assistant",
+                "| Column | Result |\n|---|---|\n| cargo test | passed |",
+            )],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(210, 35)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert!(
+            state.selection_area.width >= 200,
+            "maximized terminals should not be artificially limited to 100 columns"
+        );
+        assert!(state.selection_rows.join("\n").contains("cargo test"));
+        let small = reading_area(Rect::new(0, 0, 40, 20));
+        assert_eq!(small.width, 40);
+    }
+
+    #[test]
+    fn markdown_and_plain_links_hit_the_correct_screen_cells() {
+        let answer = "Reports: [审查报告 SR-001](https://example.org/report) and [复现测试](./reviews/tests.md).\n\nFile src/provider.rs:128 and https://rust-lang.org.";
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("assistant", answer)],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(130, 32)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        for (label, target) in [
+            ("审查报告 SR-001", "https://example.org/report"),
+            ("复现测试", "./reviews/tests.md"),
+            ("src/provider.rs:128", "src/provider.rs:128"),
+            ("https://rust-lang.org", "https://rust-lang.org"),
+        ] {
+            let row = state
+                .selection_rows
+                .iter()
+                .position(|row| row.contains(label))
+                .expect("link label visible");
+            let prefix = state.selection_rows[row].split_once(label).unwrap().0;
+            let x = state.selection_area.x + UnicodeWidthStr::width(prefix) as u16;
+            let y = state.selection_area.y + row as u16;
+            assert_eq!(state.link_at(x, y), Some(target), "wrong link for {label}");
+            state.hover_link(x, y);
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+            let cells = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(cells.contains("Ctrl+Click to open"));
+        }
+        assert!(state
+            .link_at(state.selection_area.x, state.selection_area.y)
+            .is_none());
+    }
+
+    #[test]
+    fn clickable_regions_follow_scrolling_without_reusing_stale_coordinates() {
+        let mut history = (0..60)
+            .map(|i| Message::new("assistant", format!("History item {i}")))
+            .collect::<Vec<_>>();
+        history.push(Message::new(
+            "assistant",
+            "[latest report](https://example.org/latest)",
+        ));
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &history,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(88, 22)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let (x, y) = state.test_link_position("example.org/latest").unwrap();
+        assert_eq!(state.link_at(x, y), Some("https://example.org/latest"));
+        state.scroll(15);
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert_ne!(state.link_at(x, y), Some("https://example.org/latest"));
+        state.scroll_to_bottom();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert_eq!(state.link_at(x, y), Some("https://example.org/latest"));
+    }
+
+    #[test]
+    fn long_literal_url_reconstructs_full_destination_after_wrapping() {
+        let url = format!("https://example.org/{}", "very-long-segment".repeat(9));
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new(
+                "assistant",
+                format!("Check {url} for details"),
+            )],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(44, 25)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let partial = state
+            .visible_links
+            .iter()
+            .find(|link| link.target.starts_with("https://example.org/"))
+            .expect("start of wrapped URL should be clickable");
+        assert!(partial.target.len() < url.len());
+        assert_eq!(state.resolved_link(&partial.target), url);
+    }
+
+    #[test]
+    fn long_named_markdown_link_remains_clickable_across_wrapped_rows() {
+        let label = "明细报告测试报告测试报告测试报告";
+        let text = format!("Please review [{label}](https://example.org/full-report) now.");
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("assistant", text)],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(34, 24)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let hits = state
+            .visible_links
+            .iter()
+            .filter(|link| link.target == "https://example.org/full-report")
+            .collect::<Vec<_>>();
+        assert!(
+            hits.len() >= 2,
+            "wrapped Markdown link must have click targets on both rows"
+        );
+        for hit in hits {
+            assert_eq!(
+                state.link_at(hit.x, hit.y),
+                Some("https://example.org/full-report")
+            );
+        }
     }
 
     #[test]

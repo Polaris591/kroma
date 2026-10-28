@@ -110,8 +110,29 @@ fn render_table(lines: &mut Vec<Line<'static>>, table: TableContent, theme: Them
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct LinkSpan {
+    pub row: usize,
+    pub span: usize,
+    pub target: String,
+}
+
+#[cfg(test)]
 pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
+    render_with_links(source, theme, width).0
+}
+
+/// Keep the link's real destination alongside its rendered label. A terminal
+/// hyperlink may display `审查报告` instead of an actual URL; linkify-by-text
+/// alone cannot open it, especially after line wrapping.
+pub fn render_with_links(
+    source: &str,
+    theme: Theme,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
     let mut lines = Vec::new();
+    let mut link_spans = Vec::new();
+    let mut current_link: Option<String> = None;
     let mut spans = Vec::new();
     let mut styles = vec![Style::default().fg(theme.text)];
     let mut list_depth = 0usize;
@@ -185,11 +206,14 @@ pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'
                 Tag::Strikethrough => {
                     styles.push(styles.last().unwrap().add_modifier(Modifier::CROSSED_OUT))
                 }
-                Tag::Link { .. } => styles.push(
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::UNDERLINED),
-                ),
+                Tag::Link { dest_url, .. } => {
+                    current_link = Some(dest_url.into_string());
+                    styles.push(
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::UNDERLINED),
+                    );
+                }
                 Tag::CodeBlock(kind) => {
                     if !spans.is_empty() {
                         emit_line(&mut lines, &mut spans, &mut last_blank);
@@ -265,7 +289,11 @@ pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'
                     }
                     blank_after(&mut lines);
                 }
-                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link => {
+                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
+                    styles.pop();
+                }
+                TagEnd::Link => {
+                    current_link = None;
                     styles.pop();
                 }
                 TagEnd::Paragraph | TagEnd::Item => {
@@ -309,15 +337,35 @@ pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'
                         } else {
                             style
                         };
+                        if let Some(target) = &current_link {
+                            link_spans.push(LinkSpan {
+                                row: lines.len(),
+                                span: spans.len(),
+                                target: target.clone(),
+                            });
+                        }
                         spans.push(Span::styled(chunk.to_owned(), code_style));
                         last_blank = false;
                     }
                 }
             }
-            Event::Code(value) => spans.push(Span::styled(
-                value.into_string(),
-                Style::default().fg(theme.code),
-            )),
+            Event::Code(value) => {
+                if let Some(target) = &current_link {
+                    link_spans.push(LinkSpan {
+                        row: lines.len(),
+                        span: spans.len(),
+                        target: target.clone(),
+                    });
+                }
+                let style = if current_link.is_some() {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(theme.code)
+                };
+                spans.push(Span::styled(value.into_string(), style));
+            }
             Event::SoftBreak => spans.push(Span::raw(" ")),
             Event::HardBreak => emit_line(&mut lines, &mut spans, &mut last_blank),
             Event::Rule => {
@@ -343,7 +391,7 @@ pub fn render_with_width(source: &str, theme: Theme, width: usize) -> Vec<Line<'
     if lines.is_empty() {
         lines.push(Line::default());
     }
-    lines
+    (lines, link_spans)
 }
 
 #[cfg(test)]
@@ -398,6 +446,26 @@ mod tests {
         assert!(text[table + 2].contains("架构设计") && text[table + 2].contains("9.0"));
         assert!(text[table + 3].contains("测试质量") && text[table + 3].contains("8.5"));
         assert!(text.iter().any(|line| line.contains("结论")));
+    }
+
+    #[test]
+    fn named_markdown_links_keep_their_targets_when_display_text_differs() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let (rows, tags) = render_with_links(
+            "Read [审查报告 SR-001](https://example.org/reviews/SR-001) and [复现测试](./reviews/tests.md).",
+            theme, 100,
+        );
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].target, "https://example.org/reviews/SR-001");
+        assert_eq!(tags[1].target, "./reviews/tests.md");
+        assert_eq!(
+            rows[tags[0].row].spans[tags[0].span].content,
+            "审查报告 SR-001"
+        );
+        assert!(rows[tags[0].row].spans[tags[0].span]
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
     }
 
     #[test]
