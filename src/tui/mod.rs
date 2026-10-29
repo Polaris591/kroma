@@ -798,6 +798,7 @@ async fn execute_task(
                 },
                 _=ticker.tick() => {
                     if state.auto_scroll_selection() { dirty=true; }
+                    if state.tick_activity() { dirty=true; }
                     if dirty {
                         screen.draw(state)?;
                         dirty=false;

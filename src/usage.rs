@@ -13,11 +13,39 @@ pub struct UsageMeter {
     unknown_output: usize,
     unknown_cached: usize,
     unknown_reasoning: usize,
+    /// Cache hit rate only uses calls with both input and cached tokens
+    /// reported. Never mix an unknown denominator into a measured ratio.
+    paired_cache_input: u64,
+    paired_cache_hits: u64,
+}
+
+/// Compact decimal units for counters, shared by context and API usage.
+pub fn compact_tokens(value: u64) -> String {
+    if value >= 1_000_000 {
+        let scaled = value as f64 / 1_000_000.0;
+        if value >= 10_000_000 || value % 1_000_000 == 0 {
+            format!("{scaled:.0}M")
+        } else {
+            format!("{scaled:.1}M")
+        }
+    } else if value >= 100_000 || (value >= 10_000 && value % 1_000 == 0) {
+        format!("{:.0}k", value as f64 / 1_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
 }
 
 impl UsageMeter {
     pub fn record(&mut self, usage: Option<&Usage>) {
         self.calls += 1;
+        if let (Some(input), Some(cached)) =
+            (usage.and_then(|u| u.input), usage.and_then(|u| u.cached))
+        {
+            self.paired_cache_input = self.paired_cache_input.saturating_add(input);
+            self.paired_cache_hits = self.paired_cache_hits.saturating_add(cached.min(input));
+        }
         if let Some(value) = usage.and_then(|u| u.input) {
             self.input = self.input.saturating_add(value);
         } else {
@@ -40,6 +68,65 @@ impl UsageMeter {
         }
     }
 
+    /// Cached input / total input on requests where *both* were reported.
+    /// None means not reported (distinct from a real 0% hit rate).
+    pub fn cache_hit_rate(&self) -> Option<(u64, u64, bool)> {
+        (self.paired_cache_input > 0).then_some((
+            self.paired_cache_hits,
+            self.paired_cache_input,
+            self.unknown_input > 0 || self.unknown_cached > 0,
+        ))
+    }
+
+    pub fn compact_status(&self, width: usize) -> Option<String> {
+        if self.calls == 0 {
+            return Some("Tokens (total) In — · Out — · Cache —".into());
+        }
+        let input = if self.unknown_input == 0 {
+            compact_tokens(self.input)
+        } else if self.input > 0 {
+            format!("≥{}", compact_tokens(self.input))
+        } else {
+            "—".into()
+        };
+        let output = if self.unknown_output == 0 {
+            compact_tokens(self.output)
+        } else if self.output > 0 {
+            format!("≥{}", compact_tokens(self.output))
+        } else {
+            "—".into()
+        };
+        let cache = self
+            .cache_hit_rate()
+            .map_or("—".to_owned(), |(hits, total, partial)| {
+                let percent = hits as f64 * 100.0 / total as f64;
+                let prefix = if partial { "~" } else { "" };
+                if width >= 95 {
+                    format!(
+                        "{prefix}{percent:.0}% ({}/{})",
+                        compact_tokens(hits),
+                        compact_tokens(total)
+                    )
+                } else {
+                    format!("{prefix}{percent:.0}%")
+                }
+            });
+        let full = format!("Tokens (total) In {input} · Out {output} · Cache {cache}");
+        if width >= full.chars().count() {
+            return Some(full);
+        }
+        let short = format!("In {input} · Out {output} · Cache {cache}");
+        if width >= short.chars().count() {
+            return Some(short);
+        }
+        let narrow = format!("Cache {cache} · In {input}");
+        if width >= narrow.chars().count() {
+            Some(narrow)
+        } else {
+            Some(format!("Cache {cache}").chars().take(width).collect())
+        }
+    }
+
     pub fn report(&self) -> String {
         let value = |count: u64, missing: usize| -> String {
             if missing == 0 {
@@ -48,12 +135,29 @@ impl UsageMeter {
                 format!("{count} measured (+{missing} unknown request(s))")
             }
         };
+        let cache_rate = self.cache_hit_rate().map_or(
+            "unknown (provider did not report both cache and input tokens)".to_owned(),
+            |(cached, input, partial)| {
+                format!(
+                    "{:.1}% ({} cached / {} input{}); cached tokens are part of input",
+                    cached as f64 * 100.0 / input as f64,
+                    cached,
+                    input,
+                    if partial {
+                        ", reported requests only"
+                    } else {
+                        ""
+                    }
+                )
+            },
+        );
         format!(
-            "Foreground usage (this Kroma process, not historical or APEC):\nModel calls: {}\nInput: {} tokens\nOutput: {} tokens\nReasoning: {} tokens (included in output; when reported)\nCached input: {} tokens (included in input)\nAPEC summary usage is reported separately in runtime logs.",
+            "Foreground usage (this Kroma process, not historical or APEC):\nModel calls: {}\nInput: {} tokens\nOutput: {} tokens\nReasoning: {} tokens (included in output; when reported)\nCached input: {} tokens (included in input)\nCache hit rate: {}\nAPEC summary usage is reported separately in runtime logs.",
             self.calls,value(self.input,self.unknown_input),
             value(self.output,self.unknown_output),
             value(self.reasoning,self.unknown_reasoning),
             value(self.cached,self.unknown_cached),
+            cache_rate,
         )
     }
 }
@@ -78,5 +182,48 @@ mod tests {
             .contains("100 measured (+1 unknown request(s))"));
         assert!(meter.report().contains("80 measured"));
         assert!(meter.report().contains("8 measured"));
+        assert_eq!(meter.cache_hit_rate(), Some((80, 100, true)));
+        assert!(meter.compact_status(120).unwrap().contains("Cache ~80%"));
+    }
+
+    #[test]
+    fn cache_hit_rate_distinguishes_zero_from_unreported_and_uses_paired_calls() {
+        let mut meter = UsageMeter::default();
+        assert_eq!(meter.cache_hit_rate(), None);
+        meter.record(Some(&Usage {
+            input: Some(1_000),
+            output: Some(90),
+            cached: None,
+            ..Usage::default()
+        }));
+        assert_eq!(meter.cache_hit_rate(), None);
+        assert!(meter.compact_status(100).unwrap().contains("Cache —"));
+        meter.record(Some(&Usage {
+            input: Some(1_000),
+            output: Some(70),
+            cached: Some(0),
+            ..Usage::default()
+        }));
+        assert_eq!(meter.cache_hit_rate(), Some((0, 1_000, true)));
+        meter.record(Some(&Usage {
+            input: Some(3_000),
+            output: Some(150),
+            cached: Some(2_000),
+            ..Usage::default()
+        }));
+        assert_eq!(meter.cache_hit_rate(), Some((2_000, 4_000, true)));
+        assert_eq!(meter.input, 5_000);
+        assert_eq!(meter.output, 310);
+        assert!(meter
+            .report()
+            .contains("50.0% (2000 cached / 4000 input, reported requests only)"));
+    }
+
+    #[test]
+    fn compact_tokens_formats_million_and_sub_kilounits() {
+        assert_eq!(compact_tokens(1_000_000), "1M");
+        assert_eq!(compact_tokens(1_600), "1.6k");
+        assert_eq!(compact_tokens(12_500), "12.5k");
+        assert_eq!(compact_tokens(0), "0");
     }
 }

@@ -14,7 +14,10 @@ use ratatui::{
     Frame,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tokio::sync::mpsc::UnboundedSender;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -566,7 +569,12 @@ pub struct UiState {
     pub thinking: Option<String>,
     /// Levels advertised by the active profile; empty means every level.
     phase: &'static str,
+    phase_since: Option<Instant>,
+    activity_frame: usize,
+    last_activity_frame: Instant,
 }
+
+const ACTIVITY_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 impl UiState {
     pub fn new(model: String, session: String, themes: ThemeStore, messages: &[Message]) -> Self {
@@ -617,6 +625,9 @@ impl UiState {
             context_estimated: true,
             thinking: None,
             phase: "ready",
+            phase_since: None,
+            activity_frame: 0,
+            last_activity_frame: Instant::now(),
         };
         result.load_history(messages);
         result.restore_input_history(messages);
@@ -640,7 +651,7 @@ impl UiState {
         self.scroll_from_bottom = 0;
         self.scroll_anchor = None;
         self.running = true;
-        self.phase = "preparing";
+        self.set_phase("preparing");
     }
 
     pub fn attach(&mut self, mut item: Attachment) -> Result<(), String> {
@@ -824,37 +835,40 @@ impl UiState {
     }
 
     pub fn context_display(&self) -> String {
-        fn compact(value: u64) -> String {
-            if value >= 10_000 {
-                format!("{:.0}k", value as f64 / 1000.0)
-            } else if value >= 1_000 {
-                format!("{:.1}k", value as f64 / 1000.0)
-            } else {
-                value.to_string()
-            }
-        }
+        use crate::usage::compact_tokens;
         let window = self.context_window as u64;
         if window == 0 {
             return "Ctx —".into();
         }
         match self.context_input {
             Some(input) => {
-                let percent = (input as f64 * 100.0 / window as f64).round() as u64;
+                let percent = Self::context_percent(input, window);
                 let marker = if self.context_estimated { "~" } else { "" };
                 format!(
                     "Ctx {marker}{} / {} · {marker}{percent}%",
-                    compact(input),
-                    compact(window)
+                    compact_tokens(input),
+                    compact_tokens(window)
                 )
             }
-            None => format!("Ctx — / {}", compact(window)),
+            None => format!("Ctx — / {}", compact_tokens(window)),
+        }
+    }
+
+    fn context_percent(input: u64, window: u64) -> String {
+        let percent = input as f64 * 100.0 / window as f64;
+        if percent > 0.0 && percent < 0.1 {
+            format!("{percent:.2}")
+        } else if percent < 1.0 {
+            format!("{percent:.1}")
+        } else {
+            format!("{percent:.0}")
         }
     }
 
     fn compact_context(&self) -> String {
         match (self.context_input, self.context_window) {
             (Some(input), window) if window > 0 => {
-                let percent = (input as f64 * 100.0 / window as f64).round() as u64;
+                let percent = Self::context_percent(input, window as u64);
                 format!("Ctx {percent}%")
             }
             _ => "Ctx —".into(),
@@ -891,6 +905,47 @@ impl UiState {
 
     pub fn note(&mut self, text: impl Into<String>) {
         self.notification = text.into();
+    }
+
+    fn set_phase(&mut self, phase: &'static str) {
+        if self.phase != phase {
+            self.phase = phase;
+            self.phase_since = (phase != "ready").then(Instant::now);
+        }
+    }
+
+    fn activity_symbol(&self) -> &'static str {
+        ACTIVITY_FRAMES[self.activity_frame % ACTIVITY_FRAMES.len()]
+    }
+
+    /// The task loop already wakes every 40ms; paint only about five frames
+    /// per second while active. This keeps the UI alive even when the model
+    /// hasn't emitted a single byte, without reflowing Markdown or polling
+    /// the provider.
+    pub fn tick_activity(&mut self) -> bool {
+        if !self.running || self.last_activity_frame.elapsed() < Duration::from_millis(180) {
+            return false;
+        }
+        self.last_activity_frame = Instant::now();
+        self.activity_frame = (self.activity_frame + 1) % ACTIVITY_FRAMES.len();
+        true
+    }
+
+    fn activity_status(&self) -> String {
+        if !self.running {
+            return "● ready".into();
+        }
+        let phase = match self.phase {
+            "thinking" => "thinking",
+            "waiting" => "waiting",
+            "streaming" => "writing",
+            "tool" => "running tool",
+            _ => "preparing",
+        };
+        let elapsed = self
+            .phase_since
+            .map_or(0, |start| start.elapsed().as_secs());
+        format!("{} {phase} · {elapsed}s", self.activity_symbol())
     }
 
     /// Brief feedback is shown until the user's next interaction, not
@@ -941,7 +996,7 @@ impl UiState {
         self.active_assistant = None;
         self.active_reasoning = None;
         self.running = false;
-        self.phase = "ready";
+        self.set_phase("ready");
         // The full conversation is available for paging, but keep tool
         // result matching linear instead of rescanning older UI entries.
         let mut tool_entries = HashMap::<String, usize>::new();
@@ -1042,13 +1097,13 @@ impl UiState {
             }
             UiEvent::TaskStarted => {
                 self.running = true;
-                self.phase = "preparing";
+                self.set_phase("preparing");
             }
             UiEvent::TaskFinished => {
                 self.running = false;
                 self.active_assistant = None;
                 self.active_reasoning = None;
-                self.phase = "ready";
+                self.set_phase("ready");
             }
             UiEvent::Context { estimated } => {
                 // Runtime input budgets reserve output space; they must not
@@ -1063,10 +1118,10 @@ impl UiState {
             UiEvent::ModelStarted => {
                 self.active_assistant = None;
                 self.active_reasoning = None;
-                self.phase = "waiting";
+                self.set_phase("waiting");
             }
             UiEvent::Text(delta) => {
-                self.phase = "streaming";
+                self.set_phase("streaming");
                 if let Some(index) = self.active_assistant {
                     self.entries[index].body.push_str(&delta);
                 } else {
@@ -1079,7 +1134,7 @@ impl UiState {
                 if delta.is_empty() {
                     return;
                 }
-                self.phase = "thinking";
+                self.set_phase("thinking");
                 if let Some(index) = self.active_reasoning {
                     self.entries[index].body.push_str(&delta);
                 } else {
@@ -1098,7 +1153,7 @@ impl UiState {
                 }
             }
             UiEvent::ToolStarted { name, id, args } => {
-                self.phase = "tool";
+                self.set_phase("tool");
                 let mut entry = Entry::new(Kind::Tool, format!("{name} · running"), args);
                 entry.call_id = Some(id);
                 self.entries.push(entry);
@@ -1423,7 +1478,7 @@ impl UiState {
     ) -> (Text<'static>, Vec<(String, String)>) {
         let mut lines = Vec::new();
         let mut markdown_targets = Vec::new();
-        if self.entries.is_empty() {
+        if self.entries.is_empty() && !self.running {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 "   ◆  Ready for a task.",
@@ -1646,24 +1701,16 @@ impl UiState {
             Constraint::Length(2),
         ])
         .split(area);
-        let (status, status_color) = if self.running {
-            (
-                match self.phase {
-                    "streaming" => "● writing",
-                    "thinking" => "● thinking",
-                    "waiting" => "● waiting",
-                    "tool" => "● running tool",
-                    _ => "● working",
-                },
-                colors.tool,
-            )
+        let status = self.activity_status();
+        let status_color = if self.running {
+            colors.tool
         } else {
-            ("● ready", colors.user)
+            colors.user
         };
         // Header: identity and activity only. Model, Think and Context sit
         // together in one footer row, including the common 80-column case.
         let header_line = Rect::new(layout[0].x, layout[0].y, layout[0].width, 1);
-        let activity_width = UnicodeWidthStr::width(status);
+        let activity_width = UnicodeWidthStr::width(status.as_str());
         let show_activity = header_line.width as usize >= activity_width + 25;
         let left_width = (header_line.width as usize).saturating_sub(if show_activity {
             activity_width + 2
@@ -1895,6 +1942,29 @@ impl UiState {
                 .style(Style::default().fg(colors.text).bg(colors.background)),
             history,
         );
+        // The live activity label lives in cached history. Animate its marker
+        // directly in the viewport instead of rebuilding the entire markdown
+        // document on each tick (and without moving the scroll position).
+        if self.running && matches!(self.phase, "thinking" | "waiting" | "preparing") {
+            let label = match self.phase {
+                "thinking" => "  ◌  Thinking…",
+                "waiting" => "  ◌  Waiting for model…",
+                _ => "  ◌  Preparing context…",
+            };
+            if let Some(row) = self
+                .selection_rows
+                .iter()
+                .position(|line| line.starts_with(label))
+            {
+                if let Some(cell) = frame
+                    .buffer_mut()
+                    .cell_mut((history.x + 2, history.y + row as u16))
+                {
+                    cell.set_symbol(self.activity_symbol());
+                    cell.set_style(Style::default().fg(colors.accent));
+                }
+            }
+        }
         for link in &self.visible_links {
             let hovered = self
                 .hover_pointer
@@ -2047,14 +2117,29 @@ impl UiState {
                 "Ctrl+Click to open · {}",
                 compact_line(target, (status_area.width as usize).saturating_sub(22))
             )
-        } else if self.scroll_anchor.is_some() {
-            "↑ Reading earlier output · Ctrl+End to latest".into()
-        } else if self.running {
-            "Enter steer · Ctrl+C cancel · /queue follow-up".into()
-        } else if status_area.width < 50 {
-            "Enter send · /help".into()
         } else {
-            "Enter send · /help · Ctrl+R reasoning · Ctrl+O tools".into()
+            let help = if self.scroll_anchor.is_some() {
+                "↑ History · Ctrl+End latest"
+            } else if self.running {
+                "Ctrl+C cancel"
+            } else {
+                "Enter send · /help"
+            };
+            match self.usage.compact_status(status_area.width as usize) {
+                Some(tokens) => {
+                    let gap = "  ·  ";
+                    if UnicodeWidthStr::width(tokens.as_str())
+                        + UnicodeWidthStr::width(gap)
+                        + UnicodeWidthStr::width(help)
+                        <= status_area.width as usize
+                    {
+                        format!("{tokens}{gap}{help}")
+                    } else {
+                        tokens
+                    }
+                }
+                None => help.into(),
+            }
         };
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(if self.notification.is_empty() {
@@ -2126,6 +2211,120 @@ mod tests {
         state.event(UiEvent::ReasoningDelta("Next turn".into()));
         assert_eq!(state.entries.len(), 4);
         assert_eq!(state.entries[3].body, "Next turn");
+    }
+
+    #[test]
+    fn waiting_and_thinking_animate_even_when_the_provider_is_silent() {
+        let mut ui = UiState::new(
+            "deepseek".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.event(UiEvent::TaskStarted);
+        ui.event(UiEvent::ModelStarted);
+        let mut terminal = Terminal::new(TestBackend::new(90, 26)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let cached = ui.history_cache.as_ref().unwrap().text.lines.as_ptr();
+        let before = ui.activity_status();
+        ui.last_activity_frame = Instant::now() - Duration::from_millis(200);
+        assert!(
+            ui.tick_activity(),
+            "the activity clock must wake without new SSE data"
+        );
+        assert_ne!(ui.activity_status(), before);
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert_eq!(
+            cached,
+            ui.history_cache.as_ref().unwrap().text.lines.as_ptr(),
+            "animation must not rebuild the history layout"
+        );
+        let marker_row = ui
+            .selection_rows
+            .iter()
+            .position(|s| s.starts_with("  ◌  Waiting"))
+            .unwrap();
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((
+                ui.selection_area.x + 2,
+                ui.selection_area.y + marker_row as u16,
+            ))
+            .unwrap();
+        assert_eq!(cell.symbol(), ui.activity_symbol());
+
+        ui.event(UiEvent::ReasoningDelta("step 1".into()));
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(ui.selection_rows.join("\n").contains("Thinking…"));
+        ui.phase_since = Some(Instant::now() - Duration::from_secs(9));
+        assert!(ui.activity_status().contains("thinking · 9s"));
+        let before = ui.activity_symbol();
+        ui.last_activity_frame = Instant::now() - Duration::from_millis(200);
+        assert!(ui.tick_activity());
+        assert_ne!(ui.activity_symbol(), before);
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let marker_row = ui
+            .selection_rows
+            .iter()
+            .position(|s| s.starts_with("  ◌  Thinking"))
+            .unwrap();
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((
+                ui.selection_area.x + 2,
+                ui.selection_area.y + marker_row as u16,
+            ))
+            .unwrap();
+        assert_eq!(cell.symbol(), ui.activity_symbol());
+
+        ui.event(UiEvent::TaskFinished);
+        assert!(!ui.tick_activity());
+        assert_eq!(ui.activity_status(), "● ready");
+    }
+
+    #[test]
+    fn footer_distinguishes_context_from_api_tokens_and_cached_ratio() {
+        let mut ui = UiState::new(
+            "deepseek".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.configure_status(1_000_000, Some("max".into()));
+        ui.event(UiEvent::Context { estimated: 1_600 });
+        assert_eq!(ui.context_display(), "Ctx ~1.6k / 1M · ~0.2%");
+        ui.event(UiEvent::Usage {
+            input: Some(8_000),
+            output: Some(500),
+            cached: Some(6_000),
+            reasoning: Some(200),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(130, 26)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Ctx ~1.6k / 1M · ~0.2%"));
+        assert!(rendered.contains("Tokens (total) In 8.0k · Out 500 · Cache 75% (6.0k/8.0k)"));
+        let mut narrow = Terminal::new(TestBackend::new(40, 26)).unwrap();
+        narrow.draw(|frame| ui.draw(frame)).unwrap();
+        let narrow_render = narrow
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            narrow_render.contains("Cache 75%"),
+            "cache must remain visible on narrow terminals"
+        );
     }
 
     #[test]
