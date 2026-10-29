@@ -528,8 +528,14 @@ pub struct UiState {
     history_cache: Option<HistoryCache>,
     selection_rows: Vec<String>,
     selection_area: Rect,
-    selection_start: Option<(u16, u16)>,
-    selection_end: Option<(u16, u16)>,
+    selection_start: Option<(usize, usize)>,
+    selection_end: Option<(usize, usize)>,
+    history_top_row: usize,
+    scrollbar_drag: Option<usize>,
+    scrollbar_pointer_y: Option<u16>,
+    scrollbar_area: Rect,
+    selection_dragging: bool,
+    selection_edge: i8,
     visible_links: Vec<VisibleLink>,
     hover_pointer: Option<(u16, u16)>,
     entries: Vec<Entry>,
@@ -576,6 +582,12 @@ impl UiState {
             selection_area: Rect::default(),
             selection_start: None,
             selection_end: None,
+            history_top_row: 0,
+            scrollbar_drag: None,
+            scrollbar_pointer_y: None,
+            scrollbar_area: Rect::default(),
+            selection_dragging: false,
+            selection_edge: 0,
             visible_links: Vec::new(),
             hover_pointer: None,
             session,
@@ -604,6 +616,9 @@ impl UiState {
 
     pub fn add_user(&mut self, text: &str) {
         self.dismiss_notification();
+        self.mouse_release();
+        self.selection_start = None;
+        self.selection_end = None;
         self.history_cache = None;
         let items = self
             .attachments
@@ -897,6 +912,9 @@ impl UiState {
 
     pub fn load_history(&mut self, messages: &[Message]) {
         self.history_cache = None;
+        self.mouse_release();
+        self.selection_start = None;
+        self.selection_end = None;
         self.entries.clear();
         self.active_assistant = None;
         self.active_reasoning = None;
@@ -1118,8 +1136,6 @@ impl UiState {
     }
 
     pub fn scroll(&mut self, amount: isize) {
-        self.selection_start = None;
-        self.selection_end = None;
         self.scroll_from_bottom = if amount.is_positive() {
             self.scroll_from_bottom.saturating_add(amount as usize)
         } else {
@@ -1151,6 +1167,105 @@ impl UiState {
         self.scroll_anchor = None;
         self.prepend_rows_before = None;
         self.scroll_from_bottom = 0;
+    }
+
+    fn scroll_to_row(&mut self, row: usize) {
+        let top = row.min(self.history_max_scroll);
+        self.scroll_from_bottom = self.history_max_scroll - top;
+        self.scroll_anchor = (self.scroll_from_bottom > 0).then_some(top);
+    }
+
+    fn scrollbar_geometry(&self) -> (usize, usize) {
+        let height = self.scrollbar_area.height as usize;
+        let total = self.history_max_scroll + self.viewport_height as usize;
+        if height == 0 || total == 0 {
+            return (0, height);
+        }
+        let thumb = (height * height / total).clamp(1, height);
+        let position = if self.history_max_scroll == 0 {
+            0
+        } else {
+            self.history_top_row * (height - thumb) / self.history_max_scroll
+        };
+        (position, thumb)
+    }
+
+    pub fn scrollbar_press(&mut self, x: u16, y: u16) -> bool {
+        if !self.scrollbar_area.contains((x, y).into()) || self.history_max_scroll == 0 {
+            return false;
+        }
+        if self.history_visible < self.entries.len() {
+            // Only pay for the full history if the user explicitly drags
+            // the scrollbar; ordinary streaming still caches recent entries.
+            self.prepend_rows_before = self
+                .history_cache
+                .as_ref()
+                .map(|cache| cache.text.lines.len());
+            self.history_visible = self.entries.len();
+            self.history_cache = None;
+        }
+        let (position, thumb) = self.scrollbar_geometry();
+        let row = (y - self.scrollbar_area.y) as usize;
+        self.scrollbar_drag = Some(if row >= position && row < position + thumb {
+            row - position
+        } else {
+            thumb / 2
+        });
+        self.scrollbar_pointer_y = Some(y);
+        self.scrollbar_move(y);
+        true
+    }
+
+    pub fn scrollbar_move(&mut self, y: u16) -> bool {
+        let Some(offset) = self.scrollbar_drag else {
+            return false;
+        };
+        self.scrollbar_pointer_y = Some(y);
+        let height = self.scrollbar_area.height as usize;
+        let (_, thumb) = self.scrollbar_geometry();
+        if height <= thumb {
+            self.scroll_to_bottom();
+            return true;
+        }
+        let top = (y.saturating_sub(self.scrollbar_area.y) as usize)
+            .saturating_sub(offset)
+            .min(height - thumb);
+        self.scroll_to_row(top * self.history_max_scroll / (height - thumb));
+        true
+    }
+
+    pub fn mouse_release(&mut self) {
+        self.scrollbar_drag = None;
+        self.scrollbar_pointer_y = None;
+        self.selection_dragging = false;
+        self.selection_edge = 0;
+    }
+
+    pub fn selection_needs_auto_scroll(&self) -> bool {
+        self.selection_dragging && self.selection_edge != 0
+    }
+
+    pub fn auto_scroll_selection(&mut self) -> bool {
+        if !self.selection_dragging || self.selection_edge == 0 {
+            return false;
+        }
+        let direction = self.selection_edge;
+        let before = self.scroll_from_bottom;
+        self.scroll(if direction < 0 { 2 } else { -2 });
+        if before == self.scroll_from_bottom {
+            return false;
+        }
+        let edge_row = if direction < 0 {
+            self.selection_area.y
+        } else {
+            self.selection_area.bottom().saturating_sub(1)
+        };
+        let col = self.selection_end.map_or(0, |(_, x)| x);
+        let top = self
+            .history_max_scroll
+            .saturating_sub(self.scroll_from_bottom);
+        self.selection_end = Some((top + (edge_row - self.selection_area.y) as usize, col));
+        true
     }
 
     pub fn link_at(&self, column: u16, row: u16) -> Option<&str> {
@@ -1200,42 +1315,64 @@ impl UiState {
 
     pub fn select_start(&mut self, column: u16, row: u16) {
         if self.selection_area.contains((column, row).into()) {
-            self.selection_start = Some((column, row));
-            self.selection_end = Some((column, row));
+            let point = (
+                self.history_top_row + (row - self.selection_area.y) as usize,
+                (column - self.selection_area.x) as usize,
+            );
+            self.selection_start = Some(point);
+            self.selection_end = Some(point);
+            self.selection_dragging = true;
+            self.selection_edge = 0;
         }
     }
 
     pub fn select_drag(&mut self, column: u16, row: u16) {
-        if self.selection_start.is_some() {
-            self.selection_end = Some((column, row));
+        if self.selection_dragging {
+            self.selection_edge = if row <= self.selection_area.y {
+                -1
+            } else if row >= self.selection_area.bottom().saturating_sub(1) {
+                1
+            } else {
+                0
+            };
+            let y = row.clamp(
+                self.selection_area.y,
+                self.selection_area.bottom().saturating_sub(1),
+            );
+            let x = column.clamp(
+                self.selection_area.x,
+                self.selection_area.right().saturating_sub(1),
+            );
+            self.selection_end = Some((
+                self.history_top_row + (y - self.selection_area.y) as usize,
+                (x - self.selection_area.x) as usize,
+            ));
         }
     }
 
     pub fn selected_text(&self) -> Option<String> {
         let (start, end) = (self.selection_start?, self.selection_end?);
-        let (start, end) = if (start.1, start.0) <= (end.1, end.0) {
+        let (start, end) = if start <= end {
             (start, end)
         } else {
             (end, start)
         };
-        if !self.selection_area.contains(start.into()) {
-            return None;
-        }
-        let area = self.selection_area;
+        let history = &self.history_cache.as_ref()?.text.lines;
         let mut copied = Vec::new();
-        for y in start.1..=end.1.min(area.bottom().saturating_sub(1)) {
-            let Some(line) = self.selection_rows.get((y - area.y) as usize) else {
+        for row in start.0..=end.0.min(history.len().saturating_sub(1)) {
+            let Some(line) = history.get(row) else {
                 continue;
             };
-            let first = if y == start.1 {
-                start.0.saturating_sub(area.x) as usize
+            let line = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let first = if row == start.0 { start.1 } else { 0 };
+            let last = if row == end.0 {
+                end.1 + 1
             } else {
-                0
-            };
-            let last = if y == end.1 {
-                end.0.saturating_sub(area.x) as usize + 1
-            } else {
-                area.width as usize
+                self.selection_area.width as usize
             };
             let mut selected = String::new();
             let mut column = 0;
@@ -1573,13 +1710,50 @@ impl UiState {
         let rows = contents.lines.len();
         let max_scroll = rows.saturating_sub(history.height as usize);
         self.history_max_scroll = max_scroll;
-        if let Some(anchor) = self.scroll_anchor {
+        if let (Some(y), Some(offset)) = (self.scrollbar_pointer_y, self.scrollbar_drag) {
+            let height = self.scrollbar_area.height as usize;
+            let thumb = if rows == 0 {
+                height
+            } else {
+                (height.saturating_mul(height) / rows).clamp(1, height.max(1))
+            };
+            let track = height.saturating_sub(thumb);
+            let from_track_start = (y.saturating_sub(self.scrollbar_area.y) as usize)
+                .saturating_sub(offset)
+                .min(track);
+            let top = if track > 0 {
+                from_track_start * max_scroll / track
+            } else {
+                0
+            };
+            self.scroll_from_bottom = max_scroll.saturating_sub(top);
+            self.scroll_anchor = (self.scroll_from_bottom > 0).then_some(top);
+            // If the lazy history was expanded, existing selection rows are
+            // now lower in the cached transcript.
+            if let Some(previous) = self.prepend_rows_before.take() {
+                let added = rows.saturating_sub(previous);
+                if let Some((row, _)) = self.selection_start.as_mut() {
+                    *row = row.saturating_add(added);
+                }
+                if let Some((row, _)) = self.selection_end.as_mut() {
+                    *row = row.saturating_add(added);
+                }
+            }
+        } else if let Some(anchor) = self.scroll_anchor {
             // The history window loads older entries by prepending rows.
             // Adjust for those once; ordinary live text only appends below.
             let prepend = self
                 .prepend_rows_before
                 .take()
                 .map_or(0, |old_rows| rows.saturating_sub(old_rows));
+            if prepend > 0 {
+                if let Some((row, _)) = self.selection_start.as_mut() {
+                    *row = row.saturating_add(prepend);
+                }
+                if let Some((row, _)) = self.selection_end.as_mut() {
+                    *row = row.saturating_add(prepend);
+                }
+            }
             let anchored = anchor.saturating_add(prepend).min(max_scroll);
             self.scroll_anchor = Some(anchored);
             self.scroll_from_bottom = max_scroll.saturating_sub(anchored);
@@ -1588,7 +1762,9 @@ impl UiState {
             self.scroll_from_bottom = self.scroll_from_bottom.min(max_scroll);
         }
         let start_row = max_scroll.saturating_sub(self.scroll_from_bottom);
+        self.history_top_row = start_row;
         self.selection_area = history;
+        self.scrollbar_area = Rect::new(history.right(), history.y, 1, history.height);
         let end_row = start_row.saturating_add(history.height as usize).min(rows);
         let viewport_lines = contents.lines[start_row..end_row].to_vec();
         self.selection_rows = viewport_lines
@@ -1666,17 +1842,18 @@ impl UiState {
             }
         }
         if let (Some(mut start), Some(mut end)) = (self.selection_start, self.selection_end) {
-            if (start.1, start.0) > (end.1, end.0) {
+            if start > end {
                 std::mem::swap(&mut start, &mut end);
             }
-            for y in start.1.max(history.y)..=end.1.min(history.bottom().saturating_sub(1)) {
-                let left = if y == start.1 {
-                    start.0.max(history.x)
+            for index in start.0.max(start_row)..=end.0.min(end_row.saturating_sub(1)) {
+                let y = history.y + (index - start_row) as u16;
+                let left = if index == start.0 {
+                    history.x.saturating_add(start.1 as u16)
                 } else {
                     history.x
                 };
-                let right = if y == end.1 {
-                    end.0.min(history.right().saturating_sub(1))
+                let right = if index == end.0 {
+                    history.x.saturating_add(end.1 as u16)
                 } else {
                     history.right().saturating_sub(1)
                 };
@@ -1686,6 +1863,26 @@ impl UiState {
                             cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
                         }
                     }
+                }
+            }
+        }
+
+        // One unobtrusive cell-wide track, always proportional to the full
+        // rendered transcript. Dragging the thumb updates the history anchor.
+        if rows > history.height as usize && self.scrollbar_area.height > 0 {
+            let (top, thumb) = self.scrollbar_geometry();
+            for i in 0..self.scrollbar_area.height {
+                if let Some(cell) = frame
+                    .buffer_mut()
+                    .cell_mut((self.scrollbar_area.x, self.scrollbar_area.y + i))
+                {
+                    let active = (i as usize) >= top && (i as usize) < top + thumb;
+                    cell.set_symbol(if active { "┃" } else { "│" });
+                    cell.set_style(Style::default().fg(if active {
+                        colors.accent
+                    } else {
+                        colors.border
+                    }));
                 }
             }
         }
@@ -2356,6 +2553,156 @@ mod tests {
         assert_eq!(state.selected_text().as_deref(), Some("hello"));
         terminal.draw(|frame| state.draw(frame)).unwrap();
         assert_eq!(state.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn scrollbar_thumb_can_be_dragged_between_earliest_and_latest_history() {
+        let messages = (0..120)
+            .map(|i| Message::new("assistant", format!("Log line {i:03}")))
+            .collect::<Vec<_>>();
+        let mut state = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert!(state.history_max_scroll > 0);
+        let track = state.scrollbar_area;
+        assert!(track.height > 5);
+        let (position, thumb) = state.scrollbar_geometry();
+        assert!(thumb < track.height as usize);
+        assert!(state.scrollbar_press(track.x, track.y + position as u16));
+        assert!(state.scrollbar_move(track.y));
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert_eq!(state.history_top_row, 0);
+        assert!(state.selection_rows.join("\n").contains("Log line 000"));
+        assert!(state.scrollbar_move(track.bottom() - 1));
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert_eq!(state.scroll_from_bottom, 0);
+        assert!(state.selection_rows.join("\n").contains("Log line 119"));
+        state.mouse_release();
+        assert!(!state.scrollbar_move(track.y));
+        assert!(!state.scrollbar_press(track.x.saturating_sub(3), track.y));
+    }
+
+    #[test]
+    fn scrollbar_can_reach_entries_older_than_initial_lazy_history_window() {
+        let messages = (0..440)
+            .map(|i| Message::new("assistant", format!("Timeline {i:03}")))
+            .collect::<Vec<_>>();
+        let mut state = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert_eq!(state.history_visible, 300);
+        let track = state.scrollbar_area;
+        assert!(state.scrollbar_press(track.x, track.y));
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert_eq!(state.history_visible, messages.len());
+        assert_eq!(state.history_top_row, 0);
+        assert!(state.selection_rows.join("\n").contains("Timeline 000"));
+        state.mouse_release();
+        state.scroll_to_bottom();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert!(state.selection_rows.join("\n").contains("Timeline 439"));
+    }
+
+    #[test]
+    fn drag_selection_autoscrolls_and_copies_across_multiple_viewports() {
+        let messages = (0..80)
+            .map(|i| Message::new("assistant", format!("Excerpt {i:03}")))
+            .collect::<Vec<_>>();
+        let mut state = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        state.scroll(state.history_max_scroll as isize);
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert_eq!(state.history_top_row, 0);
+        let area = state.selection_area;
+        state.select_start(area.x + 3, area.y + 2);
+        state.select_drag(area.x + 4, area.bottom() - 1);
+        assert!(state.selection_needs_auto_scroll());
+        let first_end = state.selection_end.unwrap().0;
+        for _ in 0..40 {
+            assert!(state.auto_scroll_selection());
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+        }
+        assert!(state.selection_end.unwrap().0 > first_end + 15);
+        assert!(state.selected_text().unwrap().contains("Excerpt 012"));
+        assert!(state.selected_text().unwrap().contains("Excerpt 025"));
+        state.mouse_release();
+        assert!(!state.selection_needs_auto_scroll());
+        assert!(!state.auto_scroll_selection());
+        assert!(state.selected_text().unwrap().contains("Excerpt 025"));
+    }
+
+    #[test]
+    fn selection_can_auto_scroll_upward_and_keeps_earlier_text() {
+        let messages = (0..80)
+            .map(|i| Message::new("assistant", format!("Earlier {i:03}")))
+            .collect::<Vec<_>>();
+        let mut state = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let area = state.selection_area;
+        state.select_start(area.x + 2, area.bottom() - 3);
+        let start_row = state.selection_start.unwrap().0;
+        state.select_drag(area.x + 2, area.y);
+        assert!(state.selection_needs_auto_scroll());
+        for _ in 0..25 {
+            assert!(state.auto_scroll_selection());
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+        }
+        assert!(state.selection_end.unwrap().0 < start_row - 20);
+        assert!(state.selected_text().unwrap().lines().count() > 20);
+        state.mouse_release();
+        assert!(!state.auto_scroll_selection());
+    }
+
+    #[test]
+    fn scrollbar_drag_does_not_replace_existing_selection() {
+        let messages = (0..45)
+            .map(|i| Message::new("assistant", format!("Record {i:03}")))
+            .collect::<Vec<_>>();
+        let mut state = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let area = state.selection_area;
+        let row = state
+            .selection_rows
+            .iter()
+            .position(|line| line.contains("Record 044"))
+            .unwrap();
+        state.select_start(area.x + 3, area.y + row as u16);
+        state.select_drag(area.x + 8, area.y + row as u16);
+        let selected = state.selected_text().unwrap();
+        state.mouse_release();
+        let x = state.scrollbar_area.x;
+        let y = state.scrollbar_area.y;
+        assert!(state.scrollbar_press(x, y));
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        assert_eq!(state.selected_text().as_deref(), Some(selected.as_str()));
     }
     #[test]
     fn scrolling_pins_visible_history_while_streaming_then_returns_to_latest() {

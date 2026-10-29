@@ -40,7 +40,10 @@ framework, a second agent loop, or a mandatory plugin system.
   **`kroma --continue`** opens that conversation directly in the TUI. Plain
   `kroma` remains unchanged; the recent session is never restored implicitly.
 - **Mouse copy:** drag-select visible conversation text, then right-click to
-  copy. **Hover a hyperlink and Ctrl+left-click** to open its target. Both
+  copy. The selection can extend past the top or bottom of the transcript:
+  keep holding the left button at the edge to auto-scroll and continue
+  selecting across multiple screens. **Hover a hyperlink and Ctrl+left-click**
+  to open its target. Both
   named Markdown links (e.g. `[report](./reviews/report.md)`) and bare
   `https://` URLs, `file://` URLs, and recognizable file paths are supported.
   Web links use your default browser; local paths resolve against the current
@@ -111,6 +114,10 @@ sessions and the existing slash commands. Shortcuts:
 - **PgUp/PgDn** or mouse wheel scroll conversation; scrolling up pins the
   reading position even as the model streams, and **Ctrl+End** returns to the
   latest output. **Ctrl+O** expands tool outputs; **Ctrl+R** shows reasoning.
+- **Scroll bar:** drag the thin thumb at the right edge of the conversation
+  to move directly through history. Its track is proportional to the transcript
+  and loads older history when necessary. Ordinary text dragging keeps
+  selection active while the viewport moves.
 - **Ctrl+P** opens the searchable picker; **Tab** changes its category among
   commands, model profiles, sessions, and files. Type to filter, Up/Down to
   select, Enter to confirm, Esc to dismiss without deleting an unsent draft.

@@ -609,9 +609,12 @@ fn input_event(
             MouseEventKind::ScrollUp => state.scroll(3),
             MouseEventKind::ScrollDown => state.scroll(-3),
             MouseEventKind::Moved => state.hover_link(mouse.column, mouse.row),
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => state.mouse_release(),
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 state.hover_link(mouse.column, mouse.row);
-                if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                if state.scrollbar_press(mouse.column, mouse.row) {
+                    // Scrollbar owns this drag, not transcript selection.
+                } else if mouse.modifiers.contains(KeyModifiers::CONTROL) {
                     if let Some(target) = state.link_at(mouse.column, mouse.row) {
                         let target = state.resolved_link(target);
                         match links::open_target(&target, workdir) {
@@ -624,7 +627,9 @@ fn input_event(
                 }
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                if !mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                if state.scrollbar_move(mouse.row) {
+                    // Proportional track drag; keep selection untouched.
+                } else if !mouse.modifiers.contains(KeyModifiers::CONTROL) {
                     state.select_drag(mouse.column, mouse.row);
                 }
             }
@@ -792,6 +797,7 @@ async fn execute_task(
                     dirty=true;
                 },
                 _=ticker.tick() => {
+                    if state.auto_scroll_selection() { dirty=true; }
                     if dirty {
                         screen.draw(state)?;
                         dirty=false;
@@ -990,6 +996,8 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     let mut input = EventStream::new();
     let task_input = agent.task_input();
     let mut run_followups = false;
+    let mut selection_tick = tokio::time::interval(std::time::Duration::from_millis(55));
+    selection_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         if run_followups {
@@ -1029,6 +1037,10 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
             },
             message=rx.recv() => {
                 if let Some(message)=message {state.event(message);}
+                InputAction::None
+            },
+            _=selection_tick.tick(), if state.selection_needs_auto_scroll() => {
+                state.auto_scroll_selection();
                 InputAction::None
             },
         };

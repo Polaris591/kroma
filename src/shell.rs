@@ -1190,18 +1190,17 @@ mod tests {
     #[tokio::test]
     async fn clearing_session_deletes_referenced_large_capture_only() {
         let cwd = std::env::current_dir().unwrap();
-        let result = execute("yes x | head -c 1100000", &cwd).await.unwrap();
+        let session = cwd.join("test-session.json");
+        let result = execute_for_session("yes x | head -c 1100000", &cwd, &session)
+            .await
+            .unwrap();
         let path = result
             .stdout_file
             .clone()
             .expect("large result stored on disk");
         assert!(Path::new(&path).is_file());
         let raw = serde_json::to_string(&result).unwrap();
-        cleanup_cleared_history(
-            &cwd,
-            &cwd.join("test-session.json"),
-            &[Message::tool("large".into(), raw)],
-        );
+        cleanup_cleared_history(&cwd, &session, &[Message::tool("large".into(), raw)]);
         assert!(!Path::new(&path).exists());
     }
 
