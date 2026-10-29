@@ -792,6 +792,9 @@ impl Agent {
         self.compression.new_user_turn();
         let active_attachment_paths =
             active_attachment_paths(&self.messages, attachments, self.model.accepts_images());
+        // Reuse immutable image encodings across this task's model/tool turns.
+        // Dropped on completion, error, or cancellation; never written to WAL.
+        let task_images = crate::model::TaskImageCache::default();
         let mut message = Message::new("user", user_input);
         if !attachments.is_empty() {
             message.provider_items = Some(attachments.to_vec());
@@ -853,9 +856,11 @@ impl Agent {
             // reasoning from other models and human-visible thinking history.
             let mut budget_view = view.clone();
             self.model.project_for_budget(&mut budget_view);
-            let estimated_input_tokens = self
+            // Reuse the tool-schema bytes measured once for this task,
+            // and the validated message bytes for cache calibration.
+            let (estimated_input_tokens, budget_view_bytes) = self
                 .context_budget
-                .validate_final_request(&budget_view, &tool_definitions)?;
+                .validate_with_tool_bytes(&budget_view, tool_schema_bytes)?;
             if let Some(events) = &self.events {
                 events.on_event(RuntimeEvent::ContextPrepared {
                     messages: view.len(),
@@ -896,9 +901,10 @@ impl Agent {
             let event_sink = self.events.clone();
             let completion = self
                 .model
-                .complete_with_reasoning(
+                .complete_with_task_images(
                     &view,
                     &tool_definitions,
+                    &task_images,
                     &mut |delta| {
                         printed_text = true;
                         if let Some(events) = &event_sink {
@@ -971,8 +977,9 @@ impl Agent {
             // their tool results. The freshly returned calls/results remain
             // protected until a subsequent successful model response.
             self.compression.mark_consumed(self.messages.len());
-            self.compression.observe(
+            self.compression.observe_with_bytes(
                 &budget_view,
+                budget_view_bytes,
                 completion.usage.as_ref().and_then(|usage| usage.input),
                 completion.usage.as_ref().and_then(|usage| usage.cached),
             );

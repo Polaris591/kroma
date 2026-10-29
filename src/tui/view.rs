@@ -1987,7 +1987,9 @@ impl UiState {
         self.selection_area = history;
         self.scrollbar_area = Rect::new(history.right(), history.y, 1, history.height);
         let end_row = start_row.saturating_add(history.height as usize).min(rows);
-        let viewport_lines = contents.lines[start_row..end_row].to_vec();
+        // Borrow cached styled lines instead of cloning every span on every
+        // animation/scroll frame. Selection still owns its plain-text rows.
+        let viewport_lines = &contents.lines[start_row..end_row];
         self.selection_rows = viewport_lines
             .iter()
             .map(|line| {
@@ -2038,13 +2040,17 @@ impl UiState {
             })
             .collect();
 
-        // Copy/render just the viewport, not the entire cached transcript.
-        // This also avoids u16::MAX clipping on very long conversations.
-        frame.render_widget(
-            Paragraph::new(Text::from(viewport_lines))
-                .style(Style::default().fg(colors.text).bg(colors.background)),
+        // Render already-wrapped cached lines directly into the buffer.
+        // Ratatui's stable set_line API keeps per-span styles and Unicode
+        // clipping without allocating/cloning a Text for each frame.
+        let buffer = frame.buffer_mut();
+        buffer.set_style(
             history,
+            Style::default().fg(colors.text).bg(colors.background),
         );
+        for (row, line) in viewport_lines.iter().enumerate() {
+            buffer.set_line(history.x, history.y + row as u16, line, history.width);
+        }
         if self.home {
             super::logo::draw(frame, history, colors, self.themes.preset());
         }
@@ -3255,6 +3261,61 @@ mod tests {
         state.select_start(x, y);
         state.select_drag(x + 1, y);
         assert_eq!(state.selected_text().as_deref(), Some("👩‍💻"));
+    }
+
+    #[test]
+    fn borrowed_viewport_renders_the_same_cells_as_original_paragraph() {
+        let messages = vec![
+            Message::new("user", "你好，检查 Unicode 和 emoji"),
+            Message::new(
+                "assistant",
+                "## Results\n\n**Passed**: ✅ 3 tests\n\n- Cargo checks\n- 宽字符和组合字形 e\u{301}\n\n`fn main() {}`",
+            ),
+        ];
+        let mut state = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut actual = Terminal::new(TestBackend::new(88, 25)).unwrap();
+        actual.draw(|frame| state.draw(frame)).unwrap();
+        let area = state.selection_area;
+        let end = (state.history_top_row + area.height as usize)
+            .min(state.history_cache.as_ref().unwrap().text.lines.len());
+        let original_lines =
+            state.history_cache.as_ref().unwrap().text.lines[state.history_top_row..end].to_vec();
+        let theme = state.themes.colors;
+        let mut reference = Terminal::new(TestBackend::new(88, 25)).unwrap();
+        reference
+            .draw(|frame| {
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(theme.background)),
+                    frame.area(),
+                );
+                frame.render_widget(
+                    Paragraph::new(Text::from(original_lines))
+                        .style(Style::default().fg(theme.text).bg(theme.background)),
+                    area,
+                );
+            })
+            .unwrap();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let real = actual.backend().buffer().cell((x, y)).unwrap();
+                let previous = reference.backend().buffer().cell((x, y)).unwrap();
+                assert_eq!(
+                    (real.symbol(), real.fg, real.bg, real.modifier),
+                    (
+                        previous.symbol(),
+                        previous.fg,
+                        previous.bg,
+                        previous.modifier
+                    ),
+                    "viewport cell ({x},{y}) changed"
+                );
+            }
+        }
     }
 
     #[test]

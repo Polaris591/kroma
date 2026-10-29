@@ -15,6 +15,24 @@ pub(super) fn payload(
     info: &ModelInfo,
     origin: &str,
 ) -> Result<Value> {
+    payload_with_cache(
+        model, messages, tools, max_tokens, effort, info, origin, None,
+    )
+}
+
+// Keep the existing protocol payload inputs unchanged; the optional cache
+// only affects image materialization, not wire format or request settings.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn payload_with_cache(
+    model: &str,
+    messages: &[Message],
+    tools: &[Value],
+    max_tokens: usize,
+    effort: &str,
+    info: &ModelInfo,
+    origin: &str,
+    image_cache: Option<&crate::model::TaskImageCache>,
+) -> Result<Value> {
     let mut system = Vec::new();
     let mut items: Vec<Value> = Vec::new();
     let active_turn = messages
@@ -28,9 +46,11 @@ pub(super) fn payload(
                     system.push(text.clone());
                 }
             }
-            "user" => items.push(json!({"role":"user","content":crate::attachments::content(
+            "user" => items.push(
+                json!({"role":"user","content":crate::attachments::content_with_cache(
                     msg.content.as_deref().unwrap_or(""),
-                    msg.provider_items.as_deref().unwrap_or(&[]),"anthropic")?})),
+                    msg.provider_items.as_deref().unwrap_or(&[]),"anthropic",image_cache)?}),
+            ),
             "assistant" => {
                 let mut blocks = msg
                     .provider_items

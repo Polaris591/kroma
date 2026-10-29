@@ -13,6 +13,18 @@ pub(super) fn payload(
     effort: &str,
     origin: &str,
 ) -> Result<Value> {
+    payload_with_cache(model, messages, tools, max_output, effort, origin, None)
+}
+
+pub(super) fn payload_with_cache(
+    model: &str,
+    messages: &[Message],
+    tools: &[Value],
+    max_output: Option<usize>,
+    effort: &str,
+    origin: &str,
+    image_cache: Option<&crate::model::TaskImageCache>,
+) -> Result<Value> {
     let mut input = Vec::new();
     let active_turn = messages
         .iter()
@@ -22,10 +34,11 @@ pub(super) fn payload(
         match msg.role.as_str() {
             "system" | "developer" | "user" => {
                 let content = if msg.role == "user" {
-                    crate::attachments::content(
+                    crate::attachments::content_with_cache(
                         msg.content.as_deref().unwrap_or(""),
                         msg.provider_items.as_deref().unwrap_or(&[]),
                         "responses",
+                        image_cache,
                     )?
                 } else {
                     json!(msg.content.as_deref().unwrap_or(""))

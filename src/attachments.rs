@@ -1,5 +1,6 @@
 //! Provider-neutral conversion of durable attachment references.
 //! Binary bytes are loaded only at request time, never saved inline in WAL.
+use crate::model::TaskImageCache;
 use anyhow::{Context, Result};
 use base64::Engine;
 use serde_json::{json, Value};
@@ -86,7 +87,41 @@ pub(crate) fn marker(part: &Value) -> Option<char> {
     Some(marker)
 }
 
+fn encode_image(path: &str, name: &str) -> Result<String> {
+    let raw = std::fs::read(path).with_context(|| format!("attachment missing: {name}"))?;
+    if raw.len() > MAX_IMAGE_BYTES {
+        anyhow::bail!("image exceeds 8 MiB");
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(raw))
+}
+
+impl TaskImageCache {
+    fn image_base64(&self, path: &str, name: &str) -> Result<String> {
+        if let Some(encoded) = self.encoded.lock().expect("image cache poisoned").get(path) {
+            return Ok(encoded.clone());
+        }
+        // Persisted attachment paths are immutable copies under ~/.kroma.
+        // One encoding can be reused by every tool round of this task.
+        let encoded = encode_image(path, name)?;
+        self.encoded
+            .lock()
+            .expect("image cache poisoned")
+            .insert(path.to_owned(), encoded.clone());
+        Ok(encoded)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn content(text: &str, parts: &[Value], protocol: &str) -> Result<Value> {
+    content_with_cache(text, parts, protocol, None)
+}
+
+pub(crate) fn content_with_cache(
+    text: &str,
+    parts: &[Value],
+    protocol: &str,
+    cache: Option<&TaskImageCache>,
+) -> Result<Value> {
     if !parts.iter().any(|p| p["type"] == "kroma_attachment") {
         return Ok(json!(text));
     }
@@ -121,12 +156,11 @@ pub(crate) fn content(text: &str, parts: &[Value], protocol: &str) -> Result<Val
             body.push(text_block(format!(
                 "[Image {name}, attachment #{number}/{total}]"
             )));
-            let raw = std::fs::read(path).with_context(|| format!("attachment missing: {name}"))?;
-            if raw.len() > MAX_IMAGE_BYTES {
-                anyhow::bail!("image exceeds 8 MiB");
-            }
             let mime = part["mime"].as_str().unwrap_or("image/png");
-            let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+            let b64 = match cache {
+                Some(cache) => cache.image_base64(path, name)?,
+                None => encode_image(path, name)?,
+            };
             match protocol {
                 "anthropic" => body.push(json!({"type":"image","source":{
                     "type":"base64","media_type":mime,"data":b64}})),
@@ -199,6 +233,49 @@ mod tests {
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn image_encoding_is_identical_per_protocol_and_scoped_to_one_task() -> Result<()> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("kroma-image-cache-{}-{now}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("test.png");
+        let parts = vec![json!({
+            "type":"kroma_attachment", "kind":"image", "name":"test.png",
+            "path":path, "mime":"image/png", "bytes":5, "marker":"\u{e000}"
+        })];
+        for protocol in ["chat", "responses", "anthropic"] {
+            fs::write(&path, b"first")?;
+            let task = TaskImageCache::default();
+            let baseline = content("Inspect \u{e000}", &parts, protocol)?;
+            assert_eq!(
+                content_with_cache("Inspect \u{e000}", &parts, protocol, Some(&task))?,
+                baseline,
+                "first request must be byte-for-byte identical"
+            );
+            assert_eq!(task.encoded.lock().unwrap().len(), 1);
+            fs::write(&path, b"later")?;
+            assert_eq!(
+                content_with_cache("Inspect \u{e000}", &parts, protocol, Some(&task))?,
+                baseline,
+                "tool rounds reuse the original immutable image encoding"
+            );
+            let next_task = TaskImageCache::default();
+            assert_ne!(
+                content_with_cache("Inspect \u{e000}", &parts, protocol, Some(&next_task))?,
+                baseline,
+                "a new task must not inherit previous image bytes"
+            );
+            // WAL payload is still a disk reference, never encoded data.
+            let serialized = serde_json::to_string(&parts)?;
+            assert!(
+                !serialized.contains(&base64::engine::general_purpose::STANDARD.encode(b"first"))
+            );
+        }
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn mixed_image_log_image_order_survives_all_protocols_and_session_roundtrip() -> Result<()> {

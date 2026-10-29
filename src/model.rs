@@ -2,7 +2,14 @@
 use crate::protocol::Message;
 use anyhow::Result;
 use serde_json::Value;
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Mutex, time::Duration};
+
+/// Temporary image encodings owned by one Agent run. Never persisted, and
+/// dropped even when the task is cancelled or fails.
+#[derive(Default)]
+pub struct TaskImageCache {
+    pub(crate) encoded: Mutex<HashMap<String, String>>,
+}
 
 pub type StreamFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 pub type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
@@ -67,6 +74,20 @@ pub trait ModelBackend: Send + Sync {
         _on_reasoning: &'a mut (dyn FnMut(&str) + Send),
     ) -> StreamFuture<'a, Completion> {
         self.complete(messages, tools, on_text)
+    }
+
+    /// Optional per-task image encoding reuse. The default preserves every
+    /// custom backend's existing behavior; the built-in HTTP backend reuses
+    /// immutable attachment bytes across tool rounds in the same task.
+    fn complete_with_task_images<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        _images: &'a TaskImageCache,
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        self.complete_with_reasoning(messages, tools, on_text, on_reasoning)
     }
 
     /// Optional live effort control. Hosts can change it between (or during)

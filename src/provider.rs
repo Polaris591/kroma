@@ -1,7 +1,7 @@
 pub use crate::model::{Completion, SummaryResult, Usage};
 mod anthropic;
 mod responses;
-use crate::model::{ModelBackend, ModelFuture, StreamFuture};
+use crate::model::{ModelBackend, ModelFuture, StreamFuture, TaskImageCache};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{header::RETRY_AFTER, Client, StatusCode};
@@ -460,6 +460,32 @@ fn process_sse_line_with_reasoning(
     Ok(())
 }
 
+/// Consume only new bytes when looking for completed SSE lines. A large
+/// chunk with thousands of lines used to drain (and shift) the entire
+/// remaining buffer once per line. Compact leftovers once per chunk instead.
+fn consume_sse_lines(
+    pending: &mut Vec<u8>,
+    chunk: &[u8],
+    mut on_line: impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<bool> {
+    let first_new = pending.len();
+    pending.extend_from_slice(chunk);
+    let mut start = 0;
+    for end in first_new..pending.len() {
+        if pending[end] != b'\n' {
+            continue;
+        }
+        if on_line(&pending[start..end])? {
+            return Ok(true);
+        }
+        start = end + 1;
+    }
+    if start > 0 {
+        pending.drain(..start);
+    }
+    Ok(false)
+}
+
 #[derive(Clone)]
 pub struct ModelClient {
     http: Client,
@@ -806,11 +832,22 @@ impl ModelClient {
         Some(info)
     }
 
+    #[cfg(test)]
     fn payload(
         &self,
         messages: &[Message],
         tools: &[Value],
         max_tokens: Option<usize>,
+    ) -> Result<Value> {
+        self.payload_with_images(messages, tools, max_tokens, None)
+    }
+
+    fn payload_with_images(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        max_tokens: Option<usize>,
+        images: Option<&TaskImageCache>,
     ) -> Result<Value> {
         let output = max_tokens.or_else(|| self.effective_output_tokens());
         match self.protocol {
@@ -819,10 +856,11 @@ impl ModelClient {
                 if let Some(items) = value.get_mut("messages").and_then(Value::as_array_mut) {
                     for (item, message) in items.iter_mut().zip(messages.iter()) {
                         if message.role == "user" {
-                            item["content"] = crate::attachments::content(
+                            item["content"] = crate::attachments::content_with_cache(
                                 message.content.as_deref().unwrap_or(""),
                                 message.provider_items.as_deref().unwrap_or(&[]),
                                 "chat",
+                                images,
                             )?;
                         }
                     }
@@ -850,7 +888,7 @@ impl ModelClient {
                 Ok(value)
             }
             ApiProtocol::Responses => {
-                let mut request = responses::payload(
+                let mut request = responses::payload_with_cache(
                     &self.model,
                     messages,
                     tools,
@@ -861,6 +899,7 @@ impl ModelClient {
                         .as_deref()
                         .unwrap_or(&self.reasoning_effort),
                     &self.opaque_reasoning_origin(),
+                    images,
                 )?;
                 if self.reasoning_summary_rejected.load(Ordering::Relaxed) {
                     if let Some(reasoning) =
@@ -875,7 +914,7 @@ impl ModelClient {
                 Ok(request)
             }
             ApiProtocol::Anthropic => {
-                let mut request = anthropic::payload(
+                let mut request = anthropic::payload_with_cache(
                     &self.model,
                     messages,
                     tools,
@@ -887,6 +926,7 @@ impl ModelClient {
                         .unwrap_or(&self.reasoning_effort),
                     &self.model_info,
                     &self.opaque_reasoning_origin(),
+                    images,
                 )?;
                 if self.anthropic_cache_rejected.load(Ordering::Relaxed) {
                     request.as_object_mut().unwrap().remove("cache_control");
@@ -1085,7 +1125,7 @@ impl ModelClient {
         tools: &[Value],
         on_text: &mut (impl FnMut(&str) + Send),
     ) -> Result<Completion> {
-        self.complete_with_tools_stream(messages, tools, on_text, &mut |_| {})
+        self.complete_with_tools_stream(messages, tools, None, on_text, &mut |_| {})
             .await
     }
 
@@ -1093,6 +1133,7 @@ impl ModelClient {
         &self,
         messages: &[Message],
         tools: &[Value],
+        images: Option<&TaskImageCache>,
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
     ) -> Result<Completion> {
@@ -1107,6 +1148,7 @@ impl ModelClient {
                 .complete_once(
                     text_fallback.as_deref().unwrap_or(messages),
                     tools,
+                    images,
                     on_text,
                     on_reasoning,
                     &mut received_stream_data,
@@ -1397,12 +1439,13 @@ impl ModelClient {
         &self,
         messages: &[Message],
         tools: &[Value],
+        images: Option<&TaskImageCache>,
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
         received_stream_data: &mut bool,
     ) -> Result<Completion> {
         let started = Instant::now();
-        let payload = self.payload(messages, tools, None)?;
+        let payload = self.payload_with_images(messages, tools, None, images)?;
         let request = self.request(&payload);
 
         let response = tokio::time::timeout(self.stream_idle_timeout, request.send())
@@ -1449,11 +1492,9 @@ impl ModelClient {
             if !chunk.is_empty() {
                 *received_stream_data = true;
             }
-            pending.extend_from_slice(&chunk);
-            while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
-                let line = pending.drain(..=end).collect::<Vec<_>>();
+            let done = consume_sse_lines(&mut pending, &chunk, |line| {
                 process_sse_line_with_reasoning(
-                    &line[..line.len() - 1],
+                    line,
                     &mut data_lines,
                     &mut result,
                     on_text,
@@ -1462,15 +1503,16 @@ impl ModelClient {
                 if first_token.is_none() && result.received_delta() {
                     first_token = Some(started.elapsed());
                 }
-                if result.done() {
-                    let (message, usage) = result.finish()?;
-                    return Ok(Completion {
-                        message,
-                        usage,
-                        elapsed: started.elapsed(),
-                        first_token,
-                    });
-                }
+                Ok(result.done())
+            })?;
+            if done {
+                let (message, usage) = result.finish()?;
+                return Ok(Completion {
+                    message,
+                    usage,
+                    elapsed: started.elapsed(),
+                    first_token,
+                });
             }
         }
         if !pending.is_empty() {
@@ -1643,6 +1685,27 @@ impl ModelBackend for ModelClient {
             self.complete_with_tools_stream(
                 messages,
                 tools,
+                None,
+                &mut |delta| on_text(delta),
+                &mut |delta| on_reasoning(delta),
+            )
+            .await
+        })
+    }
+
+    fn complete_with_task_images<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        images: &'a TaskImageCache,
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        Box::pin(async move {
+            self.complete_with_tools_stream(
+                messages,
+                tools,
+                Some(images),
                 &mut |delta| on_text(delta),
                 &mut |delta| on_reasoning(delta),
             )
@@ -2665,6 +2728,87 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].function.name, "shell");
         assert_eq!(calls[0].function.arguments, r#"{"command":"pwd"}"#);
+    }
+
+    #[test]
+    fn task_image_cache_preserves_full_wire_payload_across_all_protocols() -> Result<()> {
+        use std::fs;
+        let directory = std::env::temp_dir().join(format!(
+            "kroma-payload-image-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory)?;
+        let path = directory.join("screenshot.png");
+        fs::write(&path, b"original")?;
+        let mut user = Message::new("user", "Compare this \u{e000}");
+        user.provider_items = Some(vec![json!({
+            "type":"kroma_attachment", "kind":"image", "name":"screenshot.png",
+            "path":path, "mime":"image/png", "bytes":8, "marker":"\u{e000}"
+        })]);
+        let messages = [Message::new("system", "You are Kroma"), user];
+        for protocol in ["chat", "responses", "anthropic"] {
+            let client = ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())?
+                .with_protocol(protocol)?;
+            let cache = TaskImageCache::default();
+            let normal = client.payload(&messages, &[], None)?;
+            let cached = client.payload_with_images(&messages, &[], None, Some(&cache))?;
+            assert_eq!(
+                normal, cached,
+                "cold cache must preserve {protocol} payload"
+            );
+            assert_eq!(cache.encoded.lock().unwrap().len(), 1);
+            fs::write(&path, b"different")?;
+            let next_round = client.payload_with_images(&messages, &[], None, Some(&cache))?;
+            assert_eq!(
+                next_round, cached,
+                "{protocol} must reuse current task bytes"
+            );
+            let new_task = client.payload_with_images(
+                &messages,
+                &[],
+                None,
+                Some(&TaskImageCache::default()),
+            )?;
+            assert_ne!(new_task, cached, "{protocol} starts a fresh cache");
+            fs::write(&path, b"original")?;
+        }
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sse_incremental_scanner_preserves_line_boundaries_across_chunks() -> Result<()> {
+        let source = b"data: one\r\n\r\ndata: two\n\n: comment\n\nleftover";
+        let expected: Vec<Vec<u8>> = source
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter(|line| line.ends_with(b"\n"))
+            .map(|line| line[..line.len() - 1].to_vec())
+            .collect();
+        for stride in [1, 2, 3, 5, 64] {
+            let mut pending = Vec::new();
+            let mut lines = Vec::new();
+            for chunk in source.chunks(stride) {
+                let done = consume_sse_lines(&mut pending, chunk, |line| {
+                    lines.push(line.to_vec());
+                    Ok(false)
+                })?;
+                assert!(!done);
+            }
+            assert_eq!(lines, expected, "chunk size={stride}");
+            assert_eq!(pending, b"leftover", "trailing partial line retained");
+        }
+        let mut pending = Vec::new();
+        let mut calls = 0;
+        let lines = b"first\nsecond\nthird\n";
+        assert!(consume_sse_lines(&mut pending, lines, |_| {
+            calls += 1;
+            Ok(calls == 2)
+        })?);
+        assert_eq!(calls, 2, "terminal event must stop parsing immediately");
+        Ok(())
     }
 
     #[test]

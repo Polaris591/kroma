@@ -182,6 +182,9 @@ sessions and the existing slash commands. Shortcuts:
   WAL. Images stay active throughout their initial task (including tool
   rounds) and one immediate follow-up, but older images are lightweight text
   references on later turns, avoiding repeated historical base64 uploads.
+  Within a task, immutable image encodings are kept in temporary memory and
+  reused between tool rounds, then dropped. This avoids repeated file reads
+  and base64 encoding, but does not change the images sent or billed tokens.
   Up-arrow input recall preserves the original media references; removing
   a recalled chip or clearing the draft never deletes a previously submitted
   image. While an Agent task is running, new media/long-log pastes are

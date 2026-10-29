@@ -37,6 +37,17 @@ pub trait ContextPolicy: Send {
     fn new_user_turn(&mut self) {}
     fn mark_consumed(&mut self, _message_count: usize) {}
     fn observe(&mut self, _sent: &[Message], _input: Option<u64>, _cached: Option<u64>) {}
+    /// Reuse the already validated serialized projection size. Custom
+    /// policies retain the existing observe hook without any API break.
+    fn observe_with_bytes(
+        &mut self,
+        sent: &[Message],
+        _serialized_bytes: usize,
+        input: Option<u64>,
+        cached: Option<u64>,
+    ) {
+        self.observe(sent, input, cached);
+    }
     fn take_usage(&mut self) -> CompactionUsage {
         CompactionUsage::default()
     }
@@ -206,8 +217,19 @@ impl ContextConfig {
     /// Budget-checked estimate for the exact prepared request (including tool
     /// schemas). The upstream usage, when provided, replaces this in the UI.
     pub fn validate_final_request(&self, view: &[Message], tools: &[Value]) -> Result<usize> {
-        let message_bytes = serde_json::to_vec(view)?.len();
         let tool_bytes = serde_json::to_vec(tools)?.len();
+        Ok(self.validate_with_tool_bytes(view, tool_bytes)?.0)
+    }
+
+    /// Return the exact serialized projection byte count alongside the
+    /// conservative token estimate, so observe() need not serialize it again.
+    /// Tool schema bytes are stable throughout one agent task.
+    pub(crate) fn validate_with_tool_bytes(
+        &self,
+        view: &[Message],
+        tool_bytes: usize,
+    ) -> Result<(usize, usize)> {
+        let message_bytes = serde_json::to_vec(view)?.len();
         let active_images = view
             .iter()
             .flat_map(|m| m.provider_items.as_deref().unwrap_or(&[]))
@@ -226,7 +248,7 @@ impl ContextConfig {
                 estimated, self.hard, self.output_reserve
             );
         }
-        Ok(estimated)
+        Ok((estimated, message_bytes))
     }
 
     fn summary_tokens(&self) -> usize {
@@ -516,6 +538,16 @@ impl Compression {
     }
 
     pub fn observe(&mut self, sent: &[Message], input: Option<u64>, cached: Option<u64>) {
+        self.observe_with_bytes(sent, None, input, cached);
+    }
+
+    fn observe_with_bytes(
+        &mut self,
+        sent: &[Message],
+        serialized_bytes: Option<usize>,
+        input: Option<u64>,
+        cached: Option<u64>,
+    ) {
         // Provider image tokenization is independent of JSON path length.
         // Never let a visual request inflate the text-only calibration.
         let has_images = sent
@@ -527,7 +559,11 @@ impl Compression {
                     && part["mode"] != "reference"
             });
         if let Some(actual) = input.filter(|_| !has_images) {
-            let estimate = rough_tokens(sent)
+            let measured_projection = serialized_bytes.map_or_else(
+                || rough_tokens(sent),
+                |bytes| bytes.div_ceil(3).saturating_add(256),
+            );
+            let estimate = measured_projection
                 .saturating_add(self.request_extra_tokens)
                 .max(1) as f64;
             // Separate fixed provider overhead from proportional tokenizer
@@ -1100,6 +1136,16 @@ impl ContextPolicy for Compression {
 
     fn observe(&mut self, sent: &[Message], input: Option<u64>, cached: Option<u64>) {
         Compression::observe(self, sent, input, cached);
+    }
+
+    fn observe_with_bytes(
+        &mut self,
+        sent: &[Message],
+        serialized_bytes: usize,
+        input: Option<u64>,
+        cached: Option<u64>,
+    ) {
+        Compression::observe_with_bytes(self, sent, Some(serialized_bytes), input, cached);
     }
 
     fn take_usage(&mut self) -> CompactionUsage {
@@ -2483,6 +2529,54 @@ mod tests {
             budget.validate_final_request(&view, &[]).is_ok(),
             "historical image references should fit without media cost"
         );
+    }
+
+    #[test]
+    fn prepared_json_bytes_reuse_is_exactly_equivalent_to_legacy_measurement() {
+        let budget = ContextConfig::with_output_reserve(128_000, 4096).unwrap();
+        let messages = vec![
+            Message::new("system", "Code safely and quickly"),
+            Message::new("user", "检查 src/provider.rs 和 Rust 函数"),
+            Message::tool(
+                "tool-1".into(),
+                json!({"stdout":"\nline".repeat(40)}).to_string(),
+            ),
+        ];
+        let tools = vec![json!({"type":"function","function":{
+            "name":"shell","description":"run command",
+            "parameters":{"type":"object","properties":{"command":{"type":"string"}}}
+        }})];
+        let old = budget.validate_final_request(&messages, &tools).unwrap();
+        let tool_bytes = serde_json::to_vec(&tools).unwrap().len();
+        let (new, json_bytes) = budget
+            .validate_with_tool_bytes(&messages, tool_bytes)
+            .unwrap();
+        assert_eq!(old, new);
+        assert_eq!(json_bytes, serde_json::to_vec(&messages).unwrap().len());
+
+        let mut legacy = Compression::new(
+            CompactionState::default(),
+            budget,
+            Path::new("/tmp/kroma-observe-legacy"),
+        );
+        let mut optimized = Compression::new(
+            CompactionState::default(),
+            budget,
+            Path::new("/tmp/kroma-observe-reused"),
+        );
+        legacy.request_extra_tokens = 200;
+        optimized.request_extra_tokens = 200;
+        for (input, cached) in [(Some(1800), Some(300)), (Some(2500), None), (None, Some(0))] {
+            legacy.observe(&messages, input, cached);
+            ContextPolicy::observe_with_bytes(&mut optimized, &messages, json_bytes, input, cached);
+            assert_eq!(legacy.calibration, optimized.calibration);
+            assert_eq!(
+                legacy.calibration_fixed_tokens,
+                optimized.calibration_fixed_tokens
+            );
+            assert_eq!(legacy.cache_observed, optimized.cache_observed);
+            assert_eq!(legacy.last_cached_tokens, optimized.last_cached_tokens);
+        }
     }
 
     #[test]
