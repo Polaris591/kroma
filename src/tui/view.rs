@@ -15,7 +15,7 @@ use ratatui::{
 };
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -291,6 +291,9 @@ struct VisibleLink {
     target: String,
 }
 
+/// Styled transcript, markdown link targets and per-call disclosure rows.
+type HistoryDocument = (Text<'static>, Vec<(String, String)>, Vec<(usize, String)>);
+
 struct HistoryCache {
     width: u16,
     visible: usize,
@@ -301,6 +304,8 @@ struct HistoryCache {
     text: Text<'static>,
     source_lines: Vec<usize>,
     links: Vec<links::Region>,
+    // Wrapped transcript row -> actual tool call ID, for per-call disclosure.
+    tool_rows: Vec<(usize, String)>,
 }
 
 impl Entry {
@@ -512,20 +517,23 @@ fn failure_summary(details: &str) -> String {
                     lower.contains("error")
                         || lower.contains("failed")
                         || lower.contains("exception")
+                        || lower.contains("not found")
+                        || lower.contains("denied")
+                        || lower.contains("refused")
+                        || lower.contains("cannot")
+                        || lower.contains("错误")
+                        || lower.contains("失败")
+                        || lower.contains("不存在")
                 }
             })
         })
-        .or_else(|| {
-            lines
-                .iter()
-                .copied()
-                .find(|line| !line.starts_with("exit: "))
-        })
-        .unwrap_or("Tool failed");
+        .unwrap_or("");
     let message = message.trim().trim_start_matches("stderr: ");
-    match exit {
-        Some(code) => format!("exit {code} · {message}"),
-        None => message.to_owned(),
+    match (exit, message.is_empty()) {
+        (Some(code), true) => format!("exit {code}"),
+        (Some(code), false) => format!("exit {code} · {message}"),
+        (None, true) => "Tool failed".into(),
+        (None, false) => message.to_owned(),
     }
 }
 
@@ -644,6 +652,7 @@ pub struct UiState {
     prepend_rows_before: Option<usize>,
     pub viewport_height: u16,
     pub tools_expanded: bool,
+    expanded_tool_calls: HashSet<String>,
     pub reasoning_expanded: bool,
     active_assistant: Option<usize>,
     active_reasoning: Option<usize>,
@@ -711,6 +720,7 @@ impl UiState {
             prepend_rows_before: None,
             viewport_height: 0,
             tools_expanded: false,
+            expanded_tool_calls: HashSet::new(),
             reasoning_expanded: false,
             active_assistant: None,
             active_reasoning: None,
@@ -964,6 +974,10 @@ impl UiState {
         self.task_started = Some(Instant::now());
         self.task_elapsed = None;
         self.active_assistant = None;
+        // A new user turn must not append thinking to the previous task's
+        // reasoning entry, even if TaskFinished was consumed by the final
+        // event drain and only finish_task() ran.
+        self.active_reasoning = None;
         self.scroll_from_bottom = 0;
         self.scroll_anchor = None;
         self.running = true;
@@ -1471,6 +1485,10 @@ impl UiState {
                 _ => {}
             }
         }
+        // Keep the disclosure of a completed tool open after the runtime
+        // reconciles its durable WAL messages, but not across other sessions.
+        self.expanded_tool_calls
+            .retain(|id| tool_entries.contains_key(id));
         self.scroll_from_bottom = 0;
         self.scroll_anchor = None;
         self.prepend_rows_before = None;
@@ -1489,6 +1507,7 @@ impl UiState {
         self.picker = None;
         self.home = true;
         self.entries.clear();
+        self.expanded_tool_calls.clear();
         self.session_title = None;
         self.history_cache = None;
         self.active_assistant = None;
@@ -1742,6 +1761,37 @@ impl UiState {
         self.scroll_from_bottom = 0;
     }
 
+    /// The small disclosure chevron expands exactly one tool call. Clicks
+    /// elsewhere still select text, and Ctrl+O continues to expand all calls.
+    /// Coordinates come from the same wrapped source rows as the renderer.
+    pub fn toggle_tool_at(&mut self, column: u16, row: u16) -> bool {
+        if self.tools_expanded
+            || !self.selection_area.contains((column, row).into())
+            || column < self.selection_area.x.saturating_add(2)
+            || column > self.selection_area.x.saturating_add(3)
+        {
+            return false;
+        }
+        let wrapped_row = self.history_top_row + (row - self.selection_area.y) as usize;
+        let Some(id) = self.history_cache.as_ref().and_then(|cache| {
+            cache
+                .tool_rows
+                .iter()
+                .find(|(line, _)| *line == wrapped_row)
+                .map(|(_, id)| id.clone())
+        }) else {
+            return false;
+        };
+        if !self.expanded_tool_calls.insert(id.clone()) {
+            self.expanded_tool_calls.remove(&id);
+        }
+        self.history_cache = None;
+        self.selection_start = None;
+        self.selection_end = None;
+        self.mouse_release();
+        true
+    }
+
     fn scroll_to_row(&mut self, row: usize) {
         let top = row.min(self.history_max_scroll);
         self.scroll_from_bottom = self.history_max_scroll - top;
@@ -1970,16 +2020,17 @@ impl UiState {
         self.history_document(theme, width).0
     }
 
-    fn history_document(
-        &self,
-        theme: Theme,
-        width: usize,
-    ) -> (Text<'static>, Vec<(String, String)>) {
+    fn history_document(&self, theme: Theme, width: usize) -> HistoryDocument {
         if self.home {
-            return (Text::default(), Vec::new());
+            return (Text::default(), Vec::new(), Vec::new());
         }
         let mut lines = Vec::new();
         let mut markdown_targets = Vec::new();
+        let mut tool_rows = Vec::new();
+        // One collapsed reasoning entry per user turn, even if the model
+        // alternates reasoning/tool calls several times. Ctrl+R still renders
+        // every reasoning segment in its original chronological position.
+        let mut reasoning_notice_shown = false;
         if self.entries.is_empty() && !self.running {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
@@ -1988,12 +2039,13 @@ impl UiState {
                     .text("   ◆  Ready for a task.", "   ◆  可以开始任务了。"),
                 Style::default().fg(theme.muted),
             )));
-            return (Text::from(lines), markdown_targets);
+            return (Text::from(lines), markdown_targets, tool_rows);
         }
         for entry in self.entries.iter().rev().take(self.history_visible).rev() {
             let role_style = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
             match entry.kind {
                 Kind::User => {
+                    reasoning_notice_shown = false;
                     lines.push(Line::from(vec![
                         Span::styled("  ▎", Style::default().fg(theme.user)),
                         Span::styled(
@@ -2058,34 +2110,47 @@ impl UiState {
                     } else if warning {
                         ("!", theme.tool)
                     } else if status == "running" {
-                        ("◌", theme.tool)
+                        ("◌", theme.accent)
                     } else {
-                        ("✓", theme.user)
+                        ("✓", theme.muted)
                     };
-                    // A tool is activity, not a separate article. In collapsed
-                    // mode show only one purposeful line, without the same
-                    // Ctrl+O instruction repeated for every call.
-                    let display_name = compact_line(name, width.saturating_sub(13).min(24));
-                    let summary_width = width;
-                    let command_width = summary_width
-                        .saturating_sub(5 + UnicodeWidthStr::width(display_name.as_str()) + 2);
+                    // Render the operation once, not "shell + run shell command
+                    // + Ctrl+O" on every line. Success is quiet; failure and
+                    // active work carry the visual weight. Raw details remain
+                    // available without truncation using Ctrl+O.
+                    let expanded = self.tools_expanded
+                        || entry
+                            .call_id
+                            .as_ref()
+                            .is_some_and(|id| self.expanded_tool_calls.contains(id));
+                    let caret = if expanded { "▾" } else { "▸" };
                     let elapsed = entry
                         .duration
                         .map(|duration| format!(" · {:.1}s", duration.as_secs_f64()))
                         .unwrap_or_default();
                     let summary =
                         super::tool_display::summary(name, &entry.body, self.preferences.language);
-                    let command =
-                        compact_line(summary, command_width.saturating_sub(elapsed.len()));
+                    let command = compact_line(
+                        &summary,
+                        width.saturating_sub(6 + UnicodeWidthStr::width(elapsed.as_str())),
+                    );
+                    if let Some(id) = entry.call_id.as_ref() {
+                        tool_rows.push((lines.len(), id.clone()));
+                    }
                     lines.push(Line::from(vec![
-                        Span::styled(format!("  {marker}  "), Style::default().fg(color)),
-                        Span::styled(display_name, role_style(theme.tool)),
+                        Span::styled(format!("  {caret} "), Style::default().fg(theme.border)),
+                        Span::styled(format!("{marker} "), Style::default().fg(color)),
                         Span::styled(
-                            format!("  {command}{elapsed}"),
-                            Style::default().fg(theme.muted),
+                            command,
+                            Style::default().fg(if entry.failed || status == "running" {
+                                theme.text
+                            } else {
+                                theme.muted
+                            }),
                         ),
+                        Span::styled(elapsed, Style::default().fg(theme.muted)),
                     ]));
-                    if warning && !self.tools_expanded {
+                    if warning && !expanded {
                         lines.push(body_line(Line::styled(
                             self.preferences.language.text(
                                 "↳ Exit 0; diagnostic reported · Ctrl+O details",
@@ -2094,7 +2159,7 @@ impl UiState {
                             Style::default().fg(theme.tool),
                         )));
                     }
-                    if entry.failed && !self.tools_expanded {
+                    if entry.failed && !expanded {
                         lines.push(body_line(Line::from(Span::styled(
                             format!(
                                 "↳ {}",
@@ -2106,7 +2171,7 @@ impl UiState {
                             Style::default().fg(theme.error),
                         ))));
                     }
-                    if status == "running" && !entry.details.is_empty() && !self.tools_expanded {
+                    if status == "running" && !entry.details.is_empty() && !expanded {
                         let preview = entry
                             .details
                             .lines()
@@ -2118,7 +2183,7 @@ impl UiState {
                             Style::default().fg(theme.code),
                         ))));
                     }
-                    if self.tools_expanded {
+                    if expanded {
                         for command in entry.body.lines() {
                             lines.push(body_line(Line::styled(
                                 format!("$ {command}"),
@@ -2126,18 +2191,34 @@ impl UiState {
                             )));
                         }
                     }
-                    if self.tools_expanded && !entry.details.is_empty() {
+                    if expanded && !entry.details.is_empty() {
+                        // Treat actual unified diffs as source review, not
+                        // ordinary stdout. Don't recolor random + / - logs.
+                        let diff = name == "shell"
+                            && (entry.body.contains("git diff")
+                                || entry.details.contains("diff --git "));
                         for output in entry.details.lines() {
+                            let ink = if entry.failed {
+                                theme.error
+                            } else if diff && output.starts_with('+') && !output.starts_with("+++")
+                            {
+                                theme.user
+                            } else if diff && output.starts_with('-') && !output.starts_with("---")
+                            {
+                                theme.error
+                            } else if diff
+                                && (output.starts_with("@@")
+                                    || output.starts_with("diff --git ")
+                                    || output.starts_with("+++ ")
+                                    || output.starts_with("--- "))
+                            {
+                                theme.accent
+                            } else {
+                                theme.code
+                            };
                             lines.push(body_line(Line::from(vec![
                                 Span::styled("│ ", Style::default().fg(theme.border)),
-                                Span::styled(
-                                    output.to_owned(),
-                                    Style::default().fg(if entry.failed {
-                                        theme.error
-                                    } else {
-                                        theme.code
-                                    }),
-                                ),
+                                Span::styled(output.to_owned(), Style::default().fg(ink)),
                             ])));
                         }
                     }
@@ -2148,12 +2229,17 @@ impl UiState {
                     if entry.body.trim().is_empty() {
                         continue;
                     }
-                    lines.push(Line::from(Span::styled(
-                        self.preferences
-                            .language
-                            .text("  ◇  Reasoning · Ctrl+R", "  ◇  推理摘要 · Ctrl+R"),
-                        Style::default().fg(theme.muted),
-                    )));
+                    if !reasoning_notice_shown {
+                        lines.push(Line::from(Span::styled(
+                            self.preferences.language.text(
+                                "  ◇  Reasoning collapsed · Ctrl+R",
+                                "  ◇  思考已折叠 · Ctrl+R",
+                            ),
+                            Style::default().fg(theme.muted),
+                        )));
+                        reasoning_notice_shown = true;
+                        lines.push(Line::default());
+                    }
                     if self.reasoning_expanded {
                         let (rendered, tags) = markdown::render_with_links(
                             &entry.body,
@@ -2171,11 +2257,8 @@ impl UiState {
                         for line in rendered {
                             lines.push(body_line(line));
                         }
+                        lines.push(Line::default());
                     }
-                    // Give reasoning the same one-row separation every other block
-                    // gets, so the collapsed line is not read as a header for the
-                    // answer below it.
-                    lines.push(Line::default());
                 }
                 Kind::Info => {
                     lines.push(Line::from(Span::styled(
@@ -2217,7 +2300,7 @@ impl UiState {
         if self.running || self.task_outcome.is_some() {
             lines.push(Line::default());
         }
-        (Text::from(lines), markdown_targets)
+        (Text::from(lines), markdown_targets, tool_rows)
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -2321,9 +2404,17 @@ impl UiState {
                 ))
             });
         if !cached {
-            let (raw, targets) = self.history_document(colors, usize::from(history_slot.width));
+            let (raw, targets, raw_tool_rows) =
+                self.history_document(colors, usize::from(history_slot.width));
             let (text, source_lines) = wrap_document(raw, usize::from(history_slot.width));
             let link_regions = markdown_link_regions(&text, &targets);
+            let tool_rows = raw_tool_rows
+                .into_iter()
+                .filter_map(|(line, id)| {
+                    let first = source_lines.partition_point(|&source| source < line);
+                    (source_lines.get(first) == Some(&line)).then_some((first, id))
+                })
+                .collect();
             self.history_cache = Some(HistoryCache {
                 width: history_slot.width,
                 visible: self.history_visible,
@@ -2334,25 +2425,17 @@ impl UiState {
                 text,
                 source_lines,
                 links: link_regions,
+                tool_rows,
             });
         }
         let contents = &self.history_cache.as_ref().unwrap().text;
         let rows = contents.lines.len();
         let max_scroll = rows.saturating_sub(history_slot.height as usize);
         self.history_max_scroll = max_scroll;
-        // For short conversations, bring the newest response near the input.
-        // Empty space is left *above* the dialogue, not between it and the
-        // composer. Keep the full viewport for welcome art and long history.
-        let history = if !self.home && rows > 0 && rows < history_slot.height as usize {
-            Rect::new(
-                history_slot.x,
-                history_slot.bottom().saturating_sub(rows as u16),
-                history_slot.width,
-                rows as u16,
-            )
-        } else {
-            history_slot
-        };
+        // Read naturally from the header down. The previous bottom-anchored
+        // transcript put a huge blank area above the first user request on
+        // large terminals; keep conversation geometry stable at any length.
+        let history = history_slot;
         if let Some((source, offset, old_count)) = reflow_anchor {
             // Preserve the same *logical transcript line* when a resize
             // changes wrapping. An absolute visual row is not meaningful
@@ -2806,18 +2889,16 @@ mod tests {
             .iter()
             .position(|row| row.contains("Steer this task"))
             .unwrap();
-        assert_eq!(
-            status_row + 2,
-            editor_row,
-            "activity must sit directly above composer"
+        assert!(
+            status_row < editor_row && status_row <= 3,
+            "activity should follow the transcript at the top, not float above the input"
         );
         assert!(
             !rows[0].contains("Connecting"),
             "no distant header duplicate"
         );
         assert_eq!(
-            ui.selection_area.bottom() as usize - 1,
-            status_row,
+            ui.selection_area.y as usize, status_row,
             "activity belongs to the reserved trailing transcript line"
         );
         assert!(
@@ -2851,7 +2932,7 @@ mod tests {
     }
 
     #[test]
-    fn short_chat_hugs_composer_and_live_status_follows_the_latest_message() {
+    fn short_chat_starts_below_header_and_live_status_follows_the_latest_message() {
         let messages = vec![
             Message::new("user", "hello"),
             Message::new("assistant", "The answer is visible"),
@@ -2873,10 +2954,10 @@ mod tests {
             .position(|row| row.contains("Ask anything"))
             .unwrap();
         assert_eq!(header, 0);
-        assert!(answer > 20, "short transcript belongs near the composer");
+        assert!(answer < 10, "no empty wall above a short conversation");
         assert!(
-            editor - answer <= 5,
-            "do not leave a tall empty void between latest reply and input"
+            editor - answer > 10,
+            "the input remains fixed while a short transcript reads from the top"
         );
         assert_eq!(
             ui.history_top_row, 0,
@@ -2900,8 +2981,8 @@ mod tests {
             .unwrap();
         assert!(latest_user < status && status < editor);
         assert!(
-            editor - status <= 3,
-            "live activity belongs to latest message"
+            status - latest_user <= 4 && editor > status,
+            "live activity follows the newest user turn"
         );
         assert!(
             !rows[0].contains("Connecting"),
@@ -2922,7 +3003,11 @@ mod tests {
             .iter()
             .position(|row| row.contains("Steer this task"))
             .unwrap();
-        assert!(editor - tool_status <= 3);
+        assert!(tool_status < editor, "tool phase remains in the transcript");
+        assert!(
+            tool_status - latest_user <= 6,
+            "tool activity follows the actual tool event"
+        );
         let cache = ui.history_cache.as_ref().unwrap().text.lines.as_ptr();
         ui.last_activity_frame = Instant::now() - Duration::from_millis(200);
         assert!(ui.tick_activity());
@@ -2979,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    fn short_bottom_aligned_history_keeps_links_clickable() {
+    fn short_top_aligned_history_keeps_links_clickable() {
         let messages = vec![
             Message::new("user", "show link"),
             Message::new(
@@ -2994,7 +3079,10 @@ mod tests {
             &messages,
         );
         rendered_text(&mut ui, 120, 38);
-        assert!(ui.selection_area.y > 10, "short transcript moves down");
+        assert_eq!(
+            ui.selection_area.y, 1,
+            "short transcript starts just below header"
+        );
         let link = ui.visible_links.first().expect("link must remain visible");
         assert_eq!(
             ui.link_at(link.x, link.y),
@@ -4548,7 +4636,7 @@ mod tests {
         let rows = rendered_text(&mut ui, 80, 24);
         let reasoning = rows
             .iter()
-            .position(|row| row.contains("Reasoning · Ctrl+R"))
+            .position(|row| row.contains("Reasoning collapsed · Ctrl+R"))
             .expect("collapsed reasoning line");
         assert!(
             rows[reasoning + 1].trim().is_empty(),
@@ -4560,6 +4648,241 @@ mod tests {
             "the answer header follows the separator: {:?}",
             &rows[reasoning..reasoning + 3]
         );
+    }
+
+    #[test]
+    fn svg_task_layout_is_readable_across_narrow_and_wide_chinese_terminals() {
+        let mut ui = UiState::new(
+            "deepseek".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.apply_preferences(super::super::preferences::Preferences {
+            language: super::super::preferences::Language::Zh,
+            full_width: false,
+        });
+        ui.add_user("画一个蹦蹦跳跳的动态 SVG");
+        ui.event(UiEvent::ReasoningDelta("先检查 Node 是否可用".into()));
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "check-node".into(),
+            args: "node -v".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "check-node".into(),
+            result: "exit: 0\nv22.0".into(),
+            failed: false,
+        });
+        ui.event(UiEvent::ModelStarted);
+        ui.event(UiEvent::ReasoningDelta("写入动画文件".into()));
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "draw-svg".into(),
+            args: "node -e \"require('fs').writeFileSync('bouncing-cat.svg','<svg/>')\"".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "draw-svg".into(),
+            result: "exit: 49\n-1.18-windows.xml".into(),
+            failed: true,
+        });
+        ui.event(UiEvent::Text("Node 可用，正在处理 SVG。".into()));
+        ui.running = false;
+        for width in [40, 80, 120, 184, 240] {
+            let rows = rendered_text(&mut ui, width, 42);
+            let stripped = rows
+                .iter()
+                .map(|row| row.chars().filter(|ch| *ch != ' ').collect::<String>())
+                .collect::<Vec<_>>();
+            let text = stripped.join("\n");
+            let first_user = stripped
+                .iter()
+                .position(|row| row.contains("蹦蹦跳跳"))
+                .unwrap();
+            assert!(
+                first_user < 6,
+                "user prompt should start near the header at {width}"
+            );
+            assert_eq!(
+                text.matches("思考已折叠").count(),
+                1,
+                "only one collapsed reasoning header at {width}"
+            );
+            assert!(
+                text.contains("检查Node版本") && text.contains("bouncing-cat.svg"),
+                "real tool operations must be visible at {width}: {text}"
+            );
+            assert!(!text.contains("执行Shell命令"));
+            assert!(
+                text.contains("exit49"),
+                "failure remains visible at {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_tools_prefer_actionable_diagnostics_over_unrelated_stdout() {
+        assert_eq!(failure_summary("exit: 49\n-1.18-windows.xml"), "exit 49");
+        assert_eq!(
+            failure_summary("exit: 101\nstderr: error[E0599]: method not found"),
+            "exit 101 · error[E0599]: method not found"
+        );
+        assert_eq!(
+            failure_summary("exit: 1\nThe file was not found"),
+            "exit 1 · The file was not found"
+        );
+        assert_eq!(failure_summary("connection refused"), "connection refused");
+    }
+
+    #[test]
+    fn expanded_git_diff_uses_semantic_add_remove_colors() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "diff".into(),
+            args: "git diff -- src/main.rs".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "diff".into(),
+            result: "exit: 0\ndiff --git a/src/main.rs b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n unchanged".into(),
+            failed: false,
+        });
+        ui.tools_expanded = true;
+        let text = ui.history_text(ui.themes.colors, 105);
+        let ink = |needle: &str| {
+            text.lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .find(|span| span.content == needle)
+                .and_then(|span| span.style.fg)
+        };
+        assert_eq!(ink("+new"), Some(ui.themes.colors.user));
+        assert_eq!(ink("-old"), Some(ui.themes.colors.error));
+        assert_eq!(ink("@@ -1 +1 @@"), Some(ui.themes.colors.accent));
+        assert_eq!(ink(" unchanged"), Some(ui.themes.colors.code));
+    }
+
+    #[test]
+    fn one_reasoning_notice_per_user_turn_preserves_every_expanded_segment() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.add_user("draw an animated SVG");
+        ui.event(UiEvent::ReasoningDelta(
+            "I should inspect the environment".into(),
+        ));
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "node-check".into(),
+            args: "node -v".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "node-check".into(),
+            result: "exit: 0\nv22.0.0".into(),
+            failed: false,
+        });
+        ui.event(UiEvent::ModelStarted);
+        ui.event(UiEvent::ReasoningDelta("Now create the SVG drawing".into()));
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "create".into(),
+            args: "node -e \"require('fs').writeFileSync('cat.svg','<svg/>')\"".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "create".into(),
+            result: "exit: 0\ncat.svg".into(),
+            failed: false,
+        });
+        ui.event(UiEvent::ModelStarted);
+        ui.event(UiEvent::ReasoningFinal("Now check the SVG file".into()));
+        ui.running = false;
+
+        let collapsed = ui.history_text(ui.themes.colors, 120).to_string();
+        assert_eq!(
+            collapsed.matches("Reasoning collapsed · Ctrl+R").count(),
+            1,
+            "three thinking segments must not produce three repeated banners"
+        );
+        assert!(!collapsed.contains("I should inspect"));
+        assert!(!collapsed.contains("Now create"));
+        assert!(collapsed.contains("Check Node version"));
+        assert!(collapsed.contains("Write · cat.svg"));
+        assert!(!collapsed.contains("Run shell command"));
+
+        ui.reasoning_expanded = true;
+        let expanded = ui.history_text(ui.themes.colors, 120).to_string();
+        assert_eq!(expanded.matches("Reasoning collapsed · Ctrl+R").count(), 1);
+        assert!(expanded.contains("I should inspect"));
+        assert!(expanded.contains("Now create"));
+        assert!(expanded.contains("Now check the SVG"));
+        ui.add_user("make it bounce higher");
+        ui.event(UiEvent::ReasoningDelta("Adjust the path".into()));
+        ui.running = false;
+        let next = ui.history_text(ui.themes.colors, 120).to_string();
+        assert_eq!(next.matches("Reasoning collapsed · Ctrl+R").count(), 2);
+    }
+
+    #[test]
+    fn single_tool_chevron_expands_only_its_own_output() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        for (id, command, result) in [
+            ("one", "node -v", "exit: 0\nfirst tool detail 22.0.0"),
+            (
+                "two",
+                "node render.js",
+                "exit: 0\nsecond tool detail cat.svg",
+            ),
+        ] {
+            ui.event(UiEvent::ToolStarted {
+                name: "shell".into(),
+                id: id.into(),
+                args: command.into(),
+            });
+            ui.event(UiEvent::ToolFinished {
+                id: id.into(),
+                result: result.into(),
+                failed: false,
+            });
+        }
+        let rows = rendered_text(&mut ui, 100, 30);
+        let row = rows
+            .iter()
+            .position(|text| text.contains("Check Node version"))
+            .expect("first tool row");
+        assert_eq!(ui.selection_area.y, 1);
+        let marker_x = ui.selection_area.x + 2;
+        assert!(!ui.toggle_tool_at(marker_x + 12, row as u16));
+        assert!(ui.toggle_tool_at(marker_x, row as u16));
+        let after = rendered_text(&mut ui, 100, 30).join("\n");
+        assert!(after.contains("first tool detail"));
+        assert!(!after.contains("second tool detail"));
+        assert!(after.contains("▾"), "clicked tool displays an open chevron");
+        assert!(after.contains("▸"), "other tool remains collapsed");
+        assert!(!ui.toggle_tool_at(marker_x, 0), "header is not a tool");
+        ui.tools_expanded = true;
+        let all = rendered_text(&mut ui, 100, 30).join("\n");
+        assert!(
+            all.contains("second tool detail"),
+            "Ctrl+O still exposes all"
+        );
+        ui.tools_expanded = false;
+        rendered_text(&mut ui, 100, 30);
+        assert!(ui.toggle_tool_at(marker_x, row as u16));
+        let collapsed = rendered_text(&mut ui, 100, 30).join("\n");
+        assert!(!collapsed.contains("first tool detail"));
     }
 
     #[test]

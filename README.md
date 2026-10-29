@@ -127,8 +127,8 @@ sessions and the existing slash commands. Shortcuts:
   selection active while the viewport moves.
 - **Command index:** type `/` or run `/commands` to see commands with descriptions and argument hints. Up/Down selects; **Tab** (or Enter in this completion list) inserts the command without executing it. Type arguments, then Enter to run; Esc closes the list without clearing the draft.
 - **Interface language:** `/language zh` switches UI chrome, hints, help and command descriptions to Chinese; `/language en` switches to English; `/language` toggles. Model answers, tool output and upstream diagnostics are not translated. The default is English.
-- **Reading layout:** `/layout comfortable` (default) centres a reading column (75% of available width, bounded to 100–160 cells and never wider than the terminal); short conversations are bottom-aligned near the composer, while long history scrolls normally. `/layout wide` restores full-width prose. Language and layout are saved atomically in `~/.kroma/ui.toml`.
-- **Tool records:** common build/test/search commands have concise activity labels. Ctrl+O reveals original commands, output, exit codes and output-file links. Failures stay visible while collapsed; successful exits with explicit diagnostic prefixes get an advisory; ordinary stderr progress is not a warning.
+- **Reading layout:** `/layout comfortable` (default) centres a reading column (75% of available width, bounded to 100–160 cells and never wider than the terminal); conversation text begins below the header even for short exchanges, while the composer stays at the bottom and long history scrolls normally. `/layout wide` restores full-width prose. Language and layout are saved atomically in `~/.kroma/ui.toml`.
+- **Tool records:** common Rust, Git, Node, Python, PowerShell, file and search commands have concise activity labels; unfamiliar commands show their real first line, not “Run shell command”. Successes are muted; failures keep exit codes and real diagnostics visible. Click a tool's `▸` to expand just that call, or use **Ctrl+O** to expand all. Expanded output retains raw commands, original output-file paths, and colored Git diff changes. Ordinary stderr progress is not a warning.
 - **Task status:** a subtle branded indicator follows the latest transcript entry while Kroma is thinking, using tools or streaming output. Completion/cancellation and elapsed time appear at the end of that turn, not in a floating status bar. When browsing older history, a separate navigation hint gives the return-to-latest shortcut and unseen update count without moving the reader.
 - **Ctrl+P** opens the searchable picker; **Tab** changes its category among
   commands, model profiles, sessions, and files. Type to filter, Up/Down to
@@ -157,9 +157,10 @@ sessions and the existing slash commands. Shortcuts:
   level they do not support. Short terminals compact the footer automatically.
 - Model output streams as it arrives, with a subtle cursor and a branded
   activity indicator at the end of the transcript while the model is working.
-  Reasoning stays collapsed by default; Ctrl+R reveals provider-exposed
-  reasoning deltas as they arrive. Completion reconciles the entry without
-  duplication. Providers exposing only final reasoning show it after completion.
+  Reasoning stays collapsed with one summary per user turn rather than one
+  repeated banner after every tool call; Ctrl+R shows every reasoning segment
+  in chronological order. Completion reconciles the entry without duplication.
+  Providers exposing only final reasoning show it after completion.
   Encrypted or otherwise unavailable private reasoning is never displayed.
 - **Esc** dismisses the file-path prompt or transient feedback; it never
   silently deletes the current draft. Short notices disappear on the next

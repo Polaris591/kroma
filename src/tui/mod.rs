@@ -724,6 +724,9 @@ fn input_event(
                             )),
                         }
                     }
+                } else if state.toggle_tool_at(mouse.column, mouse.row) {
+                    // The disclosure chevron owns this click; text selection
+                    // and Ctrl+Click links still work everywhere else.
                 } else {
                     state.select_start(mouse.column, mouse.row);
                 }
@@ -1691,6 +1694,67 @@ mod tests {
         );
         assert!(matches!(action, InputAction::None));
         assert_eq!(ui.editor.text(), "/exit");
+    }
+
+    #[test]
+    fn clicking_a_tool_chevron_expands_only_that_tool_and_keeps_draft() {
+        use crossterm::event::{MouseButton, MouseEvent};
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut ui, model) = setup();
+        ui.editor.paste("Keep this unsent draft");
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "click-one".into(),
+            args: "node -v".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "click-one".into(),
+            result: "exit: 0\nversion 22.0.0".into(),
+            failed: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 27)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let y = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(100)
+            .position(|cells| cells.iter().any(|cell| cell.symbol() == "▸"))
+            .expect("disclosure chevron must be rendered") as u16;
+        let x = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(100)
+            .nth(y as usize)
+            .unwrap()
+            .iter()
+            .position(|cell| cell.symbol() == "▸")
+            .unwrap() as u16;
+        let action = input_event(
+            &mut ui,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            false,
+            &model,
+            std::path::Path::new("."),
+        );
+        assert!(matches!(action, InputAction::None));
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let visible = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(visible.contains("version 22.0.0"));
+        assert_eq!(ui.editor.text(), "Keep this unsent draft");
+        assert!(ui.selected_text().is_none());
     }
 
     #[test]
