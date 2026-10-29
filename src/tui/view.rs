@@ -1597,6 +1597,19 @@ impl UiState {
     pub fn draw(&mut self, frame: &mut Frame) {
         let colors = self.themes.colors;
         let full_area = frame.area();
+        if full_area.width < 20 || full_area.height < 8 {
+            // Some SSH/PTY hosts initially report 0x0 before the first
+            // terminal resize event. Do not draw cells outside that buffer.
+            self.viewport_height = 0;
+            self.selection_area = Rect::default();
+            self.scrollbar_area = Rect::default();
+            self.visible_links.clear();
+            self.mouse_release();
+            if full_area.width > 0 && full_area.height > 0 {
+                frame.render_widget(Paragraph::new("Resize terminal for Kroma"), full_area);
+            }
+            return;
+        }
         frame.render_widget(
             Block::default().style(Style::default().bg(colors.background)),
             full_area,
@@ -2814,6 +2827,24 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("history item 0"));
     }
+    #[test]
+    fn zero_and_tiny_terminal_draws_are_safe() {
+        let themes = ThemeStore::load_at(None).unwrap();
+        let mut ui = UiState::new("model".into(), "test".into(), themes, &[]);
+        for (width, height) in [(0, 0), (0, 10), (12, 0), (1, 1), (15, 7), (19, 20)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+            assert_eq!(ui.viewport_height, 0);
+            assert!(ui.visible_links.is_empty());
+        }
+        let mut normal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        normal.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(
+            ui.viewport_height > 0,
+            "normal layout must recover after resize"
+        );
+    }
+
     #[test]
     fn narrow_terminal_draw_does_not_panic() {
         let mut store = ThemeStore::load_at(None).unwrap();
