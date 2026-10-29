@@ -1215,6 +1215,27 @@ impl ModelClient {
         text: &str,
         output_tokens: usize,
     ) -> Result<SummaryResult> {
+        self.text_completion_with_budget(system, text, output_tokens, false)
+            .await
+    }
+
+    async fn short_text_completion(
+        &self,
+        system: &str,
+        text: &str,
+        output_tokens: usize,
+    ) -> Result<SummaryResult> {
+        self.text_completion_with_budget(system, text, output_tokens, true)
+            .await
+    }
+
+    async fn text_completion_with_budget(
+        &self,
+        system: &str,
+        text: &str,
+        output_tokens: usize,
+        short: bool,
+    ) -> Result<SummaryResult> {
         let mut timeouts = 0;
         let mut truncations = 0;
         let mut requests = 0;
@@ -1222,10 +1243,15 @@ impl ModelClient {
         let mut spent_usage: Option<Usage> = None;
         let mut usage_known = true;
         loop {
-            let max_tokens = self.output_limit.map_or(
-                apec_completion_budget(output_tokens, truncations),
-                |limit| apec_completion_budget(output_tokens, truncations).min(limit),
-            );
+            // APEC needs a large hidden-reasoning reserve. A short session
+            // title does not: cap the generation budget and never retry a
+            // truncated title with an exponentially larger allowance.
+            let budget = if short {
+                output_tokens.clamp(32, 160)
+            } else {
+                apec_completion_budget(output_tokens, truncations)
+            };
+            let max_tokens = self.output_limit.map_or(budget, |limit| budget.min(limit));
             let mut payload = json!({
                 "model": self.model,
                 "stream": false,
@@ -1281,7 +1307,10 @@ impl ModelClient {
             };
             let request = self.request(&payload);
             let result = tokio::time::timeout(Duration::from_secs(120), async {
-                let response = request.send().await.context("APEC model request failed")?;
+                let response = request
+                    .send()
+                    .await
+                    .context("tool-free model request failed")?;
                 let status = response.status();
                 let body = response
                     .text()
@@ -1289,7 +1318,7 @@ impl ModelClient {
                     .context("failed to read APEC response")?;
                 if !status.is_success() {
                     let excerpt: String = body.chars().take(500).collect();
-                    bail!("APEC model returned HTTP {status}: {excerpt}");
+                    bail!("tool-free model returned HTTP {status}: {excerpt}");
                 }
                 match self.protocol {
                     ApiProtocol::Chat => parse_apec_text_response(&body),
@@ -1299,7 +1328,7 @@ impl ModelClient {
             })
             .await
             .map_err(|err| {
-                anyhow::Error::new(err).context("APEC model request exceeded 120 seconds")
+                anyhow::Error::new(err).context("tool-free model request exceeded 120 seconds")
             })
             .and_then(|response| response);
             elapsed += start.elapsed();
@@ -1320,6 +1349,23 @@ impl ModelClient {
                     });
                 }
                 Ok(ApecTextAttempt::Truncated(usage)) => {
+                    if short {
+                        // The caller supplies a free local title fallback.
+                        // Never spend another request just to name a session.
+                        crate::runtime_log!(
+                            "[title] short response truncated (output={}); using local title",
+                            usage
+                                .as_ref()
+                                .and_then(|u| u.output)
+                                .map_or_else(|| "unknown".to_owned(), |n| n.to_string())
+                        );
+                        return Ok(SummaryResult {
+                            text: String::new(),
+                            usage,
+                            elapsed,
+                            requests,
+                        });
+                    }
                     spent_usage = if requests == 1 {
                         usage
                     } else if usage_known {
@@ -1337,7 +1383,7 @@ impl ModelClient {
                         truncations + 1
                     );
                 }
-                Err(error) if timeouts < 3 && is_timeout(&error) => {
+                Err(error) if !short && timeouts < 3 && is_timeout(&error) => {
                     timeouts += 1;
                     usage_known = false;
                     crate::runtime_log!("[apec] request timed out; retrying ({timeouts}/3)");
@@ -1611,6 +1657,15 @@ impl ModelBackend for ModelClient {
         output_tokens: usize,
     ) -> ModelFuture<'a, SummaryResult> {
         Box::pin(self.text_completion(system, text, output_tokens))
+    }
+
+    fn generate_short_text<'a>(
+        &'a self,
+        system: &'a str,
+        text: &'a str,
+        output_tokens: usize,
+    ) -> ModelFuture<'a, SummaryResult> {
+        Box::pin(self.short_text_completion(system, text, output_tokens))
     }
 }
 
@@ -2121,6 +2176,128 @@ mod tests {
             vec!["Consolidate the memory"; 2],
             "generic model text generation must not inject APEC instructions"
         );
+    }
+
+    #[tokio::test]
+    async fn short_title_uses_small_budget_without_touching_coding_reasoning() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0u8; len];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            let reply = json!({
+                "choices": [{"message":{"role":"assistant","content":"Kroma 介绍"},
+                    "finish_reason":"stop"}],
+                "usage":{"prompt_tokens":20,"completion_tokens":12}
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                reply.len(),
+                reply
+            ).unwrap();
+            stream.flush().unwrap();
+            payload
+        });
+        let client = ModelClient::new(&url, None, "deepseek".into())
+            .unwrap()
+            .with_reasoning("high".into(), None);
+        let result = client
+            .generate_short_text("Name conversation", "User: 你好", 128)
+            .await
+            .unwrap();
+        assert_eq!(result.text, "Kroma 介绍");
+        assert_eq!(result.requests, 1);
+        let payload = server.join().unwrap();
+        assert_eq!(
+            payload["max_tokens"], 128,
+            "title must not get APEC's 1024-token floor"
+        );
+        assert_eq!(payload["reasoning_effort"], "low");
+        assert_eq!(payload["stream"], false);
+        assert_eq!(client.reasoning_level().as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn truncated_short_title_keeps_measured_usage_and_does_not_retry() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0u8; len];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let reply = json!({
+                "choices": [{"message":{"role":"assistant","content":"unfinished"},
+                    "finish_reason":"length"}],
+                "usage":{"prompt_tokens":55,"completion_tokens":128,
+                    "prompt_cache_hit_tokens":0}
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                reply.len(),
+                reply
+            ).unwrap();
+            stream.flush().unwrap();
+            request
+        });
+        let model = ModelClient::new(&url, None, "deepseek".into()).unwrap();
+        let result = model
+            .generate_short_text("Title", "User: hello", 128)
+            .await
+            .unwrap();
+        assert!(
+            result.text.is_empty(),
+            "never use a truncated session title"
+        );
+        assert_eq!(result.requests, 1);
+        assert_eq!(
+            result.usage.unwrap().output,
+            Some(128),
+            "retain actual cost"
+        );
+        assert_eq!(server.join().unwrap()["max_tokens"], 128);
     }
 
     #[tokio::test]

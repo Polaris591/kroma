@@ -41,10 +41,18 @@ pub fn compact_tokens(value: u64) -> String {
 
 impl UsageMeter {
     pub fn record(&mut self, usage: Option<&Usage>) {
-        self.calls += 1;
-        // A request with no usage must replace the previous request's
-        // measurements; never display stale cache hits as "last".
-        self.last = Some(usage.cloned().unwrap_or_default());
+        self.record_batch(1, usage);
+    }
+
+    /// Summaries can be aggregates of several provider attempts. Their token
+    /// fields are combined measurements, not one artificial model request.
+    pub fn record_batch(&mut self, requests: usize, usage: Option<&Usage>) {
+        if requests == 0 {
+            return;
+        }
+        self.calls = self.calls.saturating_add(requests);
+        // A missing measurement must never leave a stale "last" value.
+        self.last = (requests == 1).then(|| usage.cloned().unwrap_or_default());
         if let (Some(input), Some(cached)) =
             (usage.and_then(|u| u.input), usage.and_then(|u| u.cached))
         {
@@ -54,22 +62,22 @@ impl UsageMeter {
         if let Some(value) = usage.and_then(|u| u.input) {
             self.input = self.input.saturating_add(value);
         } else {
-            self.unknown_input += 1;
+            self.unknown_input += requests;
         }
         if let Some(value) = usage.and_then(|u| u.output) {
             self.output = self.output.saturating_add(value);
         } else {
-            self.unknown_output += 1;
+            self.unknown_output += requests;
         }
         if let Some(value) = usage.and_then(|u| u.cached) {
             self.cached = self.cached.saturating_add(value);
         } else {
-            self.unknown_cached += 1;
+            self.unknown_cached += requests;
         }
         if let Some(value) = usage.and_then(|u| u.reasoning) {
             self.reasoning = self.reasoning.saturating_add(value);
         } else {
-            self.unknown_reasoning += 1;
+            self.unknown_reasoning += requests;
         }
     }
 
@@ -83,97 +91,111 @@ impl UsageMeter {
         ))
     }
 
-    /// Latest completed request is primary. Process totals, including cold
-    /// first turns, are secondary. Neither is the current context size.
-    /// Unknown provider fields stay unknown, not silently counted as zero.
+    /// The quiet footer describes only the latest foreground coding request.
+    /// Title generation and APEC are separate expenses, visible in /usage.
+    /// Missing cache fields are unknown; a reported zero is exactly 0%.
     pub fn compact_status(&self, width: usize) -> Option<String> {
         if width == 0 {
             return None;
         }
-        let count = |n: Option<u64>| n.map(compact_tokens).unwrap_or_else(|| "—".into());
         let last = self.last.as_ref();
+        let count = |n: Option<u64>| n.map(compact_tokens).unwrap_or_else(|| "—".into());
         let input = count(last.and_then(|u| u.input));
         let output = count(last.and_then(|u| u.output));
-        let (cache_full, cache_short, rate, fresh) =
-            match (last.and_then(|u| u.input), last.and_then(|u| u.cached)) {
-                (Some(input), Some(cached)) if input > 0 && cached <= input => {
-                    let rate = format!("{:.0}%", cached as f64 * 100.0 / input as f64);
-                    (
-                        format!(
-                            "{}/{} ({rate})",
-                            compact_tokens(cached),
-                            compact_tokens(input)
-                        ),
-                        format!("{} ({rate})", compact_tokens(cached)),
-                        rate,
-                        Some(compact_tokens(input - cached)),
-                    )
-                }
-                (_, Some(cached)) => (
-                    format!("{} (hit —)", compact_tokens(cached)),
+        let (rate, detail) = match (last.and_then(|u| u.input), last.and_then(|u| u.cached)) {
+            (Some(input), Some(cached)) if input > 0 && cached <= input => (
+                format!("{:.0}%", cached as f64 * 100.0 / input as f64),
+                Some(format!(
+                    "{}/{}",
                     compact_tokens(cached),
-                    "—".into(),
-                    None,
-                ),
-                _ => ("—".into(), "—".into(), "—".into(), None),
-            };
-        let total_count = |n: u64, unknown: usize| {
-            if unknown == 0 {
-                compact_tokens(n)
-            } else if n > 0 {
-                format!("≥{}", compact_tokens(n))
-            } else {
-                "—".into()
-            }
+                    compact_tokens(input)
+                )),
+            ),
+            _ => ("—".into(), None),
         };
-        let total_rate =
-            self.cache_hit_rate()
-                .map_or("—".to_owned(), |(hits, input, partial)| {
-                    format!(
-                        "{}{:.0}%",
-                        if partial { "~" } else { "" },
-                        hits as f64 * 100.0 / input as f64
-                    )
-                });
-        let full = format!("Last In {input} · Out {output} · Cache {cache_full}");
-        let with_fresh = match fresh {
-            Some(fresh) => format!("{full} · Fresh {fresh}"),
-            None => full.clone(),
-        };
-        let total = format!(
-            "Total In {} · Out {} · Hit {total_rate}",
-            total_count(self.input, self.unknown_input),
-            total_count(self.output, self.unknown_output),
-        );
-        let full_total = if self.calls > 1 {
-            format!("{with_fresh} · {total}")
-        } else {
-            with_fresh.clone()
-        };
-        let short_total = if self.calls > 1 {
-            format!("{full} · Total hit {total_rate}")
-        } else {
-            full.clone()
-        };
-        let short = format!("Last In {input} · Out {output} · Cache {cache_short}");
-        let narrow = format!("Last In {input} · Out {output} · Cache {rate}");
-        let minimal = format!("Last In {input} · Cache {rate}");
+        let normal = format!("Last In {input} · Out {output} · Cache {rate}");
+        let detailed = detail.map_or(normal.clone(), |detail| format!("{normal} ({detail})"));
+        let narrow = format!("In {input} · Out {output} · Cache {rate}");
+        let minimal = format!("In {input} · Cache {rate}");
         let cache_only = format!("Cache {rate}");
-        for choice in [
-            full_total,
-            short_total,
-            with_fresh,
-            full,
-            short,
-            narrow,
-            minimal,
-            cache_only.clone(),
-        ] {
-            if choice.chars().count() <= width {
-                return Some(choice);
+        for variant in [detailed, normal, narrow, minimal, cache_only.clone()] {
+            if variant.chars().count() <= width {
+                return Some(variant);
             }
         }
         Some(cache_only.chars().take(width).collect())
+    }
+
+    fn summary_line(&self, label: &str) -> String {
+        let measured = |value: u64, unknown: usize| {
+            if self.calls == 0 {
+                "—".to_owned()
+            } else if unknown == 0 {
+                value.to_string()
+            } else if value > 0 {
+                format!("≥{value}")
+            } else {
+                "—".to_owned()
+            }
+        };
+        let cache_rate =
+            self.cache_hit_rate()
+                .map_or("—".to_owned(), |(cached, input, partial)| {
+                    format!(
+                        "{}{:.1}%",
+                        if partial { "~" } else { "" },
+                        cached as f64 * 100.0 / input as f64,
+                    )
+                });
+        format!(
+            "{label}: {} call(s) | In {} | Out {} | Cache read {} | Hit {} | Reasoning {}",
+            self.calls,
+            measured(self.input, self.unknown_input),
+            measured(self.output, self.unknown_output),
+            measured(self.cached, self.unknown_cached),
+            cache_rate,
+            measured(self.reasoning, self.unknown_reasoning),
+        )
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.calls = self.calls.saturating_add(other.calls);
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cached = self.cached.saturating_add(other.cached);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
+        self.unknown_input = self.unknown_input.saturating_add(other.unknown_input);
+        self.unknown_output = self.unknown_output.saturating_add(other.unknown_output);
+        self.unknown_cached = self.unknown_cached.saturating_add(other.unknown_cached);
+        self.unknown_reasoning = self
+            .unknown_reasoning
+            .saturating_add(other.unknown_reasoning);
+        self.paired_cache_input = self
+            .paired_cache_input
+            .saturating_add(other.paired_cache_input);
+        self.paired_cache_hits = self
+            .paired_cache_hits
+            .saturating_add(other.paired_cache_hits);
+    }
+
+    pub fn report_breakdown(&self, title: &Self, apec: &Self) -> String {
+        let mut total = Self::default();
+        for meter in [self, title, apec] {
+            total.merge(meter);
+        }
+        [
+            "Measured usage (this Kroma process only):".to_owned(),
+            self.summary_line("Coding"),
+            title.summary_line("Auto titles"),
+            apec.summary_line("APEC summaries"),
+            total.summary_line("Combined"),
+            "Last coding request: ".to_owned()
+                + &self.compact_status(120).unwrap_or_default(),
+            "Cache read tokens are part of input; reasoning tokens are part of output.".into(),
+            "— = unavailable; ≥ = some requests unreported; ~ = cache ratio based on measured requests only.".into(),
+            "APEC counts finalized summaries; unfinished or failed attempts may have unreported costs.".into(),
+        ]
+        .join("\n")
     }
 
     pub fn report(&self) -> String {
@@ -252,7 +274,9 @@ mod tests {
         assert!(meter.report().contains("8 measured"));
         assert_eq!(meter.cache_hit_rate(), Some((80, 100, true)));
         assert!(meter.compact_status(120).unwrap().contains("Cache —"));
-        assert!(meter.compact_status(120).unwrap().contains("Hit ~80%"));
+        assert!(meter
+            .report_breakdown(&UsageMeter::default(), &UsageMeter::default())
+            .contains("Hit ~80.0%"));
     }
 
     #[test]
@@ -284,8 +308,10 @@ mod tests {
         assert!(meter
             .compact_status(120)
             .unwrap()
-            .contains("2.0k/3.0k (67%)"));
-        assert!(meter.compact_status(130).unwrap().contains("Hit ~50%"));
+            .contains("Cache 67% (2.0k/3.0k)"));
+        assert!(meter
+            .report_breakdown(&UsageMeter::default(), &UsageMeter::default())
+            .contains("Hit ~50.0%"));
         assert_eq!(meter.input, 5_000);
         assert_eq!(meter.output, 310);
         assert!(meter
@@ -305,8 +331,8 @@ mod tests {
         }));
         let wide = meter.compact_status(130).unwrap();
         assert!(wide.contains("Last In 8.0k · Out 500"));
-        assert!(wide.contains("Cache 6.0k/8.0k (75%)"));
-        assert!(wide.contains("Fresh 2.0k"));
+        assert!(wide.contains("Cache 75% (6.0k/8.0k)"));
+        assert!(!wide.contains("Fresh") && !wide.contains("Total"));
         assert!(meter.compact_status(40).unwrap().contains("75%"));
         let mut zero = UsageMeter::default();
         zero.record(Some(&Usage {
@@ -317,7 +343,7 @@ mod tests {
         assert!(zero
             .compact_status(130)
             .unwrap()
-            .contains("Cache 0/1.0k (0%)"));
+            .contains("Cache 0% (0/1.0k)"));
         assert!(meter.compact_status(0).is_none());
     }
 
@@ -335,7 +361,7 @@ mod tests {
         assert!(meter
             .compact_status(130)
             .unwrap()
-            .contains("Cache 0/2.0k (0%)"));
+            .contains("Cache 0% (0/2.0k)"));
         meter.record(Some(&Usage {
             input: Some(4_000),
             output: Some(200),
@@ -343,13 +369,67 @@ mod tests {
             ..Usage::default()
         }));
         let footer = meter.compact_status(145).unwrap();
-        assert!(footer.contains("Last In 4.0k · Out 200 · Cache 3.0k/4.0k (75%)"));
-        assert!(footer.contains("Total In 6.0k · Out 300 · Hit 50%"));
+        assert!(footer.contains("Last In 4.0k · Out 200 · Cache 75% (3.0k/4.0k)"));
+        assert!(!footer.contains("Total"));
+        assert!(meter
+            .report_breakdown(&UsageMeter::default(), &UsageMeter::default())
+            .contains("Combined: 2 call(s) | In 6000 | Out 300 | Cache read 3000 | Hit 50.0%"));
         assert_eq!(meter.cache_hit_rate(), Some((3_000, 6_000, false)));
         meter.record(None);
         let unknown = meter.compact_status(120).unwrap();
         assert!(unknown.contains("Last In — · Out — · Cache —"));
-        assert!(unknown.contains("Hit ~50%"));
+        assert!(meter
+            .report_breakdown(&UsageMeter::default(), &UsageMeter::default())
+            .contains("Hit ~50.0%"));
+    }
+
+    #[test]
+    fn separate_categories_sum_measured_usage_without_mixing_last_coding_request() {
+        let mut coding = UsageMeter::default();
+        coding.record(Some(&Usage {
+            input: Some(1_000),
+            output: Some(80),
+            cached: Some(800),
+            ..Usage::default()
+        }));
+        let last_before = coding.compact_status(100);
+        let mut titles = UsageMeter::default();
+        titles.record_batch(
+            1,
+            Some(&Usage {
+                input: Some(117),
+                output: Some(95),
+                cached: Some(0),
+                ..Usage::default()
+            }),
+        );
+        let mut apec = UsageMeter::default();
+        apec.record_batch(
+            2,
+            Some(&Usage {
+                input: Some(500),
+                output: Some(70),
+                cached: Some(100),
+                ..Usage::default()
+            }),
+        );
+        assert_eq!(coding.compact_status(100), last_before);
+        let report = coding.report_breakdown(&titles, &apec);
+        assert!(
+            report.contains("Coding: 1 call(s) | In 1000 | Out 80 | Cache read 800 | Hit 80.0%")
+        );
+        assert!(
+            report.contains("Auto titles: 1 call(s) | In 117 | Out 95 | Cache read 0 | Hit 0.0%")
+        );
+        assert!(report
+            .contains("APEC summaries: 2 call(s) | In 500 | Out 70 | Cache read 100 | Hit 20.0%"));
+        assert!(report.contains("Combined: 4 call(s) | In 1617 | Out 245 | Cache read 900"));
+        titles.record_batch(1, None);
+        assert_eq!(titles.calls, 2);
+        let partial = coding.report_breakdown(&titles, &apec);
+        assert!(partial
+            .contains("Auto titles: 2 call(s) | In ≥117 | Out ≥95 | Cache read — | Hit ~0.0%"));
+        assert!(partial.contains("Combined: 5 call(s) | In ≥1617 | Out ≥245 | Cache read ≥900"));
     }
 
     #[test]

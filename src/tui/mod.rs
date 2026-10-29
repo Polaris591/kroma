@@ -684,7 +684,12 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
         return true;
     }
     if input == "/usage" {
-        state.info("USAGE", state.usage.report());
+        state.info(
+            "USAGE",
+            state
+                .usage
+                .report_breakdown(&state.title_usage, &state.apec_usage),
+        );
         return true;
     }
     if input == "/think"
@@ -761,6 +766,8 @@ fn drain_final_usage(state: &mut UiState, rx: &mut UnboundedReceiver<UiEvent>) {
         if matches!(
             event,
             UiEvent::Usage { .. }
+                | UiEvent::TitleUsage { .. }
+                | UiEvent::ApecUsage { .. }
                 | UiEvent::ActualInput(_)
                 | UiEvent::Context { .. }
                 | UiEvent::SessionTitleUpdated(_)
@@ -1341,15 +1348,32 @@ mod tests {
         })
         .unwrap();
         tx.send(UiEvent::ActualInput(2_000)).unwrap();
+        tx.send(UiEvent::ApecUsage {
+            requests: 2,
+            input: Some(800),
+            output: Some(90),
+            cached: Some(300),
+        })
+        .unwrap();
+        tx.send(UiEvent::TitleUsage {
+            requests: 1,
+            input: Some(117),
+            output: Some(95),
+            cached: Some(0),
+            reasoning: None,
+        })
+        .unwrap();
         drain_final_usage(&mut ui, &mut rx);
         assert_eq!(ui.usage.calls, 1);
+        assert_eq!(ui.title_usage.calls, 1);
+        assert_eq!(ui.apec_usage.calls, 2);
         ui.configure_status(10_000, None);
         assert_eq!(ui.context_display(), "Ctx 2.0k / 10k · 20%");
         assert!(ui
             .usage
             .compact_status(100)
             .unwrap()
-            .contains("Cache 0/2.0k (0%)"));
+            .contains("Cache 0% (0/2.0k)"));
         ui.load_history(&[]);
         assert_eq!(ui.usage.calls, 1, "history reload must preserve usage");
         let mut terminal =

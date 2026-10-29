@@ -95,4 +95,16 @@ pub trait ModelBackend: Send + Sync {
         text: &'a str,
         output_tokens: usize,
     ) -> ModelFuture<'a, TextResult>;
+
+    /// Optional low-budget title/label request. Unlike APEC, short text
+    /// should not reserve a large hidden-reasoning completion allowance.
+    /// Other backends may reuse their normal text-generation path.
+    fn generate_short_text<'a>(
+        &'a self,
+        system: &'a str,
+        text: &'a str,
+        output_tokens: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        self.generate_text(system, text, output_tokens)
+    }
 }

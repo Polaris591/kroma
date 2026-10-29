@@ -24,9 +24,10 @@ framework, a second agent loop, or a mandatory plugin system.
 - **`!command`** executes a command directly with the built-in Shell
   executor, without a model call. Output is shown locally, not inserted
   into the model transcript.
-- **`/usage`** reports measured foreground input/output/cached tokens and
-  model calls for the current process. Unknown provider measurements are
-  marked unknown, and APEC usage is not silently added to foreground usage.
+- **`/usage`** separates the current process's coding requests, automatic
+  session titles, and finalized APEC summaries, then shows measured combined
+  totals. Unknown upstream usage stays unknown; cache reads are a subset of
+  input tokens. In-flight and failed APEC attempts may not report their cost.
 - **`/diff`** previews the Git diff (truncated for a small TUI).
   **`/tools`** also displays MCP servers that failed to connect at startup.
 - **`/model`** lists saved profiles; **`/model profile-name`** switches
@@ -143,13 +144,17 @@ sessions and the existing slash commands. Shortcuts:
   model name in the header. **Ctx** uses the total model context window. During a
   request `~` denotes a conservative estimate including tool schemas; after
   a completed request, upstream input-token usage replaces that estimate when
-  supplied. `—` means no recent request, not zero usage. The **Think** label
+  supplied. `—` means no measurement, not zero usage. The second footer
+  row shows only the latest **coding-model request** (In, Out, cache hits);
+  background automatic title and APEC requests never replace its counters.
+  Run `/usage` for separate/combined totals. The **Think** label
   shows the requested reasoning level. **Shift+Tab** cycles
   auto/off/low/medium/high/xhigh/max, or use `/think high` to select directly.
   The change applies to the next model request, and gateways may reject a
   level they do not support. Short terminals compact the footer automatically.
-- Model output streams as it arrives, with a subtle cursor and working/waiting
-  states. Reasoning stays collapsed by default; Ctrl+R reveals provider-exposed
+- Model output streams as it arrives, with a subtle cursor and a branded
+  activity indicator directly above the input while the model is working.
+  Reasoning stays collapsed by default; Ctrl+R reveals provider-exposed
   reasoning deltas as they arrive. Completion reconciles the entry without
   duplication. Providers exposing only final reasoning show it after completion.
   Encrypted or otherwise unavailable private reasoning is never displayed.

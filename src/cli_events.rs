@@ -34,6 +34,13 @@ impl EventSink for JsonEvents {
                     "output":output_tokens,"cached":cached_tokens,"reasoning_tokens":reasoning_tokens})
             }
             RuntimeEvent::ModelFailed => json!({"type":"model_failed"}),
+            RuntimeEvent::CompactionUsage {
+                requests,
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+            } => json!({"type":"apec_usage","requests":requests,"input":input_tokens,
+                "output":output_tokens,"cached":cached_tokens}),
             RuntimeEvent::ToolStarted { name, id, .. } => {
                 json!({"type":"tool_started","name":name,"id":id})
             }

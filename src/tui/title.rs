@@ -36,22 +36,24 @@ pub(super) fn schedule(
     tokio::spawn(async move {
         let prompt = format!(
             "User: {}\nAssistant: {}",
-            user_text.chars().take(320).collect::<String>(),
-            assistant_text.chars().take(240).collect::<String>(),
+            user_text.chars().take(160).collect::<String>(),
+            assistant_text.chars().take(120).collect::<String>(),
         );
-        let system = "Give this coding assistant conversation a concise, descriptive title in the user's language. Return ONLY the title, no quotes or Markdown. Prefer 4-12 Chinese characters or 2-6 English words.";
-        let (title, usage) = match tokio::time::timeout(
+        let system = "Name this coding assistant conversation in the user's language. Return only a short descriptive title, no explanation or Markdown.";
+        let (title, usage, requests) = match tokio::time::timeout(
             Duration::from_secs(12),
-            model.generate_text(system, &prompt, 48),
+            model.generate_short_text(system, &prompt, 128),
         )
         .await
         {
-            Ok(Ok(result)) => (sanitize_title(&result.text), result.usage),
-            _ => (None, None),
+            Ok(Ok(result)) => (sanitize_title(&result.text), result.usage, result.requests),
+            // Even an unsuccessful request might be charged by a gateway.
+            _ => (None, None, 1),
         };
-        // A title is an actual model request. Include its measured tokens in
-        // the TUI totals rather than silently hiding its small API cost.
-        let _ = sender.send(UiEvent::Usage {
+        // Count title generation as a separate API expense: it must never
+        // become the "last coding request" or change Ctx/cache in the footer.
+        let _ = sender.send(UiEvent::TitleUsage {
+            requests,
             input: usage.as_ref().and_then(|u| u.input),
             output: usage.as_ref().and_then(|u| u.output),
             cached: usage.as_ref().and_then(|u| u.cached),
@@ -94,11 +96,20 @@ mod tests {
             &'a self,
             _system: &'a str,
             _text: &'a str,
+            _output_tokens: usize,
+        ) -> ModelFuture<'a, TextResult> {
+            Box::pin(async { anyhow::bail!("title must use short text generation") })
+        }
+
+        fn generate_short_text<'a>(
+            &'a self,
+            _system: &'a str,
+            _text: &'a str,
             output_tokens: usize,
         ) -> ModelFuture<'a, TextResult> {
             self.0.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move {
-                assert_eq!(output_tokens, 48);
+                assert_eq!(output_tokens, 128);
                 Ok(TextResult {
                     text: "**优化 Kroma 会话**".into(),
                     usage: Some(Usage {
@@ -140,7 +151,8 @@ mod tests {
         let first = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await?;
         assert!(matches!(
             first,
-            Some(UiEvent::Usage {
+            Some(UiEvent::TitleUsage {
+                requests: 1,
                 input: Some(80),
                 output: Some(12),
                 ..

@@ -752,6 +752,16 @@ impl Agent {
             .run_inner(user_input, attachments, on_text, &mut stats)
             .await;
         stats.record_compaction(self.compression.take_usage());
+        if stats.compaction.requests > 0 {
+            if let Some(events) = &self.events {
+                events.on_event(RuntimeEvent::CompactionUsage {
+                    requests: stats.compaction.requests,
+                    input_tokens: stats.compaction.input,
+                    output_tokens: stats.compaction.output,
+                    cached_tokens: stats.compaction.cached,
+                });
+            }
+        }
         let status = if result.is_ok() {
             "completed"
         } else {

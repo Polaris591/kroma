@@ -385,6 +385,7 @@ impl EventSink for RecordingEvents {
             RuntimeEvent::ReasoningDelta(text) => format!("reasoning:{text}"),
             RuntimeEvent::ModelFinished { request, .. } => format!("model-end-{request}"),
             RuntimeEvent::ModelFailed => "model-failed".to_owned(),
+            RuntimeEvent::CompactionUsage { requests, .. } => format!("apec-usage:{requests}"),
             RuntimeEvent::ToolStarted { name, .. } => format!("tool-start:{name}"),
             RuntimeEvent::ToolOutput { .. } => "tool-output".to_owned(),
             RuntimeEvent::ToolFinished { name, result, .. } => {

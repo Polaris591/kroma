@@ -298,6 +298,19 @@ pub enum UiEvent {
         cached: Option<u64>,
         reasoning: Option<u64>,
     },
+    TitleUsage {
+        requests: usize,
+        input: Option<u64>,
+        output: Option<u64>,
+        cached: Option<u64>,
+        reasoning: Option<u64>,
+    },
+    ApecUsage {
+        requests: usize,
+        input: Option<u64>,
+        output: Option<u64>,
+        cached: Option<u64>,
+    },
     Context {
         estimated: usize,
     },
@@ -361,6 +374,17 @@ impl crate::events::EventSink for UiSink {
                 }
                 None
             }
+            RuntimeEvent::CompactionUsage {
+                requests,
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+            } => Some(UiEvent::ApecUsage {
+                requests,
+                input: input_tokens,
+                output: output_tokens,
+                cached: cached_tokens,
+            }),
             RuntimeEvent::ToolStarted {
                 name,
                 id,
@@ -524,6 +548,8 @@ pub struct UiState {
     pub editor: Editor,
     pub picker: Option<Picker>,
     pub usage: crate::usage::UsageMeter,
+    pub title_usage: crate::usage::UsageMeter,
+    pub apec_usage: crate::usage::UsageMeter,
     pub attachments: Vec<Attachment>,
     removed_drafts: Vec<Attachment>,
     saved_draft_attachments: Option<Vec<Attachment>>,
@@ -586,6 +612,8 @@ impl UiState {
             editor: Editor::default(),
             picker: None,
             usage: crate::usage::UsageMeter::default(),
+            title_usage: crate::usage::UsageMeter::default(),
+            apec_usage: crate::usage::UsageMeter::default(),
             attachments: Vec::new(),
             removed_drafts: Vec::new(),
             saved_draft_attachments: None,
@@ -1145,6 +1173,8 @@ impl UiState {
         let unchanged_history = matches!(
             &event,
             UiEvent::Usage { .. }
+                | UiEvent::TitleUsage { .. }
+                | UiEvent::ApecUsage { .. }
                 | UiEvent::Context { .. }
                 | UiEvent::ActualInput(_)
                 | UiEvent::SessionTitleUpdated(_)
@@ -1174,6 +1204,41 @@ impl UiState {
                     reasoning,
                     total: None,
                 }));
+            }
+            UiEvent::TitleUsage {
+                requests,
+                input,
+                output,
+                cached,
+                reasoning,
+            } => {
+                self.title_usage.record_batch(
+                    requests,
+                    Some(&crate::model::Usage {
+                        input,
+                        output,
+                        cached,
+                        reasoning,
+                        total: None,
+                    }),
+                );
+            }
+            UiEvent::ApecUsage {
+                requests,
+                input,
+                output,
+                cached,
+            } => {
+                self.apec_usage.record_batch(
+                    requests,
+                    Some(&crate::model::Usage {
+                        input,
+                        output,
+                        cached,
+                        reasoning: None,
+                        total: None,
+                    }),
+                );
             }
             UiEvent::TaskStarted => {
                 self.running = true;
@@ -2378,7 +2443,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Ctx ~1.6k / 1M · ~0.2%"));
-        assert!(rendered.contains("Last In 8.0k · Out 500 · Cache 6.0k/8.0k (75%)"));
+        assert!(rendered.contains("Last In 8.0k · Out 500 · Cache 75% (6.0k/8.0k)"));
         let mut narrow = Terminal::new(TestBackend::new(40, 26)).unwrap();
         narrow.draw(|frame| ui.draw(frame)).unwrap();
         let narrow_render = narrow
@@ -2392,6 +2457,60 @@ mod tests {
             narrow_render.contains("Cache") && narrow_render.contains("75%"),
             "cache read and rate must remain visible on narrow terminals"
         );
+    }
+
+    #[test]
+    fn background_title_and_apec_usage_cannot_replace_coding_cache_or_context() {
+        let mut ui = UiState::new(
+            "deepseek".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.configure_status(1_000_000, Some("high".into()));
+        ui.event(UiEvent::Usage {
+            input: Some(1_000),
+            output: Some(80),
+            cached: Some(800),
+            reasoning: Some(20),
+        });
+        ui.event(UiEvent::ActualInput(1_000));
+        let coding_footer = ui.usage.compact_status(150);
+        let context = ui.context_display();
+        ui.event(UiEvent::TitleUsage {
+            requests: 1,
+            input: Some(117),
+            output: Some(95),
+            cached: Some(0),
+            reasoning: Some(80),
+        });
+        ui.event(UiEvent::ApecUsage {
+            requests: 2,
+            input: Some(500),
+            output: Some(100),
+            cached: Some(200),
+        });
+        assert_eq!(ui.usage.compact_status(150), coding_footer);
+        assert_eq!(ui.context_display(), context);
+        assert_eq!(ui.usage.calls, 1);
+        assert_eq!(ui.title_usage.calls, 1);
+        assert_eq!(ui.apec_usage.calls, 2);
+        let report = ui.usage.report_breakdown(&ui.title_usage, &ui.apec_usage);
+        assert!(report.contains("Coding: 1 call(s) | In 1000"));
+        assert!(report.contains("Auto titles: 1 call(s) | In 117"));
+        assert!(report.contains("APEC summaries: 2 call(s) | In 500"));
+        assert!(report.contains("Combined: 4 call(s) | In 1617 | Out 275 | Cache read 1000"));
+        let mut terminal = Terminal::new(TestBackend::new(120, 26)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Last In 1.0k · Out 80 · Cache 80%"));
+        assert!(!rendered.contains("Out 95") && !rendered.contains("Total In"));
     }
 
     #[test]
@@ -3455,6 +3574,18 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             state.event(event);
         }
+        assert_eq!(state.context_display(), "Ctx 100k / 500k · 20%");
+        sink.on_event(RuntimeEvent::CompactionUsage {
+            requests: 2,
+            input_tokens: Some(1_000),
+            output_tokens: Some(200),
+            cached_tokens: Some(800),
+        });
+        while let Ok(event) = rx.try_recv() {
+            state.event(event);
+        }
+        assert_eq!(state.apec_usage.calls, 2);
+        assert_eq!(state.usage.calls, 1);
         assert_eq!(state.context_display(), "Ctx 100k / 500k · 20%");
         // Show current request usage, not cumulative billed tokens.
         state.event(UiEvent::ActualInput(150_000));

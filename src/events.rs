@@ -25,6 +25,13 @@ pub enum RuntimeEvent<'a> {
         cached_tokens: Option<u64>,
     },
     ModelFailed,
+    /// Aggregated, finalized APEC generation usage; not a foreground request.
+    CompactionUsage {
+        requests: usize,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        cached_tokens: Option<u64>,
+    },
     ToolStarted {
         name: &'a str,
         id: &'a str,
