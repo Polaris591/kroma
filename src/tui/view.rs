@@ -1182,11 +1182,11 @@ impl UiState {
             return (0, height);
         }
         let thumb = (height * height / total).clamp(1, height);
-        let position = if self.history_max_scroll == 0 {
-            0
-        } else {
-            self.history_top_row * (height - thumb) / self.history_max_scroll
-        };
+        let position = self
+            .history_top_row
+            .saturating_mul(height - thumb)
+            .checked_div(self.history_max_scroll)
+            .unwrap_or(0);
         (position, thumb)
     }
 
@@ -1712,20 +1712,19 @@ impl UiState {
         self.history_max_scroll = max_scroll;
         if let (Some(y), Some(offset)) = (self.scrollbar_pointer_y, self.scrollbar_drag) {
             let height = self.scrollbar_area.height as usize;
-            let thumb = if rows == 0 {
-                height
-            } else {
-                (height.saturating_mul(height) / rows).clamp(1, height.max(1))
-            };
+            let thumb = height
+                .saturating_mul(height)
+                .checked_div(rows)
+                .map(|ratio| ratio.clamp(1, height.max(1)))
+                .unwrap_or(height);
             let track = height.saturating_sub(thumb);
             let from_track_start = (y.saturating_sub(self.scrollbar_area.y) as usize)
                 .saturating_sub(offset)
                 .min(track);
-            let top = if track > 0 {
-                from_track_start * max_scroll / track
-            } else {
-                0
-            };
+            let top = from_track_start
+                .saturating_mul(max_scroll)
+                .checked_div(track)
+                .unwrap_or(0);
             self.scroll_from_bottom = max_scroll.saturating_sub(top);
             self.scroll_anchor = (self.scroll_from_bottom > 0).then_some(top);
             // If the lazy history was expanded, existing selection rows are
