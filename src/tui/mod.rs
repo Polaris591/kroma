@@ -545,7 +545,7 @@ fn input_event(
         state.dismiss_notification();
     }
     if running
-        && matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        && matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::SHIFT))
     {
         state.picker = None;
         return InputAction::Cancel;
@@ -554,6 +554,21 @@ fn input_event(
         return picker_event(state, event, workdir);
     }
     match event {
+        // Ctrl+Shift+C and Ctrl+Insert copy the draft selection without
+        // changing Ctrl+C's existing clear/cancel behavior.
+        Event::Key(key)
+            if key.kind != KeyEventKind::Release
+                && ((key.code == KeyCode::Char('c')
+                    && key
+                        .modifiers
+                        .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT))
+                    || (key.code == KeyCode::Insert
+                        && key.modifiers.contains(KeyModifiers::CONTROL))) =>
+        {
+            if let Some(selected) = state.editor_selected_text() {
+                copy_selection_feedback(state, &selected);
+            }
+        }
         Event::Key(key)
             if !running
                 && !state.attach_mode
@@ -646,6 +661,12 @@ fn input_event(
             return key_action(state, key, running, model);
         }
         Event::Key(key) => {
+            // Native terminal mouse selection is disabled in a full-screen
+            // app. Keep draft selection independent of the transcript; a
+            // normal editing keystroke dismisses the highlighted draft.
+            if key.kind != KeyEventKind::Release {
+                state.clear_editor_selection();
+            }
             if state.attach_mode {
                 match key.code {
                     KeyCode::Enter => {
@@ -688,6 +709,7 @@ fn input_event(
             return action;
         }
         Event::Paste(text) => {
+            state.clear_editor_selection();
             if state.attach_mode {
                 state.attach_path.push_str(&text);
             } else if running && attachments::long_paste(&text) {
@@ -725,8 +747,9 @@ fn input_event(
                         }
                     }
                 } else if state.toggle_tool_at(mouse.column, mouse.row) {
-                    // The disclosure chevron owns this click; text selection
-                    // and Ctrl+Click links still work everywhere else.
+                    // The disclosure chevron owns this click.
+                } else if state.start_editor_selection(mouse.column, mouse.row) {
+                    // The composer owns its own selection and caret.
                 } else {
                     state.select_start(mouse.column, mouse.row);
                 }
@@ -734,26 +757,15 @@ fn input_event(
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 if state.scrollbar_move(mouse.row) {
                     // Proportional track drag; keep selection untouched.
-                } else if !mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                } else if !mouse.modifiers.contains(KeyModifiers::CONTROL)
+                    && !state.drag_editor_selection(mouse.column, mouse.row)
+                {
                     state.select_drag(mouse.column, mouse.row);
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
-                if let Some(selected) = state.selected_text() {
-                    match copy_selection(&selected) {
-                        Ok(true) => state.note(state.preferences.language.text(
-                            "Copied selection to desktop clipboard",
-                            "已将选中内容复制到剪贴板",
-                        )),
-                        Ok(false) => state.note(state.preferences.language.text(
-                            "OSC 52 copy sent · terminal support required",
-                            "已发送 OSC 52 复制请求 · 需要终端支持",
-                        )),
-                        Err(error) => state.note(format!(
-                            "{}: {error}",
-                            state.preferences.language.text("Copy failed", "复制失败")
-                        )),
-                    }
+                if let Some(selected) = state.selected_text_at(mouse.column, mouse.row) {
+                    copy_selection_feedback(state, &selected);
                 }
             }
             _ => {}
@@ -761,6 +773,23 @@ fn input_event(
         _ => {}
     }
     InputAction::None
+}
+
+fn copy_selection_feedback(state: &mut UiState, selected: &str) {
+    match copy_selection(selected) {
+        Ok(true) => state.note(state.preferences.language.text(
+            "Copied selection to desktop clipboard",
+            "已将选中内容复制到剪贴板",
+        )),
+        Ok(false) => state.note(state.preferences.language.text(
+            "OSC 52 copy sent · terminal support required",
+            "已发送 OSC 52 复制请求 · 需要终端支持",
+        )),
+        Err(error) => state.note(format!(
+            "{}: {error}",
+            state.preferences.language.text("Copy failed", "复制失败")
+        )),
+    }
 }
 
 /// Local desktop clipboard is more reliable than OSC 52 in Windows Terminal;
@@ -974,6 +1003,22 @@ fn drain_final_usage(state: &mut UiState, rx: &mut UnboundedReceiver<UiEvent>) {
     }
 }
 
+/// Consume at most 127 extra live events after the first recv(). The queue
+/// remains ordered; the caller returns to select! before the next batch.
+fn drain_live_events(state: &mut UiState, rx: &mut UnboundedReceiver<UiEvent>) -> usize {
+    let mut consumed = 0;
+    for _ in 0..127 {
+        match rx.try_recv() {
+            Ok(message) => {
+                state.event(message);
+                consumed += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    consumed
+}
+
 /// One active task, with the UI and model running concurrently in the same
 /// async process. The model future borrows Agent; the renderer never does.
 /// Dropping the future on Ctrl+C preserves the existing cancellation policy.
@@ -1018,9 +1063,10 @@ async fn execute_task(
                 },
                 message=rx.recv() => {
                     if let Some(message)=message {state.event(message);}
-                    // Drain bursts so fast model streams do not accumulate
-                    // thousands of stale intermediate UI frames.
-                    while let Ok(message)=rx.try_recv() {state.event(message);}
+                    // A noisy tool must not starve keyboard/cancel/timer.
+                    // Stop after 128 total events, preserving every queued
+                    // event and its order for the next select! iteration.
+                    drain_live_events(state,rx);
                     dirty=true;
                 },
                 _=ticker.tick() => {
@@ -1234,6 +1280,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         themes,
         agent.messages(),
     );
+    state.set_link_workdir(&workdir);
     state.preferences_path = preferences::Preferences::path();
     match preferences::Preferences::load_at(state.preferences_path.as_deref()) {
         Ok(prefs) => state.apply_preferences(prefs),
@@ -1624,6 +1671,24 @@ mod tests {
     }
 
     #[test]
+    fn live_stream_batch_is_bounded_and_preserves_queued_event_order() {
+        let (mut ui, _) = setup();
+        ui.configure_status(1000, None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for index in 1..=320 {
+            tx.send(UiEvent::ActualInput(index)).unwrap();
+        }
+        assert_eq!(drain_live_events(&mut ui, &mut rx), 127);
+        assert_eq!(ui.context_display(), "Ctx 127 / 1.0k · 13%");
+        assert_eq!(drain_live_events(&mut ui, &mut rx), 127);
+        assert_eq!(drain_live_events(&mut ui, &mut rx), 66);
+        assert_eq!(drain_live_events(&mut ui, &mut rx), 0);
+        // The last update must survive. This test proves fairness without
+        // losing or reordering the measurable stream.
+        assert!(ui.context_display().contains("320"));
+    }
+
+    #[test]
     fn task_completion_drains_last_usage_without_replaying_transcript_deltas() {
         let (mut ui, _) = setup();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1697,6 +1762,92 @@ mod tests {
     }
 
     #[test]
+    fn input_mouse_drag_selects_draft_and_editing_clears_only_its_highlight() {
+        use crossterm::event::{MouseButton, MouseEvent};
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut ui, model) = setup();
+        ui.editor.paste("draft 中文 👩‍💻");
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = buffer
+            .content()
+            .chunks(100)
+            .enumerate()
+            .find_map(|(y, row)| {
+                row.windows(5)
+                    .position(|window| {
+                        window.iter().map(|cell| cell.symbol()).collect::<String>() == "draft"
+                    })
+                    .map(|x| (x as u16, y as u16))
+            })
+            .expect("editor text must be visible");
+        let mouse = |kind, x, y| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        input_event(
+            &mut ui,
+            mouse(MouseEventKind::Down(MouseButton::Left), x, y),
+            false,
+            &model,
+            std::path::Path::new("."),
+        );
+        input_event(
+            &mut ui,
+            mouse(MouseEventKind::Drag(MouseButton::Left), x + 5, y),
+            false,
+            &model,
+            std::path::Path::new("."),
+        );
+        input_event(
+            &mut ui,
+            mouse(MouseEventKind::Up(MouseButton::Left), x + 5, y),
+            false,
+            &model,
+            std::path::Path::new("."),
+        );
+        assert_eq!(ui.editor_selected_text().as_deref(), Some("draft"));
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(terminal
+            .backend()
+            .buffer()
+            .cell((x, y))
+            .unwrap()
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED));
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+            false,
+            &model,
+            std::path::Path::new("."),
+        );
+        assert!(ui.editor_selected_text().is_none());
+        assert!(ui.editor.text().ends_with('z'));
+    }
+
+    #[test]
+    fn copying_with_ctrl_shift_c_does_not_cancel_active_task() {
+        let (mut ui, model) = setup();
+        let action = input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+            true,
+            &model,
+            std::path::Path::new("."),
+        );
+        assert!(matches!(action, InputAction::None));
+    }
+
+    #[test]
     fn clicking_a_tool_chevron_expands_only_that_tool_and_keeps_draft() {
         use crossterm::event::{MouseButton, MouseEvent};
         use ratatui::{backend::TestBackend, Terminal};
@@ -1758,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_click_on_missing_file_reports_failure_without_selecting_text() {
+    fn ctrl_click_on_missing_file_is_not_advertised_or_selected() {
         use crossterm::event::{MouseButton, MouseEvent};
         use ratatui::{backend::TestBackend, Terminal};
         let (mut ui, model) = setup();
@@ -1767,9 +1918,23 @@ mod tests {
         ));
         let mut terminal = Terminal::new(TestBackend::new(110, 27)).unwrap();
         terminal.draw(|frame| ui.draw(frame)).unwrap();
-        let (x, y) = ui
-            .test_link_position("nonexistent-kroma-file")
-            .expect("file path should be clickable");
+        assert!(
+            ui.test_link_position("nonexistent-kroma-file").is_none(),
+            "missing files must not advertise Ctrl+Click"
+        );
+        let (x, y) = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(110)
+            .enumerate()
+            .find_map(|(row, cells)| {
+                let display = cells.iter().map(|cell| cell.symbol()).collect::<String>();
+                display
+                    .find("src/nonexistent-kroma-file")
+                    .map(|column| (column as u16, row as u16))
+            })
+            .expect("the literal path remains readable");
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: x,
@@ -1785,8 +1950,8 @@ mod tests {
         );
         assert!(matches!(result, InputAction::None));
         assert!(
-            ui.notification.contains("file not found"),
-            "error feedback required"
+            ui.notification.is_empty(),
+            "a missing file must not trigger a broken open attempt"
         );
         assert!(
             ui.selected_text().is_none(),

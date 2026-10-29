@@ -602,13 +602,14 @@ impl Compression {
 
     #[cfg(test)]
     fn trc_plan(&self, messages: &[Message]) -> Option<CompactionState> {
-        self.trc_plan_from_view(messages, self.view(messages))
+        let view = self.view(messages);
+        self.trc_plan_from_view(messages, &view)
     }
 
     fn trc_plan_from_view(
         &self,
         messages: &[Message],
-        projected: Vec<Message>,
+        projected: &[Message],
     ) -> Option<CompactionState> {
         let mut next = self.state.clone();
         // Build the exact provider projection once. Each TRC candidate only
@@ -1014,12 +1015,12 @@ impl Compression {
         // not the mutable TRC projection. A TRC revision cannot stale it.
         let mut budget_view = self.view(messages);
         model.project_for_budget(&mut budget_view);
-        if let Some(next) = self.trc_plan_from_view(messages, budget_view) {
-            let mut before_view = self.view(messages);
+        if let Some(next) = self.trc_plan_from_view(messages, &budget_view) {
+            // Already projected for this provider: don't rebuild or reproject
+            // the original view just to log the before/after estimate.
+            let projected_before = self.tokens(&budget_view);
             let mut after_view = self.view_with_state(messages, &next);
-            model.project_for_budget(&mut before_view);
             model.project_for_budget(&mut after_view);
-            let projected_before = self.tokens(&before_view);
             let projected_after = self.tokens(&after_view);
             store.commit(&PersistedContext::Builtin(next.clone()))?;
             let cleared = next

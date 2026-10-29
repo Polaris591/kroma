@@ -117,15 +117,14 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
     )
     .with_output_tokens(config.max_output_tokens)
     .with_thinking_levels(config.thinking_levels.clone());
-    // A Chat profile with an explicit context window already provides the
-    // key limit needed to budget requests. The output reserve uses the
-    // configured limit if present, otherwise Kroma's conservative default.
-    // Do not impose a synchronous, optional /models lookup
-    // on every short-lived CLI invocation (gateways can spend 4s there).
-    // Other protocols retain capability discovery for compatibility.
+    // A configured Chat context is enough to avoid the optional /models call.
+    // Other protocols can also skip it if every discoverable limit and
+    // thinking tier has been specified. Otherwise preserve capability
+    // discovery (including image support) rather than guessing.
     let has_context =
         config.context_window.is_some() || std::env::var_os("KROMA_CONTEXT_WINDOW").is_some();
-    let limits = if config.api_protocol == "chat" && has_context {
+    let configured_fully = config.max_output_tokens.is_some() && !config.thinking_levels.is_empty();
+    let limits = if has_context && (config.api_protocol == "chat" || configured_fully) {
         crate::runtime_log!("[model] using configured limits; skipping optional metadata lookup");
         None
     } else {
@@ -197,6 +196,40 @@ mod tests {
         assert!(model.set_reasoning_level("low").is_err());
         model.set_reasoning_level("xhigh").unwrap();
         assert_eq!(model.reasoning_level().as_deref(), Some("xhigh"));
+    }
+
+    #[tokio::test]
+    async fn fully_specified_non_chat_profiles_skip_optional_metadata_lookup() {
+        use std::net::TcpListener;
+        for protocol in ["responses", "anthropic"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let profile = crate::profiles::ProviderProfile {
+                base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+                model: "mock".into(),
+                api_key: None,
+                deepseek_thinking: None,
+                api_protocol: Some(protocol.into()),
+                reasoning_effort: Some("high".into()),
+                context_window: Some(240_000),
+                max_output_tokens: Some(8192),
+                thinking_levels: Some(vec!["medium".into(), "high".into()]),
+            };
+            let (_, budget) = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                model_from_profile(&profile),
+            )
+            .await
+            .expect("explicit profile must skip metadata network call")
+            .unwrap();
+            assert_eq!(budget.window(), 240_000);
+            assert_eq!(budget.output_reserve(), 8192);
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{protocol} must not call /models when fully configured"
+            );
+        }
     }
 
     #[tokio::test]

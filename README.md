@@ -41,16 +41,22 @@ framework, a second agent loop, or a mandatory plugin system.
   **`kroma --continue`** opens that conversation directly in the TUI. Plain
   `kroma` opens the branded welcome screen: no new conversation is saved
   until the first message is sent. Existing histories remain accessible.
-- **Mouse copy:** drag-select visible conversation text, then right-click to
-  copy. The selection can extend past the top or bottom of the transcript:
+- **Mouse copy:** drag-select visible conversation text **or text in the
+  composer**, then right-click to copy. The input also supports
+  **Ctrl+Shift+C / Ctrl+Insert** for selected draft text without changing
+  Ctrl+C's clear/cancel behavior. Selection preserves CJK, emoji, soft wraps,
+  and readable attachment labels. Transcript selection can extend past the
+  top or bottom of the history:
   keep holding the left button at the edge to auto-scroll and continue
   selecting across multiple screens. **Hover a hyperlink and Ctrl+left-click**
   to open its target. Both
-  named Markdown links (e.g. `[report](./reviews/report.md)`) and bare
-  `https://` URLs, `file://` URLs, and recognizable file paths are supported.
-  Web links use your default browser; local paths resolve against the current
-  project directory and open with the system default application. The hover
-  hint and underline identify links; Ctrl+click does not start text selection.
+  explicit Markdown links and bare `https://` URLs are supported. An
+  automatically detected local file or explicit local Markdown link is
+  clickable only when it exists relative to the active project directory;
+  code blocks and tool output are never auto-linkified. Web links use your
+  default browser; local paths open with the system default application.
+  The hover hint and underline identify valid links; Ctrl+click does not
+  start text selection.
   A local desktop uses the system clipboard directly; SSH sessions and
   machines without a local clipboard send OSC 52 to the terminal instead.
   OSC 52 requires compatible terminal settings, so the fallback confirms only
@@ -127,8 +133,8 @@ sessions and the existing slash commands. Shortcuts:
   selection active while the viewport moves.
 - **Command index:** type `/` or run `/commands` to see commands with descriptions and argument hints. Up/Down selects; **Tab** (or Enter in this completion list) inserts the command without executing it. Type arguments, then Enter to run; Esc closes the list without clearing the draft.
 - **Interface language:** `/language zh` switches UI chrome, hints, help and command descriptions to Chinese; `/language en` switches to English; `/language` toggles. Model answers, tool output and upstream diagnostics are not translated. The default is English.
-- **Reading layout:** `/layout comfortable` (default) centres a reading column (75% of available width, bounded to 100–160 cells and never wider than the terminal); conversation text begins below the header even for short exchanges, while the composer stays at the bottom and long history scrolls normally. `/layout wide` restores full-width prose. Language and layout are saved atomically in `~/.kroma/ui.toml`.
-- **Tool records:** common Rust, Git, Node, Python, PowerShell, file and search commands have concise activity labels; unfamiliar commands show their real first line, not “Run shell command”. Successes are muted; failures keep exit codes and real diagnostics visible. Click a tool's `▸` to expand just that call, or use **Ctrl+O** to expand all. Expanded output retains raw commands, original output-file paths, and colored Git diff changes. Ordinary stderr progress is not a warning.
+- **Reading layout:** Kroma uses the terminal width for its header, tool timeline, history and composer, even in a maximized window. `/layout comfortable` (default) keeps Markdown tables and structured blocks within a more readable width; `/layout wide` relaxes their width limit. Conversation text begins under the header, with the composer fixed at the bottom. Language and layout are saved in `~/.kroma/ui.toml`.
+- **Tool records:** common Rust, Git, Node, Python, PowerShell, file and search commands have concise labels; unknown commands show their real first line. Older successes in long consecutive runs fold into one summary, while recent, failed, warning and active calls stay visible. Click a tool's `▸` to expand only that call; **Ctrl+O** expands all. Expanded calls separate **Command** and **Output** with indented gutters; reasoning segments have a distinct gutter under **Ctrl+R**. Model task failures use an error-colored heading and details. Git diffs retain addition/deletion colors.
 - **Task status:** a subtle branded indicator follows the latest transcript entry while Kroma is thinking, using tools or streaming output. Completion/cancellation and elapsed time appear at the end of that turn, not in a floating status bar. When browsing older history, a separate navigation hint gives the return-to-latest shortcut and unseen update count without moving the reader.
 - **Ctrl+P** opens the searchable picker; **Tab** changes its category among
   commands, model profiles, sessions, and files. Type to filter, Up/Down to
@@ -150,8 +156,9 @@ sessions and the existing slash commands. Shortcuts:
   During a request `~` denotes a conservative estimate including tool schemas;
   after completion, upstream input-token usage replaces that estimate when
   supplied. `—` means no measurement, not zero usage. Background automatic
-  title and APEC requests never replace coding metrics. Run `/usage` for the
-  complete breakdown. **Shift+Tab** cycles
+  title and APEC requests never replace coding metrics. Cache rates retain
+  decimal precision and do not round a partial hit to exactly 100%. Run
+  `/usage` for the complete breakdown. **Shift+Tab** cycles
   auto/off/low/medium/high/xhigh/max, or use `/think high` to select directly.
   The change applies to the next model request, and gateways may reject a
   level they do not support. Short terminals compact the footer automatically.

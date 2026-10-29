@@ -96,6 +96,25 @@ impl UsageMeter {
         ))
     }
 
+    /// Do not display a rounded 100% unless upstream actually reported
+    /// every input token as cached. A 99.96% reading is still below 100%.
+    pub(crate) fn cache_percent(cached: u64, input: u64) -> String {
+        if input == 0 {
+            return "—".into();
+        }
+        if cached >= input {
+            return "100%".into();
+        }
+        let rate = cached as f64 * 100.0 / input as f64;
+        if rate >= 99.95 {
+            "<100%".into()
+        } else if (rate - rate.round()).abs() < 0.00001 {
+            format!("{rate:.0}%")
+        } else {
+            format!("{rate:.1}%")
+        }
+    }
+
     /// The quiet footer describes only the latest foreground coding request.
     /// Title generation and APEC are separate expenses, visible in /usage.
     /// Missing cache fields are unknown; a reported zero is exactly 0%.
@@ -109,7 +128,7 @@ impl UsageMeter {
         let output = count(last.and_then(|u| u.output));
         let (rate, detail) = match (last.and_then(|u| u.input), last.and_then(|u| u.cached)) {
             (Some(input), Some(cached)) if input > 0 && cached <= input => (
-                format!("{:.0}%", cached as f64 * 100.0 / input as f64),
+                Self::cache_percent(cached, input),
                 Some(format!(
                     "{}/{}",
                     compact_tokens(cached),
@@ -146,11 +165,13 @@ impl UsageMeter {
         let cache_rate =
             self.cache_hit_rate()
                 .map_or("—".to_owned(), |(cached, input, partial)| {
-                    format!(
-                        "{}{:.1}%",
-                        if partial { "~" } else { "" },
-                        cached as f64 * 100.0 / input as f64,
-                    )
+                    let percent =
+                        if cached < input && (cached as f64 * 100.0 / input as f64) >= 99.95 {
+                            "<100%".to_owned()
+                        } else {
+                            format!("{:.1}%", cached as f64 * 100.0 / input as f64)
+                        };
+                    format!("{}{percent}", if partial { "~" } else { "" })
                 });
         format!(
             "{label}: {} call(s) | In {} | Out {} | Cache read {} | Hit {} | Reasoning {}",
@@ -313,7 +334,7 @@ mod tests {
         assert!(meter
             .compact_status(120)
             .unwrap()
-            .contains("Cache 67% (2.0k/3.0k)"));
+            .contains("Cache 66.7% (2.0k/3.0k)"));
         assert!(meter
             .report_breakdown(&UsageMeter::default(), &UsageMeter::default())
             .contains("Hit ~50.0%"));
@@ -322,6 +343,22 @@ mod tests {
         assert!(meter
             .report()
             .contains("50.0% (2000 cached / 4000 input, reported requests only)"));
+    }
+
+    #[test]
+    fn cache_percent_never_rounds_a_partial_hit_to_exactly_one_hundred() {
+        assert_eq!(UsageMeter::cache_percent(9_960, 10_000), "99.6%");
+        assert_eq!(UsageMeter::cache_percent(9_999, 10_000), "<100%");
+        assert_eq!(UsageMeter::cache_percent(10_000, 10_000), "100%");
+        assert_eq!(UsageMeter::cache_percent(0, 10_000), "0%");
+        assert_eq!(UsageMeter::cache_percent(0, 0), "—");
+        let mut usage = UsageMeter::default();
+        usage.record(Some(&Usage {
+            input: Some(10_000),
+            cached: Some(9_960),
+            ..Usage::default()
+        }));
+        assert!(usage.compact_status(120).unwrap().contains("Cache 99.6%"));
     }
 
     #[test]

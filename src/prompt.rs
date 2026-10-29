@@ -48,9 +48,16 @@ impl PromptComposer {
             .unwrap_or_else(|_| workdir.to_path_buf());
         let mut included = std::collections::BTreeSet::new();
         for token in task.split_whitespace() {
+            let explicit = token.starts_with('@');
             let token = token
                 .trim_start_matches('@')
                 .trim_matches(|c: char| matches!(c, ',' | ';' | ')' | '(' | '\'' | '"'));
+            // Don't stat/canonicalize every prose word in a long prompt.
+            // An ordinary "hello" is not an explicit reference to ./hello
+            // even if a directory of that name happens to exist.
+            if !explicit && !token.contains(['/', '\\']) && Path::new(token).extension().is_none() {
+                continue;
+            }
             let candidate = if Path::new(token).is_absolute() {
                 std::path::PathBuf::from(token)
             } else {
@@ -319,6 +326,32 @@ mod tests {
         let mut baseline = raw;
         PromptComposer::default().apply(&mut baseline);
         assert_eq!(projection[0].content, baseline[0].content);
+        Ok(())
+    }
+
+    #[test]
+    fn prose_words_do_not_probe_or_load_matching_nested_folders() -> Result<()> {
+        let root = env::temp_dir().join(format!("kroma-prose-paths-{}", std::process::id()));
+        fs::create_dir_all(root.join("hello"))?;
+        fs::write(root.join("hello/AGENTS.md"), "SHOULD_NOT_BE_INJECTED")?;
+        let mut composer = PromptComposer::default();
+        composer.refresh_for_task(&root, &"hello ".repeat(4_000))?;
+        let mut view = composer.initial_history(&root);
+        composer.apply(&mut view);
+        assert!(!view[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("SHOULD_NOT_BE_INJECTED"));
+        composer.refresh_for_task(&root, "Inspect @hello")?;
+        let mut view = composer.initial_history(&root);
+        composer.apply(&mut view);
+        assert!(view[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("SHOULD_NOT_BE_INJECTED"));
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 

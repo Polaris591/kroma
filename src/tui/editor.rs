@@ -209,7 +209,6 @@ impl Editor {
         self.display_text(&self.text)
     }
 
-    #[cfg(test)]
     fn display_text(&self, raw: &str) -> String {
         let mut result = String::new();
         for ch in raw.chars() {
@@ -489,10 +488,141 @@ impl Editor {
         )
     }
 
+    /// Map visible editor cells to draft character boundaries. This follows
+    /// viewport()'s grapheme widths, soft wrapping and cursor-relative scroll,
+    /// and is only computed for pointer selection (not on every animation).
+    fn visible_cells(&self, width: u16, height: u16) -> Vec<EditorVisualRow> {
+        let width = usize::from(width.max(1));
+        let height = usize::from(height.max(1));
+        let mut rows = vec![EditorVisualRow::default()];
+        let mut col = 0usize;
+        let mut index = 0usize;
+        let mut cursor_row = 0usize;
+        for grapheme in self.text.graphemes(true) {
+            if index == self.caret {
+                cursor_row = rows.len() - 1;
+            }
+            if grapheme == "\n" {
+                rows.last_mut().unwrap().end = index;
+                index += 1;
+                rows.push(EditorVisualRow {
+                    start: index,
+                    end: index,
+                    cells: Vec::new(),
+                });
+                col = 0;
+                continue;
+            }
+            let displayed = grapheme
+                .chars()
+                .next()
+                .and_then(|ch| self.attachment_labels.get(&ch))
+                .filter(|_| grapheme.chars().count() == 1)
+                .map_or(grapheme, String::as_str);
+            let cells = UnicodeWidthStr::width(displayed);
+            if col + cells > width && col > 0 {
+                rows.push(EditorVisualRow {
+                    start: index,
+                    end: index,
+                    cells: Vec::new(),
+                });
+                col = 0;
+                if index == self.caret {
+                    cursor_row = rows.len() - 1;
+                }
+            }
+            let next = index + grapheme.chars().count();
+            rows.last_mut()
+                .unwrap()
+                .cells
+                .push((col, col + cells, index, next));
+            rows.last_mut().unwrap().end = next;
+            col += cells;
+            index = next;
+        }
+        if self.caret == index {
+            cursor_row = rows.len() - 1;
+        }
+        if self.caret == index && col >= width {
+            rows.push(EditorVisualRow {
+                start: index,
+                end: index,
+                cells: Vec::new(),
+            });
+            cursor_row = rows.len() - 1;
+        }
+        let start = cursor_row.saturating_sub(height - 1);
+        rows.into_iter().skip(start).take(height).collect()
+    }
+
+    pub fn position_at(&self, width: u16, height: u16, x: u16, y: u16) -> usize {
+        let rows = self.visible_cells(width, height);
+        let Some(row) = rows.get(y as usize) else {
+            return rows.last().map_or(self.caret, |row| row.end);
+        };
+        if row.cells.is_empty() {
+            return row.start;
+        }
+        let x = usize::from(x);
+        for &(left, right, start, end) in &row.cells {
+            if x < right {
+                return if x.saturating_sub(left) * 2 < right.saturating_sub(left) {
+                    start
+                } else {
+                    end
+                };
+            }
+        }
+        row.end
+    }
+
+    pub fn set_caret(&mut self, index: usize) {
+        self.caret = index.min(self.text.chars().count());
+    }
+
+    /// Copy text users can actually see. Attachment sentinels become labels,
+    /// never the private-use codepoints used in model payloads.
+    pub fn selected_display_text(&self, a: usize, b: usize) -> Option<String> {
+        if a == b {
+            return None;
+        }
+        let (start, end) = if a < b { (a, b) } else { (b, a) };
+        let selected = &self.text[self.byte_index(start)..self.byte_index(end)];
+        Some(self.display_text(selected))
+    }
+
+    pub fn selection_cells(
+        &self,
+        width: u16,
+        height: u16,
+        a: usize,
+        b: usize,
+    ) -> Vec<(u16, u16, u16)> {
+        let (start, end) = if a < b { (a, b) } else { (b, a) };
+        self.visible_cells(width, height)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(row, line)| {
+                line.cells
+                    .into_iter()
+                    .filter(move |&(_, _, begin, finish)| begin < end && finish > start)
+                    .map(move |(left, right, _, _)| (row as u16, left as u16, right as u16))
+            })
+            .collect()
+    }
+
     pub fn display_rows(&self, width: u16) -> u16 {
         let (visible, _, _) = self.viewport(width, u16::MAX);
         visible.split('\n').count().clamp(1, 8) as u16
     }
+}
+
+#[derive(Default)]
+struct EditorVisualRow {
+    start: usize,
+    end: usize,
+    // Display cell start/end and Unicode char start/end.
+    cells: Vec<(usize, usize, usize, usize)>,
 }
 
 #[cfg(test)]
@@ -500,6 +630,36 @@ mod tests {
     use super::*;
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn mouse_selection_tracks_unicode_wrapping_and_attachment_labels() {
+        let mut editor = Editor::default();
+        editor.paste("你好 👩‍💻 ab\nnext");
+        editor.set_caret(editor.text().chars().count());
+        // The first line has CJK (2 cells each) and a ZWJ emoji.
+        assert_eq!(editor.position_at(30, 3, 0, 0), 0);
+        let first_end = editor.position_at(30, 3, 11, 0);
+        assert_eq!(
+            editor.selected_display_text(0, first_end).as_deref(),
+            Some("你好 👩‍💻 ab")
+        );
+        let newline_end = editor.position_at(30, 3, 2, 1);
+        assert_eq!(
+            editor.selected_display_text(0, newline_end).as_deref(),
+            Some("你好 👩‍💻 ab\nne")
+        );
+        let spans = editor.selection_cells(30, 3, 0, newline_end);
+        assert!(spans.iter().any(|&(row, _, _)| row == 0));
+        assert!(spans.iter().any(|&(row, _, _)| row == 1));
+        // Draft markers must copy as human-visible chips, not private Unicode.
+        editor.clear();
+        editor.insert_attachment('\u{e000}', "screenshot.png".into());
+        assert_eq!(
+            editor.selected_display_text(0, 1).as_deref(),
+            Some("【screenshot.png】")
+        );
+        assert_eq!(editor.position_at(30, 2, 22, 0), 1);
     }
 
     #[test]

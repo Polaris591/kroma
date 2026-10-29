@@ -206,6 +206,15 @@ fn local_path(value: &str, workdir: &Path) -> Result<PathBuf> {
         .with_context(|| format!("file not found: {}", resolved.display()))
 }
 
+/// A guessed local path is clickable only when it resolves at render time.
+/// Explicit Markdown links are rendered separately and retain their targets.
+pub fn display_target_available(value: &str, workdir: &Path) -> bool {
+    if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("www.") {
+        return normalize_target(value).is_some();
+    }
+    local_path(value, workdir).is_ok()
+}
+
 /// Use an OS default handler without constructing a shell command from
 /// model-produced text. Only explicit user clicks reach this function.
 pub fn open_target(value: &str, workdir: &Path) -> Result<()> {

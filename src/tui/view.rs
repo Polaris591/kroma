@@ -16,6 +16,7 @@ use ratatui::{
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -223,15 +224,11 @@ fn markdown_link_regions(wrapped: &Text<'_>, targets: &[(String, String)]) -> Ve
     regions
 }
 
-/// The reading column.
-///
-/// `/layout wide` fills the terminal. The default comfortable layout centres a
-/// column of prose width: a text block glued to the left edge of a wide
-/// terminal leaves one large empty margin, and long paragraphs are harder to
-/// follow when the line has no visible right boundary. Centring keeps both
-/// margins equal without lengthening the line; narrow terminals still use
-/// their full width.
-fn reading_area(area: Rect, full_width: bool) -> Rect {
+/// The TUI occupies the terminal width. Comfortable mode limits only prose
+/// wrapping, never the header, tool timeline, history viewport, or composer.
+/// Leaving the entire app in a 160-cell island made maximized terminals feel
+/// broken and forced long commands into unreadably narrow columns.
+fn reading_area(area: Rect, _full_width: bool) -> Rect {
     let margin = if area.width >= 100 {
         2
     } else if area.width >= 55 {
@@ -240,17 +237,10 @@ fn reading_area(area: Rect, full_width: bool) -> Rect {
         0
     };
     let available = area.width.saturating_sub(margin * 2);
-    let width = if full_width {
-        available
-    } else {
-        (super::tool_display::prose_width(usize::from(available)) as u16).min(available)
-    };
     Rect::new(
-        area.x
-            .saturating_add(margin)
-            .saturating_add(available.saturating_sub(width) / 2),
+        area.x.saturating_add(margin),
         area.y,
-        width,
+        available,
         area.height,
     )
 }
@@ -292,7 +282,12 @@ struct VisibleLink {
 }
 
 /// Styled transcript, markdown link targets and per-call disclosure rows.
-type HistoryDocument = (Text<'static>, Vec<(String, String)>, Vec<(usize, String)>);
+type HistoryDocument = (
+    Text<'static>,
+    Vec<(String, String)>,
+    Vec<(usize, String)>,
+    Vec<usize>,
+);
 
 struct HistoryCache {
     width: u16,
@@ -306,6 +301,17 @@ struct HistoryCache {
     links: Vec<links::Region>,
     // Wrapped transcript row -> actual tool call ID, for per-call disclosure.
     tool_rows: Vec<(usize, String)>,
+}
+
+fn quiet_completed_tool(entry: &Entry, expanded: &HashSet<String>) -> bool {
+    matches!(entry.kind, Kind::Tool)
+        && entry.title.ends_with(" · done")
+        && !entry.failed
+        && !super::tool_display::has_diagnostic(&entry.details)
+        && !entry
+            .call_id
+            .as_ref()
+            .is_some_and(|id| expanded.contains(id))
 }
 
 impl Entry {
@@ -625,6 +631,7 @@ pub struct UiState {
     /// Plain `kroma` is a welcome page, not an implicit resumed session.
     home: bool,
     pub model: String,
+    link_workdir: PathBuf,
     pub model_profile: Option<String>,
     pub model_catalog: Option<crate::sessions::SessionCatalog>,
     history_visible: usize,
@@ -632,6 +639,9 @@ pub struct UiState {
     history_cache: Option<HistoryCache>,
     selection_rows: Vec<String>,
     selection_area: Rect,
+    editor_area: Rect,
+    editor_selection: Option<(usize, usize)>,
+    editor_selecting: bool,
     selection_start: Option<(usize, usize)>,
     selection_end: Option<(usize, usize)>,
     history_top_row: usize,
@@ -671,6 +681,11 @@ pub struct UiState {
 const BRAND_PULSE_FRAMES: usize = 6;
 
 impl UiState {
+    pub fn set_link_workdir(&mut self, workdir: &Path) {
+        self.link_workdir = workdir.to_path_buf();
+        self.history_cache = None;
+    }
+
     pub fn new(model: String, session: String, themes: ThemeStore, messages: &[Message]) -> Self {
         let mut result = Self {
             preferences: super::preferences::Preferences::default(),
@@ -692,6 +707,7 @@ impl UiState {
             next_marker: super::editor::ATTACHMENT_START,
             themes,
             model,
+            link_workdir: std::env::current_dir().unwrap_or_default(),
             model_profile: None,
             model_catalog: None,
             history_visible: 300,
@@ -699,6 +715,9 @@ impl UiState {
             history_cache: None,
             selection_rows: Vec::new(),
             selection_area: Rect::default(),
+            editor_area: Rect::default(),
+            editor_selection: None,
+            editor_selecting: false,
             selection_start: None,
             selection_end: None,
             history_top_row: 0,
@@ -860,7 +879,7 @@ impl UiState {
         let output = count(last.and_then(|usage| usage.output));
         let cache = match (last.and_then(|u| u.input), last.and_then(|u| u.cached)) {
             (Some(input), Some(cached)) if input > 0 && cached <= input => {
-                format!("{:.0}%", cached as f64 * 100.0 / input as f64)
+                crate::usage::UsageMeter::cache_percent(cached, input)
             }
             _ => unknown.into(),
         };
@@ -1297,7 +1316,16 @@ impl UiState {
             };
             return Line::from(vec![
                 Span::styled(format!("{marker}  "), Style::default().fg(color)),
-                Span::styled(self.task_status(), Style::default().fg(colors.muted)),
+                Span::styled(
+                    self.task_status(),
+                    Style::default().fg(
+                        if matches!(self.task_outcome, Some(TaskOutcome::Failed)) {
+                            colors.error
+                        } else {
+                            colors.muted
+                        },
+                    ),
+                ),
             ]);
         }
         let mut spans = Vec::with_capacity(5);
@@ -1406,6 +1434,7 @@ impl UiState {
         self.home = false;
         self.history_cache = None;
         self.mouse_release();
+        self.clear_editor_selection();
         self.selection_start = None;
         self.selection_end = None;
         let durations: HashMap<_, _> = self
@@ -1515,6 +1544,7 @@ impl UiState {
         self.scroll_anchor = None;
         self.scroll_from_bottom = 0;
         self.mouse_release();
+        self.clear_editor_selection();
         self.selection_start = None;
         self.selection_end = None;
         self.reset_context();
@@ -1861,6 +1891,14 @@ impl UiState {
     }
 
     pub fn mouse_release(&mut self) {
+        if self.editor_selecting {
+            if let Some((start, end)) = self.editor_selection {
+                if start == end {
+                    self.editor.set_caret(start);
+                }
+            }
+        }
+        self.editor_selecting = false;
         self.scrollbar_drag = None;
         self.scrollbar_pointer_y = None;
         self.selection_dragging = false;
@@ -1939,8 +1977,66 @@ impl UiState {
         self.hover_pointer = Some((column, row));
     }
 
+    pub fn start_editor_selection(&mut self, column: u16, row: u16) -> bool {
+        if self.attach_mode || !self.editor_area.contains((column, row).into()) {
+            return false;
+        }
+        let index = self.editor.position_at(
+            self.editor_area.width,
+            self.editor_area.height,
+            column - self.editor_area.x,
+            row - self.editor_area.y,
+        );
+        self.editor_selection = Some((index, index));
+        self.editor_selecting = true;
+        // Keep the current viewport anchored while dragging. Moving the
+        // caret here could scroll a long draft under the pointer mid-drag.
+        self.selection_start = None;
+        self.selection_end = None;
+        self.selection_dragging = false;
+        true
+    }
+
+    pub fn drag_editor_selection(&mut self, column: u16, row: u16) -> bool {
+        if !self.editor_selecting || self.editor_area.width == 0 || self.editor_area.height == 0 {
+            return false;
+        }
+        let x = column
+            .saturating_sub(self.editor_area.x)
+            .min(self.editor_area.width - 1);
+        let y = row
+            .saturating_sub(self.editor_area.y)
+            .min(self.editor_area.height - 1);
+        let index = self
+            .editor
+            .position_at(self.editor_area.width, self.editor_area.height, x, y);
+        if let Some((start, _)) = self.editor_selection {
+            self.editor_selection = Some((start, index));
+        }
+        true
+    }
+
+    pub fn editor_selected_text(&self) -> Option<String> {
+        let (a, b) = self.editor_selection?;
+        self.editor.selected_display_text(a, b)
+    }
+
+    pub fn selected_text_at(&self, column: u16, row: u16) -> Option<String> {
+        if self.editor_area.contains((column, row).into()) {
+            self.editor_selected_text()
+        } else {
+            self.selected_text()
+        }
+    }
+
+    pub fn clear_editor_selection(&mut self) {
+        self.editor_selection = None;
+        self.editor_selecting = false;
+    }
+
     pub fn select_start(&mut self, column: u16, row: u16) {
         if self.selection_area.contains((column, row).into()) {
+            self.clear_editor_selection();
             let point = (
                 self.history_top_row + (row - self.selection_area.y) as usize,
                 (column - self.selection_area.x) as usize,
@@ -2022,11 +2118,12 @@ impl UiState {
 
     fn history_document(&self, theme: Theme, width: usize) -> HistoryDocument {
         if self.home {
-            return (Text::default(), Vec::new(), Vec::new());
+            return (Text::default(), Vec::new(), Vec::new(), Vec::new());
         }
         let mut lines = Vec::new();
         let mut markdown_targets = Vec::new();
         let mut tool_rows = Vec::new();
+        let mut plain_link_rows = Vec::new();
         // One collapsed reasoning entry per user turn, even if the model
         // alternates reasoning/tool calls several times. Ctrl+R still renders
         // every reasoning segment in its original chronological position.
@@ -2039,9 +2136,55 @@ impl UiState {
                     .text("   ◆  Ready for a task.", "   ◆  可以开始任务了。"),
                 Style::default().fg(theme.muted),
             )));
-            return (Text::from(lines), markdown_targets, tool_rows);
+            return (
+                Text::from(lines),
+                markdown_targets,
+                tool_rows,
+                plain_link_rows,
+            );
         }
-        for entry in self.entries.iter().rev().take(self.history_visible).rev() {
+        // Large investigations may run dozens of short successful grep/sed
+        // calls. Keep failures, warnings, in-flight work and the last four
+        // completed calls visible. The rest is one quiet summary, and Ctrl+O
+        // immediately restores every call without changing the WAL.
+        let visible = self
+            .entries
+            .iter()
+            .rev()
+            .take(self.history_visible)
+            .collect::<Vec<_>>();
+        let visible = visible.into_iter().rev().collect::<Vec<_>>();
+        let mut hidden_until = 0;
+        let mut previous_was_tool = false;
+        for (index, entry) in visible.iter().enumerate() {
+            if index < hidden_until {
+                continue;
+            }
+            if previous_was_tool && !matches!(entry.kind, Kind::Tool) {
+                lines.push(Line::default());
+            }
+            previous_was_tool = matches!(entry.kind, Kind::Tool);
+            if !self.tools_expanded && quiet_completed_tool(entry, &self.expanded_tool_calls) {
+                let run = visible[index..]
+                    .iter()
+                    .take_while(|entry| quiet_completed_tool(entry, &self.expanded_tool_calls))
+                    .count();
+                if run >= 10 {
+                    let hidden = run - 4;
+                    lines.push(Line::styled(
+                        format!(
+                            "  ▸  {} {hidden} {} · Ctrl+O",
+                            self.preferences.language.text("Collapsed", "已折叠"),
+                            self.preferences
+                                .language
+                                .text("successful tools", "条成功工具"),
+                        ),
+                        Style::default().fg(theme.muted),
+                    ));
+                    hidden_until = index + hidden;
+                    continue;
+                }
+            }
             let role_style = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
             match entry.kind {
                 Kind::User => {
@@ -2069,11 +2212,14 @@ impl UiState {
                         Span::styled("  Kroma", role_style(theme.accent)),
                     ]));
                     if !entry.body.is_empty() {
-                        let (mut rendered, tags) = markdown::render_with_links(
-                            &entry.body,
-                            theme,
-                            width.saturating_sub(5),
-                        );
+                        let prose = width.saturating_sub(5);
+                        let prose = if self.preferences.full_width {
+                            prose
+                        } else {
+                            super::tool_display::prose_width(prose)
+                        };
+                        let (mut rendered, tags) =
+                            markdown::render_with_links(&entry.body, theme, prose);
                         for tag in tags {
                             if let Some(span) = rendered
                                 .get(tag.row)
@@ -2085,7 +2231,7 @@ impl UiState {
                         if self.running
                             && self.phase == "streaming"
                             && self.active_assistant == Some(self.entries.len() - 1)
-                            && std::ptr::eq(entry, self.entries.last().unwrap())
+                            && std::ptr::eq(*entry, self.entries.last().unwrap())
                         {
                             if let Some(last) = rendered.last_mut() {
                                 last.spans
@@ -2093,6 +2239,19 @@ impl UiState {
                             }
                         }
                         for line in rendered {
+                            // Only prose can acquire automatic links. Never
+                            // linkify inline/fenced code or raw tool output.
+                            let prose_text = line
+                                .spans
+                                .iter()
+                                .any(|span| span.style.fg == Some(theme.text))
+                                && !line
+                                    .spans
+                                    .iter()
+                                    .any(|span| span.style.fg == Some(theme.code));
+                            if prose_text {
+                                plain_link_rows.push(lines.len());
+                            }
                             lines.push(body_line(line));
                         }
                     }
@@ -2184,14 +2343,33 @@ impl UiState {
                         ))));
                     }
                     if expanded {
+                        lines.push(Line::styled(
+                            self.preferences
+                                .language
+                                .text("     ├─ Command", "     ├─ 执行命令"),
+                            Style::default().fg(theme.muted),
+                        ));
                         for command in entry.body.lines() {
-                            lines.push(body_line(Line::styled(
-                                format!("$ {command}"),
-                                Style::default().fg(theme.code),
-                            )));
+                            lines.push(body_line(Line::from(vec![
+                                Span::styled("│ ", Style::default().fg(theme.border)),
+                                Span::styled(
+                                    format!("$ {command}"),
+                                    Style::default().fg(theme.code),
+                                ),
+                            ])));
                         }
                     }
                     if expanded && !entry.details.is_empty() {
+                        lines.push(Line::styled(
+                            self.preferences
+                                .language
+                                .text("     └─ Output", "     └─ 执行输出"),
+                            Style::default().fg(if entry.failed {
+                                theme.error
+                            } else {
+                                theme.muted
+                            }),
+                        ));
                         // Treat actual unified diffs as source review, not
                         // ordinary stdout. Don't recolor random + / - logs.
                         let diff = name == "shell"
@@ -2222,8 +2400,11 @@ impl UiState {
                             ])));
                         }
                     }
-                    // Group neighboring tool calls; separate once the answer
-                    // resumes, using spacing instead of an enclosing box.
+                    // Dense successful calls share a timeline; disclosed
+                    // commands and failures need breathing room.
+                    if expanded || entry.failed || warning {
+                        lines.push(Line::default());
+                    }
                 }
                 Kind::Reasoning => {
                     if entry.body.trim().is_empty() {
@@ -2231,21 +2412,31 @@ impl UiState {
                     }
                     if !reasoning_notice_shown {
                         lines.push(Line::from(Span::styled(
-                            self.preferences.language.text(
-                                "  ◇  Reasoning collapsed · Ctrl+R",
-                                "  ◇  思考已折叠 · Ctrl+R",
-                            ),
+                            if self.reasoning_expanded {
+                                self.preferences.language.text(
+                                    "  ◇  Reasoning · Ctrl+R to collapse",
+                                    "  ◇  思考内容 · Ctrl+R 折叠",
+                                )
+                            } else {
+                                self.preferences.language.text(
+                                    "  ◇  Reasoning collapsed · Ctrl+R",
+                                    "  ◇  思考已折叠 · Ctrl+R",
+                                )
+                            },
                             Style::default().fg(theme.muted),
                         )));
                         reasoning_notice_shown = true;
                         lines.push(Line::default());
                     }
                     if self.reasoning_expanded {
-                        let (rendered, tags) = markdown::render_with_links(
-                            &entry.body,
-                            theme,
-                            width.saturating_sub(5),
-                        );
+                        let prose = width.saturating_sub(5);
+                        let prose = if self.preferences.full_width {
+                            prose
+                        } else {
+                            super::tool_display::prose_width(prose)
+                        };
+                        let (rendered, tags) =
+                            markdown::render_with_links(&entry.body, theme, prose);
                         for tag in tags {
                             if let Some(span) = rendered
                                 .get(tag.row)
@@ -2255,15 +2446,23 @@ impl UiState {
                             }
                         }
                         for line in rendered {
-                            lines.push(body_line(line));
+                            let mut spans =
+                                vec![Span::styled("│  ", Style::default().fg(theme.border))];
+                            spans.extend(line.spans);
+                            lines.push(body_line(Line::from(spans)));
                         }
                         lines.push(Line::default());
                     }
                 }
                 Kind::Info => {
+                    let is_error = entry.title == "ERROR";
                     lines.push(Line::from(Span::styled(
-                        format!("  ·  {}", self.info_title(&entry.title)),
-                        role_style(theme.muted),
+                        format!(
+                            "  {}  {}",
+                            if is_error { "✕" } else { "·" },
+                            self.info_title(&entry.title)
+                        ),
+                        role_style(if is_error { theme.error } else { theme.muted }),
                     )));
                     for line in entry.body.lines() {
                         let localized;
@@ -2279,7 +2478,9 @@ impl UiState {
                         } else {
                             line
                         };
-                        let style = if line.starts_with('+') && !line.starts_with("+++") {
+                        let style = if is_error {
+                            Style::default().fg(theme.error)
+                        } else if line.starts_with('+') && !line.starts_with("+++") {
                             Style::default().fg(theme.user)
                         } else if line.starts_with('-') && !line.starts_with("---") {
                             Style::default().fg(theme.error)
@@ -2288,7 +2489,14 @@ impl UiState {
                         } else {
                             Style::default().fg(theme.text)
                         };
-                        lines.push(body_line(Line::from(Span::styled(line.to_owned(), style))));
+                        if is_error {
+                            lines.push(body_line(Line::from(vec![
+                                Span::styled("│ ", Style::default().fg(theme.error)),
+                                Span::styled(line.to_owned(), style),
+                            ])));
+                        } else {
+                            lines.push(body_line(Line::from(Span::styled(line.to_owned(), style))));
+                        }
                     }
                     lines.push(Line::default());
                 }
@@ -2300,7 +2508,12 @@ impl UiState {
         if self.running || self.task_outcome.is_some() {
             lines.push(Line::default());
         }
-        (Text::from(lines), markdown_targets, tool_rows)
+        (
+            Text::from(lines),
+            markdown_targets,
+            tool_rows,
+            plain_link_rows,
+        )
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -2309,6 +2522,7 @@ impl UiState {
         let colors = self.themes.colors;
         let full_area = frame.area();
         if full_area.width < 20 || full_area.height < 8 {
+            self.editor_area = Rect::default();
             // Some SSH/PTY hosts initially report 0x0 before the first
             // terminal resize event. Do not draw cells outside that buffer.
             self.viewport_height = 0;
@@ -2404,10 +2618,52 @@ impl UiState {
                 ))
             });
         if !cached {
-            let (raw, targets, raw_tool_rows) =
+            let (raw, targets, raw_tool_rows, plain_rows) =
                 self.history_document(colors, usize::from(history_slot.width));
             let (text, source_lines) = wrap_document(raw, usize::from(history_slot.width));
-            let link_regions = markdown_link_regions(&text, &targets);
+            let mut link_regions = markdown_link_regions(&text, &targets);
+            let mut valid_paths = HashMap::<String, bool>::new();
+            let mut is_available = |target: &str| {
+                *valid_paths
+                    .entry(target.to_owned())
+                    .or_insert_with(|| links::display_target_available(target, &self.link_workdir))
+            };
+            link_regions.retain(|link| is_available(&link.target));
+            // Only rendered prose can create implicit links. Look at those
+            // source rows (not the entire transcript) and skip rows without
+            // URL/path separators. This work runs on history reflow, not on
+            // each animation tick; repeated file paths are resolved once.
+            for source_row in plain_rows {
+                let start = source_lines.partition_point(|&source| source < source_row);
+                let end = source_lines.partition_point(|&source| source <= source_row);
+                for row in start..end {
+                    let line = &text.lines[row];
+                    if !line.spans.iter().any(|span| {
+                        let chunk = span.content.as_ref();
+                        chunk.contains('/') || chunk.contains('\\') || chunk.contains("www.")
+                    }) {
+                        continue;
+                    }
+                    let visible = line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>();
+                    for link in links::detect_visible(row, &visible) {
+                        if !is_available(&link.target) {
+                            continue;
+                        }
+                        if link_regions.iter().any(|existing| {
+                            existing.row == row
+                                && link.start < existing.end
+                                && link.end > existing.start
+                        }) {
+                            continue;
+                        }
+                        link_regions.push(link);
+                    }
+                }
+            }
             let tool_rows = raw_tool_rows
                 .into_iter()
                 .filter_map(|(line, id)| {
@@ -2525,7 +2781,7 @@ impl UiState {
         // Click coordinates come from the same wrapped rows used for drawing,
         // not from source offsets. This remains correct after scrolling,
         // terminal resizing and Unicode double-width characters.
-        let mut regions = self
+        let regions = self
             .history_cache
             .as_ref()
             .unwrap()
@@ -2539,15 +2795,6 @@ impl UiState {
                 target: link.target.clone(),
             })
             .collect::<Vec<_>>();
-        for (row, line) in self.selection_rows.iter().enumerate() {
-            for link in links::detect_visible(row, line) {
-                if !regions.iter().any(|existing| {
-                    existing.row == row && link.start < existing.end && link.end > existing.start
-                }) {
-                    regions.push(link);
-                }
-            }
-        }
         self.visible_links = regions
             .into_iter()
             .filter_map(|link| {
@@ -2692,6 +2939,7 @@ impl UiState {
             composer.width.saturating_sub(6),
             editor_rows.min(composer.height.saturating_sub(1)),
         );
+        self.editor_area = editor_inner;
         let (text, cx, cy) = self
             .editor
             .viewport(editor_inner.width, editor_inner.height);
@@ -2735,7 +2983,28 @@ impl UiState {
             ),
         );
         frame.render_widget(input, editor_inner);
-        if self.show_editor_cursor() && editor_inner.width > 0 && editor_inner.height > 0 {
+        if let Some((a, b)) = self.editor_selection {
+            if a != b {
+                for (row, left, right) in
+                    self.editor
+                        .selection_cells(editor_inner.width, editor_inner.height, a, b)
+                {
+                    for column in left..right.min(editor_inner.width) {
+                        if let Some(cell) = frame
+                            .buffer_mut()
+                            .cell_mut((editor_inner.x + column, editor_inner.y + row))
+                        {
+                            cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
+                        }
+                    }
+                }
+            }
+        }
+        if self.show_editor_cursor()
+            && editor_inner.width > 0
+            && editor_inner.height > 0
+            && !self.editor_selection.is_some_and(|(a, b)| a != b)
+        {
             let (cx, cy) = if self.attach_mode {
                 (
                     unicode_width::UnicodeWidthStr::width(self.attach_path.as_str())
@@ -3327,10 +3596,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(210, 35)).unwrap();
         terminal.draw(|frame| state.draw(frame)).unwrap();
         let area = reading_area(Rect::new(0, 0, 210, 35), false);
-        assert!(
-            area.width >= 150,
-            "a maximized terminal still uses a wide column, got {}",
-            area.width
+        assert_eq!(
+            area.width, 206,
+            "the full-screen timeline and input must use the maximized window"
         );
         let left = i32::from(area.x);
         let right = 210 - i32::from(area.x) - i32::from(area.width);
@@ -3350,8 +3618,142 @@ mod tests {
     }
 
     #[test]
+    fn only_existing_prose_files_or_valid_urls_are_clickable() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let root = std::env::temp_dir().join(format!(
+            "kroma-link-view-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/real.rs"), "fn main() {}").unwrap();
+
+        let body = concat!(
+            "Available: src/real.rs\n\n",
+            "Missing: src/ghost.rs\n\n",
+            "`src/real.rs` is an inline code example.\n\n",
+            "```shell\ncat src/real.rs\n```\n\n",
+            "[nonexistent document](./ghost.md) and https://example.org/help"
+        );
+        let mut ui = UiState::new(
+            "mock".into(),
+            "session".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("assistant", body)],
+        );
+        ui.set_link_workdir(&root);
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "check".into(),
+            args: "cat src/real.rs".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "check".into(),
+            result: "exit: 0\nsrc/real.rs".into(),
+            failed: false,
+        });
+        rendered_text(&mut ui, 120, 40);
+        let links = &ui.visible_links;
+        assert_eq!(
+            links
+                .iter()
+                .filter(|link| link.target == "src/real.rs")
+                .count(),
+            1,
+            "only real prose paths should be linkified: {links:?} ROWS={:?}",
+            ui.selection_rows
+        );
+        assert!(links
+            .iter()
+            .any(|link| link.target == "https://example.org/help"));
+        assert!(!links.iter().any(|link| link.target.contains("ghost")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_failures_are_highlighted_in_header_body_and_final_status() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "session".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.info("ERROR", "Model request failed: HTTP 429");
+        ui.task_outcome = Some(TaskOutcome::Failed);
+        let theme = ui.themes.colors;
+        let text = ui.history_text(theme, 100);
+        let heading = text
+            .lines
+            .iter()
+            .find(|row| row.spans.iter().any(|span| span.content.contains("ERROR")))
+            .unwrap();
+        assert!(heading
+            .spans
+            .iter()
+            .any(|span| span.style.fg == Some(theme.error)));
+        let diagnostic = text
+            .lines
+            .iter()
+            .find(|row| {
+                row.spans
+                    .iter()
+                    .any(|span| span.content.contains("HTTP 429"))
+            })
+            .unwrap();
+        assert!(diagnostic
+            .spans
+            .iter()
+            .any(|span| span.style.fg == Some(theme.error)));
+        let status = ui.activity_line(theme);
+        assert!(status
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(theme.error)));
+    }
+
+    #[test]
+    fn expanded_tool_and_reasoning_have_distinct_gutters_and_sections() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "session".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.add_user("Fix the tests");
+        ui.event(UiEvent::ReasoningDelta("Inspect the build results".into()));
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "build".into(),
+            args: "cargo test".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "build".into(),
+            result: "exit: 1\nstderr: error: test failed".into(),
+            failed: true,
+        });
+        ui.reasoning_expanded = true;
+        ui.tools_expanded = true;
+        let doc = ui.history_text(ui.themes.colors, 130);
+        let text = doc.to_string();
+        assert!(text.contains("Reasoning · Ctrl+R to collapse"));
+        assert!(text.contains("├─ Command"));
+        assert!(text.contains("└─ Output"));
+        assert!(doc.lines.iter().any(|line| line
+            .spans
+            .first()
+            .is_some_and(|span| { span.content == "     " })
+            && line.spans.iter().any(|span| span.content == "│  ")));
+        assert!(text.contains("$ cargo test"));
+        assert!(text.contains("error: test failed"));
+    }
+
+    #[test]
     fn markdown_and_plain_links_hit_the_correct_screen_cells() {
-        let answer = "Reports: [审查报告 SR-001](https://example.org/report) and [复现测试](./reviews/tests.md).\n\nFile src/provider.rs:128 and https://rust-lang.org.";
+        let answer = "Reports: [审查报告 SR-001](https://example.org/report) and [复现测试](./src/provider.rs).\n\nFile src/provider.rs:128 and https://rust-lang.org.";
         let mut state = UiState::new(
             "model".into(),
             "default".into(),
@@ -3362,7 +3764,7 @@ mod tests {
         terminal.draw(|frame| state.draw(frame)).unwrap();
         for (label, target) in [
             ("审查报告 SR-001", "https://example.org/report"),
-            ("复现测试", "./reviews/tests.md"),
+            ("复现测试", "./src/provider.rs"),
             ("src/provider.rs:128", "src/provider.rs:128"),
             ("https://rust-lang.org", "https://rust-lang.org"),
         ] {
@@ -3708,6 +4110,67 @@ mod tests {
             .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
             .collect::<String>();
         assert!(rendered.contains("Changed"));
+    }
+
+    #[test]
+    fn composer_mouse_selection_is_visible_and_copies_unicode_exactly() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "draft".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.editor.paste("hello 猫 👩‍💻 world");
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let area = ui.editor_area;
+        assert!(area.width > 20 && area.height > 0);
+        assert!(ui.start_editor_selection(area.x, area.y));
+        assert!(ui.drag_editor_selection(area.x + 6, area.y));
+        ui.mouse_release();
+        assert_eq!(ui.editor_selected_text().as_deref(), Some("hello "));
+        assert_eq!(
+            ui.selected_text_at(area.x, area.y).as_deref(),
+            Some("hello ")
+        );
+        assert!(
+            ui.selected_text().is_none(),
+            "transcript selection remains independent"
+        );
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let selected = terminal.backend().buffer().cell((area.x, area.y)).unwrap();
+        assert!(
+            selected.modifier.contains(Modifier::REVERSED),
+            "draft selection should visibly highlight the chosen text"
+        );
+        ui.clear_editor_selection();
+        assert!(ui.editor_selected_text().is_none());
+        assert_eq!(ui.editor.text(), "hello 猫 👩‍💻 world");
+    }
+
+    #[test]
+    fn long_draft_does_not_jump_when_drag_selection_starts() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "draft".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.editor.paste(
+            &(0..20)
+                .map(|i| format!("line {i:02}\n"))
+                .collect::<String>(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let area = ui.editor_area;
+        let before = ui.editor.viewport(area.width, area.height).0;
+        assert!(ui.start_editor_selection(area.x, area.y));
+        assert_eq!(before, ui.editor.viewport(area.width, area.height).0);
+        assert!(ui.drag_editor_selection(area.x + 4, area.y + 1));
+        assert_eq!(before, ui.editor.viewport(area.width, area.height).0);
+        ui.mouse_release();
+        assert!(ui.editor_selected_text().is_some());
     }
 
     #[test]
@@ -4819,7 +5282,10 @@ mod tests {
 
         ui.reasoning_expanded = true;
         let expanded = ui.history_text(ui.themes.colors, 120).to_string();
-        assert_eq!(expanded.matches("Reasoning collapsed · Ctrl+R").count(), 1);
+        assert_eq!(
+            expanded.matches("Reasoning · Ctrl+R to collapse").count(),
+            1
+        );
         assert!(expanded.contains("I should inspect"));
         assert!(expanded.contains("Now create"));
         assert!(expanded.contains("Now check the SVG"));
@@ -4827,7 +5293,58 @@ mod tests {
         ui.event(UiEvent::ReasoningDelta("Adjust the path".into()));
         ui.running = false;
         let next = ui.history_text(ui.themes.colors, 120).to_string();
-        assert_eq!(next.matches("Reasoning collapsed · Ctrl+R").count(), 2);
+        assert_eq!(next.matches("Reasoning · Ctrl+R to collapse").count(), 2);
+    }
+
+    #[test]
+    fn long_successful_tool_bursts_collapse_without_hiding_failures() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.add_user("inspect the repository");
+        for i in 0..18 {
+            let id = format!("call-{i}");
+            ui.event(UiEvent::ToolStarted {
+                name: "shell".into(),
+                id: id.clone(),
+                args: format!("rg unique-pattern-{i} src"),
+            });
+            ui.event(UiEvent::ToolFinished {
+                id,
+                result: "exit: 0\none match".into(),
+                failed: false,
+            });
+        }
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "failed".into(),
+            args: "rg unresolved_pattern src".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "failed".into(),
+            result: "exit: 1\nnot found".into(),
+            failed: true,
+        });
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "active".into(),
+            args: "cargo test".into(),
+        });
+        let collapsed = ui.history_text(ui.themes.colors, 120).to_string();
+        assert!(collapsed.contains("Collapsed 14 successful tools"));
+        assert!(!collapsed.contains("unique-pattern-0"));
+        assert!(collapsed.contains("unique-pattern-17"));
+        assert!(collapsed.contains("unresolved_pattern"));
+        assert!(collapsed.contains("exit 1"));
+        assert!(collapsed.contains("Run Rust tests"));
+        ui.tools_expanded = true;
+        let full = ui.history_text(ui.themes.colors, 120).to_string();
+        assert!(!full.contains("Collapsed 14"));
+        assert!(full.contains("unique-pattern-0"));
+        assert!(full.contains("unique-pattern-17"));
     }
 
     #[test]
