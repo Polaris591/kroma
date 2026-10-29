@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{events::RuntimeEvent, protocol::Message};
 use ratatui::{
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
@@ -1757,26 +1757,23 @@ impl UiState {
         let area = reading_area(full_area);
         let editor_rows = self.editor.display_rows(area.width.saturating_sub(6));
         let composer_height = editor_rows.saturating_add(2).clamp(3, 10);
+        // The single animated status sits next to the composer, where the
+        // reader's eyes already are. No second copy in the distant header.
+        // Reserve a row only during activity; idle history gets that row back.
+        let show_activity = self.running && area.height >= 10;
         let layout = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
+            Constraint::Length(u16::from(show_activity)),
             Constraint::Length(composer_height),
             Constraint::Length(2),
         ])
         .split(area);
-        let status = self.activity_status();
-        // Header: the logo's blue/white/rose triangles pulse as one status
-        // indicator. Model, thinking effort and context stay in the footer.
         let header_line = Rect::new(layout[0].x, layout[0].y, layout[0].width, 1);
-        let activity_width =
-            UnicodeWidthStr::width(status.as_str()) + if self.running { 5 } else { 0 };
-        let show_activity = header_line.width as usize >= activity_width + 25;
-        let left_width = (header_line.width as usize).saturating_sub(if show_activity {
-            activity_width + 2
-        } else {
-            0
-        });
-        let label = ellipsize_cells(self.session_label(), left_width.saturating_sub(12));
+        let label = ellipsize_cells(
+            self.session_label(),
+            (header_line.width as usize).saturating_sub(12),
+        );
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("◆ ", Style::default().fg(colors.accent)),
@@ -1788,24 +1785,8 @@ impl UiState {
                 ),
                 Span::styled(format!("  /  {label}"), Style::default().fg(colors.muted)),
             ])),
-            Rect::new(
-                header_line.x,
-                header_line.y,
-                left_width.min(u16::MAX as usize) as u16,
-                1,
-            ),
+            Rect::new(header_line.x, header_line.y, header_line.width, 1),
         );
-        if show_activity {
-            frame.render_widget(
-                Paragraph::new(self.activity_line(colors)).alignment(Alignment::Right),
-                Rect::new(
-                    header_line.right().saturating_sub(activity_width as u16),
-                    header_line.y,
-                    activity_width as u16,
-                    1,
-                ),
-            );
-        }
         frame.render_widget(
             Paragraph::new("─".repeat(usize::from(layout[0].width)))
                 .style(Style::default().fg(colors.border)),
@@ -2065,9 +2046,20 @@ impl UiState {
             }
         }
 
+        if show_activity {
+            frame.render_widget(
+                Paragraph::new(self.activity_line(colors)),
+                Rect::new(
+                    layout[2].x.saturating_add(2),
+                    layout[2].y,
+                    layout[2].width.saturating_sub(4),
+                    1,
+                ),
+            );
+        }
         // One quiet input surface: a divider, a colored prompt marker and a
         // multiline editor. No nested rectangular conversation/editor boxes.
-        let composer = layout[2];
+        let composer = layout[3];
         frame.render_widget(
             Block::default()
                 .style(Style::default().bg(colors.input_surface()))
@@ -2136,9 +2128,9 @@ impl UiState {
             ));
         }
         let status_area = Rect::new(
-            layout[3].x.saturating_add(2),
-            layout[3].y,
-            layout[3].width.saturating_sub(4),
+            layout[4].x.saturating_add(2),
+            layout[4].y,
+            layout[4].width.saturating_sub(4),
             1,
         );
         let status_line = self.footer_status(status_area.width as usize);
@@ -2179,36 +2171,22 @@ impl UiState {
             };
             let tokens = self.usage.compact_status(budget).unwrap_or_default();
             let mut spans = Vec::new();
-            if let Some((before, after)) = tokens.split_once("Cache ") {
-                spans.push(Span::styled(
-                    before.to_owned(),
-                    Style::default().fg(colors.text),
-                ));
-                spans.push(Span::styled("Cache ", Style::default().fg(colors.muted)));
-                if let Some((cached, uncached)) = after.split_once(" · Uncached ") {
-                    spans.push(Span::styled(
-                        cached.to_owned(),
-                        Style::default().fg(colors.tool),
-                    ));
-                    spans.push(Span::styled(
-                        " · Uncached ",
-                        Style::default().fg(colors.muted),
-                    ));
-                    spans.push(Span::styled(
-                        uncached.to_owned(),
-                        Style::default().fg(colors.text),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        after.to_owned(),
-                        Style::default().fg(colors.tool),
-                    ));
+            for (index, segment) in tokens.split(" · ").enumerate() {
+                if index > 0 {
+                    spans.push(Span::styled(" · ", Style::default().fg(colors.muted)));
                 }
-            } else {
-                spans.push(Span::styled(
-                    tokens.clone(),
-                    Style::default().fg(colors.text),
-                ));
+                let color = if segment.starts_with("Cache ")
+                    || segment.starts_with("Hit ")
+                    || segment.starts_with("Total hit ")
+                {
+                    // Cache is information, not a warning/error state.
+                    colors.accent
+                } else if segment.starts_with("Total ") || segment.starts_with("Fresh ") {
+                    colors.muted
+                } else {
+                    colors.text
+                };
+                spans.push(Span::styled(segment.to_owned(), Style::default().fg(color)));
             }
             if UnicodeWidthStr::width(tokens.as_str())
                 + UnicodeWidthStr::width(gap)
@@ -2326,6 +2304,35 @@ mod tests {
             "animation must not rebuild the transcript"
         );
         assert!(!ui.selection_rows.join("\n").contains("Waiting for model"));
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(90)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let status_row = rows
+            .iter()
+            .position(|row| row.contains("Connecting"))
+            .unwrap();
+        let editor_row = rows
+            .iter()
+            .position(|row| row.contains("Steer this task"))
+            .unwrap();
+        assert_eq!(
+            status_row + 2,
+            editor_row,
+            "activity must sit directly above composer"
+        );
+        assert!(
+            !rows[0].contains("Connecting"),
+            "no distant header duplicate"
+        );
+        assert_eq!(
+            ui.selection_area.bottom() as usize,
+            status_row,
+            "activity must not obscure transcript history"
+        );
 
         ui.event(UiEvent::ReasoningDelta("step 1".into()));
         terminal.draw(|frame| ui.draw(frame)).unwrap();
@@ -2371,9 +2378,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Ctx ~1.6k / 1M · ~0.2%"));
-        assert!(rendered.contains(
-            "Tokens since launch · In 8.0k · Out 500 · Cache 6.0k/8.0k (75%) · Uncached 2.0k"
-        ));
+        assert!(rendered.contains("Last In 8.0k · Out 500 · Cache 6.0k/8.0k (75%)"));
         let mut narrow = Terminal::new(TestBackend::new(40, 26)).unwrap();
         narrow.draw(|frame| ui.draw(frame)).unwrap();
         let narrow_render = narrow

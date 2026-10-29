@@ -753,6 +753,23 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
     }
 }
 
+/// Task completion can win the select race while ModelFinished events are
+/// still queued. Keep their usage/context samples, then reload the transcript
+/// from the authoritative Agent state instead of replaying stale deltas.
+fn drain_final_usage(state: &mut UiState, rx: &mut UnboundedReceiver<UiEvent>) {
+    while let Ok(event) = rx.try_recv() {
+        if matches!(
+            event,
+            UiEvent::Usage { .. }
+                | UiEvent::ActualInput(_)
+                | UiEvent::Context { .. }
+                | UiEvent::SessionTitleUpdated(_)
+        ) {
+            state.event(event);
+        }
+    }
+}
+
 /// One active task, with the UI and model running concurrently in the same
 /// async process. The model future borrows Agent; the renderer never does.
 /// Dropping the future on Ctrl+C preserves the existing cancellation policy.
@@ -831,7 +848,9 @@ async fn execute_task(
         }
     };
     // The transcript, not live UI events, is authoritative after completion.
-    while rx.try_recv().is_ok() {}
+    // Do not discard the final model's usage if it was queued just before
+    // the future completed; that made the footer randomly undercount tokens.
+    drain_final_usage(state, rx);
     state.load_history(agent.messages());
     state.session = agent.session_id().to_owned();
     state.refresh_session_title();
@@ -1306,6 +1325,47 @@ mod tests {
             &[],
         );
         (ui, model)
+    }
+
+    #[test]
+    fn task_completion_drains_last_usage_without_replaying_transcript_deltas() {
+        let (mut ui, _) = setup();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(UiEvent::Text("stale stream".into())).unwrap();
+        tx.send(UiEvent::Context { estimated: 1_100 }).unwrap();
+        tx.send(UiEvent::Usage {
+            input: Some(2_000),
+            output: Some(140),
+            cached: Some(0),
+            reasoning: None,
+        })
+        .unwrap();
+        tx.send(UiEvent::ActualInput(2_000)).unwrap();
+        drain_final_usage(&mut ui, &mut rx);
+        assert_eq!(ui.usage.calls, 1);
+        ui.configure_status(10_000, None);
+        assert_eq!(ui.context_display(), "Ctx 2.0k / 10k · 20%");
+        assert!(ui
+            .usage
+            .compact_status(100)
+            .unwrap()
+            .contains("Cache 0/2.0k (0%)"));
+        ui.load_history(&[]);
+        assert_eq!(ui.usage.calls, 1, "history reload must preserve usage");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            !rendered.contains("stale stream"),
+            "discard obsolete deltas"
+        );
     }
 
     #[test]
