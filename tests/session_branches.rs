@@ -250,7 +250,7 @@ fn tool_capture_for_branch(dir: &Path, id: &str) -> Result<PathBuf> {
                         .then(|| event["message"]["content"].as_str().map(str::to_owned))
                         .flatten()
                 })
-                .last()
+                .next_back()
         })
         .expect("tool result in checkpoint or WAL");
     let output: Value = serde_json::from_str(&content)?;

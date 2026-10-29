@@ -1,5 +1,5 @@
 //! P2 integration: register a tool and swap the model without modifying Agent.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use kroma::{
     agent::Agent,
     context::{
@@ -529,9 +529,13 @@ async fn tool_finished_is_durable_and_agent_future_is_send() -> Result<()> {
         for byte in dir.to_string_lossy().as_bytes() {
             hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
         }
-        std::path::PathBuf::from(std::env::var("HOME")?)
-            .join(".kroma/sessions")
-            .join(format!("{hash:016x}.json"))
+        std::path::PathBuf::from(
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .context("HOME or USERPROFILE must be set")?,
+        )
+        .join(".kroma/sessions")
+        .join(format!("{hash:016x}.json"))
     };
     *events.archive.lock().unwrap() = Some(session);
     let outcome = tokio::spawn(async move { agent.run("test", &mut |_| {}).await }).await??;

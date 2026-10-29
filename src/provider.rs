@@ -1743,8 +1743,11 @@ mod tests {
             )
             .unwrap();
             stream.flush().unwrap();
+            // Deliberately exceed one idle window in total while every chunk
+            // still arrives within it. Leave scheduling headroom for busy CI
+            // hosts; the previous 45/95 ms ratio was flaky on macOS runners.
             for (content, reason) in [("Hello", "null"), (" world", "null"), ("!", "\"stop\"")] {
-                std::thread::sleep(Duration::from_millis(45));
+                std::thread::sleep(Duration::from_millis(350));
                 write!(stream, "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{content}\"}},\"finish_reason\":{reason}}}]}}\n\n").unwrap();
                 stream.flush().unwrap();
             }
@@ -1753,7 +1756,7 @@ mod tests {
         });
         let mut client =
             ModelClient::new(&format!("http://{addr}/v1"), None, "mock".into()).unwrap();
-        client.stream_idle_timeout = Duration::from_millis(95);
+        client.stream_idle_timeout = Duration::from_secs(1);
         let mut output = String::new();
         let result = client
             .complete(&[Message::new("user", "hello")], &mut |s| {
@@ -1763,7 +1766,7 @@ mod tests {
             .unwrap();
         assert_eq!(output, "Hello world!");
         assert_eq!(result.message.content.as_deref(), Some("Hello world!"));
-        assert!(result.elapsed >= Duration::from_millis(120));
+        assert!(result.elapsed >= Duration::from_secs(1));
         server.join().unwrap();
     }
 

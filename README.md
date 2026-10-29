@@ -532,14 +532,14 @@ see `benchmarks/P3_REVIEW.md`.
 ## P4: Shell usability and real task comparison
 
 On Unix Kroma uses Bash when `/bin/bash` is installed, and falls back to POSIX
-`sh` otherwise. On Windows it uses Git Bash (`Git\bin\bash.exe` or
+`sh` otherwise. On Windows it prefers Git Bash (`Git\bin\bash.exe` or
 `Git\usr\bin\bash.exe`, also detected under `%LOCALAPPDATA%\Programs\Git` and on
-`PATH`) and only falls back to `cmd /C` when no Git Bash exists; `bash.exe` in
-`System32` is ignored because it launches WSL, which cannot run Windows paths.
-`KROMA_SHELL` overrides the choice (a `bash.exe` path, or `cmd` to force native
-semantics). This prevents Bash-specific model-generated syntax from
-unexpectedly failing on systems with Bash, and keeps one dialect for both
-platforms. The tool description names the dialect actually in use.
+`PATH`), then native PowerShell 7 or Windows PowerShell 5.1, and finally
+`cmd /C` only if neither is available; the WSL `bash.exe` stub in `System32`
+is not selected. `KROMA_SHELL` can force a `bash.exe` path, `powershell.exe`,
+`pwsh.exe`, or `cmd`. Each shell has its own command syntax, which Kroma
+explains to the model in the tool description. PowerShell runs with no profile
+and UTF-8 output; native process failures retain their exit code.
 The shell is always started in the requested working directory; only Unix gets
 a login shell, because a Windows profile can `cd` away from it. Bash now
 enables `pipefail` by default: `cargo test | tail` cannot conceal a failing
@@ -728,7 +728,7 @@ cargo run
 
 Commands: `/new`, `/sessions`, `/resume <id>`, `/clear` (active session only), `/exit`. `cargo run -- --help` shows all environment options.
 
-`KROMA_WORKDIR` selects the starting working directory for shell commands, defaulting to the directory from which Kroma starts. `KROMA_SHELL` selects the shell on Windows (`bash.exe` or `cmd`). `KROMA_API_KEY` can be omitted for gateways that do not require a key.
+`KROMA_WORKDIR` selects the starting working directory for shell commands, defaulting to the directory from which Kroma starts. `KROMA_SHELL` selects the shell on Windows (`bash.exe`, `powershell.exe`, `pwsh.exe` or `cmd`). `KROMA_API_KEY` can be omitted for gateways that do not require a key.
 
 ## Streaming and saved chat
 

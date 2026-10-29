@@ -585,7 +585,10 @@ enum Dialect {
     /// Unix fallback when `/bin/bash` is missing.
     #[cfg_attr(windows, allow(dead_code))]
     PosixSh,
-    /// Windows fallback when no Git Bash is installed.
+    /// Native Windows fallback when no Git Bash is installed.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    PowerShell,
+    /// Explicit Windows compatibility fallback.
     #[cfg_attr(not(windows), allow(dead_code))]
     Cmd,
 }
@@ -614,6 +617,27 @@ impl ShellChoice {
         }
     }
 
+    #[cfg(windows)]
+    fn powershell(program: PathBuf) -> Self {
+        Self {
+            program,
+            dialect: Dialect::PowerShell,
+        }
+    }
+
+    fn command_text(&self, command: &str) -> String {
+        if self.dialect == Dialect::PowerShell {
+            // PowerShell 5.1 can report success after a native command exits
+            // nonzero. Capture that code explicitly and use UTF-8 pipes for
+            // non-ASCII tool output, without interpolating through cmd.exe.
+            format!(
+                "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; $global:LASTEXITCODE = 0; & {{ {command} }}; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"
+            )
+        } else {
+            command.to_owned()
+        }
+    }
+
     fn configure(&self, cmd: &mut Command) {
         if self.dialect == Dialect::Bash {
             // Bash otherwise reports only the last pipeline command's status:
@@ -623,6 +647,9 @@ impl ShellChoice {
         match self.dialect {
             Dialect::Cmd => {
                 cmd.arg("/C");
+            }
+            Dialect::PowerShell => {
+                cmd.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
             }
             Dialect::Bash | Dialect::PosixSh => {
                 // A login shell re-reads the profile. On Windows a profile can
@@ -663,16 +690,72 @@ fn resolve_shell() -> ShellChoice {
 
 #[cfg(windows)]
 fn resolve_shell() -> ShellChoice {
-    match windows_bash() {
-        Some(bash) => ShellChoice::bash(bash),
-        None => ShellChoice::cmd(),
+    if let Some(forced) = env::var_os("KROMA_SHELL") {
+        let path = PathBuf::from(forced);
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        if name == "cmd" || name == "cmd.exe" {
+            return ShellChoice::cmd();
+        }
+        if matches!(
+            name.as_str(),
+            "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+        ) {
+            let program = if path.is_absolute() || path.is_file() {
+                path
+            } else if name.starts_with("pwsh") {
+                PathBuf::from("pwsh.exe")
+            } else {
+                PathBuf::from("powershell.exe")
+            };
+            return ShellChoice::powershell(program);
+        }
+    }
+    if let Some(bash) = windows_bash() {
+        ShellChoice::bash(bash)
+    } else if let Some(powershell) = windows_powershell() {
+        ShellChoice::powershell(powershell)
+    } else {
+        ShellChoice::cmd()
     }
 }
 
-/// Git Bash is the only shell commonly installed on Windows that accepts the
-/// POSIX syntax coding models emit, so it is preferred over `cmd`.
-/// `KROMA_SHELL` overrides the choice: point it at a `bash.exe`, or at `cmd` to
-/// force native `cmd` semantics.
+/// Prefer PowerShell 7 if installed, otherwise use the Windows-provided
+/// PowerShell 5.1. Fall back to cmd only on a minimal host without either.
+#[cfg(windows)]
+fn windows_powershell() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(root) = env::var_os("ProgramFiles") {
+        candidates.push(
+            PathBuf::from(root)
+                .join("PowerShell")
+                .join("7")
+                .join("pwsh.exe"),
+        );
+    }
+    if let Some(path) = env::var_os("PATH") {
+        candidates.extend(env::split_paths(&path).map(|dir| dir.join("pwsh.exe")));
+    }
+    if let Some(root) = env::var_os("SystemRoot") {
+        candidates.push(
+            PathBuf::from(root)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
+    }
+    if let Some(path) = env::var_os("PATH") {
+        candidates.extend(env::split_paths(&path).map(|dir| dir.join("powershell.exe")));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+/// Git Bash is preferred on Windows because coding models generally emit
+/// POSIX commands. KROMA_SHELL can force Bash, PowerShell or cmd.
 #[cfg(windows)]
 fn windows_bash() -> Option<PathBuf> {
     if let Some(forced) = env::var_os("KROMA_SHELL") {
@@ -736,6 +819,9 @@ pub fn tool_description() -> &'static str {
         Dialect::PosixSh => {
             "Execute a POSIX sh command in the project working directory. Returns exit_code, stdout and stderr. Avoid Bash-specific syntax. Keep checks relevant and verify required tests."
         }
+        Dialect::PowerShell => {
+            "Run Windows PowerShell commands in the project working directory. Use PowerShell syntax (Get-ChildItem, Get-Content, pipelines, $env:NAME), not Bash syntax. Native executable nonzero exit codes and PowerShell errors are reported as failures. Returns exit_code, stdout and stderr. Prefer concise commands and check failures directly."
+        }
         Dialect::Cmd => {
             "Execute commands in the current working directory using Windows cmd (/C). Returns stdout, stderr and exit_code. Use cmd syntax (&&, &, %VAR%, dir) instead of Bash syntax; only run commands needed for the task."
         }
@@ -764,7 +850,7 @@ async fn execute_internal(
     let mut cleanup_stderr = CaptureCleanup::new(vec![stderr_path.clone()]);
     let mut cmd = Command::new(&shell.program);
     shell.configure(&mut cmd);
-    cmd.arg(command)
+    cmd.arg(shell.command_text(command))
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
@@ -1258,6 +1344,39 @@ mod tests {
         assert!(output.stdout.contains("kroma-windows-ok"));
         let failed = execute("exit 7", &cwd).await.unwrap();
         assert_eq!(failed.exit_code, Some(7));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_powershell_executes_unicode_and_propagates_exit_codes() {
+        let Some(program) = windows_powershell() else {
+            return; // Minimal Windows image without a PowerShell installation.
+        };
+        let shell = ShellChoice::powershell(program);
+        for (script, expected_code, expected_text) in [
+            ("Write-Output 'Kroma 中文 OK'", 0, "Kroma 中文 OK"),
+            ("cmd.exe /c exit 9", 9, ""),
+            ("Write-Error 'kroma-failed'", 1, ""),
+        ] {
+            let mut command = Command::new(&shell.program);
+            shell.configure(&mut command);
+            let output = command
+                .arg(shell.command_text(script))
+                .output()
+                .await
+                .expect("PowerShell must start");
+            assert_eq!(
+                output.status.code(),
+                Some(expected_code),
+                "script {script}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(expected_text),
+                "script {script}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
     }
 
     #[cfg(windows)]

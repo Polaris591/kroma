@@ -23,3 +23,8 @@ jobs:
         run: cargo test --locked
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Native PowerShell fallback
+        if: matrix.os == 'windows-latest'
+        env:
+          KROMA_SHELL: powershell.exe
+        run: cargo test --locked windows_shell_reports_output_and_exit_code
