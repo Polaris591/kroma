@@ -606,23 +606,18 @@ fn apec_completion_budget(output_tokens: usize, truncated_responses: u32) -> usi
 }
 
 fn summary_capability_rejection(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<ModelHttpError>().is_some_and(|http| {
-        let message = http.message.to_ascii_lowercase();
-        http.status == StatusCode::BAD_REQUEST
-            && (message.contains("reasoning.summary") || message.contains("reasoning[summary]"))
-            && [
-                "unsupported",
-                "unknown",
-                "unrecognized",
-                "not support",
-                "not allowed",
-            ]
-            .iter()
-            .any(|word| message.contains(word))
-    })
+    rejected_request_field(error, &["reasoning.summary", "reasoning[summary]"])
 }
 
 fn anthropic_cache_rejection(error: &anyhow::Error) -> bool {
+    rejected_request_field(error, &["cache_control"])
+}
+
+/// Treat structured error.param as authoritative when present. Otherwise
+/// check *only the actual error message*, never the serialized JSON wrapper:
+/// invalid_request_error contains "invalid" even when the described error
+/// is unrelated to the requested feature.
+fn rejected_request_field(error: &anyhow::Error, fields: &[&str]) -> bool {
     error.downcast_ref::<ModelHttpError>().is_some_and(|http| {
         if !matches!(
             http.status,
@@ -630,20 +625,63 @@ fn anthropic_cache_rejection(error: &anyhow::Error) -> bool {
         ) {
             return false;
         }
-        let message = http.message.to_ascii_lowercase();
-        (message.contains("cache_control") || message.contains("cache control"))
-            && [
-                "unsupported",
-                "not support",
-                "unknown",
-                "unrecognized",
-                "not allowed",
-                "invalid",
-                "unexpected",
-                "extra_forbidden",
-            ]
-            .iter()
-            .any(|word| message.contains(word))
+        let raw: Option<Value> = serde_json::from_str(&http.message).ok();
+        let detail = raw.as_ref().map(|body| body.get("error").unwrap_or(body));
+        let parameter = detail.and_then(|body| {
+            body.get("param")
+                .or_else(|| body.get("field"))
+                .or_else(|| body.get("parameter"))
+                .and_then(Value::as_str)
+        });
+        let message = detail
+            .and_then(|body| body.get("message").and_then(Value::as_str))
+            .unwrap_or(&http.message)
+            .to_ascii_lowercase();
+        let rejection = [
+            "unsupported",
+            "not supported",
+            "not support",
+            "unknown",
+            "unrecognized",
+            "not allowed",
+            "not permitted",
+            "extra inputs",
+            "extra_forbidden",
+            "unexpected",
+            "invalid field",
+            "invalid parameter",
+            "unrecognized field",
+        ]
+        .iter()
+        .any(|word| message.contains(word));
+        if let Some(parameter) = parameter {
+            let matching_field = fields
+                .iter()
+                .any(|field| parameter.eq_ignore_ascii_case(field));
+            let code = detail
+                .and_then(|body| body.get("code").and_then(Value::as_str))
+                .unwrap_or("");
+            return matching_field
+                && (rejection
+                    || matches!(
+                        code,
+                        "extra_forbidden" | "unknown_field" | "unsupported_parameter"
+                    ));
+        }
+        let field_present = fields.iter().any(|field| {
+            let field = field.to_ascii_lowercase();
+            // A dot, bracket, or underscore is part of the field spelling.
+            // Require a word boundary so unrelated parameter names cannot
+            // accidentally disable a supported provider capability.
+            message.match_indices(&field).any(|(start, _)| {
+                let end = start + field.len();
+                let before = message[..start].chars().next_back();
+                let after = message[end..].chars().next();
+                let name_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+                !before.is_some_and(name_char) && !after.is_some_and(name_char)
+            })
+        });
+        field_present && rejection
     })
 }
 
@@ -1101,20 +1139,7 @@ impl ModelClient {
                     if !received_stream_data
                         && !usage_fallback
                         && self.protocol == ApiProtocol::Chat
-                        && error.downcast_ref::<ModelHttpError>().is_some_and(|http| {
-                            http.status == StatusCode::BAD_REQUEST
-                                && http.message.to_ascii_lowercase().contains("stream_options")
-                                && [
-                                    "unsupported",
-                                    "unknown",
-                                    "unrecognized",
-                                    "not support",
-                                    "not allowed",
-                                    "invalid",
-                                ]
-                                .iter()
-                                .any(|word| http.message.to_ascii_lowercase().contains(word))
-                        }) =>
+                        && rejected_request_field(&error, &["stream_options"]) =>
                 {
                     self.usage_stream_rejected.store(true, Ordering::Relaxed);
                     usage_fallback = true;
@@ -1128,11 +1153,7 @@ impl ModelClient {
                                 .as_deref()
                                 .unwrap_or(&[])
                                 .iter()
-                                .any(|part| {
-                                    part["type"] == "kroma_attachment"
-                                        && part["kind"] == "image"
-                                        && part["mode"] != "reference"
-                                })
+                                .any(crate::attachments::inline_image)
                         })
                         && image_capability_rejection(&error) =>
                 {
@@ -1141,7 +1162,7 @@ impl ModelClient {
                     let mut view = messages.to_vec();
                     for msg in &mut view {
                         for part in msg.provider_items.as_mut().into_iter().flatten() {
-                            if part["type"] == "kroma_attachment" && part["kind"] == "image" {
+                            if crate::attachments::is_image(part) {
                                 part["mode"] = json!("reference");
                             }
                         }
@@ -1623,6 +1644,38 @@ fn is_timeout(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_fallback_uses_actual_error_field_not_json_wrapper() {
+        let error = |body: &str| {
+            anyhow::Error::new(ModelHttpError {
+                status: StatusCode::BAD_REQUEST,
+                retry_after: None,
+                message: body.to_owned(),
+            })
+        };
+        assert!(!anthropic_cache_rejection(&error(
+            r#"{"error":{"type":"invalid_request_error","message":"cache_control: value is malformed"}}"#
+        )));
+        assert!(anthropic_cache_rejection(&error(
+            r#"{"error":{"message":"cache_control is not permitted"}}"#
+        )));
+        assert!(anthropic_cache_rejection(&error(
+            r#"{"error":{"param":"cache_control","type":"invalid_request_error","message":"extra inputs"}}"#
+        )));
+        assert!(!anthropic_cache_rejection(&error(
+            r#"{"error":{"param":"other_field","message":"cache_control is not permitted"}}"#
+        )));
+        assert!(!anthropic_cache_rejection(&error(
+            r#"{"error":{"param":"cache_control","message":"value too large"}}"#
+        )));
+        assert!(summary_capability_rejection(&error(
+            r#"{"error":{"message":"reasoning.summary is not permitted"}}"#
+        )));
+        assert!(!summary_capability_rejection(&error(
+            r#"{"error":{"type":"invalid_request_error","message":"reasoning.summary generated successfully"}}"#
+        )));
+    }
 
     #[tokio::test]
     async fn anthropic_cache_rejection_retries_once_and_remembers_gateway_capability() {

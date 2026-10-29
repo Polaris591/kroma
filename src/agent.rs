@@ -80,7 +80,7 @@ fn active_attachment_paths(
     // the combined image allowance would be exceeded.
     let used = attachments
         .iter()
-        .filter(|part| part["type"] == "kroma_attachment" && part["kind"] == "image")
+        .filter(|part| crate::attachments::is_image(part))
         .map(|part| {
             part["bytes"]
                 .as_u64()
@@ -90,7 +90,7 @@ fn active_attachment_paths(
     let mut remaining = crate::attachments::MAX_ACTIVE_IMAGE_BYTES.saturating_sub(used);
     if let Some(previous) = messages.iter().rev().find(|msg| msg.role == "user") {
         for part in previous.provider_items.as_deref().unwrap_or(&[]) {
-            if part["type"] != "kroma_attachment" || part["kind"] != "image" {
+            if !crate::attachments::is_image(part) {
                 continue;
             }
             if let Some(path) = part["path"].as_str() {
@@ -734,22 +734,25 @@ impl Agent {
         // schema and serializing it on every model round trip.
         let tool_definitions = self.tools.definitions();
         let tool_schema_bytes = serde_json::to_vec(&tool_definitions)?.len();
-        let image_tokens = crate::attachments::active_image_tokens(
-            &self.messages,
-            &active_attachment_paths,
-            self.model.accepts_images(),
-        );
-        let extra_tokens = self
+        let base_extra_tokens = self
             .prompt
             .extra_estimated_tokens(&self.messages[0])
-            .saturating_add(tool_schema_bytes.div_ceil(3))
-            .saturating_add(image_tokens);
+            .saturating_add(tool_schema_bytes.div_ceil(3));
 
         let mut overflow_retries = 0;
         loop {
             // Steering is a durable new user instruction, delivered only
             // after the preceding model turn and all its tool results.
             self.append_pending_steering()?;
+            // The provider can discover that vision is unsupported during an
+            // earlier tool round. Keep the image reserve consistent with the
+            // actual projection instead of using the first round's estimate.
+            let extra_tokens =
+                base_extra_tokens.saturating_add(crate::attachments::active_image_tokens(
+                    &self.messages,
+                    &active_attachment_paths,
+                    self.model.accepts_images(),
+                ));
             let prepare_started = Instant::now();
             let mut view = self
                 .compression

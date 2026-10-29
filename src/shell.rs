@@ -630,8 +630,11 @@ impl ShellChoice {
             // PowerShell 5.1 can report success after a native command exits
             // nonzero. Capture that code explicitly and use UTF-8 pipes for
             // non-ASCII tool output, without interpolating through cmd.exe.
+            // Keep the command on its own lines. In a single-line wrapper a
+            // trailing # comment swallows the closing brace, and PowerShell
+            // here-string terminators are required to start on a new line.
             format!(
-                "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; $global:LASTEXITCODE = 0; & {{ {command} }}; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"
+                "$ErrorActionPreference = 'Stop'\n[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$OutputEncoding = [Console]::OutputEncoding\n$global:LASTEXITCODE = 0\n& {{\n{command}\n}}\nif ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"
             )
         } else {
             command.to_owned()
@@ -1355,6 +1358,17 @@ mod tests {
         let shell = ShellChoice::powershell(program);
         for (script, expected_code, expected_text) in [
             ("Write-Output 'Kroma 中文 OK'", 0, "Kroma 中文 OK"),
+            (
+                "Write-Output 'comment ok' # trailing comment",
+                0,
+                "comment ok",
+            ),
+            ("@'\nmultiline here-string\n'@", 0, "multiline here-string"),
+            (
+                "Write-Output 'first'\nWrite-Output 'second' # trailing",
+                0,
+                "second",
+            ),
             ("cmd.exe /c exit 9", 9, ""),
             ("Write-Error 'kroma-failed'", 1, ""),
         ] {

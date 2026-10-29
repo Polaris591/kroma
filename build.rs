@@ -20,6 +20,28 @@ fn main() {
             println!("cargo:rerun-if-changed={path}");
         }
     }
+    if let Some(index) = git(&["rev-parse", "--git-path", "index"]) {
+        println!("cargo:rerun-if-changed={index}");
+    }
+    // Dirty state depends on worktree files, not just HEAD. Make Cargo
+    // rerun this script when an existing tracked file changes (including
+    // README and tests); the Git index catches added/removed tracked paths.
+    // Never watch the whole repository: target/ changes on every build.
+    if let Ok(output) = Command::new("git").args(["ls-files", "-z"]).output() {
+        if output.status.success() {
+            for raw in output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|raw| !raw.is_empty())
+            {
+                if let Ok(path) = std::str::from_utf8(raw) {
+                    if !path.contains('\n') {
+                        println!("cargo:rerun-if-changed={path}");
+                    }
+                }
+            }
+        }
+    }
     let sha = git(&["rev-parse", "--short=12", "HEAD"])
         .filter(|sha| !sha.is_empty() && sha.bytes().all(|c| c.is_ascii_hexdigit()))
         .unwrap_or_else(|| "source".to_owned());

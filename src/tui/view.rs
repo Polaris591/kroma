@@ -50,10 +50,13 @@ fn ascii_word(ch: char) -> bool {
 
 /// Styled lines wrapped to display cells. Avoid Ratatui's unstable
 /// Paragraph::line_count, while keeping scroll position exact.
-fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
+fn wrap_history(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize>) {
     let width = width.max(1);
     let mut rows = Vec::new();
-    for line in text.lines {
+    // Keep a stable source-line identity for every visual row. The absolute
+    // visual row index changes when the terminal width changes.
+    let mut source_lines = Vec::new();
+    for (source_index, line) in text.lines.into_iter().enumerate() {
         let mut spans = Vec::new();
         let mut columns = 0usize;
         let hanging_indent = hanging_indent(&line, width);
@@ -76,6 +79,7 @@ fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
                                 spans.push(Span::styled(std::mem::take(&mut segment), style));
                             }
                             rows.push(Line::from(std::mem::take(&mut spans)));
+                            source_lines.push(source_index);
                             columns = hanging_indent;
                             if hanging_indent > 0 {
                                 spans.push(Span::raw(" ".repeat(hanging_indent)));
@@ -87,6 +91,7 @@ fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
                             spans.push(Span::styled(std::mem::take(&mut segment), style));
                         }
                         rows.push(Line::from(std::mem::take(&mut spans)));
+                        source_lines.push(source_index);
                         columns = hanging_indent;
                         if hanging_indent > 0 {
                             spans.push(Span::raw(" ".repeat(hanging_indent)));
@@ -122,6 +127,7 @@ fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
                                 spans.push(Span::styled(std::mem::take(&mut segment), style));
                             }
                             rows.push(Line::from(std::mem::take(&mut spans)));
+                            source_lines.push(source_index);
                             columns = hanging_indent;
                             if hanging_indent > 0 {
                                 spans.push(Span::raw(" ".repeat(hanging_indent)));
@@ -133,6 +139,7 @@ fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
                             spans.push(Span::styled(std::mem::take(&mut segment), style));
                         }
                         rows.push(Line::from(std::mem::take(&mut spans)));
+                        source_lines.push(source_index);
                         columns = hanging_indent;
                         if hanging_indent > 0 {
                             spans.push(Span::raw(" ".repeat(hanging_indent)));
@@ -151,8 +158,9 @@ fn wrap_history(text: Text<'static>, width: usize) -> Text<'static> {
             }
         }
         rows.push(Line::from(spans));
+        source_lines.push(source_index);
     }
-    Text::from(rows)
+    (Text::from(rows), source_lines)
 }
 
 /// Match the Markdown parser's labeled link fragments to the wrapped
@@ -258,6 +266,7 @@ struct HistoryCache {
     reasoning_expanded: bool,
     theme: Theme,
     text: Text<'static>,
+    source_lines: Vec<usize>,
     links: Vec<links::Region>,
 }
 
@@ -702,10 +711,20 @@ impl UiState {
                 let marker = if let Some(ch) = item.marker {
                     ch
                 } else {
-                    while char::from_u32(candidate).is_some_and(|ch| text.contains(ch)) {
+                    while candidate <= super::editor::ATTACHMENT_END
+                        && char::from_u32(candidate).is_some_and(|ch| text.contains(ch))
+                    {
                         candidate += 1;
                     }
-                    let ch = char::from_u32(candidate).unwrap();
+                    // Old or malformed sessions may contain more attachments
+                    // than the editor's private-use marker range. Leave any
+                    // excess attachment unmarked (legacy list format) rather
+                    // than assigning a non-marker Unicode scalar or panicking.
+                    let Some(ch) = char::from_u32(candidate)
+                        .filter(|_| candidate <= super::editor::ATTACHMENT_END)
+                    else {
+                        continue;
+                    };
                     candidate += 1;
                     // Older list-style sessions had no inline position.
                     text.push(ch);
@@ -1716,9 +1735,23 @@ impl UiState {
                 && cache.reasoning_expanded == self.reasoning_expanded
                 && cache.theme == colors
         });
+        let reflow_anchor = self
+            .history_cache
+            .as_ref()
+            .filter(|cache| cache.width != history.width && self.scroll_anchor.is_some())
+            .and_then(|cache| {
+                let source = *cache.source_lines.get(self.history_top_row)?;
+                let first = cache.source_lines.partition_point(|&line| line < source);
+                let last = cache.source_lines.partition_point(|&line| line <= source);
+                Some((
+                    source,
+                    self.history_top_row.saturating_sub(first),
+                    last - first,
+                ))
+            });
         if !cached {
             let (raw, targets) = self.history_document(colors, usize::from(history.width));
-            let text = wrap_history(raw, usize::from(history.width));
+            let (text, source_lines) = wrap_history(raw, usize::from(history.width));
             let link_regions = markdown_link_regions(&text, &targets);
             self.history_cache = Some(HistoryCache {
                 width: history.width,
@@ -1727,6 +1760,7 @@ impl UiState {
                 reasoning_expanded: self.reasoning_expanded,
                 theme: colors,
                 text,
+                source_lines,
                 links: link_regions,
             });
         }
@@ -1734,6 +1768,20 @@ impl UiState {
         let rows = contents.lines.len();
         let max_scroll = rows.saturating_sub(history.height as usize);
         self.history_max_scroll = max_scroll;
+        if let Some((source, offset, old_count)) = reflow_anchor {
+            // Preserve the same *logical transcript line* when a resize
+            // changes wrapping. An absolute visual row is not meaningful
+            // across terminal widths. Keep roughly the same position within
+            // an exceptionally long source line as well.
+            let source_lines = &self.history_cache.as_ref().unwrap().source_lines;
+            let start = source_lines.partition_point(|&line| line < source);
+            let end = source_lines.partition_point(|&line| line <= source);
+            let rebased = start
+                .saturating_add(offset.saturating_mul(end.saturating_sub(start)) / old_count.max(1))
+                .min(max_scroll);
+            self.scroll_anchor = (rebased > 0).then_some(rebased);
+            self.scroll_from_bottom = max_scroll.saturating_sub(rebased);
+        }
         if let (Some(y), Some(offset)) = (self.scrollbar_pointer_y, self.scrollbar_drag) {
             let height = self.scrollbar_area.height as usize;
             let thumb = height
@@ -2475,7 +2523,7 @@ mod tests {
             Span::raw("• "),
             Span::raw("inspect run_with_resume now"),
         ])]);
-        let wrapped = wrap_history(text, 25);
+        let wrapped = wrap_history(text, 25).0;
         let rows = wrapped
             .lines
             .iter()
@@ -2504,7 +2552,7 @@ mod tests {
     #[test]
     fn history_wrapping_keeps_zwj_emoji_as_one_visible_character() {
         let line = Line::raw(format!("{}👩‍💻z", "a".repeat(6)));
-        let wrapped = wrap_history(Text::from(vec![line]), 8);
+        let wrapped = wrap_history(Text::from(vec![line]), 8).0;
         let rendered = wrapped
             .lines
             .iter()
@@ -2880,6 +2928,81 @@ mod tests {
                 .contains("FRESH_INFORMATION_AFTER_SCROLL"),
             "new command output must be visible instead of remaining pinned to old history"
         );
+    }
+
+    #[test]
+    fn resize_preserves_logical_history_line_instead_of_old_wrapped_row() {
+        let messages = (0..85)
+            .map(|i| {
+                Message::new(
+                    "user",
+                    format!("HISTORY_{i:03} {}", "long_words ".repeat(17)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut ui = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut wide = Terminal::new(TestBackend::new(115, 25)).unwrap();
+        wide.draw(|frame| ui.draw(frame)).unwrap();
+        ui.scroll(96);
+        wide.draw(|frame| ui.draw(frame)).unwrap();
+        let original_source = ui.history_cache.as_ref().unwrap().source_lines[ui.history_top_row];
+        assert!(original_source > 10);
+        let mut narrow = Terminal::new(TestBackend::new(53, 25)).unwrap();
+        narrow.draw(|frame| ui.draw(frame)).unwrap();
+        let narrow_source = ui.history_cache.as_ref().unwrap().source_lines[ui.history_top_row];
+        assert_eq!(
+            narrow_source, original_source,
+            "resize should preserve the source line"
+        );
+        wide.draw(|frame| ui.draw(frame)).unwrap();
+        let restored_source = ui.history_cache.as_ref().unwrap().source_lines[ui.history_top_row];
+        assert_eq!(
+            restored_source, original_source,
+            "round-trip reflow should keep context"
+        );
+    }
+
+    #[test]
+    fn legacy_attachment_markers_stop_at_private_use_boundary() {
+        let mut user = Message::new("user", "old session with too many attachments");
+        user.provider_items = Some(
+            (0..6_402)
+                .map(|i| {
+                    serde_json::json!({
+                        "type":"kroma_attachment","kind":"log",
+                        "path":format!("/missing/{i}.log"),"name":format!("log-{i}"),
+                    })
+                })
+                .collect(),
+        );
+        let mut ui = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[user],
+        );
+        // Older, unmarked attachments must remain in restored history even
+        // when the 6400 private-use marker slots have been exhausted.
+        assert_eq!(ui.entries.len(), 1);
+        ui.editor.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let parts = ui.editor.history_attachments();
+        assert_eq!(parts.len(), 6_402);
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|part| crate::attachments::marker(part).is_some())
+                .count(),
+            6_400
+        );
+        assert!(parts[6_400]["marker"].is_null());
     }
 
     #[test]

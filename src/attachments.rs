@@ -12,6 +12,22 @@ pub(crate) const MAX_LOG_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const INLINE_LOG_BYTES: u64 = 4096;
 pub(crate) const IMAGE_TOKEN_ALLOWANCE: usize = 4096;
 
+pub(crate) fn is_image(part: &Value) -> bool {
+    part["type"] == "kroma_attachment" && part["kind"] == "image"
+}
+
+pub(crate) fn inline_image(part: &Value) -> bool {
+    is_image(part) && part["mode"] != "reference"
+}
+
+pub(crate) fn active_image(part: &Value, active: &HashSet<String>, vision: Option<bool>) -> bool {
+    vision != Some(false)
+        && inline_image(part)
+        && part["path"]
+            .as_str()
+            .is_some_and(|path| active.contains(path))
+}
+
 /// Reserve the same per-image allowance used by the final request check
 /// *before* TRC/APEC decides whether the request fits. Only images that will
 /// be sent in this task count; older references and text-only models do not.
@@ -26,14 +42,7 @@ pub(crate) fn active_image_tokens(
     messages
         .iter()
         .flat_map(|message| message.provider_items.as_deref().unwrap_or(&[]))
-        .filter(|part| {
-            part["type"] == "kroma_attachment"
-                && part["kind"] == "image"
-                && part["mode"] != "reference"
-                && part["path"]
-                    .as_str()
-                    .is_some_and(|path| active.contains(path))
-        })
+        .filter(|part| active_image(part, active, vision))
         .count()
         .saturating_mul(IMAGE_TOKEN_ALLOWANCE)
 }
@@ -57,7 +66,7 @@ pub(crate) fn project_history(
             let is_active = part["path"]
                 .as_str()
                 .is_some_and(|path| active.contains(path));
-            if !is_active || (part["kind"] == "image" && vision == Some(false)) {
+            if !is_active || (is_image(part) && vision == Some(false)) {
                 part["mode"] = json!("reference");
             }
         }
@@ -97,7 +106,7 @@ pub(crate) fn content(text: &str, parts: &[Value], protocol: &str) -> Result<Val
     // heuristic; image-token accounting is provider-specific.
     let image_bytes = attached
         .iter()
-        .filter(|p| p["kind"] == "image" && p["mode"] != "reference")
+        .filter(|p| inline_image(p))
         .map(|p| p["bytes"].as_u64().unwrap_or(0))
         .sum::<u64>();
     if image_bytes > MAX_ACTIVE_IMAGE_BYTES {
@@ -108,7 +117,7 @@ pub(crate) fn content(text: &str, parts: &[Value], protocol: &str) -> Result<Val
         let path = part["path"].as_str().context("attachment missing path")?;
         let name = part["name"].as_str().unwrap_or("attachment");
         let number = index + 1;
-        if part["kind"] == "image" && part["mode"] != "reference" {
+        if inline_image(part) {
             body.push(text_block(format!(
                 "[Image {name}, attachment #{number}/{total}]"
             )));
@@ -126,7 +135,7 @@ pub(crate) fn content(text: &str, parts: &[Value], protocol: &str) -> Result<Val
                 _ => body.push(json!({"type":"image_url","image_url":{
                     "url":format!("data:{mime};base64,{b64}")}})),
             }
-        } else if part["kind"] == "image" {
+        } else if is_image(part) {
             body.push(text_block(format!(
                 "[Image {name}, attachment #{number}/{total}: omitted from model input. Original image available at {path}; previous analysis may be used, but visual details cannot be inferred without reloading.]"
             )));

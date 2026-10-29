@@ -211,11 +211,7 @@ impl ContextConfig {
         let active_images = view
             .iter()
             .flat_map(|m| m.provider_items.as_deref().unwrap_or(&[]))
-            .filter(|part| {
-                part["type"] == "kroma_attachment"
-                    && part["kind"] == "image"
-                    && part["mode"] != "reference"
-            })
+            .filter(|part| crate::attachments::inline_image(part))
             .count();
         // Images need their own allowance; raw WAL JSON only contains paths.
         // This is approximate and must not be mistaken for exact tokenizer use.
