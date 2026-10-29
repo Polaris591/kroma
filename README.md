@@ -182,6 +182,8 @@ sessions and the existing slash commands. Shortcuts:
   WAL. Images stay active throughout their initial task (including tool
   rounds) and one immediate follow-up, but older images are lightweight text
   references on later turns, avoiding repeated historical base64 uploads.
+  Activation follows each attachment's occurrence in the conversation, not
+  its file path; recalling an image does not reactivate every older copy.
   Within a task, immutable image encodings are kept in temporary memory and
   reused between tool rounds, then dropped. This avoids repeated file reads
   and base64 encoding, but does not change the images sent or billed tokens.
@@ -197,7 +199,9 @@ sessions and the existing slash commands. Shortcuts:
   once with text image references instead of guessing model support from
   its name. A different provider error is returned unchanged.
   Small pasted text (up to 4 KiB) reaches the active model inline; large
-  logs and other files remain Shell-readable references. Each item stays
+  logs and other files remain Shell-readable references. Inline short-log
+  contents, including escaped JSON characters, count toward both the
+  compaction planner and final request budget before sending. Each item stays
   in its exact position relative to typed text, across Chat Completions,
   Responses and Anthropic requests. Current images have a separate
   approximate input-budget allowance and 16 MiB combined wire-size cap;

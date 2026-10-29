@@ -21,53 +21,115 @@ pub(crate) fn inline_image(part: &Value) -> bool {
     is_image(part) && part["mode"] != "reference"
 }
 
-pub(crate) fn active_image(part: &Value, active: &HashSet<String>, vision: Option<bool>) -> bool {
-    vision != Some(false)
-        && inline_image(part)
-        && part["path"]
-            .as_str()
-            .is_some_and(|path| active.contains(path))
+// Attachment activation belongs to a specific occurrence in the transcript,
+// not to its file path. Recalling the same file cannot reactivate old turns.
+struct ActiveScope {
+    current: Option<usize>,
+    previous: Option<usize>,
+    previous_images: HashSet<usize>,
 }
 
-/// Reserve the same per-image allowance used by the final request check
-/// *before* TRC/APEC decides whether the request fits. Only images that will
-/// be sent in this task count; older references and text-only models do not.
+impl ActiveScope {
+    fn for_messages(messages: &[crate::protocol::Message], vision: Option<bool>) -> Self {
+        let mut users = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, message)| message.role == "user");
+        let current = users.next().map(|(index, _)| index);
+        let previous = users.next().map(|(index, _)| index);
+        let mut previous_images = HashSet::new();
+        if vision != Some(false) {
+            let used = current
+                .and_then(|index| messages[index].provider_items.as_deref())
+                .into_iter()
+                .flatten()
+                .filter(|part| inline_image(part))
+                .map(image_bytes)
+                .fold(0u64, u64::saturating_add);
+            let mut remaining = MAX_ACTIVE_IMAGE_BYTES.saturating_sub(used);
+            if let Some(parts) =
+                previous.and_then(|index| messages[index].provider_items.as_deref())
+            {
+                for (index, part) in parts.iter().enumerate() {
+                    if !inline_image(part) {
+                        continue;
+                    }
+                    let bytes = image_bytes(part);
+                    if bytes <= remaining {
+                        previous_images.insert(index);
+                        remaining -= bytes;
+                    }
+                }
+            }
+        }
+        Self {
+            current,
+            previous,
+            previous_images,
+        }
+    }
+
+    fn includes(&self, message: usize, part: usize, item: &Value, vision: Option<bool>) -> bool {
+        if is_image(item) && vision == Some(false) {
+            return false;
+        }
+        self.current == Some(message)
+            || (self.previous == Some(message)
+                && is_image(item)
+                && self.previous_images.contains(&part))
+    }
+}
+
+fn image_bytes(part: &Value) -> u64 {
+    part["bytes"].as_u64().unwrap_or(MAX_IMAGE_BYTES as u64)
+}
+
+/// Image allowance for the same message instances project_history will send.
+/// No path-based lookup: repeated references in older turns stay inactive.
 pub(crate) fn active_image_tokens(
     messages: &[crate::protocol::Message],
-    active: &HashSet<String>,
     vision: Option<bool>,
 ) -> usize {
-    if vision == Some(false) {
-        return 0;
-    }
+    let scope = ActiveScope::for_messages(messages, vision);
     messages
         .iter()
-        .flat_map(|message| message.provider_items.as_deref().unwrap_or(&[]))
-        .filter(|part| active_image(part, active, vision))
+        .enumerate()
+        .flat_map(|(message, item)| {
+            item.provider_items
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .enumerate()
+                .map(move |(part, value)| (message, part, value))
+        })
+        .filter(|(message, part, value)| {
+            inline_image(value) && scope.includes(*message, *part, value, vision)
+        })
         .count()
         .saturating_mul(IMAGE_TOKEN_ALLOWANCE)
 }
 
-/// A request projection, never an edit to durable history. The current
-/// task can continue seeing its image through tool rounds, but a later task
-/// receives a lightweight image reference instead of the old binary.
-pub(crate) fn project_history(
-    view: &mut [crate::protocol::Message],
-    active: &HashSet<String>,
-    vision: Option<bool>,
-) {
-    for message in view {
+/// A request projection, never an edit to durable history. Only the newest
+/// user turn and eligible images from the immediately previous user turn
+/// remain inline. The same path in any older occurrence stays a reference.
+pub(crate) fn project_history(view: &mut [crate::protocol::Message], vision: Option<bool>) {
+    let scope = ActiveScope::for_messages(view, vision);
+    for (message_index, message) in view.iter_mut().enumerate() {
         if message.role != "user" {
             continue;
         }
-        for part in message.provider_items.as_mut().into_iter().flatten() {
+        for (part_index, part) in message
+            .provider_items
+            .as_mut()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
             if part["type"] != "kroma_attachment" {
                 continue;
             }
-            let is_active = part["path"]
-                .as_str()
-                .is_some_and(|path| active.contains(path));
-            if !is_active || (is_image(part) && vision == Some(false)) {
+            if !scope.includes(message_index, part_index, part, vision) {
                 part["mode"] = json!("reference");
             }
         }
@@ -85,6 +147,68 @@ pub(crate) fn marker(part: &Value) -> Option<char> {
         return None;
     }
     Some(marker)
+}
+
+fn inline_log(part: &Value) -> bool {
+    part["type"] == "kroma_attachment"
+        && part["kind"] == "log"
+        && part["mode"] != "reference"
+        && part["bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes <= INLINE_LOG_BYTES)
+}
+
+fn inline_log_text(part: &Value, index: usize, total: usize) -> Result<String> {
+    let path = part["path"].as_str().context("attachment missing path")?;
+    let name = part["name"].as_str().unwrap_or("attachment");
+    let raw = std::fs::read(path).with_context(|| format!("attachment missing: {name}"))?;
+    let log = String::from_utf8(raw).context("attached text is not UTF-8")?;
+    Ok(format!(
+        "[Pasted text {name}, attachment #{}/{}]\n{log}",
+        index + 1,
+        total
+    ))
+}
+
+/// Additional escaped request bytes from logs which the provider will expand.
+/// The planner and final validator share this projection estimate, including
+/// repeated inline markers and historical marker-less attachments. Older user
+/// turns are references and are not charged as inline logs.
+pub(crate) fn inline_log_extra_bytes(messages: &[crate::protocol::Message]) -> Result<usize> {
+    let Some(message) = messages.iter().rev().find(|message| message.role == "user") else {
+        return Ok(0);
+    };
+    let attached = message
+        .provider_items
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|part| part["type"] == "kroma_attachment")
+        .collect::<Vec<_>>();
+    let mut occurrences = vec![0usize; attached.len()];
+    for character in message.content.as_deref().unwrap_or("").chars() {
+        if let Some(index) = attached
+            .iter()
+            .position(|part| marker(part) == Some(character))
+        {
+            occurrences[index] = occurrences[index].saturating_add(1);
+        }
+    }
+    let mut extra = 0usize;
+    for (index, part) in attached.iter().enumerate() {
+        if marker(part).is_none() {
+            occurrences[index] = occurrences[index].saturating_add(1);
+        }
+        if occurrences[index] == 0 || !inline_log(part) {
+            continue;
+        }
+        // Responses has the longest text-block envelope of the adapters.
+        // Count escaped JSON, not filesystem bytes: newlines and quotes grow.
+        let text = inline_log_text(part, index, attached.len())?;
+        let bytes = serde_json::to_vec(&json!({"type":"input_text","text":text}))?.len() + 1;
+        extra = extra.saturating_add(bytes.saturating_mul(occurrences[index]));
+    }
+    Ok(extra)
 }
 
 fn encode_image(path: &str, name: &str) -> Result<String> {
@@ -173,18 +297,9 @@ pub(crate) fn content_with_cache(
             body.push(text_block(format!(
                 "[Image {name}, attachment #{number}/{total}: omitted from model input. Original image available at {path}; previous analysis may be used, but visual details cannot be inferred without reloading.]"
             )));
-        } else if part["kind"] == "log"
-            && part["mode"] != "reference"
-            && part["bytes"]
-                .as_u64()
-                .is_some_and(|size| size <= INLINE_LOG_BYTES)
-        {
+        } else if inline_log(part) {
             // Short pasted text should not cost an avoidable Shell round trip.
-            let raw = std::fs::read(path).with_context(|| format!("attachment missing: {name}"))?;
-            let log = String::from_utf8(raw).context("attached text is not UTF-8")?;
-            body.push(text_block(format!(
-                "[Pasted text {name}, attachment #{number}/{total}]\n{log}"
-            )));
+            body.push(text_block(inline_log_text(part, index, total)?));
         } else {
             let kind = if part["kind"] == "log" { "log" } else { "file" };
             body.push(text_block(format!(
@@ -229,7 +344,6 @@ mod tests {
     use super::*;
     use crate::protocol::Message;
     use std::{
-        collections::HashSet,
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -422,8 +536,12 @@ mod tests {
         let mut message = Message::new("user", format!("see {marker}"));
         message.provider_items = Some(vec![source]);
         let original = serde_json::to_vec(&message)?;
-        let mut historical = vec![message.clone()];
-        project_history(&mut historical, &HashSet::new(), Some(true));
+        let mut historical = vec![
+            message.clone(),
+            Message::new("user", "follow-up"),
+            Message::new("user", "another follow-up"),
+        ];
+        project_history(&mut historical, Some(true));
         let reference = content(
             historical[0].content.as_deref().unwrap(),
             historical[0].provider_items.as_deref().unwrap(),
@@ -437,11 +555,7 @@ mod tests {
             "authoritative history is unchanged"
         );
         let mut switched = vec![message];
-        project_history(
-            &mut switched,
-            &HashSet::from([path.to_owned()]),
-            Some(false),
-        );
+        project_history(&mut switched, Some(false));
         let text_only = content(
             switched[0].content.as_deref().unwrap(),
             switched[0].provider_items.as_deref().unwrap(),
@@ -449,6 +563,62 @@ mod tests {
         )?;
         assert!(!text_only.to_string().contains("input_image"));
         assert!(text_only.to_string().contains("old.png"));
+        Ok(())
+    }
+
+    #[test]
+    fn repeating_the_same_image_does_not_reactivate_older_user_turns() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "kroma-repeated-image-{}-{}.png",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::write(&path, b"image-data")?;
+        let image = json!({"type":"kroma_attachment","kind":"image",
+            "name":"picture.png","path":path,"bytes":10});
+        let mut history = Vec::new();
+        for _ in 0..5 {
+            let mut message = Message::new("user", "Look at the same picture");
+            message.provider_items = Some(vec![image.clone()]);
+            history.push(message);
+            history.push(Message::new("assistant", "Acknowledged"));
+        }
+        assert_eq!(
+            active_image_tokens(&history, Some(true)),
+            2 * IMAGE_TOKEN_ALLOWANCE
+        );
+        project_history(&mut history, Some(true));
+        let inline = history
+            .iter()
+            .flat_map(|m| m.provider_items.as_deref().unwrap_or(&[]))
+            .filter(|part| inline_image(part))
+            .count();
+        assert_eq!(
+            inline, 2,
+            "only the current and immediately previous user turns may carry image bytes"
+        );
+        for (protocol, kind) in [
+            ("chat", "image_url"),
+            ("responses", "input_image"),
+            ("anthropic", "image"),
+        ] {
+            let wire_images = history
+                .iter()
+                .filter(|m| m.role == "user")
+                .map(|message| {
+                    content(
+                        message.content.as_deref().unwrap(),
+                        message.provider_items.as_deref().unwrap(),
+                        protocol,
+                    )
+                    .unwrap()
+                })
+                .flat_map(|body| body.as_array().unwrap().clone())
+                .filter(|block| block["type"] == kind)
+                .count();
+            assert_eq!(wire_images, 2, "incorrect {protocol} image payload");
+        }
+        fs::remove_file(path)?;
         Ok(())
     }
 
@@ -481,14 +651,16 @@ mod tests {
             })
             .sum::<usize>();
         let mut view = history;
+        view.push(Message::new("user", "follow-up without picture"));
+        view.push(Message::new("user", "second follow-up without picture"));
         let started = std::time::Instant::now();
-        project_history(&mut view, &HashSet::new(), Some(true));
+        project_history(&mut view, Some(true));
         let projected = view
             .iter()
             .map(|m| {
                 content(
                     m.content.as_deref().unwrap(),
-                    m.provider_items.as_deref().unwrap(),
+                    m.provider_items.as_deref().unwrap_or(&[]),
                     "chat",
                 )
                 .unwrap()

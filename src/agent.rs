@@ -69,52 +69,6 @@ pub struct HistoryPoint {
     pub response: String,
 }
 
-fn active_attachment_paths(
-    messages: &[Message],
-    attachments: &[serde_json::Value],
-    vision: Option<bool>,
-) -> std::collections::HashSet<String> {
-    use std::collections::HashSet;
-    let mut active: HashSet<String> = attachments
-        .iter()
-        .filter(|part| part["type"] == "kroma_attachment")
-        .filter_map(|part| part["path"].as_str().map(str::to_owned))
-        .collect();
-    if vision == Some(false) {
-        return active;
-    }
-    // A fresh log or file should not make an image from the immediately
-    // preceding user turn disappear. New attachments take precedence when
-    // the combined image allowance would be exceeded.
-    let used = attachments
-        .iter()
-        .filter(|part| crate::attachments::is_image(part))
-        .map(|part| {
-            part["bytes"]
-                .as_u64()
-                .unwrap_or(crate::attachments::MAX_IMAGE_BYTES as u64)
-        })
-        .sum::<u64>();
-    let mut remaining = crate::attachments::MAX_ACTIVE_IMAGE_BYTES.saturating_sub(used);
-    if let Some(previous) = messages.iter().rev().find(|msg| msg.role == "user") {
-        for part in previous.provider_items.as_deref().unwrap_or(&[]) {
-            if !crate::attachments::is_image(part) {
-                continue;
-            }
-            if let Some(path) = part["path"].as_str() {
-                let bytes = part["bytes"]
-                    .as_u64()
-                    .unwrap_or(crate::attachments::MAX_IMAGE_BYTES as u64);
-                if !active.contains(path) && bytes <= remaining {
-                    active.insert(path.to_owned());
-                    remaining -= bytes;
-                }
-            }
-        }
-    }
-    active
-}
-
 fn history_points(messages: &[Message]) -> Vec<HistoryPoint> {
     let mut points = vec![HistoryPoint {
         number: 0,
@@ -790,8 +744,6 @@ impl Agent {
         self.session.ensure_writable()?;
         self.prompt.refresh_for_task(&self.workdir, user_input)?;
         self.compression.new_user_turn();
-        let active_attachment_paths =
-            active_attachment_paths(&self.messages, attachments, self.model.accepts_images());
         // Reuse immutable image encodings across this task's model/tool turns.
         // Dropped on completion, error, or cancellation; never written to WAL.
         let task_images = crate::model::TaskImageCache::default();
@@ -826,12 +778,14 @@ impl Agent {
             // The provider can discover that vision is unsupported during an
             // earlier tool round. Keep the image reserve consistent with the
             // actual projection instead of using the first round's estimate.
-            let extra_tokens =
-                base_extra_tokens.saturating_add(crate::attachments::active_image_tokens(
+            let extra_tokens = base_extra_tokens
+                .saturating_add(crate::attachments::active_image_tokens(
                     &self.messages,
-                    &active_attachment_paths,
                     self.model.accepts_images(),
-                ));
+                ))
+                .saturating_add(
+                    crate::attachments::inline_log_extra_bytes(&self.messages)?.div_ceil(3),
+                );
             let prepare_started = Instant::now();
             let mut view = self
                 .compression
@@ -846,11 +800,7 @@ impl Agent {
             // Model context is a projection, not the WAL. Keep images for the
             // current task (including its tool rounds), but don't repeatedly
             // re-upload old images for every later user turn.
-            crate::attachments::project_history(
-                &mut view,
-                &active_attachment_paths,
-                self.model.accepts_images(),
-            );
+            crate::attachments::project_history(&mut view, self.model.accepts_images());
             // Plan with the metadata the active provider actually sends.
             // The complete view and WAL remain untouched, including opaque
             // reasoning from other models and human-visible thinking history.
@@ -1428,34 +1378,48 @@ mod tests {
         previous.provider_items = Some(vec![json!({
             "type":"kroma_attachment","kind":"image","path":"A.png","bytes":4_000_000
         })]);
-        let history = vec![Message::new("system", "system"), previous];
+        let mut next = Message::new("user", "Read log");
         let log = json!({"type":"kroma_attachment","kind":"log","path":"new.log"});
-        let active = active_attachment_paths(&history, std::slice::from_ref(&log), Some(true));
-        assert!(active.contains("A.png"));
-        assert!(active.contains("new.log"));
+        next.provider_items = Some(vec![log.clone()]);
+        let history = vec![Message::new("system", "system"), previous, next];
         let mut projected = history.clone();
-        crate::attachments::project_history(&mut projected, &active, Some(true));
+        crate::attachments::project_history(&mut projected, Some(true));
         assert_ne!(
             projected[1].provider_items.as_ref().unwrap()[0]["mode"],
+            "reference"
+        );
+        assert_ne!(
+            projected[2].provider_items.as_ref().unwrap()[0]["mode"],
             "reference"
         );
 
         let big_image = json!({"type":"kroma_attachment","kind":"image",
             "path":"B.png","bytes":13_000_000});
-        let active = active_attachment_paths(&history, &[log, big_image], Some(true));
-        assert!(
-            !active.contains("A.png"),
+        let mut projected = history.clone();
+        projected[2].provider_items = Some(vec![log, big_image]);
+        crate::attachments::project_history(&mut projected, Some(true));
+        assert_eq!(
+            projected[1].provider_items.as_ref().unwrap()[0]["mode"],
+            "reference",
             "new images take priority within the 16 MiB limit"
         );
-        assert!(active.contains("B.png"));
-        assert!(!active_attachment_paths(&history, &[], Some(false)).contains("A.png"));
-        let history = vec![
-            history[0].clone(),
-            history[1].clone(),
-            Message::new("user", "follow-up"),
-        ];
-        assert!(
-            !active_attachment_paths(&history, &[], Some(true)).contains("A.png"),
+        assert_ne!(
+            projected[2].provider_items.as_ref().unwrap()[1]["mode"],
+            "reference"
+        );
+
+        let mut text_only = history.clone();
+        crate::attachments::project_history(&mut text_only, Some(false));
+        assert_eq!(
+            text_only[1].provider_items.as_ref().unwrap()[0]["mode"],
+            "reference"
+        );
+        let mut old = history;
+        old.push(Message::new("user", "another follow-up"));
+        crate::attachments::project_history(&mut old, Some(true));
+        assert_eq!(
+            old[1].provider_items.as_ref().unwrap()[0]["mode"],
+            "reference",
             "only the immediately preceding user turn can provide an image"
         );
     }

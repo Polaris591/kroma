@@ -235,10 +235,15 @@ impl ContextConfig {
             .flat_map(|m| m.provider_items.as_deref().unwrap_or(&[]))
             .filter(|part| crate::attachments::inline_image(part))
             .count();
+        // The WAL stores short pasted logs as file references, but the
+        // provider expands them into escaped text blocks. Include that cost
+        // before approving the request, not only the attachment metadata.
+        let inline_log_bytes = crate::attachments::inline_log_extra_bytes(view)?;
         // Images need their own allowance; raw WAL JSON only contains paths.
         // This is approximate and must not be mistaken for exact tokenizer use.
         let estimated = message_bytes
             .saturating_add(tool_bytes)
+            .saturating_add(inline_log_bytes)
             .div_ceil(3)
             .saturating_add(active_images.saturating_mul(crate::attachments::IMAGE_TOKEN_ALLOWANCE))
             .saturating_add(256);
@@ -1451,8 +1456,7 @@ mod tests {
         ];
         let projected = compressor.tokens(&compressor.view(&messages));
         assert!(projected < budget.soft);
-        let active = std::collections::HashSet::from(["/tmp/example.png".to_owned()]);
-        let image_tokens = crate::attachments::active_image_tokens(&messages, &active, Some(true));
+        let image_tokens = crate::attachments::active_image_tokens(&messages, Some(true));
         assert_eq!(image_tokens, crate::attachments::IMAGE_TOKEN_ALLOWANCE);
         let model: Arc<dyn ModelBackend> = Arc::new(Memory);
         let view = compressor
@@ -1466,7 +1470,7 @@ mod tests {
         assert!(budget.validate_final_request(&view, &[]).is_ok());
         assert_eq!(messages[1].content.as_ref().unwrap().len(), 7_000);
         assert_eq!(
-            crate::attachments::active_image_tokens(&messages, &active, Some(false)),
+            crate::attachments::active_image_tokens(&messages, Some(false)),
             0,
         );
         let mut reference = messages.clone();
@@ -1477,7 +1481,7 @@ mod tests {
             .as_mut()
             .unwrap()[0]["mode"] = json!("reference");
         assert_eq!(
-            crate::attachments::active_image_tokens(&reference, &active, Some(true)),
+            crate::attachments::active_image_tokens(&reference, Some(true)),
             0,
         );
     }
@@ -2577,6 +2581,44 @@ mod tests {
             assert_eq!(legacy.cache_observed, optimized.cache_observed);
             assert_eq!(legacy.last_cached_tokens, optimized.last_cached_tokens);
         }
+    }
+
+    #[test]
+    fn inline_logs_are_counted_before_the_final_context_budget_check() -> Result<()> {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let path = std::env::temp_dir().join(format!(
+            "kroma-budget-inline-{}-{}.txt",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::write(&path, "a".repeat(4095))?;
+        let mut markers = String::new();
+        let mut parts = Vec::new();
+        for index in 0..8 {
+            let marker = char::from_u32(0xE000 + index).unwrap().to_string();
+            markers.push_str(&marker);
+            parts.push(json!({
+                "type":"kroma_attachment", "kind":"log", "name":format!("log-{index}"),
+                "path":path, "marker":marker, "bytes":4095
+            }));
+        }
+        let mut message = Message::new("user", markers);
+        message.provider_items = Some(parts);
+        let expanded = crate::attachments::content(
+            message.content.as_deref().unwrap(),
+            message.provider_items.as_deref().unwrap(),
+            "chat",
+        )?;
+        assert!(expanded.to_string().len() > 33_000);
+        let budget = ContextConfig::with_output_reserve(8192, 1024)?;
+        let result = budget.validate_final_request(&[message], &[]);
+        fs::remove_file(path)?;
+        assert!(
+            result.is_err(),
+            "expanded short logs must exceed the input budget"
+        );
+        Ok(())
     }
 
     #[test]
