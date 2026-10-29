@@ -22,6 +22,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn transient_session_path() -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("kroma-unsaved-{}-{nonce}.json", std::process::id()))
+}
+
 #[cfg(test)]
 use crate::prompt::EXECUTION_GUIDANCE;
 
@@ -236,6 +244,31 @@ impl Agent {
         workdir: PathBuf,
         budget: ContextConfig,
     ) -> Result<Self> {
+        Self::with_runtime_budget_mode(
+            model,
+            tools,
+            context_factory,
+            prompt,
+            events,
+            workdir,
+            budget,
+            false,
+        )
+    }
+
+    /// TUI welcome mode must not commit an empty default conversation just
+    /// because the application launched. CLI/other hosts retain old behavior.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_runtime_budget_mode(
+        model: Arc<dyn ModelBackend>,
+        tools: ToolRegistry,
+        context_factory: Arc<dyn ContextFactory>,
+        prompt: PromptComposer,
+        events: Option<Arc<dyn EventSink>>,
+        workdir: PathBuf,
+        budget: ContextConfig,
+        defer_initial_save: bool,
+    ) -> Result<Self> {
         let prompt = prompt.for_registered_tools(tools.is_builtin_only());
         let catalog = SessionCatalog::new(&workdir)?;
         Self::with_catalog_backends(
@@ -247,6 +280,7 @@ impl Agent {
             workdir,
             catalog,
             budget,
+            defer_initial_save,
         )
     }
 
@@ -261,6 +295,7 @@ impl Agent {
             workdir,
             catalog,
             ContextConfig::from_env()?,
+            false,
         )
     }
 
@@ -274,9 +309,24 @@ impl Agent {
         workdir: PathBuf,
         catalog: SessionCatalog,
         context_budget: ContextConfig,
+        defer_initial_save: bool,
     ) -> Result<Self> {
-        let session = SessionStore::open_at(catalog.default_path().to_path_buf(), &workdir)?;
-        let previous = session.load()?;
+        // Welcome mode must neither load nor lock the old default
+        // conversation. A second Kroma terminal can therefore open its own
+        // welcome screen while another process is using that history.
+        // The throwaway lock lives in the OS temp directory, not in the
+        // saved-session catalog; the first send switches to a real ID.
+        let path = if defer_initial_save {
+            transient_session_path()
+        } else {
+            catalog.default_path().to_path_buf()
+        };
+        let session = SessionStore::open_at(path, &workdir)?;
+        let previous = if defer_initial_save {
+            None
+        } else {
+            session.load()?
+        };
         let (messages, state, new_session) = match previous {
             Some(saved) => (saved.messages, saved.context, false),
             None => (
@@ -301,7 +351,7 @@ impl Agent {
             task_input: TaskInput::default(),
             usage: UsageMeter::default(),
         };
-        if new_session {
+        if new_session && !defer_initial_save {
             agent
                 .session
                 .save(&agent.messages, &agent.compression.state())?;
@@ -574,6 +624,22 @@ impl Agent {
         let (id, path) = self.catalog.new_path()?;
         self.open_session(path)?;
         Ok(id)
+    }
+
+    /// Release the previous history lock immediately on TUI /new, without
+    /// persisting an unused conversation or changing the recent-session ID.
+    pub fn enter_welcome(&mut self) -> Result<()> {
+        let next = SessionStore::open_at(transient_session_path(), &self.workdir)?;
+        let context = self.context_factory.restore(
+            self.context_factory.initial(),
+            self.context_budget,
+            next.archive_path(),
+        )?;
+        self.compression.abort();
+        self.session = next;
+        self.compression = context;
+        self.messages = self.prompt.initial_history(&self.workdir);
+        Ok(())
     }
 
     pub fn resume_session(&mut self, id: &str) -> Result<()> {
@@ -1235,6 +1301,107 @@ fn add_reported(total: Option<u64>, next: Option<u64>, first: bool) -> Option<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_tui_startup_does_not_create_an_empty_conversation() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-transient-session-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let catalog = SessionCatalog::from_default(dir.join("default.json"))?;
+        let mut agent = Agent::with_catalog_backends(
+            Arc::new(ModelClient::new(
+                "http://127.0.0.1:9/v1",
+                None,
+                "mock".into(),
+            )?),
+            ToolRegistry::builtin(),
+            Arc::new(BuiltinContextFactory),
+            PromptComposer::default(),
+            None,
+            dir.clone(),
+            catalog,
+            ContextConfig::from_env()?,
+            true,
+        )?;
+        assert!(!dir.join("default.json").exists());
+        assert!(agent.list_sessions()?.is_empty());
+        let id = agent.new_session()?;
+        assert_ne!(id, "default");
+        assert_eq!(agent.list_sessions()?.len(), 1);
+        assert!(agent.archive_path().is_file());
+        drop(agent);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn welcome_does_not_lock_or_resume_an_existing_default_history() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-welcome-isolation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("default.json");
+        let existing = SessionStore::open_at(path.clone(), &dir)?;
+        existing.save(
+            &[
+                Message::new("system", "System"),
+                Message::new("user", "Old chat"),
+            ],
+            &CompactionState::default(),
+        )?;
+        let mut agent = Agent::with_catalog_backends(
+            Arc::new(ModelClient::new(
+                "http://127.0.0.1:9/v1",
+                None,
+                "mock".into(),
+            )?),
+            ToolRegistry::builtin(),
+            Arc::new(BuiltinContextFactory),
+            PromptComposer::default(),
+            None,
+            dir.clone(),
+            SessionCatalog::from_default(path.clone())?,
+            ContextConfig::from_env()?,
+            true,
+        )?;
+        assert_ne!(agent.archive_path(), path);
+        assert_eq!(
+            agent.messages().len(),
+            1,
+            "welcome starts with only the system prompt"
+        );
+        assert_eq!(
+            agent.list_sessions()?.len(),
+            1,
+            "only the old saved conversation is listed"
+        );
+        agent.resume_session("default").unwrap_err(); // the old session is still locked
+        agent.enter_welcome()?;
+        assert_eq!(
+            agent.list_sessions()?.len(),
+            1,
+            "welcome must never add a saved session"
+        );
+        drop(existing);
+        agent.resume_session("default")?;
+        assert_eq!(agent.messages()[1].content.as_deref(), Some("Old chat"));
+        agent.enter_welcome()?;
+        // The old conversation lock is released when /new goes home.
+        let probe = SessionStore::open_at(path, &dir)?;
+        drop(probe);
+        drop(agent);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
     use crate::provider::Usage;
     use serde_json::json;
 

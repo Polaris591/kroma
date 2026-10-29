@@ -320,6 +320,7 @@ pub enum UiEvent {
         stream: String,
         chunk: String,
     },
+    SessionTitleUpdated(String),
     TaskFinished,
 }
 
@@ -532,6 +533,8 @@ pub struct UiState {
     pub themes: ThemeStore,
     pub session: String,
     session_title: Option<String>,
+    /// Plain `kroma` is a welcome page, not an implicit resumed session.
+    home: bool,
     pub model: String,
     pub model_profile: Option<String>,
     pub model_catalog: Option<crate::sessions::SessionCatalog>,
@@ -609,6 +612,7 @@ impl UiState {
             hover_pointer: None,
             session,
             session_title: None,
+            home: false,
             entries: Vec::new(),
             running: false,
             notification: String::new(),
@@ -635,6 +639,7 @@ impl UiState {
     }
 
     pub fn add_user(&mut self, text: &str) {
+        self.home = false;
         self.dismiss_notification();
         self.mouse_release();
         self.selection_start = None;
@@ -967,6 +972,9 @@ impl UiState {
     }
 
     pub(super) fn session_label(&self) -> &str {
+        if self.home {
+            return "new conversation";
+        }
         self.session_title
             .as_deref()
             .unwrap_or(if self.session == "default" {
@@ -988,6 +996,7 @@ impl UiState {
     }
 
     pub fn load_history(&mut self, messages: &[Message]) {
+        self.home = false;
         self.history_cache = None;
         self.mouse_release();
         self.selection_start = None;
@@ -1066,13 +1075,37 @@ impl UiState {
         self.history_visible = 300;
     }
 
+    pub fn is_home(&self) -> bool {
+        self.home
+    }
+
+    /// Keep the previous Agent session untouched until the first real send.
+    /// Only the UI enters the transient welcome state.
+    pub fn enter_home(&mut self) {
+        self.home = true;
+        self.entries.clear();
+        self.session_title = None;
+        self.history_cache = None;
+        self.active_assistant = None;
+        self.active_reasoning = None;
+        self.scroll_anchor = None;
+        self.scroll_from_bottom = 0;
+        self.mouse_release();
+        self.selection_start = None;
+        self.selection_end = None;
+        self.reset_context();
+    }
+
     pub fn event(&mut self, event: UiEvent) {
         // Usage and token updates only change the footer. Collapsed ongoing
         // reasoning is not rendered, so no Markdown reflow is required for
         // each hidden reasoning delta or its final reconciliation.
         let unchanged_history = matches!(
             &event,
-            UiEvent::Usage { .. } | UiEvent::Context { .. } | UiEvent::ActualInput(_)
+            UiEvent::Usage { .. }
+                | UiEvent::Context { .. }
+                | UiEvent::ActualInput(_)
+                | UiEvent::SessionTitleUpdated(_)
         ) || (!self.reasoning_expanded
             && self.active_reasoning.is_some()
             && matches!(&event, UiEvent::ReasoningFinal(_)
@@ -1081,6 +1114,11 @@ impl UiState {
             self.history_cache = None;
         }
         match event {
+            UiEvent::SessionTitleUpdated(id) => {
+                if !self.home && self.session == id {
+                    self.refresh_session_title();
+                }
+            }
             UiEvent::Usage {
                 input,
                 output,
@@ -1476,6 +1514,9 @@ impl UiState {
         theme: Theme,
         width: usize,
     ) -> (Text<'static>, Vec<(String, String)>) {
+        if self.home {
+            return (Text::default(), Vec::new());
+        }
         let mut lines = Vec::new();
         let mut markdown_targets = Vec::new();
         if self.entries.is_empty() && !self.running {
@@ -1942,6 +1983,9 @@ impl UiState {
                 .style(Style::default().fg(colors.text).bg(colors.background)),
             history,
         );
+        if self.home {
+            super::logo::draw(frame, history, colors, self.themes.preset());
+        }
         // The live activity label lives in cached history. Animate its marker
         // directly in the viewport instead of rebuilding the entire markdown
         // document on each tick (and without moving the scroll position).
@@ -2325,6 +2369,48 @@ mod tests {
             narrow_render.contains("Cache 75%"),
             "cache must remain visible on narrow terminals"
         );
+    }
+
+    #[test]
+    fn home_draws_original_brand_mark_and_clears_on_first_send() {
+        let previous = [Message::new("user", "Previous conversation")];
+        let mut state = UiState::new(
+            "deepseek".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &previous,
+        );
+        state.enter_home();
+        assert!(state.is_home());
+        assert_eq!(state.session_label(), "new conversation");
+        let mut terminal = Terminal::new(TestBackend::new(110, 36)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let contents = terminal.backend().buffer().content();
+        let text = contents
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("K R O M A"));
+        assert!(text.contains("/resume for history"));
+        assert!(!text.contains("Previous conversation"));
+        assert!(contents
+            .iter()
+            .any(|cell| cell.fg == ratatui::style::Color::Rgb(91, 124, 255)));
+        assert!(contents
+            .iter()
+            .any(|cell| cell.fg == ratatui::style::Color::Rgb(255, 111, 145)));
+        state.add_user("Fix the tests");
+        assert!(!state.is_home());
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!text.contains("/resume for history"));
+        assert!(text.contains("Fix the tests"));
     }
 
     #[test]

@@ -3,9 +3,11 @@
 mod attachments;
 mod editor;
 mod links;
+mod logo;
 mod markdown;
 mod picker;
 mod theme;
+mod title;
 mod view;
 
 use crate::{
@@ -239,6 +241,10 @@ fn change_thinking(state: &mut UiState, model: &dyn ModelBackend, level: &str) {
 }
 
 fn save_model_choice(state: &mut UiState, model: &dyn ModelBackend) {
+    if state.is_home() {
+        // No session exists yet: keep the choice in memory until first send.
+        return;
+    }
     if let (Some(catalog), Some(profile)) = (&state.model_catalog, &state.model_profile) {
         if let Err(error) = catalog.set_model_choice(
             &state.session,
@@ -895,8 +901,8 @@ pub async fn run(config: Config) -> Result<()> {
     run_with_resume(config, false).await
 }
 
-/// Continue the most recently modified conversation only on explicit request.
-/// A plain `kroma` still opens the default session as before.
+/// Plain `kroma` shows the welcome screen. Explicit --continue restores the
+/// latest saved session; only the first real send creates a new conversation.
 pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<()> {
     let _quiet = TuiLogGuard::enter();
     let catalog = crate::sessions::SessionCatalog::new(&config.workdir)?;
@@ -905,6 +911,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     } else {
         None
     };
+    let show_home = target_session.is_none();
     let target_id = target_session.as_deref().unwrap_or("default");
     // Explicit environment/profile choices win over a previous TUI session.
     let allow_restore = [
@@ -916,7 +923,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     ]
     .iter()
     .all(|key| std::env::var_os(key).is_none());
-    let saved = if allow_restore && catalog.resolve(target_id).is_ok() {
+    let saved = if allow_restore && resume_recent && catalog.resolve(target_id).is_ok() {
         catalog.model_choice(target_id)?
     } else {
         None
@@ -939,11 +946,12 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     let initial_profile = config.selected_profile.clone();
     let workdir = config.workdir.clone();
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let observer = Arc::new(UiSink(tx));
+    let observer = Arc::new(UiSink(tx.clone()));
     let mut model_handle: Option<Arc<dyn ModelBackend>> = None;
     let runtime = app::default_runtime_with(config, |components| {
         components.events = Some(observer);
         model_handle = Some(components.model());
+        components.defer_initial_session = show_home;
         Ok(())
     })
     .await?;
@@ -980,6 +988,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     state.refresh_session_title();
     state.model_profile = initial_profile;
     state.configure_status(agent.context_window_tokens(), model.reasoning_level());
+    if show_home {
+        state.enter_home();
+    }
     save_model_choice(&mut state, model.as_ref());
     if let Some(warning) = restore_warning {
         state.note(warning);
@@ -1063,8 +1074,19 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     open_picker(&mut state, PickerKind::Models, "", &workdir);
                     continue;
                 }
-                if text == "/sessions" {
+                if text == "/sessions" || text == "/resume" {
                     open_picker(&mut state, PickerKind::Sessions, "", &workdir);
+                    continue;
+                }
+                if text == "/new" {
+                    // Do not create an empty archived session. The next
+                    // actual user request allocates the session ID.
+                    if let Err(error) = agent.enter_welcome() {
+                        state.note(format!("Unable to return to welcome: {error:#}"));
+                        continue;
+                    }
+                    state.discard_draft();
+                    state.enter_home();
                     continue;
                 }
                 if let Some(name) = text.strip_prefix("/model ") {
@@ -1202,6 +1224,25 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                         }
                     }
                     Ok(None) => {
+                        let first_prompt = if state.is_home() {
+                            match agent.new_session() {
+                                Ok(_) => {
+                                    // Exit the transient welcome state before
+                                    // persisting this conversation's model.
+                                    state.load_history(agent.messages());
+                                    state.session = agent.session_id().to_owned();
+                                    state.refresh_session_title();
+                                    save_model_choice(&mut state, model.as_ref());
+                                    Some(text.clone())
+                                }
+                                Err(error) => {
+                                    state.note(format!("Unable to create session: {error:#}"));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
                         let attachments = std::mem::take(&mut state.attachments);
                         run_followups = execute_task(
                             &mut agent,
@@ -1215,6 +1256,31 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             &mut rx,
                         )
                         .await?;
+                        if let Some(first_prompt) = first_prompt {
+                            if run_followups {
+                                let assistant_text = agent
+                                    .messages()
+                                    .iter()
+                                    .rev()
+                                    .find(|message| message.role == "assistant")
+                                    .and_then(|message| message.content.as_deref())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                title::schedule(
+                                    model.clone(),
+                                    state
+                                        .model_catalog
+                                        .as_ref()
+                                        .context("session catalog missing")?
+                                        .default_path()
+                                        .to_path_buf(),
+                                    agent.session_id().to_owned(),
+                                    first_prompt,
+                                    assistant_text,
+                                    tx.clone(),
+                                );
+                            }
+                        }
                     }
                     Err(error) => state.note(format!("Command error: {error:#}")),
                 }

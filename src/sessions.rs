@@ -113,6 +113,29 @@ impl SessionCatalog {
         })
     }
 
+    /// Background AI naming must never replace a title set by the user.
+    /// The check and insertion are atomic across Kroma processes.
+    pub fn name_session_if_unnamed(&self, id: &str, title: &str) -> Result<bool> {
+        if title.trim().is_empty() || title.chars().count() > 80 {
+            bail!("session name must be 1–80 characters");
+        }
+        self.resolve(id)?;
+        let mut changed = false;
+        crate::catalog_file::update(&self.default, &self.names_path(), || {
+            let mut names = self.names()?;
+            if !names.contains_key(id) {
+                names.insert(id.to_owned(), title.trim().to_owned());
+                changed = true;
+            }
+            Ok(names)
+        })?;
+        Ok(changed)
+    }
+
+    pub fn has_name(&self, id: &str) -> Result<bool> {
+        Ok(self.names()?.contains_key(id))
+    }
+
     pub fn resolve_name(&self, text: &str) -> Result<String> {
         if text == "default" || self.resolve(text).is_ok() {
             return Ok(text.to_owned());
@@ -254,6 +277,29 @@ fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_title_can_only_fill_an_unnamed_session() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-auto-title-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let catalog = SessionCatalog::from_default(root.join("main.json"))?;
+        let (id, file) = catalog.new_path()?;
+        fs::write(file, "{}")?;
+        assert!(catalog.name_session_if_unnamed(&id, "AI title")?);
+        assert!(!catalog.name_session_if_unnamed(&id, "AI overwrite")?);
+        catalog.name_session(&id, "Manual title")?;
+        assert!(!catalog.name_session_if_unnamed(&id, "AI late result")?);
+        assert_eq!(
+            catalog.list()?.into_iter().next().unwrap().name.as_deref(),
+            Some("Manual title")
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn model_selection_is_per_session_and_copied_to_branches() -> Result<()> {

@@ -158,9 +158,11 @@ impl Picker {
                     .map(|rank| (rank, item))
             })
             .collect::<Vec<_>>();
-        items.sort_by(|(rank_a, a), (rank_b, b)| {
-            rank_a.cmp(rank_b).then_with(|| a.label.cmp(&b.label))
-        });
+        if self.kind != Kind::Sessions {
+            items.sort_by(|(rank_a, a), (rank_b, b)| {
+                rank_a.cmp(rank_b).then_with(|| a.label.cmp(&b.label))
+            });
+        }
         items.into_iter().map(|(_, item)| item).collect()
     }
 
@@ -223,7 +225,9 @@ impl Picker {
         frame.render_widget(
             Block::default()
                 .borders(Borders::ALL)
-                .title(if width < 48 {
+                .title(if self.kind == Kind::Sessions {
+                    " Sessions · ↑↓ select · Enter resume · Esc close ".to_owned()
+                } else if width < 48 {
                     format!(" {} ", self.kind.title())
                 } else {
                     format!(" {} · Tab: switch · Esc: close ", self.kind.title())
@@ -307,6 +311,32 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_picker_preserves_recent_first_order_and_arrow_navigation() {
+        let mut picker = Picker::new(
+            Kind::Sessions,
+            vec![
+                Item::new("Newest chat", "/resume new", "new"),
+                Item::new("Earlier chat", "/resume old", "old"),
+            ],
+            "",
+        );
+        assert_eq!(
+            picker.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::Selected("/resume new".into()),
+        );
+        picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            picker.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::Selected("/resume old".into()),
+        );
+        picker.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            picker.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::Selected("/resume new".into()),
+        );
+    }
     #[test]
     fn one_fuzzy_picker_preserves_stable_selection_and_category_switching() {
         let mut picker = Picker::new(

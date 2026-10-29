@@ -26,6 +26,8 @@ pub struct RuntimeComponents {
     pub context_factory: Arc<dyn ContextFactory>,
     pub prompt: PromptComposer,
     pub events: Option<Arc<dyn EventSink>>,
+    /// TUI welcome does not materialize a new empty default session.
+    pub defer_initial_session: bool,
 }
 
 impl RuntimeComponents {
@@ -70,9 +72,10 @@ pub async fn default_runtime_with(
         context_factory: Arc::new(BuiltinContextFactory),
         prompt,
         events: None,
+        defer_initial_session: false,
     };
     customize(&mut components)?;
-    let agent = Agent::with_runtime_budget(
+    let agent = Agent::with_runtime_budget_mode(
         components.model,
         components.tools,
         components.context_factory,
@@ -80,6 +83,7 @@ pub async fn default_runtime_with(
         components.events,
         config.workdir,
         components.context_budget,
+        components.defer_initial_session,
     )?;
     Ok(DefaultRuntime {
         agent,
@@ -161,6 +165,7 @@ mod tests {
             context_factory: Arc::new(BuiltinContextFactory),
             prompt: PromptComposer::default(),
             events: None,
+            defer_initial_session: false,
         };
         components.replace_model(next.clone(), desired);
         assert!(Arc::ptr_eq(&components.model(), &next));

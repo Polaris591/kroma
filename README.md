@@ -38,7 +38,8 @@ framework, a second agent loop, or a mandatory plugin system.
   `/exit`). Ambiguous matches are listed rather than chosen for you.
 - **`/continue`** opens the most recently modified saved conversation.
   **`kroma --continue`** opens that conversation directly in the TUI. Plain
-  `kroma` remains unchanged; the recent session is never restored implicitly.
+  `kroma` opens the branded welcome screen: no new conversation is saved
+  until the first message is sent. Existing histories remain accessible.
 - **Mouse copy:** drag-select visible conversation text, then right-click to
   copy. The selection can extend past the top or bottom of the transcript:
   keep holding the left button at the edge to auto-scroll and continue
@@ -57,8 +58,12 @@ framework, a second agent loop, or a mandatory plugin system.
   command runs, with full stdout/stderr still stored by the existing Shell
   capture mechanism. The live preview is not sent to the model as extra text.
 - **`/rename title`** names the current session; **`/sessions`** opens a
-  searchable TUI session picker (the CLI lists names and IDs), and
-  **`/resume`** accepts a unique name or ID. Session names
+  searchable TUI session picker (the CLI lists names and IDs).
+  **`/resume`** without arguments opens the same picker (Up/Down then Enter),
+  and **`/resume name-or-id`** resumes a specific session. A new TUI
+  conversation is automatically titled with one small tool-free model
+  request after its first completed reply. A manual title always wins.
+  Session names
   are lightweight metadata; source session files and WAL are unchanged.
 - **Ctrl+Z / Ctrl+Y** undo and redo edits to the input box, not project
   files or conversation history. **Ctrl+G** edits the current unsent draft;
@@ -122,7 +127,8 @@ sessions and the existing slash commands. Shortcuts:
 - **Ctrl+P** opens the searchable picker; **Tab** changes its category among
   commands, model profiles, sessions, and files. Type to filter, Up/Down to
   select, Enter to confirm, Esc to dismiss without deleting an unsent draft.
-  The **`/model`** and **`/sessions`** commands open the respective pickers;
+  The **`/model`**, **`/sessions`**, and **`/resume`** commands open
+  their respective pickers;
   typing **`@path`** and pressing Tab opens file choices when several match.
 - Input editing respects complete Unicode grapheme clusters (including joined
   Emoji and combining marks), while inline attachment chips remain atomic.
@@ -503,7 +509,10 @@ The runtime is split by responsibility: `provider.rs` (HTTP/SSE and API request 
 
 Interactive commands:
 
-- `/new` creates a new conversation with an independent snapshot, journal, and compression state, without erasing the previous one.
+- In the TUI, `/new` returns to the Logo welcome page and the next real
+  message creates an independent snapshot, journal, and compression state;
+  no empty conversations are archived. The CLI `/new` retains its original
+  immediate creation behavior.
 - `/sessions` lists saved conversations for the current default session namespace. `*` marks the active one.
 - `/resume <id>` switches to an existing conversation; `/resume default` switches to the original auto-loaded project history. Invalid/missing/busy/corrupt sessions are rejected without replacing the current one.
 - `/clear` clears **only the active** conversation and its captured outputs. `/exit` quits.
@@ -734,7 +743,10 @@ Commands: `/new`, `/sessions`, `/resume <id>`, `/clear` (active session only), `
 ## Streaming and saved chat
 
 - Responses are displayed as text arrives rather than waiting for the entire model response. Tool calls are assembled from streaming fragments before execution.
-- The complete conversation (including tool calls and results) is stored across `~/.kroma/sessions/<project-hash>.json` and its `.wal` journal and automatically reloaded when Kroma is opened again in the same working directory. Both are separate from the source repository.
+- The complete conversation (including tool calls and results) is stored in
+  `~/.kroma/sessions/` JSON and WAL files, separate from the source repository.
+  Plain TUI `kroma` now starts a new welcome page instead of loading old
+  messages automatically; use `/resume` or `kroma --continue` to restore them.
 - To pick another default history file, set `KROMA_SESSION_FILE=/path/to/conversation.json`. New sessions are stored alongside that file; `/clear` replaces only the active saved conversation with a fresh one.
 - On Unix, newly created history files are private (`0600`). If the process dies during a tool call, Kroma records the missing result as unknown on reopening, without automatically repeating a potentially destructive command.
 - History is stored as JSON checkpoint plus a checksummed, append-only journal without pruning. The checkpoint may lag the latest turn until the next compaction checkpoint. Only one Kroma process may open a given session at a time (an adjacent lock file enforces this). Session metadata (model choice, names, most recent session) is updated under an adjacent cross-process lock, so concurrent writers cannot lose an update. Session checkpoints, profile files and session metadata are replaced through `src/atomic_file.rs`: `rename` on Unix and `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` on Windows, since a plain `rename` fails on Windows when the target exists.
