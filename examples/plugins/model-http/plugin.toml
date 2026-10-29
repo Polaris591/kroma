@@ -1,0 +1,11 @@
+id = "model-http"
+name = "Custom HTTP Model"
+version = "0.1.0"
+description = "Overrides HTTP provider/model and the matching context budget"
+[model]
+model = "example-model"
+base_url = "https://api.example.com/v1"
+protocol = "chat"
+api_key_env = "EXAMPLE_MODEL_API_KEY"
+context_window = 131072
+output_reserve = 8192

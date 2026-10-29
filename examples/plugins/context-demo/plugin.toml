@@ -1,0 +1,9 @@
+id = "context-demo"
+name = "Context Projection Demo"
+version = "0.1.0"
+description = "External context policy that retains all history and persists a revision counter"
+command = "node"
+args = ["main.js"]
+
+[context]
+version = 1

@@ -1,0 +1,6 @@
+id = "model-hook"
+name = "Model Request Hook"
+version = "0.1.0"
+command = "node"
+args = ["main.js"]
+hooks = ["before_model_request"]

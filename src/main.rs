@@ -44,6 +44,9 @@ async fn main() -> Result<()> {
     if args.first().is_some_and(|arg| arg == "config") {
         return profiles::cli(&args[1..]);
     }
+    if args.first().is_some_and(|arg| arg == "plugins") {
+        return kroma::plugins::PluginCatalog::cli(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "recover-context") {
         if args.len() > 2 {
             bail!("usage: kroma recover-context [session-id]");
@@ -67,7 +70,7 @@ async fn main() -> Result<()> {
         }
         return kroma::tui::run_with_resume(config, true).await;
     }
-    let model_name = config.model.clone();
+    let mut model_name = config.model.clone();
     let json_mode = args.iter().any(|arg| arg == "--json");
     let print_mode = json_mode || args.iter().any(|arg| arg == "--print");
     if print_mode {
@@ -143,8 +146,18 @@ async fn main() -> Result<()> {
         return kroma::tui::run(config).await;
     }
     let runtime = app::default_runtime(config).await?;
-    let commands =
+    if let Some(name) = runtime.plugins.selected_model_name() {
+        model_name = name.to_owned();
+    }
+    let mut commands =
         CommandRegistry::builtin_with_warnings(runtime.skills.list(), runtime.startup_warnings)?;
+    for warning in runtime
+        .plugin_warnings
+        .iter()
+        .chain(runtime.plugins.register_commands(&mut commands).iter())
+    {
+        eprintln!("[plugin] {warning}");
+    }
     let mut agent = runtime.agent;
 
     if !args.is_empty() && !force_cli {
@@ -404,11 +417,11 @@ fn handle_running_input(handle: &TaskInput, text: &str) {
 fn print_help() {
     println!("Interactive TTY: default Ratatui TUI. --no-tui (or --cli): original line CLI. F2: switch theme; /theme reload: reread ~/.kroma/theme.toml.");
     println!(
-        "Kroma v0.4\n\nUsage:\n  kroma [task text]\n  kroma              Interactive session\n  kroma config set <name>  Save API settings (key is entered privately)\n  kroma config list        List saved profiles\n  kroma config use <name>  Switch the default profile\n  kroma config show        Show effective settings without secrets\n  kroma recover-context [session-id]  Reset unavailable custom context memory while preserving raw history\n\nControls:\n  Ctrl+C             Cancel active model request or shell task\n  /new               Start a separate saved conversation\n  /sessions          List saved conversations for this workdir\n  /resume <id>       Switch to a saved conversation (or default)\n  /clear             Clear only the active conversation\n  /exit              Quit\n\nOptional environment:\n  KROMA_MODEL                  Model ID (required without a saved profile)\n  KROMA_BASE_URL               OpenAI-compatible API base\n  KROMA_API_KEY                API key, overrides the selected profile\n  KROMA_PROVIDER_PROFILE       Select a saved profile by name\n  KROMA_CONFIG_FILE            Use an alternate JSON profiles path\n  KROMA_WORKDIR                Shell working directory (default current directory)\n  KROMA_SESSION_FILE           Override default session JSON path (named sessions share its directory)\n  KROMA_DEEPSEEK_THINKING      enabled, high or max; opt-in for DeepSeek-compatible endpoints\n  KROMA_PROFILE                Set to 1 for extra task profiling\n  KROMA_CONTEXT_WINDOW         Model context size in tokens (default 128000)\n  KROMA_OUTPUT_RESERVE_TOKENS  Tokens reserved for response (default min(4096, context/8))"
+        "Kroma v0.4\n\nUsage:\n  kroma [task text]\n  kroma              Interactive session\n  kroma config set <name>  Save API settings (key is entered privately)\n  kroma plugins list       List installed plugins (no model connection needed)\n  kroma plugins install <dir>  Install local plugin directory (disabled)\n  kroma plugins enable <id>   Enable for next startup\n  kroma plugins disable <id>  Disable for next startup\n  kroma plugins set <id> <key> <value>  Set plugin configuration\n  kroma plugins config <id>  Show plugin settings\n  kroma config list        List saved profiles\n  kroma config use <name>  Switch the default profile\n  kroma config show        Show effective settings without secrets\n  kroma recover-context [session-id]  Reset unavailable custom context memory while preserving raw history\n\nControls:\n  Ctrl+C             Cancel active model request or shell task\n  /new               Start a separate saved conversation\n  /sessions          List saved conversations for this workdir\n  /resume <id>       Switch to a saved conversation (or default)\n  /clear             Clear only the active conversation\n  /exit              Quit\n\nOptional environment:\n  KROMA_MODEL                  Model ID (required without a saved profile)\n  KROMA_BASE_URL               OpenAI-compatible API base\n  KROMA_API_KEY                API key, overrides the selected profile\n  KROMA_PROVIDER_PROFILE       Select a saved profile by name\n  KROMA_CONFIG_FILE            Use an alternate JSON profiles path\n  KROMA_WORKDIR                Shell working directory (default current directory)\n  KROMA_PLUGIN_DIR             Override user plugin directory\n  KROMA_SESSION_FILE           Override default session JSON path (named sessions share its directory)\n  KROMA_DEEPSEEK_THINKING      enabled, high or max; opt-in for DeepSeek-compatible endpoints\n  KROMA_PROFILE                Set to 1 for extra task profiling\n  KROMA_CONTEXT_WINDOW         Model context size in tokens (default 128000)\n  KROMA_OUTPUT_RESERVE_TOKENS  Tokens reserved for response (default min(4096, context/8))"
     );
     println!("\nAdditional model settings:\n  KROMA_API_PROTOCOL           chat (default), responses or anthropic\n  KROMA_REASONING_EFFORT       auto (default), off, low, medium, high, xhigh or max\n  KROMA_MAX_OUTPUT_TOKENS      Override requested output maximum; upstream cap takes priority\n  KROMA_CONTEXT_WINDOW         Override upstream model context capacity\n\nKROMA_BASE_URL is the provider's API base URL, such as https://api.anthropic.com/v1.");
     println!("\nInstruction files:\n  ~/.kroma/AGENTS.md           Global instructions for all projects\n  <workdir>/AGENTS.md          Instructions for the current project\n  Files reload at each new task; the original session transcript is unchanged.\n\nWhile a task runs:\n  type text or /steer <text>    Steer the active task at the next model turn\n  /queue <task>                Schedule a separate task after the current task\n  /queue list | /pending       Inspect pending tasks\n  /queue clear                Remove pending follow-ups\n  /queue run                  Resume a paused follow-up queue\n  Ctrl+C                      Cancel current task and pause queued tasks");
-    println!("\nMCP: ~/.kroma/mcp.json and <workdir>/.kroma/mcp.json (or KROMA_MCP_CONFIG).\nSkills: ~/.agents/skills, ~/.kroma/skills, <workdir>/.agents/skills, <workdir>/.kroma/skills.\nInteractive: /tools lists Shell and MCP tools; /skills lists discovered skill metadata.");
+    println!("\nMCP: ~/.kroma/mcp.json and <workdir>/.kroma/mcp.json (or KROMA_MCP_CONFIG).\nSkills: ~/.agents/skills, ~/.kroma/skills, <workdir>/.agents/skills, <workdir>/.kroma/skills.\nInteractive: /tools lists Shell, MCP and plugin tools; /skills lists discovered skill metadata; /plugins manages plugins.");
     println!("\nHistory: /history [count] lists completed checkpoints; /fork [number] starts a separate session; /rewind <number> replaces the current session after preserving its old future; /undo rewinds one turn. /resume <session-id> restores a saved future. These commands never revert files or git commits.");
 }
 

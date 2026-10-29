@@ -1,0 +1,19 @@
+id = "memory"
+name = "Local Notes Memory"
+version = "0.1.0"
+description = "Optional cross-session notes kept in a local JSON file"
+command = "node"
+args = ["main.js"]
+hooks = ["before_model_request"]
+
+[[commands]]
+name = "/remember"
+description = "Save a short reusable note"
+
+[[commands]]
+name = "/memories"
+description = "Show stored notes"
+
+[[commands]]
+name = "/forgetnote"
+description = "Delete a note by number"

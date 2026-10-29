@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
+pub type HookFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
 /// Structured runtime outcome. The model transcript still persists the
 /// content string unchanged, preserving existing tool-call wire formats.
@@ -46,11 +47,29 @@ pub trait Tool: Send + Sync {
     fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a>;
 }
 
+/// Interceptors can rewrite a call before dispatch and its result afterward.
+/// Each hook runs in registration order. The durable tool-call id and tool
+/// name remain Kroma-owned; they cannot be changed by a plugin.
+pub trait ToolInterceptor: Send + Sync {
+    fn before<'a>(&'a self, _call: &'a mut ToolCall, _workdir: &'a Path) -> HookFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+    fn after<'a>(
+        &'a self,
+        _call: &'a ToolCall,
+        _result: &'a mut ToolResult,
+        _workdir: &'a Path,
+    ) -> HookFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 /// The order of registration is the order presented to the model.
 /// Calls are still executed sequentially by Agent, not by the registry.
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
+    interceptors: Vec<Arc<dyn ToolInterceptor>>,
 }
 
 impl ToolRegistry {
@@ -61,6 +80,7 @@ impl ToolRegistry {
     pub fn builtin() -> Self {
         Self {
             tools: vec![Arc::new(BuiltinShell)],
+            interceptors: Vec::new(),
         }
     }
 
@@ -79,6 +99,33 @@ impl ToolRegistry {
         Ok(())
     }
 
+    pub fn replace(&mut self, name: &str, tool: Arc<dyn Tool>) -> Result<()> {
+        if name != tool.name() {
+            bail!("replacement name must match existing tool '{name}'");
+        }
+        let index = self
+            .tools
+            .iter()
+            .position(|existing| existing.name() == name)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool for replacement: {name}"))?;
+        self.tools[index] = tool;
+        Ok(())
+    }
+
+    pub fn disable(&mut self, name: &str) -> Result<()> {
+        let index = self
+            .tools
+            .iter()
+            .position(|tool| tool.name() == name)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
+        self.tools.remove(index);
+        Ok(())
+    }
+
+    pub fn register_interceptor(&mut self, interceptor: Arc<dyn ToolInterceptor>) {
+        self.interceptors.push(interceptor);
+    }
+
     pub fn definitions(&self) -> Vec<Value> {
         self.tools.iter().map(|tool| tool.definition()).collect()
     }
@@ -87,6 +134,7 @@ impl ToolRegistry {
         self.tools.len() == 1
             && self.tools[0].name() == "shell"
             && self.tools[0].definition() == definitions()[0]
+            && self.interceptors.is_empty()
     }
 
     pub async fn execute(&self, call: &ToolCall, ctx: ToolContext<'_>) -> ToolResult {
@@ -95,16 +143,50 @@ impl ToolRegistry {
                 json!({"error": format!("unsupported tool: {}", call.function.name)}).to_string(),
             );
         }
-        match self
+        // The default (no-hook) execution path performs no ToolCall clone,
+        // allocation or extra IPC. Plugins only pay for their own hooks.
+        if self.interceptors.is_empty() {
+            return match self
+                .tools
+                .iter()
+                .find(|tool| tool.name() == call.function.name)
+            {
+                Some(tool) => tool.execute(call, ctx).await,
+                None => ToolResult::error(
+                    json!({"error": format!("unsupported tool: {}", call.function.name)})
+                        .to_string(),
+                ),
+            };
+        }
+        let mut effective = call.clone();
+        for hook in &self.interceptors {
+            if let Err(error) = hook.before(&mut effective, ctx.workdir).await {
+                return ToolResult::error(format!("before_tool_call failed: {error:#}"));
+            }
+            if effective.id != call.id
+                || effective.kind != call.kind
+                || effective.function.name != call.function.name
+            {
+                return ToolResult::error("tool interceptor cannot change call id, kind or name");
+            }
+        }
+        let mut result = match self
             .tools
             .iter()
-            .find(|tool| tool.name() == call.function.name)
+            .find(|tool| tool.name() == effective.function.name)
         {
-            Some(tool) => tool.execute(call, ctx).await,
+            Some(tool) => tool.execute(&effective, ctx).await,
             None => ToolResult::error(
-                json!({"error": format!("unsupported tool: {}", call.function.name)}).to_string(),
+                json!({"error": format!("unsupported tool: {}", effective.function.name)})
+                    .to_string(),
             ),
+        };
+        for hook in &self.interceptors {
+            if let Err(error) = hook.after(&effective, &mut result, ctx.workdir).await {
+                return ToolResult::error(format!("after_tool_result failed: {error:#}"));
+            }
         }
+        result
     }
 }
 

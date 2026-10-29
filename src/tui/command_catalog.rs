@@ -103,6 +103,12 @@ commands![
     ),
     ("/skills", "", "List available skills", "查看可用技能"),
     (
+        "/plugins",
+        "[list|enable|disable|install|config|set|reset|view]",
+        "Manage plugins (restart to apply)",
+        "管理插件（重启后生效）"
+    ),
+    (
         "/usage",
         "",
         "Detailed usage and cache statistics",
@@ -162,6 +168,18 @@ commands![
     ("/quit", "", "Alias for /exit", "/exit 的别名"),
 ];
 
+pub(super) fn items_with_plugins(language: Language, plugins: &[(String, String)]) -> Vec<Item> {
+    let mut items = items(language);
+    for (name, description) in plugins {
+        if !COMMANDS.iter().any(|command| command.name == name)
+            && !items.iter().any(|item| item.value == *name)
+        {
+            items.push(Item::new(name, name, description));
+        }
+    }
+    items
+}
+
 pub(super) fn items(language: Language) -> Vec<Item> {
     COMMANDS
         .iter()
@@ -180,6 +198,25 @@ pub(super) fn items(language: Language) -> Vec<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn enabled_plugin_commands_appear_once_in_completion() {
+        let commands = items_with_plugins(
+            Language::En,
+            &[
+                ("/echo".into(), "Example command".into()),
+                ("/help".into(), "Must not override the built-in".into()),
+            ],
+        );
+        assert_eq!(
+            commands.iter().filter(|item| item.value == "/echo").count(),
+            1
+        );
+        assert_eq!(
+            commands.iter().filter(|item| item.value == "/help").count(),
+            1
+        );
+    }
+
     #[test]
     fn catalog_names_are_unique_and_descriptions_are_bilingual() {
         let mut names = std::collections::HashSet::new();

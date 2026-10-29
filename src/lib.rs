@@ -1,5 +1,5 @@
 //! Kroma runtime library. The CLI and TUI are hosts of the same agent.
-//! Keep modules in one Cargo package; no plugin runtime is required.
+//! Keep modules in one Cargo package; optional process plugins share this core.
 pub mod agent;
 pub mod app;
 pub(crate) mod attachments;
@@ -13,6 +13,7 @@ pub mod diagnostics;
 pub mod events;
 pub mod mcp;
 pub mod model;
+pub mod plugins;
 pub mod ports;
 pub mod profiles;
 pub mod prompt;

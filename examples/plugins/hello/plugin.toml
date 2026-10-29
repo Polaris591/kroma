@@ -1,0 +1,27 @@
+id = "hello"
+name = "Hello Example"
+version = "0.1.0"
+description = "Minimal Kroma tool, slash command and prompt plugin"
+command = "node"
+args = ["main.js"]
+prompt = "\nPlugin hello: an example_echo tool is available when this plugin is enabled."
+
+[settings]
+prefix = "Echo: "
+
+[[tools]]
+name = "example_echo"
+description = "Echo text through the example plugin."
+
+[tools.parameters]
+type = "object"
+required = ["text"]
+additionalProperties = false
+
+[tools.parameters.properties.text]
+type = "string"
+description = "Text to echo"
+
+[[commands]]
+name = "/echo"
+description = "Echo text from Kroma's command line"

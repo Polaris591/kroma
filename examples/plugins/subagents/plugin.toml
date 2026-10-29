@@ -1,0 +1,35 @@
+id = "subagents"
+name = "Subagents"
+version = "0.1.0"
+description = "Run isolated Kroma coding agents, optionally in parallel"
+command = "node"
+args = ["main.js"]
+prompt = "\nFor independent coding work, you may use subagent_run or subagent_parallel to delegate tasks."
+
+[settings]
+max_parallel = 3
+max_output_chars = 16000
+max_depth = 2
+
+[[tools]]
+name = "subagent_run"
+description = "Execute a single independent Kroma agent task with its own session."
+[tools.parameters]
+type = "object"
+additionalProperties = false
+required = ["task"]
+[tools.parameters.properties.task]
+type = "string"
+
+[[tools]]
+name = "subagent_parallel"
+description = "Execute independent Kroma agent tasks in parallel and collect each result."
+[tools.parameters]
+type = "object"
+additionalProperties = false
+required = ["tasks"]
+[tools.parameters.properties.tasks]
+type = "array"
+minItems = 1
+[tools.parameters.properties.tasks.items]
+type = "string"

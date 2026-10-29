@@ -285,7 +285,9 @@ fn picker_items(
     workdir: &std::path::Path,
 ) -> Result<Vec<PickerItem>> {
     Ok(match kind {
-        PickerKind::Commands => command_catalog::items(state.preferences.language),
+        PickerKind::Commands => {
+            command_catalog::items_with_plugins(state.preferences.language, &state.plugin_commands)
+        }
         PickerKind::Models => crate::profiles::Profiles::load()?
             .profiles
             .iter()
@@ -481,6 +483,7 @@ fn key_action(
                 let matches = command_catalog::COMMANDS
                     .iter()
                     .map(|command| command.name)
+                    .chain(state.plugin_commands.iter().map(|(name, _)| name.as_str()))
                     .filter(|command| command.starts_with(prefix))
                     .collect::<Vec<_>>();
                 if matches.len() == 1 {
@@ -1238,7 +1241,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
             ));
         }
     }
-    let model_name = config.model.clone();
+    let mut model_name = config.model.clone();
     let initial_profile = config.selected_profile.clone();
     let workdir = config.workdir.clone();
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1251,16 +1254,21 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         Ok(())
     })
     .await?;
+    if let Some(name) = runtime.plugins.selected_model_name() {
+        model_name = name.to_owned();
+    }
     let mut model = model_handle.expect("default runtime model was initialized");
     if restored {
         if let Some(level) = saved.as_ref().and_then(|choice| choice.thinking.as_deref()) {
             restore_warning = restore_reasoning(model.as_ref(), level);
         }
     }
-    let commands = CommandRegistry::builtin_with_warnings(
+    let mut commands = CommandRegistry::builtin_with_warnings(
         runtime.skills.list(),
         runtime.startup_warnings.clone(),
     )?;
+    let mut plugin_warnings = runtime.plugin_warnings.clone();
+    plugin_warnings.extend(runtime.plugins.register_commands(&mut commands));
     let mut agent = runtime.agent;
     if let Some(target) = target_session.as_deref().filter(|id| *id != "default") {
         agent.resume_session(target)?;
@@ -1281,6 +1289,8 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         agent.messages(),
     );
     state.set_link_workdir(&workdir);
+    state.plugin_commands = runtime.plugins.command_descriptions();
+    state.plugin_statuses = runtime.plugins.ui_statuses();
     state.preferences_path = preferences::Preferences::path();
     match preferences::Preferences::load_at(state.preferences_path.as_deref()) {
         Ok(prefs) => state.apply_preferences(prefs),
@@ -1308,6 +1318,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
             "{} MCP server(s) unavailable · /tools for details",
             runtime.startup_warnings.len()
         ));
+    }
+    for warning in plugin_warnings {
+        state.note(format!("Plugin: {warning}"));
     }
     let mut screen = TerminalScreen::enter()?;
     let mut input = EventStream::new();
@@ -1416,9 +1429,12 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     });
                     match selected {
                         Ok(profile) => match app::model_from_profile(&profile).await {
-                            Ok((next, budget)) => match agent.change_model(next.clone(), budget) {
+                            Ok((next, budget)) => match agent.change_model(
+                                runtime.plugins.model_hooks(next.clone(), budget),
+                                budget,
+                            ) {
                                 Ok(()) => {
-                                    model = next;
+                                    model = runtime.plugins.model_hooks(next, budget);
                                     state.model = profile.model.clone();
                                     state.model_profile = Some(name.trim().to_owned());
                                     save_model_choice(&mut state, model.as_ref());
@@ -1501,9 +1517,16 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                     if let Some(profile) = profiles.profiles.get(&choice.profile) {
                                         match app::model_from_profile(profile).await {
                                             Ok((next, budget)) => {
-                                                match agent.change_model(next.clone(), budget) {
+                                                match agent.change_model(
+                                                    runtime
+                                                        .plugins
+                                                        .model_hooks(next.clone(), budget),
+                                                    budget,
+                                                ) {
                                                     Ok(()) => {
-                                                        model = next;
+                                                        model = runtime
+                                                            .plugins
+                                                            .model_hooks(next, budget);
                                                         state.model = profile.model.clone();
                                                         state.model_profile =
                                                             Some(choice.profile.clone());

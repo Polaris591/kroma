@@ -616,6 +616,8 @@ pub struct UiState {
     unread_updates: usize,
     pub editor: Editor,
     pub picker: Option<Picker>,
+    pub plugin_commands: Vec<(String, String)>,
+    pub plugin_statuses: Vec<String>,
     pub usage: crate::usage::UsageMeter,
     pub title_usage: crate::usage::UsageMeter,
     pub apec_usage: crate::usage::UsageMeter,
@@ -696,6 +698,8 @@ impl UiState {
             unread_updates: 0,
             editor: Editor::default(),
             picker: None,
+            plugin_commands: Vec::new(),
+            plugin_statuses: Vec::new(),
             usage: crate::usage::UsageMeter::default(),
             title_usage: crate::usage::UsageMeter::default(),
             apec_usage: crate::usage::UsageMeter::default(),
@@ -779,7 +783,10 @@ impl UiState {
     pub fn open_command_completion(&mut self, query: String) {
         let mut picker = Picker::new(
             super::picker::Kind::Commands,
-            super::command_catalog::items(self.preferences.language),
+            super::command_catalog::items_with_plugins(
+                self.preferences.language,
+                &self.plugin_commands,
+            ),
             query,
         );
         picker.completion = true;
@@ -929,6 +936,10 @@ impl UiState {
         let compact_metadata = format!("{} · {context}", self.model);
         let fallback = format!("{thinking} · {context}");
         let mut candidates = Vec::new();
+        if width >= 110 && !self.plugin_statuses.is_empty() {
+            let statuses = self.plugin_statuses.join(" · ");
+            candidates.push(format!("{metadata} · {statuses}"));
+        }
         if self.usage.calls > 0 {
             let variants = self.usage_variants();
             // On wide terminals show input/output and cached percentage.
@@ -3064,6 +3075,27 @@ impl Drop for UiState {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn declarative_plugin_footer_status_fits_only_wide_terminals() {
+        let mut state = UiState::new(
+            "mock".into(),
+            "s".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        state.plugin_statuses = vec!["Plugin ready".into()];
+        let wide = state.footer_line(state.themes.colors, 160);
+        assert!(wide
+            .spans
+            .iter()
+            .any(|span| span.content.contains("Plugin ready")));
+        let narrow = state.footer_line(state.themes.colors, 40);
+        assert!(!narrow
+            .spans
+            .iter()
+            .any(|span| span.content.contains("Plugin ready")));
+    }
 
     #[test]
     fn live_reasoning_renders_before_text_and_reconciles_without_duplicates() {

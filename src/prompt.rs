@@ -121,12 +121,17 @@ impl PromptComposer {
     /// Replace the base system instruction when an embedding application
     /// explicitly chooses to do so. The default text remains byte-identical.
     pub fn with_system_prompt(mut self, system: impl Into<String>) -> Result<Self> {
+        self.replace_system_prompt(system)?;
+        Ok(self)
+    }
+
+    pub fn replace_system_prompt(&mut self, system: impl Into<String>) -> Result<()> {
         let system = system.into();
         if system.trim().is_empty() {
             bail!("base system prompt must not be empty");
         }
         self.system_override = Some(system);
-        Ok(self)
+        Ok(())
     }
 
     pub fn with_extra(mut self, segment: impl Into<String>) -> Result<Self> {
@@ -143,6 +148,11 @@ impl PromptComposer {
     /// Host/extension contributions after global and project instructions.
     /// Skill metadata uses this instead of coupling Agent to SkillCatalog.
     pub fn with_trailing(mut self, segment: impl Into<String>) -> Result<Self> {
+        self.push_trailing(segment)?;
+        Ok(self)
+    }
+
+    pub fn push_trailing(&mut self, segment: impl Into<String>) -> Result<()> {
         let segment = segment.into();
         if segment.trim().is_empty() {
             bail!("prompt contribution must not be empty");
@@ -150,7 +160,7 @@ impl PromptComposer {
         if !self.trailing.contains(&segment) {
             self.trailing.push(segment);
         }
-        Ok(self)
+        Ok(())
     }
 
     pub fn initial_history(&self, workdir: &Path) -> Vec<Message> {

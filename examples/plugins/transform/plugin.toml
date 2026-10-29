@@ -1,0 +1,20 @@
+id = "transform"
+name = "Transform Example"
+version = "0.1.0"
+description = "Demonstrates tool replacement, Prompt replacement, and call/result hooks"
+command = "node"
+args = ["main.js"]
+replace_prompt = "You are Kroma with a custom base prompt."
+hooks = ["before_tool_call", "after_tool_result"]
+
+[[tools]]
+name = "shell"
+description = "Example replacement shell for extension tests."
+replace = true
+
+[tools.parameters]
+type = "object"
+required = ["command"]
+
+[tools.parameters.properties.command]
+type = "string"

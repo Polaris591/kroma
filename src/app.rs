@@ -6,6 +6,7 @@ use crate::{
     events::EventSink,
     mcp,
     model::ModelBackend,
+    plugins::PluginCatalog,
     prompt::PromptComposer,
     provider::ModelClient,
     skills::{LoadSkill, SkillCatalog},
@@ -44,7 +45,9 @@ impl RuntimeComponents {
 pub struct DefaultRuntime {
     pub agent: Agent,
     pub skills: SkillCatalog,
+    pub plugins: PluginCatalog,
     pub startup_warnings: Vec<String>,
+    pub plugin_warnings: Vec<String>,
 }
 
 pub async fn default_runtime_with(
@@ -74,7 +77,15 @@ pub async fn default_runtime_with(
         events: None,
         defer_initial_session: false,
     };
+    let plugins = PluginCatalog::discover(&config.workdir)?;
+    let mut plugin_warnings = plugins.warnings.clone();
+    plugin_warnings.extend(plugins.contribute(&mut components.tools, &mut components.prompt));
+    plugin_warnings.extend(plugins.replace_context(&mut components.context_factory));
+    plugin_warnings
+        .extend(plugins.replace_model(&mut components.model, &mut components.context_budget));
     customize(&mut components)?;
+    components.model = plugins.model_hooks(components.model, components.context_budget);
+    components.events = plugins.wrap_events(components.events)?;
     let agent = Agent::with_runtime_budget_mode(
         components.model,
         components.tools,
@@ -88,7 +99,9 @@ pub async fn default_runtime_with(
     Ok(DefaultRuntime {
         agent,
         skills,
+        plugins,
         startup_warnings: mcp_status.unavailable,
+        plugin_warnings,
     })
 }
 

@@ -5,7 +5,7 @@ Minimal AI agent harness written in Rust. This is a **new, independent project**
 Kroma supports Chat Completions, Responses and Anthropic Messages; streaming
 model/tool execution; a built-in Shell tool with optional MCP tools and
 on-demand Agent Skills; saved chat history; and TRC + APEC compression.
-It intentionally has no plugin framework or web UI. Interactive terminals use
+It has an optional process-plugin host (tools, prompts, context/model strategies, commands, lifecycle hooks), but no web UI. Interactive terminals use
 a lightweight Rust TUI by default; scripts and one-shot commands remain CLI.
 
 ## Terminal UI (Ratatui)
@@ -14,7 +14,7 @@ a lightweight Rust TUI by default; scripts and one-shot commands remain CLI.
 
 Kroma keeps one Rust Agent runtime. The following shortcuts use existing
 Shell, session, model, and event interfaces; none introduces an approval
-framework, a second agent loop, or a mandatory plugin system.
+framework, a second agent loop, or a mandatory plugin dependency.
 
 - **`@path`** refers to a file in the project. Type `@src/age` and press
   **Tab** for path completion; `@src/agent.rs` keeps the path available for
@@ -88,6 +88,19 @@ such as `task_started`, `text_delta`, `tool_started`,
 `cargo test 2>&1 | kroma --print "analyze failures"`. Large piped inputs
 are stored as file references. JSONL uses stdout for events and stderr for
 diagnostics. Both modes share Agent, Shell, model providers, and TRC+APEC.
+
+Plugins: see the [plugin guide and concrete examples](examples/plugins/README.md).
+The first practical example is **web search and webpage extraction**:
+`kroma plugins install examples/plugins/web`, then `kroma plugins enable web`,
+restart Kroma and use `web_search` or `web_fetch` (Bing RSS by default, no key).
+`/plugins` lists or manages plugins inside CLI/TUI. Further optional examples
+include tool/Prompt replacement, model request hooks, context strategy,
+subagents, cross-session notes and a declarative TUI status/panel. Plugins are
+disabled by default; Kroma needs Node.js only for JS plugins.
+
+This is a **partial P1–P5 implementation**: full external compression lifecycle,
+new provider wire formats, tournament judging, custom TUI layout/animation and
+hot reload are not implemented yet. See [implementation status](PLUGIN_ROADMAP.md).
 
 Global/project `AGENTS.md` are loaded as before. When the task explicitly
 references a nested project file, the applicable ancestor `AGENTS.md` files
@@ -530,7 +543,7 @@ before advertising production-level support.
 
 ## P2: Lean modules and multiple conversations
 
-The runtime is split by responsibility: `provider.rs` (HTTP/SSE and API request mapping), `protocol.rs` (shared messages), `context.rs` (TRC/APEC), `tools.rs` (tool dispatch/schema), `shell.rs` (process execution), `session.rs` (checkpoint/WAL/lock), `sessions.rs` (session directory and IDs), and `agent.rs` (small execution loop). There is no new provider registry, plugin framework or database.
+The runtime is split by responsibility: `provider.rs` (HTTP/SSE and API request mapping), `protocol.rs` (shared messages), `context.rs` (TRC/APEC), `tools.rs` (tool dispatch/schema), `shell.rs` (process execution), `session.rs` (checkpoint/WAL/lock), `sessions.rs` (session directory and IDs), and `agent.rs` (small execution loop). Optional process plugins are hosted at the application boundary; there is no new provider registry or database.
 
 Interactive commands:
 

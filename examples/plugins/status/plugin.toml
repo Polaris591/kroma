@@ -1,0 +1,9 @@
+id = "status"
+name = "Status Panel Example"
+version = "0.1.0"
+description = "Static TUI footer status and plugin information panel"
+
+[ui]
+status = "Plugin ready"
+panel_title = "Kroma Plugin Panel"
+panel_text = "This panel is provided by a user plugin. Open it with /plugins view status. This example uses only declarative UI data, not terminal control."
