@@ -65,7 +65,8 @@ framework, a second agent loop, or a mandatory plugin system.
   **`/editor`** starts an external-editor draft in
   `$VISUAL` or `$EDITOR`; in-line attachments cannot be edited externally.
 - **`/export [filename.md|filename.json]`** exports the current session
-  to the project directory; **`--version`** prints the binary version.
+  to the project directory; **`--version`** prints the binary version and
+  source commit, and **`--build-info`** also prints the executable's actual path.
   Existing exports are never overwritten.
 
 Noninteractive use: **`kroma --print "task"`** streams ordinary plain text;

@@ -86,7 +86,10 @@ pub(super) fn payload(
         .collect::<Result<Vec<Value>>>()?;
     let mut request = json!({
         "model":model,"max_tokens":max_tokens,"stream":true,
-        "system":system.join("\n\n"),"messages":items,"tools":tools
+        "system":system.join("\n\n"),"messages":items,"tools":tools,
+        // Automatic prompt caching moves the breakpoint with the growing
+        // conversation; no hand-maintained cache markers or settings.
+        "cache_control":{"type":"ephemeral"}
     });
     if !tools.is_empty() {
         // No tool_choice override: the model chooses whether to call tools.
@@ -425,6 +428,28 @@ pub(super) fn parse_text(body: &str) -> Result<ApecTextAttempt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_anthropic_request_enables_prompt_caching() {
+        let history = [
+            Message::new("system", "You are a coding assistant."),
+            Message::new("user", "Inspect the repository."),
+        ];
+        let request = payload(
+            "claude-test",
+            &history,
+            &[],
+            1024,
+            "auto",
+            &ModelInfo::default(),
+            "origin",
+        )
+        .unwrap();
+        assert_eq!(
+            request["cache_control"]["type"], "ephemeral",
+            "Anthropic prompt caching requires an explicit breakpoint even with automatic caching"
+        );
+    }
 
     #[test]
     fn stream_usage_includes_cache_reads_and_writes_without_double_counting_deltas() {

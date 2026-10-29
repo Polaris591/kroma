@@ -907,7 +907,10 @@ impl UiState {
     pub fn info(&mut self, title: &str, content: impl Into<String>) {
         self.history_cache = None;
         self.entries.push(Entry::new(Kind::Info, title, content));
-        self.scroll_from_bottom = 0;
+        // Explicit command results should be visible immediately, even when
+        // the user was browsing old messages. Streaming still preserves its
+        // existing scroll anchor unless the user actively jumps to latest.
+        self.scroll_to_bottom();
     }
 
     pub fn load_history(&mut self, messages: &[Message]) {
@@ -1697,6 +1700,14 @@ impl UiState {
             layout[1].width.saturating_sub(2),
             layout[1].height,
         );
+        if self.selection_area.width > 0 && self.selection_area.width != history.width {
+            // Selection offsets refer to *wrapped display cells*, not raw
+            // grapheme indices. Reflow invalidates them. Clear the selection
+            // rather than copy unrelated text after a terminal resize.
+            self.selection_start = None;
+            self.selection_end = None;
+            self.mouse_release();
+        }
         self.viewport_height = history.height;
         let cached = self.history_cache.as_ref().is_some_and(|cache| {
             cache.width == history.width
@@ -2843,6 +2854,76 @@ mod tests {
             ui.viewport_height > 0,
             "normal layout must recover after resize"
         );
+    }
+
+    #[test]
+    fn command_output_is_visible_after_scrolling_old_history() {
+        let messages = (0..90)
+            .map(|i| Message::new("assistant", format!("Historical item {i:03}")))
+            .collect::<Vec<_>>();
+        let mut ui = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(82, 24)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        ui.scroll(45);
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(ui.scroll_anchor.is_some());
+        ui.info("Result", "FRESH_INFORMATION_AFTER_SCROLL");
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(
+            ui.selection_rows
+                .join("\n")
+                .contains("FRESH_INFORMATION_AFTER_SCROLL"),
+            "new command output must be visible instead of remaining pinned to old history"
+        );
+    }
+
+    #[test]
+    fn resize_clears_invalid_selection_without_copying_wrong_text() {
+        let answer = format!("{} TARGET {}", "prefix".repeat(7), "suffix".repeat(12));
+        let mut ui = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("assistant", answer)],
+        );
+        let mut wide = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        wide.draw(|frame| ui.draw(frame)).unwrap();
+        let row = ui
+            .selection_rows
+            .iter()
+            .position(|s| s.contains("TARGET"))
+            .unwrap();
+        let prefix = ui.selection_rows[row].split_once("TARGET").unwrap().0;
+        let x = ui.selection_area.x + UnicodeWidthStr::width(prefix) as u16;
+        let y = ui.selection_area.y + row as u16;
+        ui.select_start(x, y);
+        ui.select_drag(x + 5, y);
+        ui.mouse_release();
+        assert_eq!(ui.selected_text().as_deref(), Some("TARGET"));
+        let mut narrow = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        narrow.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(ui.selection_start.is_none() && ui.selection_end.is_none());
+        assert!(
+            ui.selected_text().is_none(),
+            "a terminal resize must clear old wrapped coordinates instead of copying wrong text"
+        );
+        let row = ui
+            .selection_rows
+            .iter()
+            .position(|s| s.contains("TARGET"))
+            .unwrap();
+        let prefix = ui.selection_rows[row].split_once("TARGET").unwrap().0;
+        let x = ui.selection_area.x + UnicodeWidthStr::width(prefix) as u16;
+        let y = ui.selection_area.y + row as u16;
+        ui.select_start(x, y);
+        ui.select_drag(x + 5, y);
+        ui.mouse_release();
+        assert_eq!(ui.selected_text().as_deref(), Some("TARGET"));
     }
 
     #[test]

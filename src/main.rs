@@ -20,8 +20,18 @@ type InputLines = Lines<BufReader<Stdin>>;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.as_slice() == ["--version"] || args.as_slice() == ["-V"] {
-        println!("kroma {}", env!("CARGO_PKG_VERSION"));
+    if args.as_slice() == ["--version"]
+        || args.as_slice() == ["-V"]
+        || args.as_slice() == ["--build-info"]
+    {
+        println!(
+            "kroma {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("KROMA_BUILD_REVISION")
+        );
+        if args.as_slice() == ["--build-info"] {
+            println!("executable: {}", std::env::current_exe()?.display());
+        }
         return Ok(());
     }
     if args

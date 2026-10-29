@@ -12,6 +12,32 @@ pub(crate) const MAX_LOG_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const INLINE_LOG_BYTES: u64 = 4096;
 pub(crate) const IMAGE_TOKEN_ALLOWANCE: usize = 4096;
 
+/// Reserve the same per-image allowance used by the final request check
+/// *before* TRC/APEC decides whether the request fits. Only images that will
+/// be sent in this task count; older references and text-only models do not.
+pub(crate) fn active_image_tokens(
+    messages: &[crate::protocol::Message],
+    active: &HashSet<String>,
+    vision: Option<bool>,
+) -> usize {
+    if vision == Some(false) {
+        return 0;
+    }
+    messages
+        .iter()
+        .flat_map(|message| message.provider_items.as_deref().unwrap_or(&[]))
+        .filter(|part| {
+            part["type"] == "kroma_attachment"
+                && part["kind"] == "image"
+                && part["mode"] != "reference"
+                && part["path"]
+                    .as_str()
+                    .is_some_and(|path| active.contains(path))
+        })
+        .count()
+        .saturating_mul(IMAGE_TOKEN_ALLOWANCE)
+}
+
 /// A request projection, never an edit to durable history. The current
 /// task can continue seeing its image through tool rounds, but a later task
 /// receives a lightweight image reference instead of the old binary.

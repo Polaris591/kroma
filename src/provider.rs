@@ -392,6 +392,11 @@ impl StreamResult {
                 if part.id.is_empty() || part.name.is_empty() || part.kind != "function" {
                     bail!("incomplete tool call in model stream");
                 }
+                let arguments: Value = serde_json::from_str(&part.arguments)
+                    .with_context(|| format!("invalid JSON arguments in tool call {}", part.id))?;
+                if !arguments.is_object() {
+                    bail!("tool call {} arguments must be a JSON object", part.id);
+                }
                 Ok(ToolCall {
                     id: part.id,
                     kind: part.kind,
@@ -473,6 +478,7 @@ pub struct ModelClient {
     image_rejected: Arc<AtomicBool>,
     usage_stream_rejected: Arc<AtomicBool>,
     reasoning_summary_rejected: Arc<AtomicBool>,
+    anthropic_cache_rejected: Arc<AtomicBool>,
     model_info: ModelInfo,
     output_limit: Option<usize>,
     requested_output: Option<usize>,
@@ -616,6 +622,31 @@ fn summary_capability_rejection(error: &anyhow::Error) -> bool {
     })
 }
 
+fn anthropic_cache_rejection(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ModelHttpError>().is_some_and(|http| {
+        if !matches!(
+            http.status,
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return false;
+        }
+        let message = http.message.to_ascii_lowercase();
+        (message.contains("cache_control") || message.contains("cache control"))
+            && [
+                "unsupported",
+                "not support",
+                "unknown",
+                "unrecognized",
+                "not allowed",
+                "invalid",
+                "unexpected",
+                "extra_forbidden",
+            ]
+            .iter()
+            .any(|word| message.contains(word))
+    })
+}
+
 impl ModelClient {
     pub fn new(base_url: &str, api_key: Option<String>, model: String) -> Result<Self> {
         let http = Client::builder()
@@ -638,6 +669,7 @@ impl ModelClient {
             image_rejected: Arc::new(AtomicBool::new(false)),
             usage_stream_rejected: Arc::new(AtomicBool::new(false)),
             reasoning_summary_rejected: Arc::new(AtomicBool::new(false)),
+            anthropic_cache_rejected: Arc::new(AtomicBool::new(false)),
             model_info: ModelInfo::default(),
             output_limit: None,
             requested_output: None,
@@ -804,19 +836,25 @@ impl ModelClient {
                 }
                 Ok(request)
             }
-            ApiProtocol::Anthropic => anthropic::payload(
-                &self.model,
-                messages,
-                tools,
-                output.unwrap_or(4096),
-                self.reasoning_override
-                    .read()
-                    .expect("reasoning lock poisoned")
-                    .as_deref()
-                    .unwrap_or(&self.reasoning_effort),
-                &self.model_info,
-                &self.opaque_reasoning_origin(),
-            ),
+            ApiProtocol::Anthropic => {
+                let mut request = anthropic::payload(
+                    &self.model,
+                    messages,
+                    tools,
+                    output.unwrap_or(4096),
+                    self.reasoning_override
+                        .read()
+                        .expect("reasoning lock poisoned")
+                        .as_deref()
+                        .unwrap_or(&self.reasoning_effort),
+                    &self.model_info,
+                    &self.opaque_reasoning_origin(),
+                )?;
+                if self.anthropic_cache_rejected.load(Ordering::Relaxed) {
+                    request.as_object_mut().unwrap().remove("cache_control");
+                }
+                Ok(request)
+            }
         }
     }
 
@@ -1039,6 +1077,18 @@ impl ModelClient {
             {
                 Err(error)
                     if !received_stream_data
+                        && self.protocol == ApiProtocol::Anthropic
+                        && !self.anthropic_cache_rejected.load(Ordering::Relaxed)
+                        && anthropic_cache_rejection(&error) =>
+                {
+                    // Some Anthropic-compatible gateways don't implement
+                    // the official cache field. Retry at most once without
+                    // it; never replay a partially delivered stream.
+                    self.anthropic_cache_rejected.store(true, Ordering::Relaxed);
+                    crate::runtime_log!("[model] gateway rejected Anthropic cache_control; retrying without prompt caching");
+                }
+                Err(error)
+                    if !received_stream_data
                         && self.protocol == ApiProtocol::Responses
                         && !self.reasoning_summary_rejected.load(Ordering::Relaxed)
                         && summary_capability_rejection(&error) =>
@@ -1202,6 +1252,9 @@ impl ModelClient {
                         &self.opaque_reasoning_origin(),
                     )?;
                     p["stream"] = json!(false);
+                    // Each APEC summary is a one-off prompt. Caching it would
+                    // pay a write premium without expecting a read.
+                    p.as_object_mut().unwrap().remove("cache_control");
                     p
                 }
             };
@@ -1570,6 +1623,76 @@ fn is_timeout(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn anthropic_cache_rejection_retries_once_and_remembers_gateway_capability() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for attempt in 0..3 {
+                let (mut connection, _) = listener.accept().unwrap();
+                connection
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&connection);
+                let mut len = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some(raw) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = raw.trim().parse().unwrap();
+                    }
+                }
+                let mut bytes = vec![0; len];
+                reader.read_exact(&mut bytes).unwrap();
+                requests.push(serde_json::from_slice::<Value>(&bytes).unwrap());
+                drop(reader);
+                if attempt == 0 {
+                    let body =
+                        r#"{"type":"error","error":{"message":"unknown field cache_control"}}"#;
+                    write!(connection, "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                } else {
+                    let events = [
+                        json!({"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":0}}}),
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"ok"}}),
+                        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+                        json!({"type":"message_stop"}),
+                    ];
+                    let mut body = String::new();
+                    for event in &events {
+                        body.push_str("data: ");
+                        body.push_str(&event.to_string());
+                        body.push_str("\n\n");
+                    }
+                    write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+                connection.flush().unwrap();
+            }
+            requests
+        });
+        let client = ModelClient::new(&format!("http://{address}/v1"), None, "mock".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap();
+        let history = [Message::new("user", "Check caching")];
+        for _ in 0..2 {
+            let answer = client
+                .complete_with_tools(&history, &[], &mut |_| {})
+                .await
+                .unwrap();
+            assert_eq!(answer.message.content.as_deref(), Some("ok"));
+        }
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0]["cache_control"]["type"], "ephemeral");
+        assert!(requests[1].get("cache_control").is_none());
+        assert!(requests[2].get("cache_control").is_none());
+    }
 
     #[tokio::test]
     async fn visual_rejection_once_falls_back_to_text_references_without_changing_history() {
@@ -2249,6 +2372,39 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("duplicate tool_call_id"));
+    }
+
+    #[test]
+    fn malformed_chat_tool_arguments_are_rejected_before_persisting_assistant() {
+        let mut stream = StreamResult::default();
+        stream.apply(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bad","type":"function","function":{"name":"shell","arguments":"{bad json"}}]},"finish_reason":"tool_calls"}]}"#,
+            &mut |_| {},
+        ).unwrap();
+        assert!(
+            stream.finish().is_err(),
+            "invalid JSON tool arguments must not become durable assistant tool_calls"
+        );
+    }
+
+    #[test]
+    fn chat_tool_arguments_must_be_objects_not_arrays_or_scalars() {
+        for arguments in ["[]", "42", "null", "\"\""] {
+            let mut stream = StreamResult::default();
+            let event = json!({"choices":[{"delta":{"tool_calls":[{
+                "index":0, "id":"bad", "type":"function",
+                "function":{"name":"shell", "arguments":arguments}
+            }]},"finish_reason":"tool_calls"}]});
+            stream.apply(&event.to_string(), &mut |_| {}).unwrap();
+            assert!(stream.finish().is_err(), "accepted {arguments}");
+        }
+        let mut stream = StreamResult::default();
+        let event = json!({"choices":[{"delta":{"tool_calls":[{
+            "index":0, "id":"good", "type":"function",
+            "function":{"name":"shell", "arguments":"{}"}
+        }]},"finish_reason":"tool_calls"}]});
+        stream.apply(&event.to_string(), &mut |_| {}).unwrap();
+        assert_eq!(stream.finish().unwrap().0.tool_calls.unwrap().len(), 1);
     }
 
     #[test]

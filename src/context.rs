@@ -1355,6 +1355,92 @@ mod tests {
     use std::time::Instant;
 
     #[tokio::test]
+    async fn active_image_budget_triggers_apec_before_final_request_check() {
+        struct Memory;
+        impl ModelBackend for Memory {
+            fn complete<'a>(
+                &'a self,
+                _: &'a [Message],
+                _: &'a [Value],
+                _: &'a mut (dyn FnMut(&str) + Send),
+            ) -> StreamFuture<'a, crate::model::Completion> {
+                Box::pin(async { bail!("only compaction is expected") })
+            }
+            fn generate_text<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: usize,
+            ) -> ModelFuture<'a, SummaryResult> {
+                Box::pin(async {
+                    Ok(SummaryResult {
+                        text: "Earlier task completed".into(),
+                        usage: None,
+                        elapsed: Duration::ZERO,
+                        requests: 1,
+                    })
+                })
+            }
+        }
+        struct NoCommit;
+        impl ContextCommit for NoCommit {
+            fn commit(&self, _: &PersistedContext) -> Result<()> {
+                Ok(())
+            }
+        }
+        let budget = ContextConfig::with_output_reserve(8_000, 1_024).unwrap();
+        let mut compressor = Compression::new(
+            CompactionState::default(),
+            budget,
+            Path::new("/tmp/kroma-review.json"),
+        );
+        let mut latest = Message::new("user", "Analyze the attached picture");
+        latest.provider_items = Some(vec![json!({
+            "type": "kroma_attachment", "kind": "image", "mode": "inline",
+            "path": "/tmp/example.png", "bytes": 400_000,
+        })]);
+        let messages = vec![
+            Message::new("system", "System"),
+            Message::new("user", "x".repeat(7_000)),
+            Message::new("assistant", "Done"),
+            Message::new("user", "Following up"),
+            Message::new("assistant", "All good"),
+            latest,
+        ];
+        let projected = compressor.tokens(&compressor.view(&messages));
+        assert!(projected < budget.soft);
+        let active = std::collections::HashSet::from(["/tmp/example.png".to_owned()]);
+        let image_tokens = crate::attachments::active_image_tokens(&messages, &active, Some(true));
+        assert_eq!(image_tokens, crate::attachments::IMAGE_TOKEN_ALLOWANCE);
+        let model: Arc<dyn ModelBackend> = Arc::new(Memory);
+        let view = compressor
+            .prepare_with_extra(&messages, &model, &NoCommit, image_tokens)
+            .await
+            .unwrap();
+        assert!(
+            compressor.state().covered_until > 1,
+            "image budget should trigger APEC"
+        );
+        assert!(budget.validate_final_request(&view, &[]).is_ok());
+        assert_eq!(messages[1].content.as_ref().unwrap().len(), 7_000);
+        assert_eq!(
+            crate::attachments::active_image_tokens(&messages, &active, Some(false)),
+            0,
+        );
+        let mut reference = messages.clone();
+        reference
+            .last_mut()
+            .unwrap()
+            .provider_items
+            .as_mut()
+            .unwrap()[0]["mode"] = json!("reference");
+        assert_eq!(
+            crate::attachments::active_image_tokens(&reference, &active, Some(true)),
+            0,
+        );
+    }
+
+    #[tokio::test]
     async fn incompatible_historical_reasoning_does_not_trigger_false_apec() {
         struct NoCommit;
         impl ContextCommit for NoCommit {

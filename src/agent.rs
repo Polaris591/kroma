@@ -734,10 +734,16 @@ impl Agent {
         // schema and serializing it on every model round trip.
         let tool_definitions = self.tools.definitions();
         let tool_schema_bytes = serde_json::to_vec(&tool_definitions)?.len();
+        let image_tokens = crate::attachments::active_image_tokens(
+            &self.messages,
+            &active_attachment_paths,
+            self.model.accepts_images(),
+        );
         let extra_tokens = self
             .prompt
             .extra_estimated_tokens(&self.messages[0])
-            .saturating_add(tool_schema_bytes.div_ceil(3));
+            .saturating_add(tool_schema_bytes.div_ceil(3))
+            .saturating_add(image_tokens);
 
         let mut overflow_retries = 0;
         loop {
