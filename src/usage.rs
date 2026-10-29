@@ -40,6 +40,11 @@ pub fn compact_tokens(value: u64) -> String {
 }
 
 impl UsageMeter {
+    /// The last measured request, including missing provider fields.
+    pub(crate) fn last_request(&self) -> Option<&Usage> {
+        self.last.as_ref()
+    }
+
     pub fn record(&mut self, usage: Option<&Usage>) {
         self.record_batch(1, usage);
     }
@@ -126,7 +131,7 @@ impl UsageMeter {
         Some(cache_only.chars().take(width).collect())
     }
 
-    fn summary_line(&self, label: &str) -> String {
+    pub(crate) fn summary_line(&self, label: &str) -> String {
         let measured = |value: u64, unknown: usize| {
             if self.calls == 0 {
                 "—".to_owned()

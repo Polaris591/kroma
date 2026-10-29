@@ -1,6 +1,6 @@
 //! One small searchable overlay for commands, model profiles, sessions and files.
 //! No separate navigation runtime: it returns ordinary TUI actions.
-use super::theme::Theme;
+use super::{preferences::Language, theme::Theme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::Rect,
@@ -27,6 +27,14 @@ impl Kind {
             Self::Models => "Models",
             Self::Sessions => "Sessions",
             Self::Files => "Files",
+        }
+    }
+    pub fn localized_title(self, language: Language) -> &'static str {
+        match self {
+            Self::Commands => language.text("Commands", "命令索引"),
+            Self::Models => language.text("Models", "模型"),
+            Self::Sessions => language.text("Sessions", "会话"),
+            Self::Files => language.text("Files", "文件"),
         }
     }
     pub fn next(self) -> Self {
@@ -73,6 +81,7 @@ pub struct Picker {
     pub kind: Kind,
     pub query: String,
     pub items: Vec<Item>,
+    pub completion: bool,
     selected: usize,
 }
 
@@ -124,6 +133,7 @@ impl Picker {
             items,
             query: query.into(),
             selected: 0,
+            completion: false,
         }
     }
 
@@ -172,7 +182,7 @@ impl Picker {
         }
         match key.code {
             KeyCode::Esc => Action::Close,
-            KeyCode::Tab => Action::NextKind,
+            KeyCode::Tab if !self.completion => Action::NextKind,
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 Action::None
@@ -184,7 +194,7 @@ impl Picker {
                     .min(self.matches().len().saturating_sub(1));
                 Action::None
             }
-            KeyCode::Enter => self
+            KeyCode::Enter | KeyCode::Tab => self
                 .matches()
                 .get(self.selected)
                 .map_or(Action::None, |item| Action::Selected(item.value.clone())),
@@ -209,7 +219,7 @@ impl Picker {
         }
     }
 
-    pub fn draw(&self, frame: &mut Frame, parent: Rect, theme: Theme) {
+    pub fn draw(&self, frame: &mut Frame, parent: Rect, theme: Theme, language: Language) {
         if parent.width < 16 || parent.height < 3 {
             return;
         }
@@ -225,12 +235,28 @@ impl Picker {
         frame.render_widget(
             Block::default()
                 .borders(Borders::ALL)
-                .title(if self.kind == Kind::Sessions {
-                    " Sessions · ↑↓ select · Enter resume · Esc close ".to_owned()
+                .title(if self.completion {
+                    language
+                        .text(
+                            " Commands · ↑↓ select · Tab complete · Esc close ",
+                            " 命令索引 · ↑↓选择 · Tab 补全 · Esc 关闭 ",
+                        )
+                        .to_owned()
+                } else if self.kind == Kind::Sessions {
+                    language
+                        .text(
+                            " Sessions · ↑↓ select · Enter resume · Esc close ",
+                            " 会话 · ↑↓选择 · Enter 恢复 · Esc 关闭 ",
+                        )
+                        .to_owned()
                 } else if width < 48 {
-                    format!(" {} ", self.kind.title())
+                    format!(" {} ", self.kind.localized_title(language))
                 } else {
-                    format!(" {} · Tab: switch · Esc: close ", self.kind.title())
+                    format!(
+                        " {} · {} ",
+                        self.kind.localized_title(language),
+                        language.text("Tab: switch · Esc: close", "Tab 切换 · Esc 关闭")
+                    )
                 })
                 .border_style(Style::default().fg(theme.accent))
                 .style(Style::default().bg(theme.input_surface())),
@@ -261,7 +287,7 @@ impl Picker {
         let start = self.selected.saturating_sub(list_height.saturating_sub(1));
         let lines = if matches.is_empty() {
             vec![Line::styled(
-                "  No matches",
+                language.text("  No matches", "  没有匹配项"),
                 Style::default().fg(theme.muted),
             )]
         } else {
@@ -274,7 +300,12 @@ impl Picker {
                     let active = index == self.selected;
                     let marker = if active { "› " } else { "  " };
                     let max_label = inner.width.saturating_sub(2) as usize;
-                    let label = clip_cells(&item.label, max_label);
+                    let name = if self.kind == Kind::Commands {
+                        clip_cells(&item.label, (max_label / 2).min(30))
+                    } else {
+                        item.label.clone()
+                    };
+                    let label = clip_cells(&format!("{name}  — {}", item.hint), max_label);
                     Line::from(vec![
                         Span::styled(marker, Style::default().fg(theme.accent)),
                         Span::styled(

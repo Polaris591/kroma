@@ -1,13 +1,16 @@
 //! Default Kroma terminal UI. A thin host of the same Agent used by the CLI.
 //! Themes are TOML data. No UI plugin runtime, RPC service or second Agent loop.
 mod attachments;
+mod command_catalog;
 mod editor;
 mod links;
 mod logo;
 mod markdown;
 mod picker;
+mod preferences;
 mod theme;
 mod title;
+mod tool_display;
 mod view;
 
 use crate::{
@@ -115,7 +118,10 @@ impl TerminalScreen {
             anyhow::bail!("editor exited unsuccessfully: {status}");
         }
         state.editor.replace_all(&contents?);
-        state.note("Draft updated from external editor");
+        state.note(state.preferences.language.text(
+            "Draft updated from external editor",
+            "已从外部编辑器更新草稿",
+        ));
         Ok(())
     }
 }
@@ -132,34 +138,6 @@ impl Drop for TerminalScreen {
     }
 }
 
-const SLASH_COMMANDS: &[&str] = &[
-    "/help",
-    "/new",
-    "/clear",
-    "/sessions",
-    "/resume",
-    "/continue",
-    "/rename",
-    "/model",
-    "/think",
-    "/theme",
-    "/tools",
-    "/skills",
-    "/usage",
-    "/diff",
-    "/export",
-    "/history",
-    "/fork",
-    "/rewind",
-    "/undo",
-    "/pending",
-    "/queue",
-    "/steer",
-    "/editor",
-    "/exit",
-    "/quit",
-];
-
 enum InputAction {
     None,
     Quit,
@@ -171,7 +149,12 @@ enum InputAction {
 fn attach_text(state: &mut UiState, text: &str, workdir: &std::path::Path, explicit: bool) {
     if explicit || attachments::long_paste(text) {
         if state.attachments.len() >= MAX_ATTACHMENTS {
-            state.note("Maximum 8 attachments");
+            state.note(
+                state
+                    .preferences
+                    .language
+                    .text("Maximum 8 attachments", "最多添加 8 个附件"),
+            );
             return;
         }
         match Attachment::from_log(text, workdir) {
@@ -179,11 +162,17 @@ fn attach_text(state: &mut UiState, text: &str, workdir: &std::path::Path, expli
                 let label = item.inline_label();
                 let detail = item.label();
                 match state.attach(item) {
-                    Ok(()) => state.note(format!("Pasted 【{label}】 · {detail}")),
+                    Ok(()) => state.note(format!(
+                        "{} 【{label}】 · {detail}",
+                        state.preferences.language.text("Pasted", "已粘贴")
+                    )),
                     Err(error) => state.note(error),
                 }
             }
-            Err(error) => state.note(format!("Paste failed: {error:#}")),
+            Err(error) => state.note(format!(
+                "{}: {error:#}",
+                state.preferences.language.text("Paste failed", "粘贴失败")
+            )),
         }
     } else {
         state.editor.paste(text);
@@ -193,7 +182,12 @@ fn attach_text(state: &mut UiState, text: &str, workdir: &std::path::Path, expli
 fn import_path(state: &mut UiState, text: &str, workdir: &std::path::Path) {
     let path = text.trim().trim_matches('"');
     if state.attachments.len() >= MAX_ATTACHMENTS {
-        state.note("Maximum 8 attachments");
+        state.note(
+            state
+                .preferences
+                .language
+                .text("Maximum 8 attachments", "最多添加 8 个附件"),
+        );
         return;
     }
     match Attachment::from_file(std::path::Path::new(path), workdir) {
@@ -201,11 +195,20 @@ fn import_path(state: &mut UiState, text: &str, workdir: &std::path::Path) {
             let label = item.inline_label();
             let detail = item.label();
             match state.attach(item) {
-                Ok(()) => state.note(format!("Attached 【{label}】 · {detail}")),
+                Ok(()) => state.note(format!(
+                    "{} 【{label}】 · {detail}",
+                    state.preferences.language.text("Attached", "已添加")
+                )),
                 Err(error) => state.note(error),
             }
         }
-        Err(error) => state.note(format!("Attachment error: {error:#}")),
+        Err(error) => state.note(format!(
+            "{}: {error:#}",
+            state
+                .preferences
+                .language
+                .text("Attachment error", "附件错误")
+        )),
     }
 }
 
@@ -232,11 +235,22 @@ fn change_thinking(state: &mut UiState, model: &dyn ModelBackend, level: &str) {
             state.thinking = model.reasoning_level();
             save_model_choice(state, model);
             state.note(format!(
-                "Thinking: {} · applies to the next model request",
-                state.thinking.as_deref().unwrap_or(level)
+                "{} {} · {}",
+                state.preferences.language.text("Thinking:", "推理："),
+                state.thinking.as_deref().unwrap_or(level),
+                state
+                    .preferences
+                    .language
+                    .text("applies to the next model request", "下次模型请求生效")
             ));
         }
-        Err(error) => state.note(format!("Thinking unchanged: {error:#}")),
+        Err(error) => state.note(format!(
+            "{}: {error:#}",
+            state
+                .preferences
+                .language
+                .text("Thinking unchanged", "推理设置未更改")
+        )),
     }
 }
 
@@ -253,7 +267,13 @@ fn save_model_choice(state: &mut UiState, model: &dyn ModelBackend) {
                 thinking: model.reasoning_level(),
             },
         ) {
-            state.note(format!("Unable to save session model: {error:#}"));
+            state.note(format!(
+                "{}: {error:#}",
+                state
+                    .preferences
+                    .language
+                    .text("Unable to save session model", "无法保存会话模型")
+            ));
         }
     }
 }
@@ -265,10 +285,7 @@ fn picker_items(
     workdir: &std::path::Path,
 ) -> Result<Vec<PickerItem>> {
     Ok(match kind {
-        PickerKind::Commands => SLASH_COMMANDS
-            .iter()
-            .map(|command| PickerItem::new(*command, *command, "command"))
-            .collect(),
+        PickerKind::Commands => command_catalog::items(state.preferences.language),
         PickerKind::Models => crate::profiles::Profiles::load()?
             .profiles
             .iter()
@@ -314,6 +331,7 @@ fn open_picker(state: &mut UiState, kind: PickerKind, query: &str, workdir: &std
 }
 
 fn picker_event(state: &mut UiState, event: Event, workdir: &std::path::Path) -> InputAction {
+    let completing = state.picker.as_ref().is_some_and(|p| p.completion);
     let action = match event {
         Event::Key(key) if key.kind != KeyEventKind::Release => {
             state.picker.as_mut().unwrap().key(key)
@@ -344,6 +362,14 @@ fn picker_event(state: &mut UiState, event: Event, workdir: &std::path::Path) ->
             open_picker(state, kind, "", workdir);
         }
         PickerAction::Changed => {
+            if completing {
+                let query = state.picker.as_ref().unwrap().query.clone();
+                state.editor.replace_all(&query);
+                if query.is_empty() || query.contains(char::is_whitespace) {
+                    state.picker = None;
+                    return InputAction::None;
+                }
+            }
             if state.picker.as_ref().unwrap().kind == PickerKind::Files {
                 let query = state.picker.as_ref().unwrap().query.clone();
                 let items = picker_items(state, PickerKind::Files, &query, workdir);
@@ -354,6 +380,10 @@ fn picker_event(state: &mut UiState, event: Event, workdir: &std::path::Path) ->
         }
         PickerAction::Selected(value) => {
             let kind = state.picker.take().unwrap().kind;
+            if completing {
+                state.editor.replace_all(&format!("{value} "));
+                return InputAction::None;
+            }
             if kind == PickerKind::Files {
                 if value.ends_with('/') {
                     open_picker(state, kind, value.trim_start_matches('@'), workdir);
@@ -414,10 +444,18 @@ fn key_action(
         KeyCode::F(2) => {
             match state.themes.cycle() {
                 Ok(()) => state.note(format!(
-                    "Theme: {} (saved to ~/.kroma/theme.toml)",
-                    state.themes.preset()
+                    "{} {} · {} ~/.kroma/theme.toml",
+                    state.preferences.language.text("Theme:", "主题："),
+                    state.themes.preset(),
+                    state.preferences.language.text("saved to", "已保存到")
                 )),
-                Err(error) => state.note(format!("Theme change failed: {error:#}")),
+                Err(error) => state.note(format!(
+                    "{}: {error:#}",
+                    state
+                        .preferences
+                        .language
+                        .text("Theme change failed", "主题切换失败")
+                )),
             }
             return InputAction::None;
         }
@@ -440,15 +478,15 @@ fn key_action(
         KeyCode::Tab if !running => {
             let prefix = state.editor.text().trim();
             if prefix.starts_with('/') && !prefix.contains(char::is_whitespace) {
-                let matches = SLASH_COMMANDS
+                let matches = command_catalog::COMMANDS
                     .iter()
+                    .map(|command| command.name)
                     .filter(|command| command.starts_with(prefix))
-                    .copied()
                     .collect::<Vec<_>>();
                 if matches.len() == 1 {
                     state.editor.replace_all(matches[0]);
                 } else if !matches.is_empty() {
-                    state.note(matches.join("  "));
+                    state.open_command_completion(prefix.to_owned());
                 }
                 return InputAction::None;
             }
@@ -472,7 +510,11 @@ fn key_action(
     match state.editor.key(key) {
         EditAction::Submit(text) => {
             state.remember_submitted_attachments();
-            InputAction::Submit(text)
+            InputAction::Submit(if text.starts_with('/') {
+                text.trim().to_owned()
+            } else {
+                text
+            })
         }
         EditAction::None => {
             if matches!(key.code, KeyCode::Up | KeyCode::Down) {
@@ -502,6 +544,12 @@ fn input_event(
     {
         state.dismiss_notification();
     }
+    if running
+        && matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        state.picker = None;
+        return InputAction::Cancel;
+    }
     if state.picker.is_some() {
         return picker_event(state, event, workdir);
     }
@@ -519,19 +567,30 @@ fn input_event(
                 && key.modifiers.contains(KeyModifiers::ALT) =>
         {
             if running {
-                state.note("Attach images/files after this task ends; /queue a follow-up instead");
+                state.note(state.preferences.language.text(
+                    "Attach images/files after this task ends; /queue a follow-up instead",
+                    "请等待任务结束后添加图片或文件；可用 /queue 添加后续任务",
+                ));
                 return InputAction::None;
             }
             match attachments::clipboard(workdir) {
                 Ok(ClipboardPaste::Text(text)) => attach_text(state, &text, workdir, true),
                 Ok(ClipboardPaste::Attach(mut items)) => {
                     if state.attachments.len() + items.len() > MAX_ATTACHMENTS {
-                        state.note("Maximum 8 attachments");
+                        state.note(
+                            state
+                                .preferences
+                                .language
+                                .text("Maximum 8 attachments", "最多添加 8 个附件"),
+                        );
                     } else {
                         for item in items.drain(..) {
                             let label = item.inline_label();
                             match state.attach(item) {
-                                Ok(()) => state.note(format!("Attached 【{label}】")),
+                                Ok(()) => state.note(format!(
+                                    "{} 【{label}】",
+                                    state.preferences.language.text("Attached", "已添加")
+                                )),
                                 Err(error) => state.note(error),
                             }
                         }
@@ -539,7 +598,10 @@ fn input_event(
                 }
                 Err(_) => {
                     state.attach_mode = true;
-                    state.note("Paste a server-side file path, then Enter · Esc cancel");
+                    state.note(state.preferences.language.text(
+                        "Paste a server-side file path, then Enter · Esc cancel",
+                        "粘贴服务器端文件路径后按 Enter；Esc 取消",
+                    ));
                 }
             }
         }
@@ -565,8 +627,19 @@ fn input_event(
                             workdir,
                         );
                     }
-                    Ok(_) => state.note("No matching file"),
-                    Err(error) => state.note(format!("File completion: {error:#}")),
+                    Ok(_) => state.note(
+                        state
+                            .preferences
+                            .language
+                            .text("No matching file", "没有匹配的文件"),
+                    ),
+                    Err(error) => state.note(format!(
+                        "{}: {error:#}",
+                        state
+                            .preferences
+                            .language
+                            .text("File completion", "文件补全")
+                    )),
                 }
                 return InputAction::None;
             }
@@ -598,13 +671,30 @@ fn input_event(
                 }
                 return InputAction::None;
             }
-            return key_action(state, key, running, model);
+            let action = key_action(state, key, running, model);
+            if key.kind != KeyEventKind::Release
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && matches!(key.code, KeyCode::Char(_) | KeyCode::Backspace)
+                && matches!(action, InputAction::None)
+                && !running
+            {
+                let prefix = state.editor.text().to_owned();
+                if prefix.starts_with('/') && !prefix.contains(char::is_whitespace) {
+                    state.open_command_completion(prefix);
+                }
+            }
+            return action;
         }
         Event::Paste(text) => {
             if state.attach_mode {
                 state.attach_path.push_str(&text);
             } else if running && attachments::long_paste(&text) {
-                state.note("Long paste needs an idle task; paste it when this task finishes");
+                state.note(state.preferences.language.text(
+                    "Long paste needs an idle task; paste it when this task finishes",
+                    "请等待当前任务结束后粘贴长文本",
+                ));
             } else if running {
                 state.editor.paste(&text);
             } else {
@@ -624,8 +714,14 @@ fn input_event(
                     if let Some(target) = state.link_at(mouse.column, mouse.row) {
                         let target = state.resolved_link(target);
                         match links::open_target(&target, workdir) {
-                            Ok(()) => state.note(format!("Opened: {target}")),
-                            Err(error) => state.note(format!("Open link: {error:#}")),
+                            Ok(()) => state.note(format!(
+                                "{}: {target}",
+                                state.preferences.language.text("Opened", "已打开")
+                            )),
+                            Err(error) => state.note(format!(
+                                "{}: {error:#}",
+                                state.preferences.language.text("Open link", "打开链接")
+                            )),
                         }
                     }
                 } else {
@@ -642,9 +738,18 @@ fn input_event(
             MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
                 if let Some(selected) = state.selected_text() {
                     match copy_selection(&selected) {
-                        Ok(true) => state.note("Copied selection to desktop clipboard"),
-                        Ok(false) => state.note("OSC 52 copy sent · terminal support required"),
-                        Err(error) => state.note(format!("Copy failed: {error}")),
+                        Ok(true) => state.note(state.preferences.language.text(
+                            "Copied selection to desktop clipboard",
+                            "已将选中内容复制到剪贴板",
+                        )),
+                        Ok(false) => state.note(state.preferences.language.text(
+                            "OSC 52 copy sent · terminal support required",
+                            "已发送 OSC 52 复制请求 · 需要终端支持",
+                        )),
+                        Err(error) => state.note(format!(
+                            "{}: {error}",
+                            state.preferences.language.text("Copy failed", "复制失败")
+                        )),
                     }
                 }
             }
@@ -679,17 +784,75 @@ fn copy_selection(selected: &str) -> Result<bool> {
 }
 
 fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend) -> bool {
+    if input == "/" || input == "/commands" {
+        state.open_command_completion(String::new());
+        return true;
+    }
+    let (name, argument) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    if matches!(name, "/language" | "/layout") {
+        let mut next = state.preferences;
+        let argument = argument.trim();
+        let outcome = if name == "/language" {
+            let choice = if argument.is_empty() {
+                Ok(match next.language {
+                    preferences::Language::En => preferences::Language::Zh,
+                    preferences::Language::Zh => preferences::Language::En,
+                })
+            } else {
+                preferences::Language::parse(argument)
+            };
+            choice.map(|language| next.language = language)
+        } else {
+            match argument {
+                "" => {
+                    next.full_width = !next.full_width;
+                    Ok(())
+                }
+                "wide" => {
+                    next.full_width = true;
+                    Ok(())
+                }
+                "comfortable" => {
+                    next.full_width = false;
+                    Ok(())
+                }
+                _ => Err(anyhow::anyhow!("/layout [comfortable|wide]")),
+            }
+        };
+        match outcome.and_then(|()| next.save_at(state.preferences_path.as_deref())) {
+            Ok(()) => {
+                state.apply_preferences(next);
+                state.note(next.language.text("UI preferences saved", "界面设置已保存"));
+            }
+            Err(error) => state.note(format!(
+                "{}: {error:#}",
+                state
+                    .preferences
+                    .language
+                    .text("Settings unchanged", "设置未更改")
+            )),
+        }
+        return true;
+    }
     if input == "/help" {
-        state.info("HELP", "Enter to send; Shift+Enter or Ctrl+J to add a line.\nPgUp/PgDn or mouse wheel scroll; Ctrl+End returns to latest output.\nCtrl+P searches commands; Tab switches model/session/file categories.\nF2 changes theme; Shift+Tab cycles thinking (or /think high).\nCtx shows last request: ~ estimated, otherwise API-reported input.\nCtrl+O expands tool output; Ctrl+R shows reasoning.\n/history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo\n/theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]\n/queue task · /skills · /tools\nWhile running: write steering text, or /queue task; Ctrl+C cancels.\nCtrl+Q quits when idle.");
+        state.info(state.preferences.language.text("HELP", "帮助"), state.preferences.language.text("Enter to send; Shift+Enter or Ctrl+J to add a line.\nPgUp/PgDn or mouse wheel scroll; Ctrl+End returns to latest output.\nType / or /commands for the command index; Tab completes without executing.
+Ctrl+P searches commands; Tab switches model/session/file categories.\nF2 changes theme; Shift+Tab cycles thinking (or /think high).\nContext shows window use (~ estimated); /usage shows full measurements.
+/language [en|zh] changes UI language; /layout [comfortable|wide] changes reading width.\nCtrl+O expands tool output; Ctrl+R shows reasoning.\n/history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo\n/theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]\n/queue task · /skills · /tools\nWhile running: write steering text, or /queue task; Ctrl+C cancels.\nCtrl+Q quits when idle.", "Enter 发送；Shift+Enter 或 Ctrl+J 换行。
+输入 / 或 /commands 查看命令索引；↑↓选择，Tab 补全，不会直接执行。
+Ctrl+P 搜索命令；搜索面板内 Tab 切换模型、会话、文件。
+PgUp/PgDn 或鼠标滚轮翻页；Ctrl+End 返回最新。
+Ctrl+O 展开原始工具命令与输出；Ctrl+R 展开推理摘要。
+/language [zh|en] 切换界面语言，不更改模型回复语言。
+/layout [comfortable|wide] 切换舒适阅读或全宽；设置会保存。
+F2 切换主题；Shift+Tab 切换推理强度。
+上下文百分比带 ~ 表示估算；未报告不等于 0；/usage 查看详情。
+任务运行中可输入引导指令，或 /queue 添加后续任务；Ctrl+C 取消。
+空闲时 Ctrl+Q 退出。
+"));
         return true;
     }
     if input == "/usage" {
-        state.info(
-            "USAGE",
-            state
-                .usage
-                .report_breakdown(&state.title_usage, &state.apec_usage),
-        );
+        state.info("USAGE", state.usage_report());
         return true;
     }
     if input == "/think"
@@ -700,8 +863,13 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
         let option = input.split_once(' ').map_or("", |(_, rest)| rest.trim());
         if option.is_empty() {
             state.note(format!(
-                "Thinking: {} · Shift+Tab to cycle, /think high to select",
-                model.reasoning_level().as_deref().unwrap_or("n/a")
+                "{} {} · {}",
+                state.preferences.language.text("Thinking:", "推理："),
+                model.reasoning_level().as_deref().unwrap_or("—"),
+                state.preferences.language.text(
+                    "Shift+Tab to cycle, /think high to select",
+                    "Shift+Tab 切换，或输入 /think high"
+                )
             ));
         } else {
             change_thinking(state, model, option);
@@ -713,8 +881,13 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
         let outcome = match choice {
             "" => {
                 state.note(format!(
-                    "Theme: {} · F2 cycles · edit ~/.kroma/theme.toml then /theme reload",
-                    state.themes.preset()
+                    "{} {} · {}",
+                    state.preferences.language.text("Theme:", "主题："),
+                    state.themes.preset(),
+                    state.preferences.language.text(
+                        "F2 cycles · edit ~/.kroma/theme.toml then /theme reload",
+                        "F2 切换 · 修改 ~/.kroma/theme.toml 后输入 /theme reload"
+                    )
                 ));
                 return true;
             }
@@ -722,8 +895,15 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
             name => state.themes.select(name),
         };
         match outcome {
-            Ok(()) => state.note(format!("Theme: {}", state.themes.preset())),
-            Err(error) => state.note(format!("Theme error: {error:#}")),
+            Ok(()) => state.note(format!(
+                "{} {}",
+                state.preferences.language.text("Theme:", "主题："),
+                state.themes.preset()
+            )),
+            Err(error) => state.note(format!(
+                "{}: {error:#}",
+                state.preferences.language.text("Theme error", "主题错误")
+            )),
         }
         return true;
     }
@@ -744,16 +924,30 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
     } else if let Some(queued) = input.strip_prefix("/queue ") {
         match task.queue_followup(queued) {
             Ok(position) => state.note(format!("Follow-up task queued at #{position}")),
-            Err(error) => state.note(format!("Queue error: {error:#}")),
+            Err(error) => state.note(format!(
+                "{}: {error:#}",
+                state.preferences.language.text("Queue error", "队列错误")
+            )),
         }
     } else if input.starts_with('/') && !input.starts_with("/steer ") {
-        state
-            .note("During a task: type steering text, /steer text, or /queue task; Ctrl+C cancels");
+        state.note(state.preferences.language.text(
+            "During a task: type steering text, /steer text, or /queue task; Ctrl+C cancels",
+            "任务执行中可输入引导文字、/steer 指令或 /queue 后续任务；Ctrl+C 取消",
+        ));
     } else {
         let instruction = input.strip_prefix("/steer ").unwrap_or(&input);
         match task.steer(instruction) {
-            Ok(()) => state.note("Steering accepted; applies at next model boundary"),
-            Err(error) => state.note(format!("Steering error: {error:#}")),
+            Ok(()) => state.note(state.preferences.language.text(
+                "Steering accepted; applies at next model boundary",
+                "已接受引导指令，将在下次模型请求时生效",
+            )),
+            Err(error) => state.note(format!(
+                "{}: {error:#}",
+                state
+                    .preferences
+                    .language
+                    .text("Steering error", "引导指令错误")
+            )),
         }
     }
 }
@@ -841,14 +1035,20 @@ async fn execute_task(
     let completed = match result {
         Some(Ok(_)) => true,
         Some(Err(error)) => {
-            let message = format!("Task failed: {error:#}");
+            let message = format!(
+                "{}: {error:#}",
+                state.preferences.language.text("Task failed", "任务失败")
+            );
             state.note(&message);
             task_notice = Some(("ERROR", message));
             false
         }
         None => {
             agent.cancel()?;
-            let message = "Task cancelled; unconfirmed commands are not replayed";
+            let message = state.preferences.language.text(
+                "Task cancelled; unconfirmed commands are not replayed",
+                "任务已取消；结果未确认的命令不会自动重跑",
+            );
             state.note(message);
             task_notice = Some(("CANCELLED", message.to_owned()));
             false
@@ -857,8 +1057,22 @@ async fn execute_task(
     // The transcript, not live UI events, is authoritative after completion.
     // Do not discard the final model's usage if it was queued just before
     // the future completed; that made the footer randomly undercount tokens.
+    let reading_position = state.reading_position();
     drain_final_usage(state, rx);
+    // The drain keeps only measurement events, so the turn duration is taken
+    // here instead of from a TaskFinished event that may never arrive.
+    state.finish_task();
     state.load_history(agent.messages());
+    state.task_outcome = Some(if completed {
+        view::TaskOutcome::Completed
+    } else if task_notice
+        .as_ref()
+        .is_some_and(|(label, _)| *label == "CANCELLED")
+    {
+        view::TaskOutcome::Cancelled
+    } else {
+        view::TaskOutcome::Failed
+    });
     state.session = agent.session_id().to_owned();
     state.refresh_session_title();
     if let Some((label, message)) = task_notice {
@@ -866,6 +1080,7 @@ async fn execute_task(
         // still reachable by scrolling after the footer is dismissed.
         state.info(label, message);
     }
+    state.restore_reading_position(reading_position);
     screen.draw(state)?;
     Ok(completed)
 }
@@ -895,7 +1110,10 @@ async fn execute_local_shell(
     workdir: &std::path::Path,
     archive: &std::path::Path,
 ) -> Result<()> {
-    state.note("Shell running · Ctrl+C / Esc cancels");
+    state.note(state.preferences.language.text(
+        "Shell running · Ctrl+C / Esc cancels",
+        "正在执行 Shell · Ctrl+C / Esc 取消",
+    ));
     screen.draw(state)?;
     let result = {
         let mut future = Box::pin(crate::shell::execute_for_session(command, workdir, archive));
@@ -917,7 +1135,10 @@ async fn execute_local_shell(
     match result {
         Some(Ok(result)) => state.info("SHELL", serde_json::to_string_pretty(&result)?),
         Some(Err(error)) => state.note(format!("Shell: {error:#}")),
-        None => state.note("Shell cancelled; completed side effects are not undone"),
+        None => state.note(state.preferences.language.text(
+            "Shell cancelled; completed side effects are not undone",
+            "Shell 已取消；已经产生的操作不会撤销",
+        )),
     }
     screen.draw(state)?;
     Ok(())
@@ -1010,6 +1231,14 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         themes,
         agent.messages(),
     );
+    state.preferences_path = preferences::Preferences::path();
+    match preferences::Preferences::load_at(state.preferences_path.as_deref()) {
+        Ok(prefs) => state.apply_preferences(prefs),
+        Err(error) => state.note(format!(
+            "{}: {error:#}",
+            state.preferences.language.text("UI settings", "界面设置")
+        )),
+    }
     state.model_catalog = Some(catalog);
     state.refresh_session_title();
     state.model_profile = initial_profile;
@@ -1065,7 +1294,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                 Some(Ok(Event::Key(key))) if key.code==KeyCode::Char('g')
                     && key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Err(error)=screen.edit_prompt(&mut state) {
-                        state.note(format!("Editor: {error:#}"));
+                        state.note(format!("{}: {error:#}", state.preferences.language.text("Editor", "编辑器")));
                     }
                     InputAction::None
                 },
@@ -1086,13 +1315,19 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
             InputAction::Quit => break,
             InputAction::Edit => {
                 if let Err(error) = screen.edit_prompt(&mut state) {
-                    state.note(format!("Editor: {error:#}"));
+                    state.note(format!(
+                        "{}: {error:#}",
+                        state.preferences.language.text("Editor", "编辑器")
+                    ));
                 }
             }
             InputAction::Submit(text) => {
                 if text == "/editor" {
                     if let Err(error) = screen.edit_prompt(&mut state) {
-                        state.note(format!("Editor: {error:#}"));
+                        state.note(format!(
+                            "{}: {error:#}",
+                            state.preferences.language.text("Editor", "编辑器")
+                        ));
                     }
                     continue;
                 }
@@ -1108,7 +1343,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     // Do not create an empty archived session. The next
                     // actual user request allocates the session ID.
                     if let Err(error) = agent.enter_welcome() {
-                        state.note(format!("Unable to return to welcome: {error:#}"));
+                        state.note(format!(
+                            "{}: {error:#}",
+                            state
+                                .preferences
+                                .language
+                                .text("Unable to return to welcome", "无法返回欢迎页")
+                        ));
                         continue;
                     }
                     state.discard_draft();
@@ -1139,18 +1380,32 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                     state
                                         .note(format!("Model: {} · profile {name}", profile.model));
                                 }
-                                Err(error) => state.note(format!("Model switch: {error:#}")),
+                                Err(error) => state.note(format!(
+                                    "{}: {error:#}",
+                                    state.preferences.language.text("Model switch", "切换模型")
+                                )),
                             },
-                            Err(error) => state.note(format!("Model switch: {error:#}")),
+                            Err(error) => state.note(format!(
+                                "{}: {error:#}",
+                                state.preferences.language.text("Model switch", "切换模型")
+                            )),
                         },
-                        Err(error) => state.note(format!("Model: {error:#}")),
+                        Err(error) => state.note(format!(
+                            "{}: {error:#}",
+                            state.preferences.language.text("Model", "模型")
+                        )),
                     }
                     continue;
                 }
                 if let Some(command) = text.strip_prefix('!') {
                     let command = command.trim();
                     if command.is_empty() {
-                        state.note("Usage: !<shell command>");
+                        state.note(
+                            state
+                                .preferences
+                                .language
+                                .text("Usage: !<shell command>", "用法：!<Shell 命令>"),
+                        );
                         continue;
                     }
                     execute_local_shell(
@@ -1167,7 +1422,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                 let text = match crate::convenience::file_reference(&text, &workdir) {
                     Ok(rewritten) => rewritten,
                     Err(error) => {
-                        state.note(format!("File reference: {error:#}"));
+                        state.note(format!(
+                            "{}: {error:#}",
+                            state
+                                .preferences
+                                .language
+                                .text("File reference", "文件引用")
+                        ));
                         continue;
                     }
                 };
@@ -1197,13 +1458,22 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                                         state.model_profile =
                                                             Some(choice.profile.clone());
                                                     }
-                                                    Err(error) => state
-                                                        .note(format!("Session model: {error:#}")),
+                                                    Err(error) => state.note(format!(
+                                                        "{}: {error:#}",
+                                                        state
+                                                            .preferences
+                                                            .language
+                                                            .text("Session model", "会话模型")
+                                                    )),
                                                 }
                                             }
-                                            Err(error) => {
-                                                state.note(format!("Session model: {error:#}"))
-                                            }
+                                            Err(error) => state.note(format!(
+                                                "{}: {error:#}",
+                                                state
+                                                    .preferences
+                                                    .language
+                                                    .text("Session model", "会话模型")
+                                            )),
                                         }
                                     } else {
                                         state.note(format!(
@@ -1250,6 +1520,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                         }
                     }
                     Ok(None) => {
+                        if text.starts_with('/') {
+                            state.note(state.preferences.language.text(
+                                "Unknown command · type / for the index",
+                                "未知命令 · 输入 / 查看命令索引",
+                            ));
+                            continue;
+                        }
                         let first_prompt = if state.is_home() {
                             match agent.new_session() {
                                 Ok(_) => {
@@ -1262,7 +1539,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                     Some(text.clone())
                                 }
                                 Err(error) => {
-                                    state.note(format!("Unable to create session: {error:#}"));
+                                    state.note(format!(
+                                        "{}: {error:#}",
+                                        state
+                                            .preferences
+                                            .language
+                                            .text("Unable to create session", "无法创建会话")
+                                    ));
                                     continue;
                                 }
                             }
@@ -1308,7 +1591,10 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             }
                         }
                     }
-                    Err(error) => state.note(format!("Command error: {error:#}")),
+                    Err(error) => state.note(format!(
+                        "{}: {error:#}",
+                        state.preferences.language.text("Command error", "命令错误")
+                    )),
                 }
             }
             _ => {}
@@ -1787,5 +2073,139 @@ mod tests {
         }
         std::fs::remove_file(item["path"].as_str().unwrap()).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn slash_index_tab_completes_without_executing_and_arguments_can_be_typed() {
+        let (mut ui, model) = setup();
+        let dir = std::path::Path::new(".");
+        for ch in "/language".chars() {
+            let action = input_event(
+                &mut ui,
+                Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                false,
+                &model,
+                dir,
+            );
+            assert!(matches!(action, InputAction::None));
+        }
+        assert!(ui.picker.as_ref().unwrap().completion);
+        let action = input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            false,
+            &model,
+            dir,
+        );
+        assert!(
+            matches!(action, InputAction::None),
+            "Tab must never execute a command"
+        );
+        assert_eq!(ui.editor.text(), "/language ");
+        assert!(ui.picker.is_none());
+        for ch in "zh".chars() {
+            input_event(
+                &mut ui,
+                Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                false,
+                &model,
+                dir,
+            );
+        }
+        let action = input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            false,
+            &model,
+            dir,
+        );
+        assert!(matches!(action, InputAction::Submit(ref text) if text == "/language zh"));
+        // Typing a space also dismisses completion, without eating the argument.
+        for ch in "/layout wide".chars() {
+            input_event(
+                &mut ui,
+                Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                false,
+                &model,
+                dir,
+            );
+        }
+        assert!(ui.picker.is_none());
+        assert_eq!(ui.editor.text(), "/layout wide");
+    }
+
+    #[test]
+    fn completion_escape_preserves_draft_and_ctrl_c_still_cancels_active_task() {
+        let (mut ui, model) = setup();
+        let dir = std::path::Path::new(".");
+        ui.editor.replace_all("/cle");
+        ui.open_command_completion("/cle".into());
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            false,
+            &model,
+            dir,
+        );
+        assert_eq!(ui.editor.text(), "/cle");
+        assert!(ui.picker.is_none());
+        ui.open_command_completion("/cle".into());
+        let action = input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            false,
+            &model,
+            dir,
+        );
+        assert!(matches!(action, InputAction::None));
+        assert_eq!(
+            ui.editor.text(),
+            "/clear ",
+            "Enter selects; a second Enter confirms execution"
+        );
+        ui.open_command_completion(String::new());
+        let action = input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            true,
+            &model,
+            dir,
+        );
+        assert!(matches!(action, InputAction::Cancel));
+        assert!(ui.picker.is_none());
+    }
+
+    #[test]
+    fn language_and_layout_commands_save_and_bad_settings_preserve_current_state() -> Result<()> {
+        let (mut ui, model) = setup();
+        let root = std::env::temp_dir().join(format!(
+            "kroma-ui-command-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let path = root.join("ui.toml");
+        ui.preferences_path = Some(path.clone());
+        assert!(show_local_command(&mut ui, "/language zh", &model));
+        assert_eq!(ui.preferences.language, preferences::Language::Zh);
+        assert!(ui.notification.contains("已保存"));
+        assert!(show_local_command(&mut ui, "/layout wide", &model));
+        let saved = preferences::Preferences::load_at(Some(&path))?;
+        assert_eq!(saved, ui.preferences);
+        assert!(saved.full_width);
+        assert!(show_local_command(&mut ui, "/language fr", &model));
+        assert_eq!(ui.preferences, saved);
+        assert_eq!(preferences::Preferences::load_at(Some(&path))?, saved);
+        assert!(show_local_command(&mut ui, "/help", &model));
+        assert!(show_local_command(&mut ui, "/language", &model));
+        assert_eq!(ui.preferences.language, preferences::Language::En);
+        // A failed write must not leave the displayed language ahead of the persisted one.
+        ui.preferences_path = Some(root.clone()); // cannot atomically replace an existing directory
+        assert!(show_local_command(&mut ui, "/language zh", &model));
+        assert_eq!(ui.preferences.language, preferences::Language::En);
+        assert!(ui.notification.contains("Settings unchanged"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

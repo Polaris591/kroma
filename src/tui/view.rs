@@ -53,7 +53,15 @@ fn ascii_word(ch: char) -> bool {
 
 /// Styled lines wrapped to display cells. Avoid Ratatui's unstable
 /// Paragraph::line_count, while keeping scroll position exact.
+///
+/// The width policy lives in `reading_area`: this function only wraps, so a
+/// line never has to be measured against two different limits.
+#[cfg(test)]
 fn wrap_history(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize>) {
+    wrap_document(text, width)
+}
+
+fn wrap_document(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize>) {
     let width = width.max(1);
     let mut rows = Vec::new();
     // Keep a stable source-line identity for every visual row. The absolute
@@ -215,10 +223,15 @@ fn markdown_link_regions(wrapped: &Text<'_>, targets: &[(String, String)]) -> Ve
     regions
 }
 
-/// Fill the available terminal width. Long tool commands, Markdown tables,
-/// code and diffs are workspace content, not newspaper paragraphs: the old
-/// 100-column limit wasted most of a maximized terminal window.
-fn reading_area(area: Rect) -> Rect {
+/// The reading column.
+///
+/// `/layout wide` fills the terminal. The default comfortable layout centres a
+/// column of prose width: a text block glued to the left edge of a wide
+/// terminal leaves one large empty margin, and long paragraphs are harder to
+/// follow when the line has no visible right boundary. Centring keeps both
+/// margins equal without lengthening the line; narrow terminals still use
+/// their full width.
+fn reading_area(area: Rect, full_width: bool) -> Rect {
     let margin = if area.width >= 100 {
         2
     } else if area.width >= 55 {
@@ -226,12 +239,26 @@ fn reading_area(area: Rect) -> Rect {
     } else {
         0
     };
-    let width = area.width.saturating_sub(margin * 2);
-    Rect::new(area.x + margin, area.y, width, area.height)
+    let available = area.width.saturating_sub(margin * 2);
+    let width = if full_width {
+        available
+    } else {
+        (super::tool_display::prose_width(usize::from(available)) as u16).min(available)
+    };
+    Rect::new(
+        area.x
+            .saturating_add(margin)
+            .saturating_add(available.saturating_sub(width) / 2),
+        area.y,
+        width,
+        area.height,
+    )
 }
 
 fn body_line(line: Line<'static>) -> Line<'static> {
-    let mut spans = vec![Span::raw("   ")];
+    // Bodies hang under the role label, so every message shares one text
+    // column instead of starting a cell left of its own title.
+    let mut spans = vec![Span::raw("     ")];
     spans.extend(line.spans);
     Line::from(spans)
 }
@@ -252,6 +279,8 @@ struct Entry {
     details: String,
     call_id: Option<String>,
     failed: bool,
+    started: Option<Instant>,
+    duration: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -267,6 +296,7 @@ struct HistoryCache {
     visible: usize,
     tools_expanded: bool,
     reasoning_expanded: bool,
+    has_activity_tail: bool,
     theme: Theme,
     text: Text<'static>,
     source_lines: Vec<usize>,
@@ -285,6 +315,8 @@ impl Entry {
             details: String::new(),
             call_id: None,
             failed: false,
+            started: None,
+            duration: None,
         }
     }
 }
@@ -401,7 +433,7 @@ impl crate::events::EventSink for UiSink {
                 ..
             } => Some(UiEvent::ToolFinished {
                 id: id.to_owned(),
-                result: short_tool_result(result),
+                result: tool_result_details(result),
                 failed: is_error,
             }),
             RuntimeEvent::ToolOutput { id, stream, chunk } => Some(UiEvent::ToolOutput {
@@ -459,7 +491,7 @@ fn compact_line(value: &str, width: usize) -> String {
 }
 
 /// Find the failure's useful diagnostic, not its full tool-result envelope.
-/// Stored and live tool results already use the same short_tool_result format.
+/// Stored and live tool results already use the same tool_result_details format.
 fn failure_summary(details: &str) -> String {
     let lines = details
         .lines()
@@ -500,22 +532,22 @@ fn failure_summary(details: &str) -> String {
 fn tool_arguments(name: &str, raw: &str) -> String {
     let value: Value = match serde_json::from_str(raw) {
         Ok(value) => value,
-        Err(_) => return excerpt(raw, 240),
+        Err(_) => return raw.to_owned(),
     };
     if name == "shell" {
         return value["command"]
             .as_str()
-            .map_or_else(|| excerpt(raw, 240), |s| excerpt(s, 240));
+            .map_or_else(|| raw.to_owned(), str::to_owned);
     }
-    excerpt(&value.to_string(), 240)
+    value.to_string()
 }
 
-fn short_tool_result(raw: &str) -> String {
+fn tool_result_details(raw: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
-        return excerpt(raw, 1200);
+        return raw.to_owned();
     };
     if let Some(error) = value.get("error") {
-        return excerpt(error.as_str().unwrap_or(raw), 1200);
+        return error.as_str().unwrap_or(raw).to_owned();
     }
     let mut lines = Vec::new();
     if let Some(code) = value.get("exit_code") {
@@ -532,19 +564,42 @@ fn short_tool_result(raw: &str) -> String {
         }
     }
     if let Some(content) = value.get("content").and_then(Value::as_array) {
-        for item in content.iter().take(4) {
+        for item in content.iter() {
             if let Some(text) = item.get("text").and_then(Value::as_str) {
                 lines.push(text.to_owned());
             }
         }
     }
-    if lines.is_empty() {
-        return excerpt(raw, 1200);
+    for key in ["stdout_file", "stderr_file"] {
+        if let Some(path) = value.get(key).and_then(Value::as_str) {
+            lines.push(format!("{key}: {path}"));
+        }
     }
-    excerpt(&lines.join("\n"), 1200)
+    if lines.is_empty() {
+        return raw.to_owned();
+    }
+    lines.join(
+        "
+",
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum TaskOutcome {
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 pub struct UiState {
+    pub preferences: super::preferences::Preferences,
+    pub preferences_path: Option<std::path::PathBuf>,
+    pub task_outcome: Option<TaskOutcome>,
+    /// Wall-clock start of the current turn; the completion row reports
+    /// how long the turn took instead of a generic acknowledgement.
+    task_started: Option<Instant>,
+    task_elapsed: Option<Duration>,
+    unread_updates: usize,
     pub editor: Editor,
     pub picker: Option<Picker>,
     pub usage: crate::usage::UsageMeter,
@@ -609,6 +664,12 @@ const BRAND_PULSE_FRAMES: usize = 6;
 impl UiState {
     pub fn new(model: String, session: String, themes: ThemeStore, messages: &[Message]) -> Self {
         let mut result = Self {
+            preferences: super::preferences::Preferences::default(),
+            preferences_path: None,
+            task_outcome: None,
+            task_started: None,
+            task_elapsed: None,
+            unread_updates: 0,
             editor: Editor::default(),
             picker: None,
             usage: crate::usage::UsageMeter::default(),
@@ -667,8 +728,227 @@ impl UiState {
         result
     }
 
+    pub fn reading_position(&self) -> Option<(usize, usize)> {
+        self.scroll_anchor.map(|row| (row, self.unread_updates))
+    }
+
+    pub fn restore_reading_position(&mut self, position: Option<(usize, usize)>) {
+        if let Some((row, unread)) = position {
+            self.scroll_anchor = Some(row);
+            self.unread_updates = unread.saturating_add(1);
+        }
+    }
+
+    pub fn apply_preferences(&mut self, preferences: super::preferences::Preferences) {
+        self.preferences = preferences;
+        self.history_cache = None;
+        self.selection_start = None;
+        self.selection_end = None;
+        self.mouse_release();
+    }
+
+    pub fn open_command_completion(&mut self, query: String) {
+        let mut picker = Picker::new(
+            super::picker::Kind::Commands,
+            super::command_catalog::items(self.preferences.language),
+            query,
+        );
+        picker.completion = true;
+        self.picker = Some(picker);
+    }
+
+    fn task_status(&self) -> String {
+        let language = self.preferences.language;
+        if self.running {
+            return self.activity_status();
+        }
+        // Report how long the turn took. A bare acknowledgement costs a row
+        // without telling the reader anything the transcript does not.
+        let elapsed = self
+            .task_elapsed
+            .map(|duration| format!(" · {:.1}s", duration.as_secs_f64()))
+            .unwrap_or_default();
+        match self.task_outcome {
+            Some(TaskOutcome::Completed) => {
+                format!("{}{elapsed}", language.text("Completed", "已完成"))
+            }
+            Some(TaskOutcome::Failed) => format!(
+                "{}{elapsed}",
+                language.text("Task failed · see error above", "任务失败 · 请查看上方错误")
+            ),
+            Some(TaskOutcome::Cancelled) => format!(
+                "{}{elapsed}",
+                language.text(
+                    "Cancelled · side effects are not undone",
+                    "已取消 · 已产生的操作不会撤销"
+                )
+            ),
+            None => language.text("Ready", "就绪").into(),
+        }
+    }
+
+    fn navigation_status(&self) -> String {
+        let language = self.preferences.language;
+        let latest = language.text(
+            "Browsing history · Ctrl+End: latest",
+            "正在浏览历史 · Ctrl+End 返回最新",
+        );
+        if self.unread_updates > 0 {
+            format!(
+                "{latest} · {} {}",
+                self.unread_updates,
+                language.text("new updates", "条新动态")
+            )
+        } else {
+            latest.into()
+        }
+    }
+
+    pub fn usage_report(&self) -> String {
+        if self.preferences.language == super::preferences::Language::En {
+            return format!(
+                "{}\n{}",
+                self.context_display(),
+                self.usage
+                    .report_breakdown(&self.title_usage, &self.apec_usage)
+            );
+        }
+        let context = self.context_display().replace("Ctx", "上下文");
+        let mut rows = vec![context, "本次进程的用量（不含启动前的历史请求）：".into()];
+        for (label, meter) in [
+            ("编程模型", &self.usage),
+            ("自动标题", &self.title_usage),
+            ("APEC 摘要", &self.apec_usage),
+        ] {
+            rows.push(
+                meter
+                    .summary_line(label)
+                    .replace("call(s)", "次请求")
+                    .replace("In ", "输入 ")
+                    .replace("Out ", "输出 ")
+                    .replace("Cache read ", "缓存读取 ")
+                    .replace("Hit ", "命中率 ")
+                    .replace("Reasoning ", "推理 "),
+            );
+        }
+        rows.push("缓存读取属于输入的一部分；推理属于输出的一部分。".into());
+        rows.push("— 表示未报告；≥ 表示部分请求未报告；~ 表示估算或部分测量。".into());
+        rows.push("APEC 仅统计已完成的摘要；未完成或失败的请求可能产生未报告的费用。".into());
+        rows.join("\n")
+    }
+
+    /// The three measurement widths, longest first. Kept separate so callers
+    /// can ask whether a variant fits *whole* before spending the row on it.
+    fn usage_variants(&self) -> [String; 3] {
+        use crate::usage::compact_tokens;
+        let language = self.preferences.language;
+        let last = self.usage.last_request();
+        let unknown = language.text("unreported", "未报告");
+        let count =
+            |value: Option<u64>| value.map(compact_tokens).unwrap_or_else(|| unknown.into());
+        let input = count(last.and_then(|usage| usage.input));
+        let output = count(last.and_then(|usage| usage.output));
+        let cache = match (last.and_then(|u| u.input), last.and_then(|u| u.cached)) {
+            (Some(input), Some(cached)) if input > 0 && cached <= input => {
+                format!("{:.0}%", cached as f64 * 100.0 / input as f64)
+            }
+            _ => unknown.into(),
+        };
+        [
+            format!(
+                "{} {input} / {} {output} · {} {cache}",
+                language.text("Last input", "上次输入"),
+                language.text("output", "输出"),
+                language.text("Cache", "缓存命中")
+            ),
+            format!(
+                "{} {input} / {output} · {} {cache}",
+                language.text("In/out", "输入/输出"),
+                language.text("Cache", "缓存")
+            ),
+            format!("{} {cache}", language.text("Cache", "缓存")),
+        ]
+    }
+
+    /// A measurement string that fits `width` without truncation, if one exists.
+    #[cfg(test)]
+    fn usage_status_fitting(&self, width: usize) -> Option<String> {
+        self.usage_variants()
+            .into_iter()
+            .find(|value| UnicodeWidthStr::width(value.as_str()) <= width)
+    }
+
+    #[cfg(test)]
+    fn usage_status(&self, width: usize) -> String {
+        self.usage_status_fitting(width)
+            .unwrap_or_else(|| ellipsize_cells(&self.usage_variants()[2], width))
+    }
+    /// One quiet footer. Usage and cache readings are secondary to the
+    /// conversation, so fit them *whole* rather than truncating numbers or
+    /// repeating command hints on every frame. /usage retains the breakdown.
+    fn footer_line(&self, colors: Theme, width: usize) -> Line<'static> {
+        let language = self.preferences.language;
+        let context = self
+            .compact_context()
+            .replace("Ctx", language.text("Context", "上下文"));
+        let thinking = format!(
+            "{} {}",
+            language.text("Think", "思考"),
+            self.thinking.as_deref().unwrap_or("—")
+        );
+        let metadata = format!("{} · {thinking} · {context}", self.model);
+        let compact_metadata = format!("{} · {context}", self.model);
+        let fallback = format!("{thinking} · {context}");
+        let mut candidates = Vec::new();
+        if self.usage.calls > 0 {
+            let variants = self.usage_variants();
+            // On wide terminals show input/output and cached percentage.
+            // On narrower ones keep model, context and cache before detail.
+            candidates.push(format!("{metadata} · {}", variants[1]));
+            candidates.push(format!("{metadata} · {}", variants[2]));
+            candidates.push(format!("{compact_metadata} · {}", variants[2]));
+            candidates.push(format!("{context} · {}", variants[2]));
+        } else {
+            candidates.push(metadata);
+            candidates.push(fallback);
+            candidates.push(compact_metadata);
+        }
+        // Very narrow terminal: preserve context first, and report cache as
+        // unknown instead of inventing zero when it has not been measured.
+        candidates.push(context);
+        let chosen = candidates
+            .into_iter()
+            .find(|candidate| UnicodeWidthStr::width(candidate.as_str()) <= width)
+            .unwrap_or_else(|| ellipsize_cells(&self.footer_status(width), width));
+        let mut spans = Vec::new();
+        for (index, section) in chosen.split(" · ").enumerate() {
+            if index > 0 {
+                spans.push(Span::styled(" · ", Style::default().fg(colors.muted)));
+            }
+            let ink = if section.starts_with("Cache ") || section.starts_with("缓存 ") {
+                colors.accent
+            } else {
+                colors.muted
+            };
+            spans.push(Span::styled(section.to_owned(), Style::default().fg(ink)));
+        }
+        Line::from(spans)
+    }
+
+    /// Record the turn's wall-clock duration.
+    ///
+    /// The completion row must not depend on a `TaskFinished` event: the final
+    /// drain keeps only measurement events, so the terminal event can be
+    /// dropped and the row would silently lose its duration.
+    pub fn finish_task(&mut self) {
+        self.running = false;
+        self.task_elapsed = self.task_started.take().map(|start| start.elapsed());
+    }
+
     pub fn add_user(&mut self, text: &str) {
         self.home = false;
+        self.task_outcome = None;
+        self.unread_updates = 0;
         self.dismiss_notification();
         self.mouse_release();
         self.selection_start = None;
@@ -681,6 +961,8 @@ impl UiState {
             .collect::<Vec<_>>();
         let summary = super::attachments::display_message(text, Some(&items));
         self.entries.push(Entry::user(summary));
+        self.task_started = Some(Instant::now());
+        self.task_elapsed = None;
         self.active_assistant = None;
         self.scroll_from_bottom = 0;
         self.scroll_anchor = None;
@@ -903,19 +1185,25 @@ impl UiState {
         match (self.context_input, self.context_window) {
             (Some(input), window) if window > 0 => {
                 let percent = Self::context_percent(input, window as u64);
-                format!("Ctx {percent}%")
+                format!(
+                    "Ctx {}{percent}%",
+                    if self.context_estimated { "~" } else { "" }
+                )
             }
             _ => "Ctx —".into(),
         }
     }
 
     fn footer_status(&self, width: usize) -> String {
-        let think = format!("Think {}", self.thinking.as_deref().unwrap_or("n/a"));
-        let context = if width >= 60 {
-            self.context_display()
-        } else {
-            self.compact_context()
-        };
+        let language = self.preferences.language;
+        let think = format!(
+            "{} {}",
+            language.text("Reasoning", "推理"),
+            self.thinking.as_deref().unwrap_or("—")
+        );
+        let context = self
+            .compact_context()
+            .replace("Ctx", language.text("Context", "上下文"));
         let separator = " · ";
         let metadata_width = UnicodeWidthStr::width(think.as_str())
             + UnicodeWidthStr::width(context.as_str())
@@ -926,19 +1214,23 @@ impl UiState {
         }
         if width >= 30 {
             let level = self.thinking.as_deref().unwrap_or("—");
-            let context = self.compact_context();
+            let context = self
+                .compact_context()
+                .replace("Ctx", language.text("Context", "上下文"));
             let right = format!("{level} · {context}");
             let available = width.saturating_sub(UnicodeWidthStr::width(right.as_str()) + 3);
             return format!("{} · {right}", ellipsize_cells(&self.model, available));
         }
-        ellipsize_cells(
-            &format!("{} · {}", self.model, self.compact_context()),
-            width,
-        )
+        ellipsize_cells(&format!("{} · {}", self.model, context), width)
     }
 
     pub fn note(&mut self, text: impl Into<String>) {
         self.notification = text.into();
+        if self.preferences.language == super::preferences::Language::Zh {
+            self.notification = self
+                .notification
+                .replace("【Clipboard image】", "【剪贴板图片】");
+        }
     }
 
     fn set_phase(&mut self, phase: &'static str) {
@@ -961,14 +1253,17 @@ impl UiState {
 
     fn activity_status(&self) -> String {
         if !self.running {
-            return "Ready".into();
+            return self.preferences.language.text("Ready", "就绪").into();
         }
         let phase = match self.phase {
-            "thinking" => "Thinking",
-            "waiting" => "Connecting",
-            "streaming" => "Writing",
-            "tool" => "Running tool",
-            _ => "Preparing",
+            "thinking" => self.preferences.language.text("Thinking", "正在思考"),
+            "waiting" => self.preferences.language.text("Connecting", "正在连接模型"),
+            "streaming" => self.preferences.language.text("Writing", "正在生成回复"),
+            "tool" => self
+                .preferences
+                .language
+                .text("Running tool", "正在执行工具"),
+            _ => self.preferences.language.text("Preparing", "正在准备"),
         };
         let elapsed = self
             .phase_since
@@ -978,7 +1273,18 @@ impl UiState {
 
     fn activity_line(&self, colors: Theme) -> Line<'static> {
         if !self.running {
-            return Line::from(Span::styled("Ready", Style::default().fg(colors.muted)));
+            // The outcome marker matches the transcript markers above, so a
+            // finished turn is recognisable without reading the words.
+            let (marker, color) = match self.task_outcome {
+                Some(TaskOutcome::Completed) => ("✓", colors.user),
+                Some(TaskOutcome::Failed) => ("✕", colors.error),
+                Some(TaskOutcome::Cancelled) => ("⊘", colors.muted),
+                None => ("·", colors.muted),
+            };
+            return Line::from(vec![
+                Span::styled(format!("{marker}  "), Style::default().fg(color)),
+                Span::styled(self.task_status(), Style::default().fg(colors.muted)),
+            ]);
         }
         let mut spans = Vec::with_capacity(5);
         for (index, ink) in [colors.accent, colors.text, colors.tool]
@@ -1043,19 +1349,34 @@ impl UiState {
 
     pub(super) fn session_label(&self) -> &str {
         if self.home {
-            return "new conversation";
+            return self.preferences.language.text("new conversation", "新会话");
         }
         self.session_title
             .as_deref()
             .unwrap_or(if self.session == "default" {
                 "default"
             } else {
-                "untitled session"
+                self.preferences
+                    .language
+                    .text("untitled session", "未命名会话")
             })
     }
 
     /// Host command output is transient UI content, not part of model history.
     /// Put long lists in the scrollable transcript instead of the tiny footer.
+    fn info_title<'a>(&self, title: &'a str) -> &'a str {
+        let language = self.preferences.language;
+        match title {
+            "HELP" => language.text(title, "帮助"),
+            "USAGE" => language.text(title, "用量"),
+            "COMMAND" => language.text(title, "命令结果"),
+            "QUEUE" => language.text(title, "任务队列"),
+            "ERROR" => language.text(title, "错误"),
+            "CANCELLED" => language.text(title, "已取消"),
+            _ => title,
+        }
+    }
+
     pub fn info(&mut self, title: &str, content: impl Into<String>) {
         self.history_cache = None;
         self.entries.push(Entry::new(Kind::Info, title, content));
@@ -1066,11 +1387,18 @@ impl UiState {
     }
 
     pub fn load_history(&mut self, messages: &[Message]) {
+        self.task_outcome = None;
+        self.unread_updates = 0;
         self.home = false;
         self.history_cache = None;
         self.mouse_release();
         self.selection_start = None;
         self.selection_end = None;
+        let durations: HashMap<_, _> = self
+            .entries
+            .iter()
+            .filter_map(|entry| Some((entry.call_id.clone()?, (entry.started, entry.duration))))
+            .collect();
         self.entries.clear();
         self.active_assistant = None;
         self.active_reasoning = None;
@@ -1108,6 +1436,10 @@ impl UiState {
                             tool_arguments(&call.function.name, &call.function.arguments),
                         );
                         entry.call_id = Some(call.id.clone());
+                        if let Some((started, duration)) = durations.get(&call.id) {
+                            entry.started = *started;
+                            entry.duration = *duration;
+                        }
                         tool_entries.insert(call.id.clone(), self.entries.len());
                         self.entries.push(entry);
                     }
@@ -1120,7 +1452,7 @@ impl UiState {
                         .and_then(|index| self.entries.get_mut(*index));
                     let result = message.content.as_deref().unwrap_or("");
                     if let Some(entry) = found {
-                        entry.details = short_tool_result(result);
+                        entry.details = tool_result_details(result);
                         entry.failed = message.tool_failed();
                         entry.title = entry.title.replace(
                             " · running",
@@ -1132,7 +1464,7 @@ impl UiState {
                         );
                     } else {
                         let mut entry = Entry::new(Kind::Tool, "tool result", "");
-                        entry.details = short_tool_result(result);
+                        entry.details = tool_result_details(result);
                         self.entries.push(entry);
                     }
                 }
@@ -1152,6 +1484,9 @@ impl UiState {
     /// Keep the previous Agent session untouched until the first real send.
     /// Only the UI enters the transient welcome state.
     pub fn enter_home(&mut self) {
+        self.task_outcome = None;
+        self.unread_updates = 0;
+        self.picker = None;
         self.home = true;
         self.entries.clear();
         self.session_title = None;
@@ -1167,6 +1502,17 @@ impl UiState {
     }
 
     pub fn event(&mut self, event: UiEvent) {
+        if self.scroll_anchor.is_some()
+            && matches!(
+                &event,
+                UiEvent::Text(_)
+                    | UiEvent::ToolStarted { .. }
+                    | UiEvent::ToolFinished { .. }
+                    | UiEvent::ToolOutput { .. }
+            )
+        {
+            self.unread_updates = self.unread_updates.saturating_add(1);
+        }
         // Usage and token updates only change the footer. Collapsed ongoing
         // reasoning is not rendered, so no Markdown reflow is required for
         // each hidden reasoning delta or its final reconciliation.
@@ -1242,12 +1588,14 @@ impl UiState {
             }
             UiEvent::TaskStarted => {
                 self.running = true;
+                self.task_started.get_or_insert_with(Instant::now);
+                self.task_elapsed = None;
                 self.set_phase("preparing");
             }
             UiEvent::TaskFinished => {
-                self.running = false;
                 self.active_assistant = None;
                 self.active_reasoning = None;
+                self.finish_task();
                 self.set_phase("ready");
             }
             UiEvent::Context { estimated } => {
@@ -1301,6 +1649,7 @@ impl UiState {
                 self.set_phase("tool");
                 let mut entry = Entry::new(Kind::Tool, format!("{name} · running"), args);
                 entry.call_id = Some(id);
+                entry.started = Some(Instant::now());
                 self.entries.push(entry);
                 self.active_assistant = None;
                 self.active_reasoning = None;
@@ -1340,6 +1689,7 @@ impl UiState {
                         .replace(" · running", if failed { " · error" } else { " · done" });
                     entry.details = result;
                     entry.failed = failed;
+                    entry.duration = entry.started.take().map(|start| start.elapsed());
                 }
             }
         }
@@ -1386,6 +1736,7 @@ impl UiState {
     }
 
     pub fn scroll_to_bottom(&mut self) {
+        self.unread_updates = 0;
         self.scroll_anchor = None;
         self.prepend_rows_before = None;
         self.scroll_from_bottom = 0;
@@ -1395,6 +1746,9 @@ impl UiState {
         let top = row.min(self.history_max_scroll);
         self.scroll_from_bottom = self.history_max_scroll - top;
         self.scroll_anchor = (self.scroll_from_bottom > 0).then_some(top);
+        if self.scroll_anchor.is_none() {
+            self.unread_updates = 0;
+        }
     }
 
     fn scrollbar_geometry(&self) -> (usize, usize) {
@@ -1629,7 +1983,9 @@ impl UiState {
         if self.entries.is_empty() && !self.running {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
-                "   ◆  Ready for a task.",
+                self.preferences
+                    .language
+                    .text("   ◆  Ready for a task.", "   ◆  可以开始任务了。"),
                 Style::default().fg(theme.muted),
             )));
             return (Text::from(lines), markdown_targets);
@@ -1640,7 +1996,10 @@ impl UiState {
                 Kind::User => {
                     lines.push(Line::from(vec![
                         Span::styled("  ▎", Style::default().fg(theme.user)),
-                        Span::styled("  You", role_style(theme.user)),
+                        Span::styled(
+                            self.preferences.language.text("  You", "  你"),
+                            role_style(theme.user),
+                        ),
                     ]));
                     for line in entry.body.lines() {
                         lines.push(body_line(Line::from(Span::styled(
@@ -1653,13 +2012,15 @@ impl UiState {
                 Kind::Assistant => {
                     lines.push(Line::from(vec![
                         Span::styled("  ◆", Style::default().fg(theme.accent)),
-                        Span::styled("  Kroma", role_style(theme.text)),
+                        // The label shares the mark's accent: a turn is found by
+                        // colour, not by reading a small bold word.
+                        Span::styled("  Kroma", role_style(theme.accent)),
                     ]));
                     if !entry.body.is_empty() {
                         let (mut rendered, tags) = markdown::render_with_links(
                             &entry.body,
                             theme,
-                            width.saturating_sub(3),
+                            width.saturating_sub(5),
                         );
                         for tag in tags {
                             if let Some(span) = rendered
@@ -1690,8 +2051,12 @@ impl UiState {
                         .title
                         .split_once(" · ")
                         .unwrap_or((&entry.title, "done"));
+                    let warning =
+                        !entry.failed && super::tool_display::has_diagnostic(&entry.details);
                     let (marker, color) = if entry.failed {
                         ("✕", theme.error)
+                    } else if warning {
+                        ("!", theme.tool)
                     } else if status == "running" {
                         ("◌", theme.tool)
                     } else {
@@ -1701,14 +2066,34 @@ impl UiState {
                     // mode show only one purposeful line, without the same
                     // Ctrl+O instruction repeated for every call.
                     let display_name = compact_line(name, width.saturating_sub(13).min(24));
-                    let command_width =
-                        width.saturating_sub(5 + UnicodeWidthStr::width(display_name.as_str()) + 2);
-                    let command = compact_line(&entry.body, command_width);
+                    let summary_width = width;
+                    let command_width = summary_width
+                        .saturating_sub(5 + UnicodeWidthStr::width(display_name.as_str()) + 2);
+                    let elapsed = entry
+                        .duration
+                        .map(|duration| format!(" · {:.1}s", duration.as_secs_f64()))
+                        .unwrap_or_default();
+                    let summary =
+                        super::tool_display::summary(name, &entry.body, self.preferences.language);
+                    let command =
+                        compact_line(summary, command_width.saturating_sub(elapsed.len()));
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {marker}  "), Style::default().fg(color)),
                         Span::styled(display_name, role_style(theme.tool)),
-                        Span::styled(format!("  {command}"), Style::default().fg(theme.muted)),
+                        Span::styled(
+                            format!("  {command}{elapsed}"),
+                            Style::default().fg(theme.muted),
+                        ),
                     ]));
+                    if warning && !self.tools_expanded {
+                        lines.push(body_line(Line::styled(
+                            self.preferences.language.text(
+                                "↳ Exit 0; diagnostic reported · Ctrl+O details",
+                                "↳ 退出成功，输出含警告或错误提示 · Ctrl+O 查看详情",
+                            ),
+                            Style::default().fg(theme.tool),
+                        )));
+                    }
                     if entry.failed && !self.tools_expanded {
                         lines.push(body_line(Line::from(Span::styled(
                             format!(
@@ -1733,6 +2118,14 @@ impl UiState {
                             Style::default().fg(theme.code),
                         ))));
                     }
+                    if self.tools_expanded {
+                        for command in entry.body.lines() {
+                            lines.push(body_line(Line::styled(
+                                format!("$ {command}"),
+                                Style::default().fg(theme.code),
+                            )));
+                        }
+                    }
                     if self.tools_expanded && !entry.details.is_empty() {
                         for output in entry.details.lines() {
                             lines.push(body_line(Line::from(vec![
@@ -1752,15 +2145,20 @@ impl UiState {
                     // resumes, using spacing instead of an enclosing box.
                 }
                 Kind::Reasoning => {
+                    if entry.body.trim().is_empty() {
+                        continue;
+                    }
                     lines.push(Line::from(Span::styled(
-                        "  ◇  Reasoning",
+                        self.preferences
+                            .language
+                            .text("  ◇  Reasoning · Ctrl+R", "  ◇  推理摘要 · Ctrl+R"),
                         Style::default().fg(theme.muted),
                     )));
                     if self.reasoning_expanded {
                         let (rendered, tags) = markdown::render_with_links(
                             &entry.body,
                             theme,
-                            width.saturating_sub(3),
+                            width.saturating_sub(5),
                         );
                         for tag in tags {
                             if let Some(span) = rendered
@@ -1774,13 +2172,30 @@ impl UiState {
                             lines.push(body_line(line));
                         }
                     }
+                    // Give reasoning the same one-row separation every other block
+                    // gets, so the collapsed line is not read as a header for the
+                    // answer below it.
+                    lines.push(Line::default());
                 }
                 Kind::Info => {
                     lines.push(Line::from(Span::styled(
-                        format!("  ·  {}", entry.title),
+                        format!("  ·  {}", self.info_title(&entry.title)),
                         role_style(theme.muted),
                     )));
                     for line in entry.body.lines() {
+                        let localized;
+                        let line = if entry.title == "COMMAND"
+                            && self.preferences.language == super::preferences::Language::Zh
+                        {
+                            if let Some(id) = line.strip_prefix("Resumed session: ") {
+                                localized = format!("已恢复会话：{id}");
+                                &localized
+                            } else {
+                                line
+                            }
+                        } else {
+                            line
+                        };
                         let style = if line.starts_with('+') && !line.starts_with("+++") {
                             Style::default().fg(theme.user)
                         } else if line.starts_with('-') && !line.starts_with("---") {
@@ -1796,10 +2211,18 @@ impl UiState {
                 }
             }
         }
+        // Reserve one stable trailing transcript row for the live model phase
+        // (or the final turn duration). Only the status glyphs animate: cached
+        // markdown and selection/source-line identities never reflow per tick.
+        if self.running || self.task_outcome.is_some() {
+            lines.push(Line::default());
+        }
         (Text::from(lines), markdown_targets)
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
+        self.editor
+            .localize_attachment_labels(self.preferences.language);
         let colors = self.themes.colors;
         let full_area = frame.area();
         if full_area.width < 20 || full_area.height < 8 {
@@ -1811,7 +2234,14 @@ impl UiState {
             self.visible_links.clear();
             self.mouse_release();
             if full_area.width > 0 && full_area.height > 0 {
-                frame.render_widget(Paragraph::new("Resize terminal for Kroma"), full_area);
+                frame.render_widget(
+                    Paragraph::new(
+                        self.preferences
+                            .language
+                            .text("Resize terminal for Kroma", "请调整终端大小"),
+                    ),
+                    full_area,
+                );
             }
             return;
         }
@@ -1819,19 +2249,19 @@ impl UiState {
             Block::default().style(Style::default().bg(colors.background)),
             full_area,
         );
-        let area = reading_area(full_area);
+        let area = reading_area(full_area, self.preferences.full_width);
         let editor_rows = self.editor.display_rows(area.width.saturating_sub(6));
         let composer_height = editor_rows.saturating_add(2).clamp(3, 10);
-        // The single animated status sits next to the composer, where the
-        // reader's eyes already are. No second copy in the distant header.
-        // Reserve a row only during activity; idle history gets that row back.
-        let show_activity = self.running && area.height >= 10;
+        // The model's activity follows the conversation itself instead of
+        // living in a fixed bar away from its latest output. Only history
+        // navigation needs a separate row above the editable composer.
+        let show_navigation = self.scroll_anchor.is_some() && area.height >= 10;
         let layout = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(u16::from(show_activity)),
+            Constraint::Length(u16::from(show_navigation)),
             Constraint::Length(composer_height),
-            Constraint::Length(2),
+            Constraint::Length(1),
         ])
         .split(area);
         let header_line = Rect::new(layout[0].x, layout[0].y, layout[0].width, 1);
@@ -1852,24 +2282,13 @@ impl UiState {
             ])),
             Rect::new(header_line.x, header_line.y, header_line.width, 1),
         );
-        frame.render_widget(
-            Paragraph::new("─".repeat(usize::from(layout[0].width)))
-                .style(Style::default().fg(colors.border)),
-            Rect::new(
-                layout[0].x,
-                layout[0].y.saturating_add(1),
-                layout[0].width,
-                1,
-            ),
-        );
-
-        let history = Rect::new(
+        let history_slot = Rect::new(
             layout[1].x.saturating_add(1),
             layout[1].y,
             layout[1].width.saturating_sub(2),
             layout[1].height,
         );
-        if self.selection_area.width > 0 && self.selection_area.width != history.width {
+        if self.selection_area.width > 0 && self.selection_area.width != history_slot.width {
             // Selection offsets refer to *wrapped display cells*, not raw
             // grapheme indices. Reflow invalidates them. Clear the selection
             // rather than copy unrelated text after a terminal resize.
@@ -1877,18 +2296,20 @@ impl UiState {
             self.selection_end = None;
             self.mouse_release();
         }
-        self.viewport_height = history.height;
+        self.viewport_height = history_slot.height;
+        let has_activity_tail = !self.home && (self.running || self.task_outcome.is_some());
         let cached = self.history_cache.as_ref().is_some_and(|cache| {
-            cache.width == history.width
+            cache.width == history_slot.width
                 && cache.visible == self.history_visible
                 && cache.tools_expanded == self.tools_expanded
                 && cache.reasoning_expanded == self.reasoning_expanded
+                && cache.has_activity_tail == has_activity_tail
                 && cache.theme == colors
         });
         let reflow_anchor = self
             .history_cache
             .as_ref()
-            .filter(|cache| cache.width != history.width && self.scroll_anchor.is_some())
+            .filter(|cache| cache.width != history_slot.width && self.scroll_anchor.is_some())
             .and_then(|cache| {
                 let source = *cache.source_lines.get(self.history_top_row)?;
                 let first = cache.source_lines.partition_point(|&line| line < source);
@@ -1900,14 +2321,15 @@ impl UiState {
                 ))
             });
         if !cached {
-            let (raw, targets) = self.history_document(colors, usize::from(history.width));
-            let (text, source_lines) = wrap_history(raw, usize::from(history.width));
+            let (raw, targets) = self.history_document(colors, usize::from(history_slot.width));
+            let (text, source_lines) = wrap_document(raw, usize::from(history_slot.width));
             let link_regions = markdown_link_regions(&text, &targets);
             self.history_cache = Some(HistoryCache {
-                width: history.width,
+                width: history_slot.width,
                 visible: self.history_visible,
                 tools_expanded: self.tools_expanded,
                 reasoning_expanded: self.reasoning_expanded,
+                has_activity_tail,
                 theme: colors,
                 text,
                 source_lines,
@@ -1916,8 +2338,21 @@ impl UiState {
         }
         let contents = &self.history_cache.as_ref().unwrap().text;
         let rows = contents.lines.len();
-        let max_scroll = rows.saturating_sub(history.height as usize);
+        let max_scroll = rows.saturating_sub(history_slot.height as usize);
         self.history_max_scroll = max_scroll;
+        // For short conversations, bring the newest response near the input.
+        // Empty space is left *above* the dialogue, not between it and the
+        // composer. Keep the full viewport for welcome art and long history.
+        let history = if !self.home && rows > 0 && rows < history_slot.height as usize {
+            Rect::new(
+                history_slot.x,
+                history_slot.bottom().saturating_sub(rows as u16),
+                history_slot.width,
+                rows as u16,
+            )
+        } else {
+            history_slot
+        };
         if let Some((source, offset, old_count)) = reflow_anchor {
             // Preserve the same *logical transcript line* when a resize
             // changes wrapping. An absolute visual row is not meaningful
@@ -1949,6 +2384,9 @@ impl UiState {
                 .unwrap_or(0);
             self.scroll_from_bottom = max_scroll.saturating_sub(top);
             self.scroll_anchor = (self.scroll_from_bottom > 0).then_some(top);
+            if self.scroll_anchor.is_none() {
+                self.unread_updates = 0;
+            }
             // If the lazy history was expanded, existing selection rows are
             // now lower in the cached transcript.
             if let Some(previous) = self.prepend_rows_before.take() {
@@ -1985,7 +2423,8 @@ impl UiState {
         let start_row = max_scroll.saturating_sub(self.scroll_from_bottom);
         self.history_top_row = start_row;
         self.selection_area = history;
-        self.scrollbar_area = Rect::new(history.right(), history.y, 1, history.height);
+        self.scrollbar_area =
+            Rect::new(history_slot.right(), history_slot.y, 1, history_slot.height);
         let end_row = start_row.saturating_add(history.height as usize).min(rows);
         // Borrow cached styled lines instead of cloning every span on every
         // animation/scroll frame. Selection still owns its plain-text rows.
@@ -2051,8 +2490,31 @@ impl UiState {
         for (row, line) in viewport_lines.iter().enumerate() {
             buffer.set_line(history.x, history.y + row as u16, line, history.width);
         }
+        // The activity belongs to the most recent message, not a floating
+        // header/composer bar. Only paint the last (reserved) transcript row.
+        // Timer ticks never rebuild wrapped Markdown or move scroll anchors.
+        if has_activity_tail && rows > 0 {
+            let tail = rows - 1;
+            if (start_row..end_row).contains(&tail) {
+                frame.render_widget(
+                    Paragraph::new(self.activity_line(colors)),
+                    Rect::new(
+                        history.x.saturating_add(2),
+                        history.y + (tail - start_row) as u16,
+                        history.width.saturating_sub(4),
+                        1,
+                    ),
+                );
+            }
+        }
         if self.home {
-            super::logo::draw(frame, history, colors, self.themes.preset());
+            super::logo::draw(
+                frame,
+                history_slot,
+                colors,
+                self.themes.preset(),
+                self.preferences.language,
+            );
         }
         for link in &self.visible_links {
             let hovered = self
@@ -2117,9 +2579,12 @@ impl UiState {
             }
         }
 
-        if show_activity {
+        if show_navigation {
             frame.render_widget(
-                Paragraph::new(self.activity_line(colors)),
+                Paragraph::new(Line::styled(
+                    self.navigation_status(),
+                    Style::default().fg(colors.accent),
+                )),
                 Rect::new(
                     layout[2].x.saturating_add(2),
                     layout[2].y,
@@ -2149,16 +2614,25 @@ impl UiState {
             .viewport(editor_inner.width, editor_inner.height);
         let input = if self.attach_mode {
             Paragraph::new(if self.attach_path.is_empty() {
-                "Attach file path…".to_owned()
+                self.preferences
+                    .language
+                    .text("Attach file path…", "粘贴附件路径…")
+                    .to_owned()
             } else {
                 self.attach_path.clone()
             })
             .style(Style::default().fg(colors.text))
         } else if self.editor.text().is_empty() {
             let hint = if self.running {
-                "Steer this task, or /queue another…"
+                self.preferences.language.text(
+                    "Steer this task, or /queue another…",
+                    "输入引导指令，或用 /queue 排队…",
+                )
             } else {
-                "Ask anything, or describe a coding task…"
+                self.preferences.language.text(
+                    "Ask anything, or describe a coding task…",
+                    "输入问题或编程任务，输入 / 查看命令…",
+                )
             };
             Paragraph::new(hint).style(Style::default().fg(colors.muted))
         } else {
@@ -2204,11 +2678,6 @@ impl UiState {
             layout[4].width.saturating_sub(4),
             1,
         );
-        let status_line = self.footer_status(status_area.width as usize);
-        frame.render_widget(
-            Paragraph::new(status_line).style(Style::default().fg(colors.muted)),
-            status_area,
-        );
         let hovered = self.hover_pointer.and_then(|(x, y)| self.link_at(x, y));
         let footer = if !self.notification.is_empty() {
             Line::from(Span::styled(
@@ -2224,64 +2693,11 @@ impl UiState {
                 Style::default().fg(colors.muted),
             ))
         } else {
-            let help = if self.scroll_anchor.is_some() {
-                "↑ History · Ctrl+End latest"
-            } else if self.running {
-                "Ctrl+C cancel"
-            } else {
-                "Enter send · /help"
-            };
-            let width = status_area.width as usize;
-            let gap = "  ·  ";
-            // On normal terminals, keep the cancel/send hint alongside the
-            // cache figures instead of letting verbose stats push it away.
-            let budget = if width >= 70 {
-                width.saturating_sub(UnicodeWidthStr::width(gap) + UnicodeWidthStr::width(help))
-            } else {
-                width
-            };
-            let tokens = self.usage.compact_status(budget).unwrap_or_default();
-            let mut spans = Vec::new();
-            for (index, segment) in tokens.split(" · ").enumerate() {
-                if index > 0 {
-                    spans.push(Span::styled(" · ", Style::default().fg(colors.muted)));
-                }
-                let color = if segment.starts_with("Cache ")
-                    || segment.starts_with("Hit ")
-                    || segment.starts_with("Total hit ")
-                {
-                    // Cache is information, not a warning/error state.
-                    colors.accent
-                } else if segment.starts_with("Total ") || segment.starts_with("Fresh ") {
-                    colors.muted
-                } else {
-                    colors.text
-                };
-                spans.push(Span::styled(segment.to_owned(), Style::default().fg(color)));
-            }
-            if UnicodeWidthStr::width(tokens.as_str())
-                + UnicodeWidthStr::width(gap)
-                + UnicodeWidthStr::width(help)
-                <= width
-            {
-                spans.push(Span::styled(
-                    format!("{gap}{help}"),
-                    Style::default().fg(colors.muted),
-                ));
-            }
-            Line::from(spans)
+            self.footer_line(colors, status_area.width as usize)
         };
-        frame.render_widget(
-            Paragraph::new(footer),
-            Rect::new(
-                status_area.x,
-                status_area.y.saturating_add(1),
-                status_area.width,
-                1,
-            ),
-        );
+        frame.render_widget(Paragraph::new(footer), status_area);
         if let Some(picker) = &self.picker {
-            picker.draw(frame, history, colors);
+            picker.draw(frame, history_slot, colors, self.preferences.language);
         }
     }
 }
@@ -2400,9 +2816,21 @@ mod tests {
             "no distant header duplicate"
         );
         assert_eq!(
-            ui.selection_area.bottom() as usize,
+            ui.selection_area.bottom() as usize - 1,
             status_row,
-            "activity must not obscure transcript history"
+            "activity belongs to the reserved trailing transcript line"
+        );
+        assert!(
+            ui.history_cache
+                .as_ref()
+                .unwrap()
+                .text
+                .lines
+                .last()
+                .unwrap()
+                .spans
+                .is_empty(),
+            "animation must never be written into persistent transcript lines"
         );
 
         ui.event(UiEvent::ReasoningDelta("step 1".into()));
@@ -2420,6 +2848,158 @@ mod tests {
         assert!(!ui.tick_activity());
         assert_eq!(ui.activity_status(), "Ready");
         assert!(ui.show_editor_cursor());
+    }
+
+    #[test]
+    fn short_chat_hugs_composer_and_live_status_follows_the_latest_message() {
+        let messages = vec![
+            Message::new("user", "hello"),
+            Message::new("assistant", "The answer is visible"),
+        ];
+        let mut ui = UiState::new(
+            "deepseek".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        let rows = rendered_text(&mut ui, 100, 36);
+        let header = rows.iter().position(|row| row.contains("Kroma")).unwrap();
+        let answer = rows
+            .iter()
+            .position(|row| row.contains("The answer is visible"))
+            .unwrap();
+        let editor = rows
+            .iter()
+            .position(|row| row.contains("Ask anything"))
+            .unwrap();
+        assert_eq!(header, 0);
+        assert!(answer > 20, "short transcript belongs near the composer");
+        assert!(
+            editor - answer <= 5,
+            "do not leave a tall empty void between latest reply and input"
+        );
+        assert_eq!(
+            ui.history_top_row, 0,
+            "logical history coordinates stay unchanged"
+        );
+
+        ui.add_user("run tests");
+        ui.event(UiEvent::ModelStarted);
+        let rows = rendered_text(&mut ui, 100, 36);
+        let status = rows
+            .iter()
+            .position(|row| row.contains("Connecting"))
+            .unwrap();
+        let latest_user = rows
+            .iter()
+            .position(|row| row.contains("run tests"))
+            .unwrap();
+        let editor = rows
+            .iter()
+            .position(|row| row.contains("Steer this task"))
+            .unwrap();
+        assert!(latest_user < status && status < editor);
+        assert!(
+            editor - status <= 3,
+            "live activity belongs to latest message"
+        );
+        assert!(
+            !rows[0].contains("Connecting"),
+            "no detached header activity"
+        );
+
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "tool1".into(),
+            args: "cargo test".into(),
+        });
+        let rows = rendered_text(&mut ui, 100, 36);
+        let tool_status = rows
+            .iter()
+            .position(|row| row.contains("Running tool"))
+            .unwrap();
+        let editor = rows
+            .iter()
+            .position(|row| row.contains("Steer this task"))
+            .unwrap();
+        assert!(editor - tool_status <= 3);
+        let cache = ui.history_cache.as_ref().unwrap().text.lines.as_ptr();
+        ui.last_activity_frame = Instant::now() - Duration::from_millis(200);
+        assert!(ui.tick_activity());
+        rendered_text(&mut ui, 100, 36);
+        assert_eq!(
+            cache,
+            ui.history_cache.as_ref().unwrap().text.lines.as_ptr(),
+            "animation cannot rewrap transcript on every frame"
+        );
+        ui.finish_task();
+        ui.task_outcome = Some(TaskOutcome::Completed);
+        let rows = rendered_text(&mut ui, 100, 36);
+        let completed = rows
+            .iter()
+            .position(|row| row.contains("Completed"))
+            .unwrap();
+        assert!(rows[completed].contains('✓'));
+        assert!(
+            completed
+                < rows
+                    .iter()
+                    .position(|row| row.contains("Ask anything"))
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn activity_stays_with_newest_message_when_reader_is_browsing_history() {
+        let messages = (0..75)
+            .map(|index| Message::new("assistant", format!("historical result {index}")))
+            .collect::<Vec<_>>();
+        let mut ui = UiState::new(
+            "deepseek".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        rendered_text(&mut ui, 80, 23);
+        ui.scroll(8);
+        let anchor = ui.scroll_anchor;
+        ui.event(UiEvent::TaskStarted);
+        ui.event(UiEvent::ModelStarted);
+        let rows = rendered_text(&mut ui, 80, 23);
+        assert_eq!(ui.scroll_anchor, anchor);
+        assert!(rows.iter().any(|row| row.contains("Browsing history")));
+        assert!(
+            !rows.iter().any(|row| row.contains("Connecting")),
+            "the status is not a floating bar above the composer while browsing"
+        );
+        ui.scroll_to_bottom();
+        let rows = rendered_text(&mut ui, 80, 23);
+        assert!(rows.iter().any(|row| row.contains("Connecting")));
+        assert!(!rows.iter().any(|row| row.contains("Browsing history")));
+    }
+
+    #[test]
+    fn short_bottom_aligned_history_keeps_links_clickable() {
+        let messages = vec![
+            Message::new("user", "show link"),
+            Message::new(
+                "assistant",
+                "See https://example.com/issues/123 for details",
+            ),
+        ];
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        rendered_text(&mut ui, 120, 38);
+        assert!(ui.selection_area.y > 10, "short transcript moves down");
+        let link = ui.visible_links.first().expect("link must remain visible");
+        assert_eq!(
+            ui.link_at(link.x, link.y),
+            Some("https://example.com/issues/123")
+        );
     }
 
     #[test]
@@ -2448,8 +3028,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Ctx ~1.6k / 1M · ~0.2%"));
-        assert!(rendered.contains("Last In 8.0k · Out 500 · Cache 75% (6.0k/8.0k)"));
+        assert!(rendered.contains("Context ~0.2%"));
+        assert!(rendered.contains("In/out 8.0k / 500 · Cache 75%"));
         let mut narrow = Terminal::new(TestBackend::new(40, 26)).unwrap();
         narrow.draw(|frame| ui.draw(frame)).unwrap();
         let narrow_render = narrow
@@ -2515,7 +3095,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Last In 1.0k · Out 80 · Cache 80%"));
+        assert!(rendered.contains("In/out 1.0k / 80 · Cache 80%"));
         assert!(!rendered.contains("Out 95") && !rendered.contains("Total In"));
     }
 
@@ -2591,7 +3171,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             rows.iter()
-                .filter(|line| line.contains("cargo test"))
+                .filter(|line| line.contains("Run Rust tests"))
                 .count(),
             1
         );
@@ -2646,7 +3226,7 @@ mod tests {
     }
 
     #[test]
-    fn widescreen_uses_available_terminal_width_instead_of_a_hundred_columns() {
+    fn widescreen_centres_the_reading_column_instead_of_gluing_it_left() {
         let mut state = UiState::new(
             "model".into(),
             "default".into(),
@@ -2658,13 +3238,27 @@ mod tests {
         );
         let mut terminal = Terminal::new(TestBackend::new(210, 35)).unwrap();
         terminal.draw(|frame| state.draw(frame)).unwrap();
+        let area = reading_area(Rect::new(0, 0, 210, 35), false);
         assert!(
-            state.selection_area.width >= 200,
-            "maximized terminals should not be artificially limited to 100 columns"
+            area.width >= 150,
+            "a maximized terminal still uses a wide column, got {}",
+            area.width
         );
+        let left = i32::from(area.x);
+        let right = 210 - i32::from(area.x) - i32::from(area.width);
+        assert!(
+            (left - right).abs() <= 1,
+            "margins must be symmetric: left {left}, right {right}"
+        );
+        assert!(state.selection_area.width > 100);
         assert!(state.selection_rows.join("\n").contains("cargo test"));
-        let small = reading_area(Rect::new(0, 0, 40, 20));
+        let small = reading_area(Rect::new(0, 0, 40, 20), false);
         assert_eq!(small.width, 40);
+        assert_eq!(small.x, 0);
+        // `/layout wide` still fills the terminal, edge to edge.
+        let wide = reading_area(Rect::new(0, 0, 210, 35), true);
+        assert_eq!(wide.width, 206);
+        assert_eq!(wide.x, 2);
     }
 
     #[test]
@@ -2854,11 +3448,7 @@ mod tests {
                 output.contains("Kroma"),
                 "no app identity at {width} columns"
             );
-            let expected_context = if width >= 80 {
-                "Ctx 32k / 128k · 25%"
-            } else {
-                "Ctx 25%"
-            };
+            let expected_context = "Context 25%";
             assert!(
                 output.contains(expected_context),
                 "no context at {width} columns"
@@ -3672,7 +4262,7 @@ mod tests {
         let mut state = UiState::new("mock".into(), "default".into(), theme, &[]);
         state.configure_status(500_000, Some("high".into()));
         state.event(UiEvent::ActualInput(100_000));
-        for (width, expected) in [(110, "Ctx 100k / 500k · 20%"), (40, "Ctx 20%")] {
+        for (width, expected) in [(110, "Context 20%"), (40, "Context 20%")] {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| state.draw(frame)).unwrap();
             let text = terminal
@@ -3710,5 +4300,359 @@ mod tests {
         let second = content.find("#2 ▤ Pasted text").expect("log 2 label");
         let third = content.find("#3 ▧ after.png").expect("image 3 label");
         assert!(first < second && second < third);
+    }
+
+    fn rendered_rows(ui: &mut UiState, width: u16, height: u16) -> Vec<String> {
+        rendered_text(ui, width, height)
+            .iter()
+            .map(|row| row.chars().filter(|ch| *ch != ' ').collect())
+            .collect()
+    }
+
+    /// Cell-accurate rows, keeping spaces: alignment and separation are the
+    /// behaviour under test for layout work.
+    fn rendered_text(ui: &mut UiState, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn bilingual_chrome_picker_descriptions_and_unknown_usage_render_at_multiple_sizes() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.apply_preferences(super::super::preferences::Preferences {
+            language: super::super::preferences::Language::Zh,
+            full_width: false,
+        });
+        ui.configure_status(500_000, Some("high".into()));
+        ui.event(UiEvent::Context { estimated: 100_000 });
+        ui.event(UiEvent::Usage {
+            input: None,
+            output: None,
+            cached: None,
+            reasoning: None,
+        });
+        for width in [30, 40, 80, 160] {
+            let output = rendered_rows(&mut ui, width, 26).join("\n");
+            assert!(
+                output.contains("上下文"),
+                "localized footer missing at {width}: {output}"
+            );
+            assert!(
+                output.contains("未报告"),
+                "unknown must not become 0 at {width}: {output}"
+            );
+            assert!(
+                UnicodeWidthStr::width(ui.usage_status((width - 8) as usize).as_str())
+                    <= (width - 8) as usize
+            );
+        }
+        ui.open_command_completion("/language".into());
+        let output = rendered_rows(&mut ui, 100, 26).join("\n");
+        assert!(output.contains("命令索引"));
+        assert!(output.contains("切换界面语言并保存"));
+        ui.picker = None;
+        ui.enter_home();
+        let output = rendered_rows(&mut ui, 100, 30).join("\n");
+        assert!(output.contains("开始新会话"));
+        ui.apply_preferences(super::super::preferences::Preferences::default());
+        let output = rendered_rows(&mut ui, 100, 30).join("\n");
+        assert!(output.contains("Startaconversation"));
+    }
+
+    #[test]
+    fn wrapping_keeps_source_line_identity_within_the_reading_column() {
+        let text = Text::from(vec![
+            Line::raw("word ".repeat(45)),
+            Line::raw(format!("│ {}", "x".repeat(150))),
+        ]);
+        let (wrapped, sources) = wrap_document(text, 180);
+        assert_eq!(wrapped.lines.len(), sources.len());
+        assert_eq!(*sources.last().unwrap(), 1);
+        for line in &wrapped.lines {
+            assert!(UnicodeWidthStr::width(line.to_string().as_str()) <= 180);
+        }
+        let (narrow, sources) = wrap_document(Text::from(vec![Line::raw("word ".repeat(45))]), 60);
+        assert!(narrow.lines.len() > 1, "the column width is the wrap width");
+        assert!(sources.iter().all(|source| *source == 0));
+    }
+
+    #[test]
+    fn history_navigation_reports_unseen_updates_without_moving_and_survives_completion() {
+        let messages: Vec<_> = (0..60)
+            .map(|i| Message::new("assistant", format!("history line {i}")))
+            .collect();
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        rendered_rows(&mut ui, 80, 24);
+        ui.scroll(12);
+        rendered_rows(&mut ui, 80, 24);
+        let anchor = ui.scroll_anchor;
+        ui.event(UiEvent::Text("new streaming result".into()));
+        let output = rendered_rows(&mut ui, 80, 24).join("\n");
+        assert_eq!(anchor, ui.scroll_anchor);
+        assert!(output.contains("Browsinghistory"));
+        assert!(ui.navigation_status().contains("new updates"));
+        let reading = ui.reading_position();
+        ui.load_history(&messages);
+        ui.task_outcome = Some(TaskOutcome::Completed);
+        ui.restore_reading_position(reading);
+        rendered_rows(&mut ui, 80, 24);
+        assert_eq!(anchor, ui.scroll_anchor);
+        ui.scroll_to_bottom();
+        assert_eq!(ui.unread_updates, 0);
+        assert!(ui.scroll_anchor.is_none());
+        assert!(rendered_rows(&mut ui, 80, 24)
+            .join("\n")
+            .contains("Completed"));
+        ui.task_outcome = Some(TaskOutcome::Failed);
+        assert!(ui.task_status().contains("failed"));
+        ui.task_outcome = Some(TaskOutcome::Cancelled);
+        assert!(ui.task_status().contains("Cancelled"));
+        ui.enter_home();
+        assert!(ui.task_outcome.is_none());
+    }
+
+    #[test]
+    fn collapsed_tool_summary_preserves_full_arguments_archive_reference_and_stderr_warning() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        let command = format!("cargo test {} UNIQUE_COMMAND_TAIL", "--locked ".repeat(80));
+        let raw = serde_json::json!({"command":command}).to_string();
+        assert_eq!(tool_arguments("shell", &raw), command);
+        let result = tool_result_details(&serde_json::json!({"exit_code":0, "stdout":"line\n".repeat(400), "stderr":"warning: diagnostic", "stdout_file":"/tmp/kroma-complete.log"}).to_string());
+        assert!(result.contains("/tmp/kroma-complete.log"));
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "1".into(),
+            args: command,
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "1".into(),
+            result,
+            failed: false,
+        });
+        let collapsed = ui.history_text(ui.themes.colors, 160).to_string();
+        assert!(collapsed.contains("Run Rust tests"));
+        assert!(collapsed.contains("diagnostic reported"));
+        assert!(!collapsed.contains("UNIQUE_COMMAND_TAIL"));
+        assert!(
+            !ui.entries[0].failed,
+            "stderr warnings do not change exit status"
+        );
+        assert!(ui.entries[0].duration.is_some());
+        ui.tools_expanded = true;
+        let expanded = ui.history_text(ui.themes.colors, 160).to_string();
+        assert!(expanded.contains("UNIQUE_COMMAND_TAIL"));
+        assert!(expanded.contains("/tmp/kroma-complete.log"));
+    }
+
+    #[test]
+    fn screenshot_regressions_compact_tools_localized_labels_and_single_history_hint() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.apply_preferences(super::super::preferences::Preferences {
+            language: super::super::preferences::Language::Zh,
+            full_width: false,
+        });
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "build".into(),
+            args: format!(
+                "cd /project && cargo build --release {}",
+                " --locked".repeat(100)
+            ),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "build".into(),
+            result: "exit 0\nstderr:    Compiling kroma\n    Finished release profile".into(),
+            failed: false,
+        });
+        for width in [40, 80, 180, 240] {
+            let raw = ui.history_text(ui.themes.colors, width);
+            let (wrapped, _) = wrap_document(raw, width);
+            let rows: Vec<_> = wrapped
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .filter(|row| !row.trim().is_empty())
+                .collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "collapsed successful tool must occupy one row at {width}: {rows:?}"
+            );
+            assert!(rows[0].contains('✓'));
+            assert!(!rows[0].contains("警告"));
+        }
+        ui.info("COMMAND", "Resumed session: abc123");
+        ui.editor.insert_attachment(
+            char::from_u32(super::super::editor::ATTACHMENT_START).unwrap(),
+            "Clipboard image".into(),
+        );
+        ui.note("已添加 【Clipboard image】");
+        let output = rendered_rows(&mut ui, 100, 26).join("\n");
+        assert!(output.contains("已恢复会话：abc123"));
+        assert!(output.contains("剪贴板图片"));
+        assert!(!output.contains("Clipboardimage"));
+        assert!(ui.notification.contains("剪贴板图片"));
+        for i in 0..30 {
+            ui.info("COMMAND", format!("old line {i}"));
+        }
+        ui.dismiss_notification();
+        rendered_rows(&mut ui, 100, 26);
+        ui.scroll(10);
+        let output = rendered_rows(&mut ui, 100, 26).join("\n");
+        assert_eq!(
+            output.matches("Ctrl+End").count(),
+            1,
+            "history navigation should appear once: {output}"
+        );
+    }
+
+    #[test]
+    fn reasoning_block_is_separated_from_the_answer_that_follows_it() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.add_user("why");
+        ui.event(UiEvent::ReasoningFinal("private chain of thought".into()));
+        ui.event(UiEvent::Text("the answer".into()));
+        ui.running = false;
+        let rows = rendered_text(&mut ui, 80, 24);
+        let reasoning = rows
+            .iter()
+            .position(|row| row.contains("Reasoning · Ctrl+R"))
+            .expect("collapsed reasoning line");
+        assert!(
+            rows[reasoning + 1].trim().is_empty(),
+            "reasoning must not be glued to the answer header: {:?}",
+            &rows[reasoning..reasoning + 3]
+        );
+        assert!(
+            rows[reasoning + 2].contains("Kroma"),
+            "the answer header follows the separator: {:?}",
+            &rows[reasoning..reasoning + 3]
+        );
+    }
+
+    #[test]
+    fn footer_is_one_compact_row_without_repeated_command_hints() {
+        let mut ui = UiState::new(
+            "deepseek".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.configure_status(1_000_000, Some("auto".into()));
+        ui.preferences.language = super::super::preferences::Language::Zh;
+        ui.event(UiEvent::ActualInput(1000));
+        ui.event(UiEvent::Usage {
+            input: Some(1500),
+            output: Some(8),
+            cached: Some(1305),
+            reasoning: None,
+        });
+        ui.add_user("你好");
+        ui.event(UiEvent::Text("answer".into()));
+        ui.event(UiEvent::TaskFinished);
+        let rows = rendered_text(&mut ui, 120, 30);
+        let footer = rows.last().expect("footer row");
+        let visible: String = footer.chars().filter(|ch| *ch != ' ').collect();
+        assert!(visible.contains("deepseek"), "{visible:?}");
+        assert!(visible.contains("上下文0.1%"), "{visible:?}");
+        assert!(visible.contains("缓存87%"), "{visible:?}");
+        assert!(visible.contains("输入/输出1.5k/8"), "{visible:?}");
+        assert!(
+            !visible.contains("/usage") && !visible.contains("/help"),
+            "use the slash picker for commands instead of a second help bar"
+        );
+        let first_line = rows
+            .iter()
+            .filter(|row| {
+                row.chars()
+                    .filter(|ch| *ch != ' ')
+                    .collect::<String>()
+                    .contains("上下文")
+            })
+            .count();
+        assert_eq!(first_line, 1, "context information belongs to only one row");
+        let column = reading_area(Rect::new(0, 0, 120, 30), false);
+        let leading = footer.chars().take_while(|ch| *ch == ' ').count();
+        assert!(
+            leading >= column.x as usize,
+            "footer must align with the reading column"
+        );
+    }
+
+    #[test]
+    fn completion_row_reports_the_outcome_and_how_long_the_turn_took() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.add_user("task");
+        // The real loop takes the duration when the task future resolves: the
+        // final event drain keeps only measurements, so a TaskFinished event
+        // may never reach the UI.
+        ui.finish_task();
+        ui.task_outcome = Some(TaskOutcome::Completed);
+        let rows = rendered_text(&mut ui, 80, 24);
+        let completed = rows
+            .iter()
+            .find(|row| row.contains('✓'))
+            .expect("completion marker");
+        assert!(completed.contains("Completed · "), "{completed:?}");
+        assert!(
+            completed.trim_end().ends_with('s'),
+            "the row reports how long the turn took: {completed:?}"
+        );
+        assert!(
+            !rows.concat().contains("review results above"),
+            "the completion row carries information, not an acknowledgement"
+        );
+        ui.task_elapsed = Some(Duration::from_millis(8_340));
+        ui.task_outcome = Some(TaskOutcome::Failed);
+        let rows = rendered_text(&mut ui, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains('✕') && row.contains("8.3s")),
+            "failure keeps its marker and duration"
+        );
+        ui.task_outcome = Some(TaskOutcome::Cancelled);
+        let rows = rendered_text(&mut ui, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains('⊘') && row.contains("8.3s")),
+            "cancellation keeps its marker and duration"
+        );
     }
 }

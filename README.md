@@ -125,6 +125,11 @@ sessions and the existing slash commands. Shortcuts:
   to move directly through history. Its track is proportional to the transcript
   and loads older history when necessary. Ordinary text dragging keeps
   selection active while the viewport moves.
+- **Command index:** type `/` or run `/commands` to see commands with descriptions and argument hints. Up/Down selects; **Tab** (or Enter in this completion list) inserts the command without executing it. Type arguments, then Enter to run; Esc closes the list without clearing the draft.
+- **Interface language:** `/language zh` switches UI chrome, hints, help and command descriptions to Chinese; `/language en` switches to English; `/language` toggles. Model answers, tool output and upstream diagnostics are not translated. The default is English.
+- **Reading layout:** `/layout comfortable` (default) centres a reading column (75% of available width, bounded to 100–160 cells and never wider than the terminal); short conversations are bottom-aligned near the composer, while long history scrolls normally. `/layout wide` restores full-width prose. Language and layout are saved atomically in `~/.kroma/ui.toml`.
+- **Tool records:** common build/test/search commands have concise activity labels. Ctrl+O reveals original commands, output, exit codes and output-file links. Failures stay visible while collapsed; successful exits with explicit diagnostic prefixes get an advisory; ordinary stderr progress is not a warning.
+- **Task status:** a subtle branded indicator follows the latest transcript entry while Kroma is thinking, using tools or streaming output. Completion/cancellation and elapsed time appear at the end of that turn, not in a floating status bar. When browsing older history, a separate navigation hint gives the return-to-latest shortcut and unseen update count without moving the reader.
 - **Ctrl+P** opens the searchable picker; **Tab** changes its category among
   commands, model profiles, sessions, and files. Type to filter, Up/Down to
   select, Enter to confirm, Esc to dismiss without deleting an unsent draft.
@@ -139,21 +144,19 @@ sessions and the existing slash commands. Shortcuts:
 - **F2** cycles dark/light/mono themes; `/theme dark`, `/theme light`,
   `/theme mono` select a theme immediately, and `/theme reload` rereads the
   on-disk theme. `/help` shows the TUI command summary.
-- The footer keeps the current **model**, **Think** and **Ctx** visible at
-  ordinary terminal widths (including 80 columns), without duplicating the
-  model name in the header. **Ctx** uses the total model context window. During a
-  request `~` denotes a conservative estimate including tool schemas; after
-  a completed request, upstream input-token usage replaces that estimate when
-  supplied. `—` means no measurement, not zero usage. The second footer
-  row shows only the latest **coding-model request** (In, Out, cache hits);
-  background automatic title and APEC requests never replace its counters.
-  Run `/usage` for separate/combined totals. The **Think** label
-  shows the requested reasoning level. **Shift+Tab** cycles
+- The single compact footer prioritizes the current **model**, **thinking level**,
+  **Context** and latest **coding-model** cache statistics, adding input/output
+  counts when width permits. **Context** uses the total model context window.
+  During a request `~` denotes a conservative estimate including tool schemas;
+  after completion, upstream input-token usage replaces that estimate when
+  supplied. `—` means no measurement, not zero usage. Background automatic
+  title and APEC requests never replace coding metrics. Run `/usage` for the
+  complete breakdown. **Shift+Tab** cycles
   auto/off/low/medium/high/xhigh/max, or use `/think high` to select directly.
   The change applies to the next model request, and gateways may reject a
   level they do not support. Short terminals compact the footer automatically.
 - Model output streams as it arrives, with a subtle cursor and a branded
-  activity indicator directly above the input while the model is working.
+  activity indicator at the end of the transcript while the model is working.
   Reasoning stays collapsed by default; Ctrl+R reveals provider-exposed
   reasoning deltas as they arrive. Completion reconciles the entry without
   duplication. Providers exposing only final reasoning show it after completion.
@@ -214,10 +217,12 @@ sessions and the existing slash commands. Shortcuts:
   clipboard data; this is generic desktop clipboard support, not a custom
   upload or remote clipboard service.
 
-The TUI `Ctx` status shows current request input tokens / total context window
-(e.g. `100k / 500k · 20%`), not cumulative session usage. Estimates carry a `~`
-marker; unknown usage is shown as `—`. Output reserves still reduce the internal
-input/compaction budget, but do not reduce the displayed window or percentage base.
+The TUI `Context` status shows the latest request's share of the total context
+window (e.g. `Context 20%`), not cumulative session usage. `/usage` retains the
+full `100k / 500k` measurement and separate request totals. Estimates carry a `~`
+marker; unknown usage is shown as `—` or `unreported`, never zero. Output reserves
+still reduce the internal input/compaction budget, but do not reduce the
+displayed window or percentage base.
 
 The first theme change writes `~/.kroma/theme.toml`. AI can edit this file
 directly, then run `/theme reload` without recompiling Kroma. For example:

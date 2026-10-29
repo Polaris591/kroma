@@ -1,7 +1,7 @@
 //! The supplied Kroma SVG mark, sampled into terminal half-block cells.
 //! Windows Terminal, SSH and ordinary POSIX terminals all show the same
 //! three wedges, without Kitty/Sixel image protocols or network access.
-use super::theme::Theme;
+use super::{preferences::Language, theme::Theme};
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
@@ -76,7 +76,7 @@ pub(super) fn mark_rows(theme: Theme, light: bool, mono: bool) -> Vec<Line<'stat
         .collect()
 }
 
-pub(super) fn draw(frame: &mut Frame, area: Rect, theme: Theme, preset: &str) {
+pub(super) fn draw(frame: &mut Frame, area: Rect, theme: Theme, preset: &str, language: Language) {
     if area.width < 24 || area.height < 5 {
         return;
     }
@@ -109,9 +109,12 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, theme: Theme, preset: &str) {
     );
     if area.height >= 7 {
         frame.render_widget(
-            Paragraph::new("Start a conversation  ·  /resume for history")
-                .style(Style::default().fg(theme.muted))
-                .alignment(Alignment::Center),
+            Paragraph::new(language.text(
+                "Start a conversation  ·  /resume for history",
+                "开始新会话 · /resume 恢复历史",
+            ))
+            .style(Style::default().fg(theme.muted))
+            .alignment(Alignment::Center),
             Rect::new(area.x, title + 2, area.width, 1),
         );
     }

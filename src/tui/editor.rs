@@ -188,6 +188,16 @@ impl Editor {
         self.insert(&clean);
     }
 
+    pub fn localize_attachment_labels(&mut self, language: super::preferences::Language) {
+        for label in self.attachment_labels.values_mut() {
+            if matches!(label.as_str(), "【Clipboard image】" | "【剪贴板图片】") {
+                *label = language
+                    .text("【Clipboard image】", "【剪贴板图片】")
+                    .to_owned();
+            }
+        }
+    }
+
     pub fn insert_attachment(&mut self, marker: char, label: String) {
         self.insert(&marker.to_string());
         self.attachment_labels
