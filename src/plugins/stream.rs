@@ -162,14 +162,25 @@ impl PluginWorker {
                         .context("stream frame has no event")?;
                     if !matches!(
                         event,
-                        "text_delta" | "reasoning_delta" | "tool_call_delta" | "complete" | "error"
+                        "text_delta"
+                            | "reasoning_delta"
+                            | "tool_call_delta"
+                            | "output_delta"
+                            | "complete"
+                            | "error"
                     ) {
                         bail!("unsupported streaming model event '{event}'");
                     }
-                    if matches!(event, "text_delta" | "reasoning_delta")
+                    if matches!(event, "text_delta" | "reasoning_delta" | "output_delta")
                         && !frame["delta"].is_string()
                     {
                         bail!("{event} requires a string delta");
+                    }
+                    if event == "output_delta"
+                        && frame.get("stream").is_some()
+                        && !matches!(frame["stream"].as_str(), Some("stdout" | "stderr"))
+                    {
+                        bail!("output_delta stream must be stdout or stderr");
                     }
                     let terminal = matches!(event, "complete" | "error");
                     sender

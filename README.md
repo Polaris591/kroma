@@ -110,10 +110,17 @@ private persistent data, commands, and declarative TUI extensions. UI plugins
 can add a status/panel, Alt+letter bindings, tool labels, animation frames,
 color overrides, and bounded layout adjustments without owning the terminal.
 `/plugins reload` atomically replaces safe idle extensions and retains unchanged
-workers. Changed model/context backends and model-request hooks still require
-restart. Failed/cancelled external context work preserves WAL history, while
-context-overflow errors can request a single recovery retry. Event subscribers
-have separate bounded queues so a slow plugin cannot stall other subscribers.
+tool/command workers. Event subscriptions are recreated on reload so stalled
+old handlers can be cancelled independently. Changed model/context backends
+and model-request hooks still require restart. Enabled model providers must
+initialize successfully and cannot be silently replaced by saved profiles.
+External context fork/rewind/undo use cancellable async requests, including
+full-copy notifications for out-of-band plugin data. Tools can opt into live
+JSONL output progress; plugin settings writes are serialized across Kroma
+processes. Session identity is provided to command, model and event plugins.
+Failed/cancelled external context work preserves WAL history, while
+context-overflow errors can request a single recovery retry and report usage.
+Event subscribers have separate bounded queues.
 
 The host deliberately does not expose raw terminal widgets, unrestricted
 process sandboxing, or an alternate Agent Loop. Official subagents, tournament

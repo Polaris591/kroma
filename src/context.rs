@@ -83,6 +83,10 @@ pub trait ContextPolicy: Send {
 /// A factory is retained by Agent across session switches; the session's
 /// persisted identifier/version determines whether it can restore the state.
 pub trait ContextFactory: Send + Sync {
+    /// Process-backed factories should use the asynchronous branch method.
+    fn requires_async_branch(&self) -> bool {
+        false
+    }
     fn initial(&self) -> PersistedContext;
     fn restore(
         &self,
@@ -95,6 +99,19 @@ pub trait ContextFactory: Send + Sync {
     /// keeps its state; the built-in policy can safely rebuild from any
     /// shortened raw transcript. A custom policy must explicitly implement
     /// trimming instead of silently losing its memory on rewind/fork.
+    fn branch_state_async<'a>(
+        &'a self,
+        state: &'a PersistedContext,
+        source: &'a [Message],
+        retained: &'a [Message],
+        source_archive: &'a Path,
+        destination_archive: &'a Path,
+    ) -> StreamFuture<'a, PersistedContext> {
+        Box::pin(async move {
+            self.branch_state(state, source, retained, source_archive, destination_archive)
+        })
+    }
+
     fn branch_state(
         &self,
         state: &PersistedContext,

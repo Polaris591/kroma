@@ -60,7 +60,8 @@ pub async fn default_runtime_with(
     customize: impl FnOnce(&mut RuntimeComponents) -> Result<()>,
 ) -> Result<DefaultRuntime> {
     let plugins = PluginCatalog::discover(&config.workdir)?;
-    let (override_model, mut plugin_warnings) = plugins.model_override();
+    let override_model = plugins.checked_model_override()?;
+    let mut plugin_warnings = Vec::new();
     let (model, budget, selected_model_name) = if let Some((backend, budget, name)) = override_model
     {
         (backend, budget, Some(name))

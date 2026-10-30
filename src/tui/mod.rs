@@ -1591,6 +1591,10 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     continue;
                 }
                 if let Some(name) = text.strip_prefix("/model ") {
+                    if runtime.plugins.has_model_override() {
+                        state.note("An active model plugin owns the model; disable it and restart before selecting a profile.");
+                        continue;
+                    }
                     let selected = crate::profiles::Profiles::load().and_then(|profiles| {
                         profiles
                             .profiles
@@ -1737,11 +1741,16 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                         let before = state.session.clone();
                         state.session = agent.session_id().to_owned();
                         if state.session != before {
-                            let saved = state
-                                .model_catalog
-                                .as_ref()
-                                .context("session catalog missing")?
-                                .model_choice(&state.session)?;
+                            let saved = if runtime.plugins.has_model_override() {
+                                // Session profiles must never override the active provider plugin.
+                                None
+                            } else {
+                                state
+                                    .model_catalog
+                                    .as_ref()
+                                    .context("session catalog missing")?
+                                    .model_choice(&state.session)?
+                            };
                             if let Some(choice) = saved {
                                 if state.model_profile.as_deref() != Some(&choice.profile) {
                                     let profiles = crate::profiles::Profiles::load()?;
@@ -1795,7 +1804,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                         }
                                     }
                                 }
-                            } else {
+                            } else if !runtime.plugins.has_model_override() {
                                 save_model_choice(&mut state, model.as_ref());
                             }
                             state.configure_status(

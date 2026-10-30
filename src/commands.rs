@@ -35,10 +35,20 @@ impl CommandReply {
 
 type SyncHandler = Box<dyn Fn(&mut Agent, &TaskInput, &str) -> Result<CommandReply> + Send + Sync>;
 type ExternalFuture = Pin<Box<dyn Future<Output = Result<CommandReply>> + Send>>;
-type ExternalHandler = Box<dyn Fn(String, PathBuf) -> ExternalFuture + Send + Sync>;
+type AgentFuture<'a> = Pin<Box<dyn Future<Output = Result<CommandReply>> + Send + 'a>>;
+type AgentAsyncHandler =
+    Box<dyn for<'a> Fn(&'a mut Agent, &'a TaskInput, &'a str) -> AgentFuture<'a> + Send + Sync>;
+#[derive(Clone)]
+pub struct CommandSession {
+    pub workdir: PathBuf,
+    pub archive: PathBuf,
+    pub session_id: String,
+}
+type ExternalHandler = Box<dyn Fn(String, CommandSession) -> ExternalFuture + Send + Sync>;
 
 enum Handler {
     Sync(SyncHandler),
+    AgentAsync(AgentAsyncHandler),
     External(ExternalHandler),
 }
 
@@ -68,6 +78,25 @@ impl CommandRegistry {
         Ok(())
     }
 
+    pub fn register_agent_async(
+        &mut self,
+        name: &str,
+        handler: impl for<'a> Fn(&'a mut Agent, &'a TaskInput, &'a str) -> AgentFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<()> {
+        if !name.starts_with('/') || name.len() < 2 || name.chars().any(char::is_whitespace) {
+            bail!("command must start with / and contain no spaces");
+        }
+        if self.commands.contains_key(name) {
+            bail!("duplicate command '{name}'");
+        }
+        self.commands
+            .insert(name.into(), Handler::AgentAsync(Box::new(handler)));
+        Ok(())
+    }
+
     /// External commands are asynchronous so a stalled plugin cannot freeze
     /// the terminal UI. The callback receives only owned arguments/workdir.
     pub fn register_async<F, Fut>(&mut self, name: &str, handler: F) -> Result<()>
@@ -81,9 +110,23 @@ impl CommandRegistry {
         if self.commands.contains_key(name) {
             bail!("duplicate command '{name}'");
         }
+        self.register_async_context(name, move |args, context| handler(args, context.workdir))
+    }
+
+    pub fn register_async_context<F, Fut>(&mut self, name: &str, handler: F) -> Result<()>
+    where
+        F: Fn(String, CommandSession) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<CommandReply>> + Send + 'static,
+    {
+        if !name.starts_with('/') || name.len() < 2 || name.chars().any(char::is_whitespace) {
+            bail!("command must start with / and contain no spaces");
+        }
+        if self.commands.contains_key(name) {
+            bail!("duplicate command '{name}'");
+        }
         self.commands.insert(
             name.into(),
-            Handler::External(Box::new(move |args, path| Box::pin(handler(args, path)))),
+            Handler::External(Box::new(move |args, ctx| Box::pin(handler(args, ctx)))),
         );
         Ok(())
     }
@@ -97,11 +140,19 @@ impl CommandRegistry {
         let (name, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         match self.commands.get(name) {
             Some(Handler::Sync(handler)) => handler(agent, input, rest.trim()).map(Some),
-            Some(Handler::External(handler)) => {
-                handler(rest.trim().into(), agent.workdir().to_path_buf())
-                    .await
-                    .map(Some)
+            Some(Handler::AgentAsync(handler)) => {
+                handler(agent, input, rest.trim()).await.map(Some)
             }
+            Some(Handler::External(handler)) => handler(
+                rest.trim().into(),
+                CommandSession {
+                    workdir: agent.workdir().to_path_buf(),
+                    archive: agent.archive_path().to_path_buf(),
+                    session_id: agent.session_id().to_owned(),
+                },
+            )
+            .await
+            .map(Some),
             None => Ok(None),
         }
     }
@@ -115,7 +166,9 @@ impl CommandRegistry {
         let (name, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         match self.commands.get(name) {
             Some(Handler::Sync(handler)) => handler(agent, input, rest.trim()).map(Some),
-            Some(Handler::External(_)) => bail!("external command '{name}' requires execute_async"),
+            Some(Handler::AgentAsync(_) | Handler::External(_)) => {
+                bail!("command '{name}' requires execute_async")
+            }
             None => Ok(None),
         }
     }
@@ -248,30 +301,36 @@ impl CommandRegistry {
             lines.push("Use /fork <number> or /rewind <number>. These change conversation state, not files.".into());
             Ok(CommandReply::text(lines.join("\n")))
         })?;
-        registry.register("/fork", |agent, _, args| {
-            let checkpoint = if args.is_empty() {
-                None
-            } else {
-                Some(parse_number(args, "/fork [checkpoint]")?)
-            };
-            let id = agent.fork(checkpoint)?;
-            Ok(CommandReply::text(format!(
-                "Forked to session '{id}'. Use /resume to return to the source."
-            )))
+        registry.register_agent_async("/fork", |agent, _, args| {
+            Box::pin(async move {
+                let checkpoint = if args.is_empty() {
+                    None
+                } else {
+                    Some(parse_number(args, "/fork [checkpoint]")?)
+                };
+                let id = agent.fork_async(checkpoint).await?;
+                Ok(CommandReply::text(format!(
+                    "Forked to session '{id}'. Use /resume to return to the source."
+                )))
+            })
         })?;
-        registry.register("/rewind", |agent, _, args| {
-            let checkpoint = parse_number(args, "/rewind <checkpoint>")?;
-            let saved = agent.rewind(checkpoint)?;
-            Ok(CommandReply::text(format!(
+        registry.register_agent_async("/rewind", |agent, _, args| {
+            Box::pin(async move {
+                let checkpoint = parse_number(args, "/rewind <checkpoint>")?;
+                let saved = agent.rewind_async(checkpoint).await?;
+                Ok(CommandReply::text(format!(
                 "Rewound to #{checkpoint}. Previous future saved as '{saved}' (/resume {saved})."
             )))
+            })
         })?;
-        registry.register("/undo", |agent, _, args| {
-            require_no_args(args, "/undo")?;
-            let (checkpoint, saved) = agent.undo()?;
-            Ok(CommandReply::text(format!(
+        registry.register_agent_async("/undo", |agent, _, args| {
+            Box::pin(async move {
+                require_no_args(args, "/undo")?;
+                let (checkpoint, saved) = agent.undo_async().await?;
+                Ok(CommandReply::text(format!(
                 "Rewound to #{checkpoint}. Previous future saved as '{saved}' (/resume {saved})."
             )))
+            })
         })?;
         registry.register("/pending", |_, input, args| {
             require_no_args(args, "/pending")?;

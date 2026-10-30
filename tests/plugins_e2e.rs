@@ -1070,20 +1070,26 @@ async fn streaming_model_cancellation_recovers_and_bad_frames_fail() -> Result<(
         Message::new("system", "system"),
         Message::new("user", "stall"),
     ];
-    let mut captured = String::new();
-    let timeout = tokio::time::timeout(
-        Duration::from_millis(450),
-        backend.complete(&stalled, &[], &mut |delta| captured.push_str(delta)),
-    )
-    .await;
-    assert!(
-        timeout.is_err(),
-        "missing final frame must not count as completion"
-    );
-    assert_eq!(
-        captured, "started",
-        "partial stream should be delivered before cancel"
-    );
+    let captured = Mutex::new(String::new());
+    let (sent, received) = tokio::sync::oneshot::channel::<()>();
+    let mut sent = Some(sent);
+    let mut callback = |delta: &str| {
+        captured.lock().unwrap().push_str(delta);
+        if let Some(sender) = sent.take() {
+            let _ = sender.send(());
+        }
+    };
+    {
+        let mut request = Box::pin(backend.complete(&stalled, &[], &mut callback));
+        tokio::select! {
+            signalled = received => { signalled.context("missing initial streamed text")?; }
+            result = &mut request => { anyhow::bail!("stalled model returned unexpectedly: {:?}", result.err()); }
+            _ = tokio::time::sleep(Duration::from_secs(5)) => anyhow::bail!("model did not stream initial text"),
+        }
+        // Dropping the request while it is waiting for its terminal frame
+        // must kill that worker and preserve the next model request.
+    }
+    assert_eq!(captured.lock().unwrap().as_str(), "started");
     let normal = [
         Message::new("system", "system"),
         Message::new("user", "hello"),
@@ -2096,7 +2102,7 @@ async fn external_context_plugin_tracks_fork_rewind_and_resume_archives() -> Res
     body={state:args.state};
   } else if(req.type==='context_branch') {
     if(!args.source_archive || !args.destination_archive ||
-       req.archive!==args.destination_archive || args.retained.length>=args.source.length)
+       req.archive!==args.destination_archive || args.retained.length>args.source.length)
       throw Error('invalid branch archive contract');
     body={state:{branchFrom:args.source_archive,branchTo:args.destination_archive}};
   } else throw Error(req.type);
@@ -2124,7 +2130,7 @@ async fn external_context_plugin_tracks_fork_rewind_and_resume_archives() -> Res
     assert_eq!(agent.run("one", &mut |_| {}).await?, "ok");
     assert_eq!(agent.run("two", &mut |_| {}).await?, "ok");
     let original = agent.archive_path().to_string_lossy().to_string();
-    let _branch_id = agent.fork(Some(1))?;
+    let _branch_id = agent.fork_async(Some(1)).await?;
     let fork_archive = agent.archive_path().to_string_lossy().to_string();
     assert_ne!(original, fork_archive);
     agent.run("forked", &mut |_| {}).await?;
@@ -2144,7 +2150,7 @@ async fn external_context_plugin_tracks_fork_rewind_and_resume_archives() -> Res
         prompt.contains(&format!("branch_to={fork_archive}")),
         "{prompt}"
     );
-    let backup_id = agent.rewind(1)?;
+    let backup_id = agent.rewind_async(1).await?;
     agent.run("after-rewind", &mut |_| {}).await?;
     let prompt = captured.0.lock().unwrap()[0]
         .content
@@ -2576,5 +2582,425 @@ async fn cancelling_external_context_prepare_restarts_worker_without_losing_sess
         .messages()
         .iter()
         .any(|m| m.content.as_deref() == Some("resume")));
+    Ok(())
+}
+
+#[test]
+fn enabled_model_provider_errors_and_broken_manifests_fail_closed() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let root = temp.path().join("plugins");
+    let bad = root.join("bad-model");
+    fs::create_dir_all(&bad)?;
+    fs::write(bad.join("plugin.toml"),
+        "id='bad-model'\nname='Provider'\n[model]\nprotocol='not-a-protocol'\nbase_url='http://127.0.0.1:9'\nmodel='broken'\ncontext_window=8192\noutput_reserve=1024\n")?;
+    let state = temp.path().join("plugins.toml");
+    let load = || PluginCatalog::discover_at(root.clone(), state.clone(), temp.path());
+    assert!(
+        load()?.checked_model_override()?.is_none(),
+        "disabled plugin must not affect provider"
+    );
+    load()?.set_enabled("bad-model", true)?;
+    let error = match load()?.checked_model_override() {
+        Err(error) => error.to_string(),
+        Ok(_) => anyhow::bail!("invalid enabled model must not silently fall back"),
+    };
+    assert!(
+        error.contains("enabled model plugin cannot initialize"),
+        "{error}"
+    );
+    fs::write(bad.join("plugin.toml"), "invalid [")?;
+    assert!(
+        load()?.ensure_loadable().is_err(),
+        "enabled corrupt manifest must not disappear"
+    );
+    assert!(load()?
+        .set_enabled("bad-model", false)?
+        .contains("disabled"));
+    assert!(
+        load()?.ensure_loadable().is_ok(),
+        "disable command must remain usable"
+    );
+    Ok(())
+}
+
+#[test]
+fn independent_kroma_processes_do_not_lose_plugin_settings() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let root = temp.path().join("plugins");
+    let plugin = root.join("shared");
+    fs::create_dir_all(&plugin)?;
+    fs::write(
+        plugin.join("plugin.toml"),
+        "id='shared'\nname='Shared state'\nprompt='hello'\n",
+    )?;
+    let mut children = Vec::new();
+    for i in 0..12 {
+        children.push(
+            Command::new(env!("CARGO_BIN_EXE_kroma"))
+                .args([
+                    "plugins",
+                    "set",
+                    "shared",
+                    &format!("key{i}"),
+                    &format!("value{i}"),
+                ])
+                .env("KROMA_PLUGIN_DIR", &root)
+                .env("KROMA_WORKDIR", temp.path())
+                .spawn()?,
+        );
+    }
+    for mut process in children {
+        assert!(
+            process.wait()?.success(),
+            "one concurrent plugin settings update failed"
+        );
+    }
+    let config = PluginCatalog::discover_at(root, temp.path().join("plugins.toml"), temp.path())?
+        .show_config("shared")?;
+    for i in 0..12 {
+        assert!(
+            config.contains(&format!("key{i} = \"value{i}\"")),
+            "lost concurrent update key{i}: {config}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_plugin_tool_streams_progress_without_changing_final_result() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let root = temp.path().join("plugins");
+    let dir = root.join("progress");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("plugin.toml"),
+        "id='progress'\nname='Streaming tool'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='progress_tool'\ndescription='Streaming test'\nstreaming=true\n")?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const request=JSON.parse(line);
+  const base={request_id:request.request_id,protocol_version:1};
+  for(const frame of [
+    {event:'output_delta',stream:'stdout',delta:'phase one'},
+    {event:'output_delta',stream:'stderr',delta:'phase two'},
+    {event:'complete',result:{content:'finished',is_error:false}}
+  ]) process.stdout.write(JSON.stringify({...base,...frame})+'\n');
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(root.clone(), state.clone(), temp.path())?
+        .set_enabled("progress", true)?;
+    let enabled = PluginCatalog::discover_at(root, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    assert!(enabled
+        .contribute(&mut tools, &mut PromptComposer::default())
+        .is_empty());
+    let call = ToolCall {
+        id: "stream-1".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "progress_tool".into(),
+            arguments: "{}".into(),
+        },
+    };
+    let chunks = Mutex::new(Vec::<(String, String)>::new());
+    let callback =
+        |channel: &str, delta: &str| chunks.lock().unwrap().push((channel.into(), delta.into()));
+    let result = tools
+        .execute(
+            &call,
+            ToolContext {
+                workdir: temp.path(),
+                archive: temp.path(),
+                on_output: Some(&callback),
+            },
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(result.content, "finished");
+    assert_eq!(
+        *chunks.lock().unwrap(),
+        vec![
+            ("stdout".into(), "phase one".into()),
+            ("stderr".into(), "phase two".into())
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_plugin_overflow_recovery_still_accounts_for_compaction_usage() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let root = temp.path().join("plugins");
+    let dir = root.join("overflow-usage");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("plugin.toml"),
+        "id='overflow-usage'\nname='Compaction usage'\ncommand='node'\nargs=['main.js']\n[context]\nversion=2\n")?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const request=JSON.parse(line);
+  process.stdout.write(JSON.stringify({request_id:request.request_id,protocol_version:1,
+    content:JSON.stringify({recovered:false,state:{should_not_persist:true},
+      usage:{requests:2,input:125,output:25,cached:30,elapsed_ms:100}})})+'\n');
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(root.clone(), state.clone(), temp.path())?
+        .set_enabled("overflow-usage", true)?;
+    let enabled = PluginCatalog::discover_at(root, state, temp.path())?;
+    let mut factory: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(enabled.replace_context(&mut factory).is_empty());
+    let mut policy = factory.restore(
+        factory.initial(),
+        ContextConfig::with_output_reserve(8192, 1024)?,
+        temp.path(),
+    )?;
+    let backend: Arc<dyn ModelBackend> = Arc::new(CaptureModel::default());
+    let history = [Message::new("system", "root"), Message::new("user", "turn")];
+    assert!(
+        !policy
+            .recover_overflow(&history, &backend, &StateRecorder::default())
+            .await?
+    );
+    let PersistedContext::External(context) = policy.state() else {
+        anyhow::bail!("external context state missing");
+    };
+    assert!(
+        context.data.is_null(),
+        "failed recovery must not commit state"
+    );
+    let usage = policy.take_usage();
+    assert_eq!(
+        (usage.requests, usage.input, usage.output, usage.cached),
+        (2, Some(125), Some(25), Some(30))
+    );
+    assert_eq!(policy.take_usage().requests, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_context_branch_is_cancellable_and_full_copy_notifies_plugin() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("work");
+    fs::create_dir_all(&workdir)?;
+    let root = temp.path().join("plugins");
+    let dir = root.join("branch-wait");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("plugin.toml"),
+        "id='branch-wait'\nname='Branch cancellation'\ncommand='node'\nargs=['main.js']\n[context]\nversion=2\n")?;
+    fs::write(
+        dir.join("main.js"),
+        r#"const fs=require('node:fs');
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const req=JSON.parse(line);
+  if(req.type==='context_branch') {
+    fs.writeFileSync('branch-started',req.arguments.destination_archive);
+    if(!fs.existsSync('allow-branch')) return;
+    // Full history branches may leave the existing state unchanged.
+    process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+      content:JSON.stringify({})})+'\n');
+  }
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(root.clone(), state.clone(), &workdir)?
+        .set_enabled("branch-wait", true)?;
+    let enabled = PluginCatalog::discover_at(root, state, &workdir)?;
+    let mut context: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(enabled.replace_context(&mut context).is_empty());
+    let mut agent = Agent::with_runtime_budget(
+        Arc::new(CaptureModel::default()),
+        ToolRegistry::builtin(),
+        context,
+        PromptComposer::default(),
+        None,
+        workdir,
+        ContextConfig::with_output_reserve(8192, 1024)?,
+    )?;
+    let original = agent.archive_path().to_path_buf();
+    assert!(
+        agent.fork(Some(0)).is_err(),
+        "sync API must not freeze on external subprocess"
+    );
+    {
+        let mut branch = Box::pin(agent.fork_async(Some(0)));
+        let started = dir.join("branch-started");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result=&mut branch => anyhow::bail!("hung branch returned: {result:?}"),
+                _=async {
+                    loop {
+                        if started.exists(){break;}
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } => Ok(()),
+            }
+        })
+        .await??;
+        // Dropping an awaiting fork future must kill its worker, not the UI.
+    }
+    assert_eq!(agent.archive_path(), original);
+    assert_eq!(agent.messages().len(), 1);
+    fs::write(dir.join("allow-branch"), "yes")?;
+    let branched =
+        tokio::time::timeout(Duration::from_secs(5), agent.fork_async(Some(0))).await??;
+    assert!(!branched.is_empty());
+    assert_ne!(agent.archive_path(), original);
+    let destination = fs::read_to_string(dir.join("branch-started"))?;
+    assert_eq!(Path::new(&destination), agent.archive_path());
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_identity_reaches_command_model_hook_and_event_plugins() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    fs::create_dir_all(&workdir)?;
+    let root = temp.path().join("plugins");
+    let dir = root.join("identity");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("plugin.toml"),
+        "id='identity'\nname='Session identity'\ncommand='node'\nargs=['main.js']\nhooks=['before_model_request']\nevents=['task_started']\n[[commands]]\nname='/identity'\n")?;
+    fs::write(
+        dir.join("main.js"),
+        r#"const fs=require('node:fs');
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+ const req=JSON.parse(line);
+ if(req.type==='event'||req.type==='hook')
+   fs.writeFileSync(req.type+'.json',JSON.stringify({session_id:req.session_id,archive:req.archive}));
+ const content=req.type==='command'?
+   JSON.stringify({session_id:req.session_id,archive:req.archive}):
+   (req.type==='hook'?'{}':'ok');
+ process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,content})+'\n');
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(root.clone(), state.clone(), &workdir)?
+        .set_enabled("identity", true)?;
+    let enabled = PluginCatalog::discover_at(root, state, &workdir)?;
+    let backend = Arc::new(CaptureModel::default());
+    let budget = ContextConfig::with_output_reserve(8192, 1024)?;
+    let model = enabled.model_hooks(backend, budget);
+    let mut agent = Agent::with_runtime_budget(
+        model,
+        ToolRegistry::builtin(),
+        Arc::new(kroma::context::BuiltinContextFactory),
+        PromptComposer::default(),
+        enabled.wrap_events(None)?,
+        workdir,
+        budget,
+    )?;
+    let mut commands = CommandRegistry::builtin(vec![])?;
+    assert!(enabled.register_commands(&mut commands).is_empty());
+    for turn in ["first", "second"] {
+        if turn == "second" {
+            agent.new_session()?;
+        }
+        assert_eq!(agent.run(turn, &mut |_| {}).await?, "ok");
+        let input_handle = agent.task_input();
+        let result = commands
+            .execute_async("/identity", &mut agent, &input_handle)
+            .await?
+            .context("missing plugin response")?;
+        let identity: serde_json::Value = serde_json::from_str(&result.output)?;
+        let path = agent.archive_path().to_string_lossy().to_string();
+        assert_eq!(identity["session_id"], agent.session_id());
+        assert_eq!(identity["archive"], path);
+        let hook: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("hook.json"))?)?;
+        assert_eq!(hook["archive"], path);
+        let mut observed = false;
+        for _ in 0..100 {
+            if let Ok(data) = fs::read_to_string(dir.join("event.json")) {
+                let payload: serde_json::Value = serde_json::from_str(&data)?;
+                if payload["archive"] == path {
+                    observed = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        assert!(observed, "session event did not include current archive");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropping_stalled_event_subscription_terminates_worker() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let root = temp.path().join("plugins");
+    let dir = root.join("stalled-events");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("plugin.toml"),
+        "id='stalled-events'\nname='Event lifecycle'\ncommand='node'\nargs=['main.js']\nevents=['task_started']\n")?;
+    fs::write(
+        dir.join("main.js"),
+        r#"const fs=require('node:fs');
+require('node:readline').createInterface({input:process.stdin}).on('line',()=>{
+  fs.writeFileSync('worker.pid',String(process.pid));
+  // Never complete this event. Unloading its subscription must terminate us.
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(root.clone(), state.clone(), temp.path())?
+        .set_enabled("stalled-events", true)?;
+    let catalog = PluginCatalog::discover_at(root, state, temp.path())?;
+    let sink = catalog
+        .wrap_events(None)?
+        .context("event subscription missing")?;
+    sink.on_event(kroma::events::RuntimeEvent::TaskStarted);
+    let marker = dir.join("worker.pid");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if marker.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    let pid: u32 = fs::read_to_string(marker)?.parse()?;
+    let started = std::time::Instant::now();
+    drop(sink);
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "unloading an event subscriber must not block the UI"
+    );
+    let mut exited = false;
+    for _ in 0..75 {
+        #[cfg(windows)]
+        let alive = {
+            let output = Command::new("tasklist.exe")
+                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                .output()?;
+            String::from_utf8_lossy(&output.stdout).contains(&format!(",\"{pid}\","))
+        };
+        #[cfg(unix)]
+        let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+        if !alive {
+            exited = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        exited,
+        "stalled event worker {pid} survived subscription unload"
+    );
     Ok(())
 }

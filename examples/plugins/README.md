@@ -119,8 +119,9 @@ In Kroma use `/plugins` with the same subcommands and
 `/plugins view <id>` for plugins declaring an information panel.
 `/plugins reload` in an **idle TUI** reloads tools, Prompt contributions,
 slash commands, event subscribers and static UI metadata. It validates the new
-registry first and keeps the old one on failure. Unchanged plugin processes
-(and their command/event state) are reused rather than restarted. The active
+registry first and keeps the old one on failure. Unchanged tool/command
+processes are reused; event subscriptions receive fresh isolated workers so
+stalled old handlers can be cancelled without killing new ones. The active
 conversation, Agent Loop and model stay unchanged. Only an actual change to
 an active model, context policy or `before_model_request` Hook requires
 restarting Kroma. A broken **disabled** plugin does not block unrelated
@@ -134,7 +135,7 @@ directory symlink targets (such as pnpm-managed dependencies) and copies
 contents, without needing symlink creation permissions in the destination.
 Recursive symlink cycles are rejected.
 
-`uninstall` removes installed plugin code and its saved activation/settings, even if its manifest is damaged; it intentionally **preserves user-authored plugin data**. A damaged but previously activated plugin can still be disabled by ID. Project-local plugins are source-managed: remove their directory manually rather than using `uninstall`. Changes to a running Kroma process still require `/plugins reload` or restart; stateful replacements require restart.
+`uninstall` removes installed plugin code and its saved activation/settings, even if its manifest is damaged; it intentionally **preserves user-authored plugin data**. Configuration read-modify-write operations use an OS-held `plugins.toml.lock` file across Kroma processes. A damaged but previously activated plugin can still be disabled by ID. Project-local plugins are source-managed: remove their directory manually rather than using `uninstall`. Changes to a running Kroma process still require `/plugins reload` or restart; stateful replacements require restart.
 
 User-global plugins and project plugins have separate enabled-state keys.
 Project activation is bound to its canonical plugin directory, so the same
@@ -156,7 +157,8 @@ The basic fields:
 - `replace_prompt`: replace the base system Prompt; all plugins still add
   the built-in execution guidance unless they change it explicitly.
 - `[[tools]]`: `name`, `description`, JSON-style `[tools.parameters]`,
-  optional `replace = true` to replace an existing named tool.
+  optional `replace = true` to replace an existing named tool, and optional
+  `streaming = true` to enable live output frames (`tool_stream`).
 - `[[commands]]`: slash command `name` and optional `description`.
 - `hooks = ["before_tool_call", "after_tool_result", "before_model_request"]`:
   synchronous modifying hooks (each opt-in).
@@ -170,8 +172,11 @@ The basic fields:
   is intentionally not interchangeable with version 1. A context response
   with no `state` property retains the previous state; explicit `"state": null`
   durably resets it. When shortening history for a fork/rewind,
-  `context_branch` must supply `state` explicitly. Kroma rejects an
-  incompatible strategy/version rather than silently discarding memory.
+  `context_branch` must supply `state` for shortened history. V2 plugins
+  also receive full-history branch notifications for copying out-of-band data;
+  the state field is optional in that case. Branching from the CLI/TUI uses
+  cancellable async calls. Kroma rejects an incompatible strategy/version
+  rather than silently discarding memory.
 - `[model]`: `model`, `base_url`, `protocol`, `api_key_env`,
   `context_window`, `output_reserve`, optional `streaming = true`,
   `thinking_levels = ["low", "medium", "high"]`,
@@ -242,6 +247,21 @@ first process call. Global and project plugin data have separate roots. Every
 process request (tool, Hook, context, model, UI, event) receives this field.
 These fields are optional to consume; older plugins continue to work.
 
+A tool declared with `[[tools]] streaming = true` receives a `tool_stream`
+request with the same arguments/identity as `tool`. It must respond using
+correlated JSONL frames (`protocol_version = 1`, matching `request_id`):
+
+```json
+{"protocol_version":1,"request_id":42,"event":"output_delta","stream":"stdout","delta":"Building..."}
+{"protocol_version":1,"request_id":42,"event":"output_delta","stream":"stderr","delta":"Warning"}
+{"protocol_version":1,"request_id":42,"event":"complete","result":{"content":"Done","is_error":false}}
+```
+
+`output_delta` is UI-only live progress; the final `complete.result.content`
+is the tool result persisted in the transcript. A terminal `error` frame with
+`message` is also supported. Cancellation terminates the process worker.
+Legacy single-response tool plugins keep the original `tool` request.
+
 Modifying hooks:
 
 - `before_tool_call`: receives root-level `call_id`/`archive` and
@@ -251,7 +271,8 @@ Modifying hooks:
 - `after_tool_result`: receives root-level `call_id`/`archive` and
   `{name,content,is_error}`; return JSON
   `{ "content": "new text", "is_error": false }`.
-- `before_model_request`: receives `{messages,tools}`; return any subset of
+- `before_model_request`: receives `{messages,tools}` and root-level
+  `session_id`/`archive`; return any subset of
   `{ "messages": [ ... ], "tools": [ ... ] }`. Request-only projections may
   insert/remove/rewrite messages and adjust tool schemas. Kroma validates the
   final request budget, while the persisted transcript and actual ToolRegistry
@@ -266,13 +287,22 @@ External context operations (`[context]`):
   per-session files without modifying the WAL directly.
 - `context_branch` receives root-level `archive` set to the destination
   session, plus `arguments.source_archive` and `arguments.destination_archive`.
-  Shortened branches must return `{ "state": ... }`; full copies keep the
-  original state. The host only persists the new branch after success.
+  Shortened branches must return `{ "state": ... }`. For full copies (V2),
+  the plugin is notified and may omit `state` to keep the existing value.
+  The host persists the new branch only after success. Synchronous Agent
+  branching refuses process-backed context adapters rather than blocking the TUI;
+  use the async branch API (as the built-in slash commands do).
 - Failed tasks clear unconsumed lifecycle notifications, while already
-  committed context state and original messages remain durable.
+  committed context state and original messages remain durable. Failed
+  overflow recovery may return `usage` even with `recovered: false`; the
+  usage is counted without committing the rejected recovery state.
 
 External model operations (`[model] protocol = "plugin"`):
 
+- Every process-model and model-Hook request includes root-level
+  `session_id` and `archive`. An enabled model plugin must initialize
+  successfully at startup; Kroma never silently falls back to another
+  Provider. The TUI does not replace it with a saved session profile.
 - `model_complete`: receive `{model,messages,tools,reasoning_level}`; return JSON inside
   `content`: `{ "message": {"role":"assistant","content":"..."},
   "usage": {"input":12,"output":5,"cached":0} }`.
@@ -358,9 +388,11 @@ Dynamic UI panel request (requires `[ui] dynamic_panel = true` and `command`):
   aborts the panel worker request; no background polling is performed.
 
 Observer events are delivered through **independent 32-frame bounded queues
-per enabled subscriber**, separate from the tool worker. A stalled subscriber
-cannot block other plugins or the Agent; its own overflowing notifications
-are dropped. High-volume streaming deltas are not forwarded.
+per enabled subscriber**, separate from the tool worker. Event envelopes include
+`session_id` and `archive`. Reloading or disabling a subscriber cancels its
+stalled worker without blocking the TUI or killing the new subscriber. A slow
+subscriber cannot block other plugins or the Agent; its own overflowing
+notifications are dropped. High-volume streaming deltas are not forwarded.
 
 ## Current limits
 

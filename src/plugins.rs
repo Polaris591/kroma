@@ -32,7 +32,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -164,6 +164,8 @@ fn context_version() -> u32 {
 pub struct PluginToolSpec {
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub streaming: bool,
     #[serde(default)]
     pub replace: bool,
     #[serde(default = "empty_parameters")]
@@ -457,6 +459,57 @@ fn valid_tool_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// A short OS-held lock for plugins.toml read/modify/write. This lock file is
+/// intentionally persistent: deleting it could create two independent locks.
+struct PluginStateLock {
+    _file: fs::File,
+}
+impl PluginStateLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let parent = path.parent().context("plugin state needs a parent")?;
+        fs::create_dir_all(parent)?;
+        let lock_path = parent.join("plugins.toml.lock");
+        for _ in 0..250 {
+            let mut options = fs::OpenOptions::new();
+            options.read(true).write(true).create(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.share_mode(0);
+            }
+            match options.open(&lock_path) {
+                Ok(file) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::fd::AsRawFd;
+                        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }
+                            != 0
+                        {
+                            let e = std::io::Error::last_os_error();
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                                continue;
+                            }
+                            return Err(e).context("locking plugin settings");
+                        }
+                    }
+                    return Ok(Self { _file: file });
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::PermissionDenied
+                    ) || (cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(e).context("opening plugin settings lock"),
+            }
+        }
+        bail!("plugin settings are busy in another Kroma process")
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct PluginState {
     #[serde(default)]
@@ -511,6 +564,8 @@ pub struct PluginCatalog {
     workdir: PathBuf,
     plugins: Vec<Plugin>,
     pub warnings: Vec<String>,
+    /// Enabled plugins with unreadable manifests cannot be silently omitted.
+    invalid_enabled: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -581,6 +636,7 @@ impl PluginCatalog {
     /// Explicit paths avoid changing process-wide environment variables in tests.
     pub fn discover_at(directory: PathBuf, state_path: PathBuf, workdir: &Path) -> Result<Self> {
         let mut warnings = Vec::new();
+        let mut invalid_enabled = Vec::new();
         let state = match PluginState::load(&state_path) {
             Ok(state) => state,
             Err(error) => {
@@ -666,7 +722,23 @@ impl PluginCatalog {
                             event_worker,
                         });
                     }
-                    Err(error) => warnings.push(format!("{}: {error:#}", dir.display())),
+                    Err(error) => {
+                        let label = format!("{}: {error:#}", dir.display());
+                        let id = entry.file_name().to_string_lossy().to_string();
+                        let project_key = if source == &directory {
+                            None
+                        } else {
+                            Some(format!("{}::{id}", source.canonicalize()?.display()))
+                        };
+                        if state.enabled.contains(&id)
+                            || project_key
+                                .as_ref()
+                                .is_some_and(|key| state.enabled_projects.contains(key))
+                        {
+                            invalid_enabled.push(label.clone());
+                        }
+                        warnings.push(label);
+                    }
                 }
             }
         }
@@ -676,7 +748,20 @@ impl PluginCatalog {
             workdir: workdir.to_path_buf(),
             plugins,
             warnings,
+            invalid_enabled,
         })
+    }
+
+    /// Fail running a broken enabled plugin, while keeping discovery and
+    /// disable/uninstall commands usable to repair the manifest.
+    pub fn ensure_loadable(&self) -> Result<()> {
+        if !self.invalid_enabled.is_empty() {
+            bail!(
+                "enabled plugin cannot load: {}",
+                self.invalid_enabled.join("; ")
+            );
+        }
+        Ok(())
     }
 
     fn refresh(&self) -> Result<Self> {
@@ -742,6 +827,7 @@ impl PluginCatalog {
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<String> {
+        let _lock = PluginStateLock::acquire(&self.state_path)?;
         let fresh = self.refresh()?;
         let mut state = PluginState::load(&self.state_path)?;
         let plugin = fresh.plugins.iter().find(|plugin| plugin.manifest.id == id);
@@ -780,6 +866,7 @@ impl PluginCatalog {
     }
 
     pub fn set_config(&self, id: &str, key: &str, value: Option<&str>) -> Result<String> {
+        let _lock = PluginStateLock::acquire(&self.state_path)?;
         let fresh = self.refresh()?;
         let plugin = fresh
             .plugins
@@ -833,6 +920,7 @@ impl PluginCatalog {
     /// Remove an installed user plugin and its activation/configuration.
     /// Project-local plugin sources are managed in their project directory.
     pub fn uninstall(&self, id: &str) -> Result<String> {
+        let _lock = PluginStateLock::acquire(&self.state_path)?;
         if !valid_id(id) {
             bail!("invalid plugin ID");
         }
@@ -865,6 +953,7 @@ impl PluginCatalog {
     }
 
     pub fn install(&self, directory: &Path) -> Result<String> {
+        let _lock = PluginStateLock::acquire(&self.state_path)?;
         let source = directory
             .canonicalize()
             .with_context(|| format!("opening {}", directory.display()))?;
@@ -916,6 +1005,7 @@ impl PluginCatalog {
         base_tools: &ToolRegistry,
         base_prompt: &PromptComposer,
     ) -> Result<(ToolRegistry, PromptComposer)> {
+        next.ensure_loadable()?;
         let desired = PluginState::load(&next.state_path)?;
         for old in self.plugins.iter().filter(|plugin| plugin.enabled) {
             let found = next.plugins.iter().any(|plugin| {
@@ -962,12 +1052,9 @@ impl PluginCatalog {
             }
             if same_worker {
                 plugin.worker = old.worker.clone();
-                if plugin.event_worker.is_some() {
-                    plugin.event_worker = old
-                        .event_worker
-                        .clone()
-                        .or_else(|| Some(Arc::new(old.worker.isolated())));
-                }
+                // Event subscriptions have independent lifetimes per reload.
+                // Reusing the old event process would let the departing sink
+                // cancel a newly registered subscriber's active request.
             }
         }
         next.prepare_idle_reload(base_tools, base_prompt)
@@ -981,6 +1068,7 @@ impl PluginCatalog {
         base_tools: &ToolRegistry,
         base_prompt: &PromptComposer,
     ) -> Result<(ToolRegistry, PromptComposer)> {
+        self.ensure_loadable()?;
         let mut tools = base_tools.clone();
         let mut prompt = base_prompt.clone();
         let warnings = self.contribute(&mut tools, &mut prompt);
@@ -1043,6 +1131,7 @@ impl PluginCatalog {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: tool.parameters.clone(),
+                    streaming: tool.streaming,
                     worker: plugin.worker.clone(),
                 };
                 let result = if tool.replace {
@@ -1111,6 +1200,24 @@ impl PluginCatalog {
     /// Resolve an enabled model plugin before initializing the default
     /// provider. This avoids optional /models requests and permits using a
     /// plugin-provided HTTP profile without redundant default credentials.
+    pub fn has_model_override(&self) -> bool {
+        self.plugins
+            .iter()
+            .any(|plugin| plugin.enabled && plugin.manifest.model.is_some())
+    }
+
+    pub fn checked_model_override(&self) -> Result<Option<ModelOverride>> {
+        self.ensure_loadable()?;
+        let (model, warnings) = self.model_override();
+        if !warnings.is_empty() {
+            bail!(
+                "enabled model plugin cannot initialize: {}",
+                warnings.join("; ")
+            );
+        }
+        Ok(model)
+    }
+
     pub fn model_override(&self) -> (Option<ModelOverride>, Vec<String>) {
         let mut warnings = Vec::new();
         let mut selected = None;
@@ -1234,20 +1341,37 @@ impl PluginCatalog {
         let mut subscriptions = Vec::with_capacity(listeners.len());
         for (events, worker) in listeners {
             let (sender, receiver) = mpsc::sync_channel::<Value>(32);
+            let stopped = Arc::new(AtomicBool::new(false));
+            let stopped_for_thread = stopped.clone();
+            let subscriber = worker.clone();
             std::thread::Builder::new()
                 .name("kroma-plugin-events".into())
                 .spawn(move || {
                     while let Ok(message) = receiver.recv() {
-                        if let Err(error) = worker.invoke(message) {
-                            crate::runtime_log!("[plugin] event handler: {error:#}");
+                        if stopped_for_thread.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let id = worker.next_request.fetch_add(1, Ordering::Relaxed);
+                        if let Err(error) =
+                            worker.invoke_inner(message, Some((id, &stopped_for_thread)))
+                        {
+                            if !stopped_for_thread.load(Ordering::SeqCst) {
+                                crate::runtime_log!("[plugin] event handler: {error:#}");
+                            }
                         }
                     }
                 })?;
-            subscriptions.push((events, sender));
+            subscriptions.push(PluginEventSubscription {
+                events,
+                sender,
+                stopped,
+                worker: subscriber,
+            });
         }
         Ok(Some(Arc::new(PluginEventSink {
             host,
             listeners: subscriptions,
+            session: RwLock::new(None),
         })))
     }
 
@@ -1474,14 +1598,16 @@ impl PluginCatalog {
                 let name = spec.name.clone();
                 let label = format!("{}: {name}", plugin.manifest.id);
                 let command_name = name.clone();
-                if let Err(error) = registry.register_async(&name, move |args, workdir| {
+                if let Err(error) = registry.register_async_context(&name, move |args, session| {
                     let worker = worker.clone();
                     let name = command_name.clone();
                     async move {
                         let reply = worker
                             .invoke_async(json!({
                                 "type": "command", "name": name, "arguments": args,
-                                "workdir": workdir
+                                "workdir": session.workdir,
+                                "archive": session.archive,
+                                "session_id": session.session_id
                             }))
                             .await?;
                         if reply.is_error {
@@ -1559,6 +1685,7 @@ struct PluginToolAdapter {
     name: String,
     description: String,
     parameters: Value,
+    streaming: bool,
     worker: Arc<PluginWorker>,
 }
 
@@ -1578,6 +1705,7 @@ impl Tool for PluginToolAdapter {
             serde_json::from_str(&call.function.arguments).map_err(Into::into);
         let worker = self.worker.clone();
         let name = self.name.clone();
+        let streaming = self.streaming;
         let workdir = context.workdir.to_path_buf();
         let archive = context.archive.to_path_buf();
         let call_id = call.id.clone();
@@ -1588,13 +1716,48 @@ impl Tool for PluginToolAdapter {
                     arguments.unwrap_err()
                 ));
             };
-            let result = worker
-                .invoke_async(
-                    json!({"type":"tool", "name":name, "arguments":arguments, "workdir":workdir,
-                        "archive":archive, "call_id":call_id}),
-                )
-                .await;
-            match result {
+            let payload = json!({"type":if streaming {"tool_stream"} else {"tool"},
+                "name":name, "arguments":arguments, "workdir":workdir,
+                "archive":archive, "call_id":call_id});
+            if streaming {
+                let mut stream = worker.start_stream(payload);
+                let mut completed = None;
+                while let Some(frame) = stream.next().await {
+                    match frame["event"].as_str() {
+                        Some("output_delta") => {
+                            let channel = frame["stream"].as_str().unwrap_or("stdout");
+                            let delta = frame["delta"].as_str().unwrap_or("");
+                            if let Some(output) = context.on_output {
+                                output(channel, delta);
+                            }
+                        }
+                        Some("complete") => {
+                            completed = Some(serde_json::from_value::<PluginResponse>(
+                                frame["result"].clone(),
+                            ));
+                            break;
+                        }
+                        Some("error") => {
+                            return ToolResult::error(
+                                frame["message"].as_str().unwrap_or("plugin stream failed"),
+                            );
+                        }
+                        _ => return ToolResult::error("unsupported plugin tool stream frame"),
+                    }
+                }
+                return match stream.finish().await {
+                    Err(error) => ToolResult::error(format!("plugin stream failed: {error:#}")),
+                    Ok(()) => match completed {
+                        Some(Ok(reply)) if !reply.is_error => ToolResult::ok(reply.content),
+                        Some(Ok(reply)) => ToolResult::error(reply.content),
+                        Some(Err(error)) => {
+                            ToolResult::error(format!("invalid tool completion: {error:#}"))
+                        }
+                        None => ToolResult::error("plugin stream ended without completion"),
+                    },
+                };
+            }
+            match worker.invoke_async(payload).await {
                 Ok(response) if !response.is_error => ToolResult::ok(response.content),
                 Ok(response) => ToolResult::error(response.content),
                 Err(error) => ToolResult::error(format!("plugin execution failed: {error:#}")),
@@ -1675,26 +1838,62 @@ impl ToolInterceptor for PluginToolHooks {
     }
 }
 
+struct PluginEventSubscription {
+    events: BTreeSet<String>,
+    sender: SyncSender<Value>,
+    stopped: Arc<AtomicBool>,
+    worker: Arc<PluginWorker>,
+}
+
 struct PluginEventSink {
     host: Option<Arc<dyn EventSink>>,
-    listeners: Vec<(BTreeSet<String>, SyncSender<Value>)>,
+    listeners: Vec<PluginEventSubscription>,
+    session: RwLock<Option<(String, PathBuf)>>,
+}
+
+impl Drop for PluginEventSink {
+    fn drop(&mut self) {
+        for subscription in &self.listeners {
+            subscription.stopped.store(true, Ordering::SeqCst);
+            let worker = subscription.worker.clone();
+            // Kill a stalled event handler off the UI thread. The worker's
+            // active lock prevents killing a different, subsequent request.
+            std::thread::spawn(move || worker.cancel_active_request());
+        }
+    }
 }
 
 impl EventSink for PluginEventSink {
+    fn set_session_context(&self, id: &str, archive: &Path) {
+        if let Ok(mut session) = self.session.write() {
+            *session = Some((id.to_owned(), archive.to_path_buf()));
+        }
+        if let Some(host) = &self.host {
+            host.set_session_context(id, archive);
+        }
+    }
+
     fn on_event(&self, event: RuntimeEvent<'_>) {
         if let Some(name) = plugin_event_name(&event) {
             if self
                 .listeners
                 .iter()
-                .any(|(events, _)| events.contains(name))
+                .any(|subscription| subscription.events.contains(name))
             {
-                let payload =
-                    json!({"type":"event", "name":name, "arguments":plugin_event_fields(&event)});
-                for (events, sender) in &self.listeners {
-                    if events.contains(name) {
+                let (session_id, archive) = self
+                    .session
+                    .read()
+                    .ok()
+                    .and_then(|s| s.clone())
+                    .map_or((None, None), |(id, path)| (Some(id), Some(path)));
+                let payload = json!({"type":"event", "name":name,
+                    "session_id":session_id,"archive":archive,
+                    "arguments":plugin_event_fields(&event)});
+                for subscriber in &self.listeners {
+                    if subscriber.events.contains(name) {
                         // A slow listener drops only its own notifications;
                         // tools, transcripts, and other plugins stay live.
-                        let _ = sender.try_send(payload.clone());
+                        let _ = subscriber.sender.try_send(payload.clone());
                     }
                 }
             }
@@ -1897,6 +2096,14 @@ impl PluginWorker {
         .await?;
         guard.armed = false;
         outcome
+    }
+
+    fn cancel_active_request(&self) {
+        if let Ok(active) = self.active.lock() {
+            if let Some((_, pid)) = *active {
+                terminate_plugin(pid);
+            }
+        }
     }
 
     fn cancel_request(&self, id: u64) {
@@ -2258,6 +2465,7 @@ base_url = "https://example.com""#,
         valid.tools.push(PluginToolSpec {
             name: "hi".into(),
             description: "hello".into(),
+            streaming: false,
             replace: false,
             parameters: empty_parameters(),
         });

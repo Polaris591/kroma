@@ -3,7 +3,9 @@ use crate::protocol::Message;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Mutex, time::Duration};
+use std::{
+    collections::HashMap, future::Future, path::Path, pin::Pin, sync::Mutex, time::Duration,
+};
 
 /// Temporary image encodings owned by one Agent run. Never persisted, and
 /// dropped even when the task is cancelled or fails.
@@ -61,6 +63,9 @@ pub type SummaryResult = TextResult;
 /// deterministic test fake. Tools are supplied by the runtime, never chosen
 /// by the model adapter itself.
 pub trait ModelBackend: Send + Sync {
+    /// Called at session boundaries, not per token. External adapters may
+    /// attach session identity to their JSONL requests without altering messages.
+    fn set_session_context(&self, _id: &str, _archive: &Path) {}
     /// Remove metadata that this backend will not send on the wire, solely
     /// for context planning. Never mutate the durable transcript; an adapter
     /// without protocol-specific filtering can keep the conservative default.

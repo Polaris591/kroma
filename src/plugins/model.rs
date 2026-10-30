@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     borrow::Cow,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Instant,
 };
@@ -27,6 +28,7 @@ pub(super) struct ProcessModelBackend {
     thinking_levels: Vec<String>,
     reasoning_level: RwLock<Option<String>>,
     image_input: Option<bool>,
+    session: RwLock<Option<(String, PathBuf)>>,
 }
 
 /// Compare parsed JSON arguments rather than source formatting. Some
@@ -129,7 +131,16 @@ impl ProcessModelBackend {
             thinking_levels,
             reasoning_level: RwLock::new(reasoning_level),
             image_input,
+            session: RwLock::new(None),
         }
+    }
+
+    fn session_fields(&self) -> (Option<String>, Option<PathBuf>) {
+        self.session
+            .read()
+            .ok()
+            .and_then(|data| data.clone())
+            .map_or((None, None), |(id, archive)| (Some(id), Some(archive)))
     }
 
     async fn complete_streaming(
@@ -140,7 +151,9 @@ impl ProcessModelBackend {
         on_reasoning: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Completion> {
         let started = Instant::now();
+        let (session_id, archive) = self.session_fields();
         let mut stream = self.worker.start_stream(json!({
+            "session_id":session_id, "archive":archive,
             "type":"model_stream", "name":"model_stream",
             "arguments":{"model":self.model_name,"messages":messages,"tools":tools,
                 "reasoning_level":self.reasoning_level()}
@@ -250,6 +263,12 @@ impl ProcessModelBackend {
 }
 
 impl ModelBackend for ProcessModelBackend {
+    fn set_session_context(&self, id: &str, archive: &Path) {
+        if let Ok(mut session) = self.session.write() {
+            *session = Some((id.to_owned(), archive.to_path_buf()));
+        }
+    }
+
     fn accepts_images(&self) -> Option<bool> {
         self.image_input
     }
@@ -296,9 +315,11 @@ impl ModelBackend for ProcessModelBackend {
                     .await;
             }
             let started = Instant::now();
+            let (session_id, archive) = self.session_fields();
             let reply = self
                 .worker
                 .invoke_async(json!({
+                    "session_id":session_id,"archive":archive,
                     "type":"model_complete", "name":"model_complete",
                     "arguments":{"model":self.model_name,"messages":messages,"tools":tools,
                         "reasoning_level":self.reasoning_level()}
@@ -352,9 +373,11 @@ impl ModelBackend for ProcessModelBackend {
     ) -> ModelFuture<'a, TextResult> {
         Box::pin(async move {
             let started = Instant::now();
+            let (session_id, archive) = self.session_fields();
             let reply = self
                 .worker
                 .invoke_async(json!({
+                    "session_id":session_id,"archive":archive,
                     "type":"model_generate", "name":"model_generate",
                     "arguments":{"model":self.model_name,"system":system,
                         "prompt":text,"output_tokens":output_tokens,
@@ -392,6 +415,7 @@ pub(super) struct PluginModelHooks {
     inner: Arc<dyn ModelBackend>,
     budget: ContextConfig,
     workers: Vec<Arc<PluginWorker>>,
+    session: RwLock<Option<(String, PathBuf)>>,
 }
 
 impl PluginModelHooks {
@@ -404,6 +428,7 @@ impl PluginModelHooks {
             inner,
             budget,
             workers,
+            session: RwLock::new(None),
         }
     }
 
@@ -417,10 +442,17 @@ impl PluginModelHooks {
         // Hook leaves the request unchanged.
         let mut view: Cow<'_, [Message]> = Cow::Borrowed(messages);
         let mut schemas: Cow<'_, [Value]> = Cow::Borrowed(tools);
+        let (session_id, archive) = self
+            .session
+            .read()
+            .ok()
+            .and_then(|data| data.clone())
+            .map_or((None, None), |(id, path)| (Some(id), Some(path)));
         for worker in &self.workers {
             let reply = worker
                 .invoke_async(json!({
                     "type":"hook", "name":"before_model_request",
+                    "session_id":session_id,"archive":archive,
                     "arguments":{"messages":view.as_ref(),"tools":schemas.as_ref()}
                 }))
                 .await?;
@@ -453,6 +485,13 @@ impl PluginModelHooks {
 }
 
 impl ModelBackend for PluginModelHooks {
+    fn set_session_context(&self, id: &str, archive: &Path) {
+        self.inner.set_session_context(id, archive);
+        if let Ok(mut session) = self.session.write() {
+            *session = Some((id.to_owned(), archive.to_path_buf()));
+        }
+    }
+
     fn project_for_budget(&self, messages: &mut [Message]) {
         self.inner.project_for_budget(messages);
     }

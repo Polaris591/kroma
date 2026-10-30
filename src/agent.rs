@@ -305,6 +305,7 @@ impl Agent {
             task_input: TaskInput::default(),
             usage: UsageMeter::default(),
         };
+        agent.sync_session_context();
         if new_session && !defer_initial_save {
             agent
                 .session
@@ -346,6 +347,15 @@ impl Agent {
             });
         }
         Ok(())
+    }
+
+    fn sync_session_context(&self) {
+        let id = self.session_id();
+        let archive = self.session.archive_path();
+        self.model.set_session_context(id, archive);
+        if let Some(events) = &self.events {
+            events.set_session_context(id, archive);
+        }
     }
 
     pub fn session_id(&self) -> &str {
@@ -401,6 +411,7 @@ impl Agent {
         self.compression = context;
         self.model = model;
         self.context_budget = budget;
+        self.sync_session_context();
         Ok(())
     }
 
@@ -433,6 +444,7 @@ impl Agent {
         self.prompt = prompt.for_registered_tools(tools.is_builtin_only());
         self.tools = tools;
         self.events = events;
+        self.sync_session_context();
     }
 
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
@@ -467,6 +479,11 @@ impl Agent {
     /// Clone the completed prefix into a new session and switch to it.
     /// The source session and its WAL are not modified.
     pub fn fork(&mut self, checkpoint: Option<usize>) -> Result<String> {
+        if self.context_factory.requires_async_branch()
+            && matches!(self.compression.state(), PersistedContext::External(_))
+        {
+            bail!("process-backed context branching requires fork_async (the CLI /fork command uses it)");
+        }
         self.session.ensure_writable()?;
         let source_id = self.session_id().to_owned();
         let number = checkpoint.unwrap_or_else(|| self.history().len() - 1);
@@ -479,6 +496,37 @@ impl Agent {
             self.session.archive_path(),
             &path,
         )?;
+        self.finish_fork(source_id, number, until, id, path, state)
+    }
+
+    pub async fn fork_async(&mut self, checkpoint: Option<usize>) -> Result<String> {
+        self.session.ensure_writable()?;
+        let source_id = self.session_id().to_owned();
+        let number = checkpoint.unwrap_or_else(|| self.history().len() - 1);
+        let until = self.checkpoint_until(number)?;
+        let (id, path) = self.catalog.new_path()?;
+        let state = self
+            .context_factory
+            .branch_state_async(
+                &self.compression.state(),
+                &self.messages,
+                &self.messages[..until],
+                self.session.archive_path(),
+                &path,
+            )
+            .await?;
+        self.finish_fork(source_id, number, until, id, path, state)
+    }
+
+    fn finish_fork(
+        &mut self,
+        source_id: String,
+        number: usize,
+        until: usize,
+        id: String,
+        path: PathBuf,
+        state: PersistedContext,
+    ) -> Result<String> {
         let compression = self
             .context_factory
             .restore(state, self.context_budget, &path)?;
@@ -495,6 +543,7 @@ impl Agent {
         self.session = next;
         self.messages = messages;
         self.compression = compression;
+        self.sync_session_context();
         self.catalog.remember_active(self.session_id())?;
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::SessionForked {
@@ -514,6 +563,11 @@ impl Agent {
     /// session *before* replacing this session with an earlier prefix.
     /// The returned ID can be passed to /resume to revisit the old future.
     pub fn rewind(&mut self, checkpoint: usize) -> Result<String> {
+        if self.context_factory.requires_async_branch()
+            && matches!(self.compression.state(), PersistedContext::External(_))
+        {
+            bail!("process-backed context branching requires rewind_async (the CLI /rewind command uses it)");
+        }
         self.session.ensure_writable()?;
         let until = self.checkpoint_until(checkpoint)?;
         if until == self.messages.len() {
@@ -534,6 +588,63 @@ impl Agent {
             self.session.archive_path(),
             self.session.archive_path(),
         )?;
+        self.finish_rewind(
+            checkpoint,
+            until,
+            backup_id,
+            backup_path,
+            backup_state,
+            retained_state,
+        )
+    }
+
+    pub async fn rewind_async(&mut self, checkpoint: usize) -> Result<String> {
+        self.session.ensure_writable()?;
+        let until = self.checkpoint_until(checkpoint)?;
+        if until == self.messages.len() {
+            bail!("already at checkpoint #{checkpoint}; no history to rewind");
+        }
+        let (backup_id, backup_path) = self.catalog.new_path()?;
+        let source_state = self.compression.state();
+        let backup_state = self
+            .context_factory
+            .branch_state_async(
+                &source_state,
+                &self.messages,
+                &self.messages,
+                self.session.archive_path(),
+                &backup_path,
+            )
+            .await?;
+        let retained_state = self
+            .context_factory
+            .branch_state_async(
+                &source_state,
+                &self.messages,
+                &self.messages[..until],
+                self.session.archive_path(),
+                self.session.archive_path(),
+            )
+            .await?;
+        self.finish_rewind(
+            checkpoint,
+            until,
+            backup_id,
+            backup_path,
+            backup_state,
+            retained_state,
+        )
+    }
+
+    fn finish_rewind(
+        &mut self,
+        checkpoint: usize,
+        until: usize,
+        backup_id: String,
+        backup_path: PathBuf,
+        backup_state: PersistedContext,
+        retained_state: PersistedContext,
+    ) -> Result<String> {
         let archived_compression =
             self.context_factory
                 .restore(backup_state, self.context_budget, &backup_path)?;
@@ -558,6 +669,7 @@ impl Agent {
         self.compression.abort();
         self.messages = shortened;
         self.compression = next_compression;
+        self.sync_session_context();
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::SessionRewound {
                 id: self.session_id(),
@@ -587,6 +699,20 @@ impl Agent {
         Ok((number, backup))
     }
 
+    pub async fn undo_async(&mut self) -> Result<(usize, String)> {
+        let points = self.history();
+        let last = points.last().expect("system checkpoint exists");
+        let number = if last.until < self.messages.len() {
+            last.number
+        } else {
+            last.number.saturating_sub(1)
+        };
+        if self.messages.len() == 1 {
+            bail!("nothing to undo");
+        }
+        Ok((number, self.rewind_async(number).await?))
+    }
+
     pub fn new_session(&mut self) -> Result<String> {
         let (id, path) = self.catalog.new_path()?;
         self.open_session(path)?;
@@ -606,6 +732,7 @@ impl Agent {
         self.session = next;
         self.compression = context;
         self.messages = self.prompt.initial_history(&self.workdir);
+        self.sync_session_context();
         Ok(())
     }
 
@@ -651,6 +778,7 @@ impl Agent {
         self.messages = messages;
         self.compression = next_compression;
         self.context_budget = next_budget;
+        self.sync_session_context();
         self.catalog.remember_active(self.session_id())?;
         if let Some(events) = &self.events {
             if fresh {

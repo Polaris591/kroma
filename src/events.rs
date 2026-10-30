@@ -80,5 +80,6 @@ pub enum RuntimeEvent<'a> {
 }
 
 pub trait EventSink: Send + Sync {
+    fn set_session_context(&self, _id: &str, _archive: &std::path::Path) {}
     fn on_event(&self, event: RuntimeEvent<'_>);
 }

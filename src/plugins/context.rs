@@ -31,9 +31,70 @@ impl PluginContextFactory {
             worker,
         }
     }
+
+    fn checked_branch<'a>(
+        &self,
+        state: &'a PersistedContext,
+    ) -> Result<Option<&'a ExternalContextState>> {
+        let PersistedContext::External(existing) = state else {
+            return Ok(None);
+        };
+        if existing.strategy != self.id || existing.version != self.version {
+            bail!(
+                "context plugin '{}' v{} cannot branch '{}' v{}; original session preserved",
+                self.id,
+                self.version,
+                existing.strategy,
+                existing.version
+            );
+        }
+        Ok(Some(existing))
+    }
+
+    fn branch_request(
+        &self,
+        existing: &ExternalContextState,
+        source: &[Message],
+        retained: &[Message],
+        source_archive: &Path,
+        destination_archive: &Path,
+    ) -> Value {
+        json!({
+            "type":"context_branch", "name":"context_branch", "archive":destination_archive,
+            "arguments":{"source":source,"retained":retained,"state":existing.data,
+                "source_archive":source_archive,"destination_archive":destination_archive}
+        })
+    }
+
+    fn branch_result(
+        &self,
+        existing: &ExternalContextState,
+        full_copy: bool,
+        response: super::PluginResponse,
+    ) -> Result<PersistedContext> {
+        if response.is_error {
+            bail!("context branch failed: {}", response.content);
+        }
+        let patch: ContextPatch = serde_json::from_str(&response.content)
+            .context("context_branch must return a JSON object")?;
+        let data = match patch.state {
+            Some(data) => data,
+            None if full_copy => existing.data.clone(),
+            None => bail!("context_branch must provide state for shortened history"),
+        };
+        Ok(PersistedContext::External(ExternalContextState {
+            strategy: self.id.clone(),
+            version: self.version,
+            data,
+        }))
+    }
 }
 
 impl ContextFactory for PluginContextFactory {
+    fn requires_async_branch(&self) -> bool {
+        true
+    }
+
     fn initial(&self) -> PersistedContext {
         PersistedContext::External(ExternalContextState {
             strategy: self.id.clone(),
@@ -88,7 +149,7 @@ impl ContextFactory for PluginContextFactory {
         source_archive: &Path,
         destination_archive: &Path,
     ) -> Result<PersistedContext> {
-        let PersistedContext::External(existing) = state else {
+        let Some(existing) = self.checked_branch(state)? else {
             return BuiltinContextFactory.branch_state(
                 state,
                 source,
@@ -97,39 +158,60 @@ impl ContextFactory for PluginContextFactory {
                 destination_archive,
             );
         };
-        if existing.strategy != self.id || existing.version != self.version {
-            bail!(
-                "context plugin '{}' v{} cannot branch '{}' v{}; original session preserved",
-                self.id,
-                self.version,
-                existing.strategy,
-                existing.version
-            );
-        }
-        if retained.len() == source.len() {
-            return Ok(state.clone());
-        }
-        if retained.len() <= 1 {
+        let full_copy = retained.len() == source.len();
+        if !full_copy && retained.len() <= 1 {
             return Ok(self.initial());
         }
-        let response = self.worker.invoke(json!({
-            "type":"context_branch", "name":"context_branch",
-            "archive":destination_archive,
-            "arguments":{"source":source,"retained":retained,"state":existing.data,
-                "source_archive":source_archive,"destination_archive":destination_archive}
-        }))?;
-        if response.is_error {
-            bail!("context branch failed: {}", response.content);
+        if full_copy && self.version < 2 {
+            return Ok(state.clone());
         }
-        let patch: ContextPatch = serde_json::from_str(&response.content)
-            .context("context_branch must return a JSON object")?;
-        Ok(PersistedContext::External(ExternalContextState {
-            strategy: self.id.clone(),
-            version: self.version,
-            data: patch
-                .state
-                .context("context_branch must provide state for shortened history")?,
-        }))
+        let response = self.worker.invoke(self.branch_request(
+            existing,
+            source,
+            retained,
+            source_archive,
+            destination_archive,
+        ))?;
+        self.branch_result(existing, full_copy, response)
+    }
+
+    fn branch_state_async<'a>(
+        &'a self,
+        state: &'a PersistedContext,
+        source: &'a [Message],
+        retained: &'a [Message],
+        source_archive: &'a Path,
+        destination_archive: &'a Path,
+    ) -> StreamFuture<'a, PersistedContext> {
+        Box::pin(async move {
+            let Some(existing) = self.checked_branch(state)? else {
+                return BuiltinContextFactory.branch_state(
+                    state,
+                    source,
+                    retained,
+                    source_archive,
+                    destination_archive,
+                );
+            };
+            let full_copy = retained.len() == source.len();
+            if !full_copy && retained.len() <= 1 {
+                return Ok(self.initial());
+            }
+            if full_copy && self.version < 2 {
+                return Ok(state.clone());
+            }
+            let response = self
+                .worker
+                .invoke_async(self.branch_request(
+                    existing,
+                    source,
+                    retained,
+                    source_archive,
+                    destination_archive,
+                ))
+                .await?;
+            self.branch_result(existing, full_copy, response)
+        })
     }
 }
 
@@ -174,21 +256,25 @@ struct PluginContextPolicy {
 }
 
 impl PluginContextPolicy {
+    fn record_usage(&mut self, usage: PluginCompactionUsage) {
+        let previously_empty = self.usage.requests == 0;
+        self.usage.requests = self.usage.requests.saturating_add(usage.requests);
+        self.usage.elapsed += std::time::Duration::from_millis(usage.elapsed_ms);
+        let accumulate = |old: Option<u64>, next: Option<u64>| {
+            if previously_empty {
+                next
+            } else {
+                old.zip(next).map(|(a, b)| a.saturating_add(b))
+            }
+        };
+        self.usage.input = accumulate(self.usage.input, usage.input);
+        self.usage.output = accumulate(self.usage.output, usage.output);
+        self.usage.cached = accumulate(self.usage.cached, usage.cached);
+    }
+
     fn update(&mut self, patch: ContextPatch) -> Option<Value> {
         if let Some(usage) = patch.usage {
-            let previously_empty = self.usage.requests == 0;
-            self.usage.requests = self.usage.requests.saturating_add(usage.requests);
-            self.usage.elapsed += std::time::Duration::from_millis(usage.elapsed_ms);
-            let accumulate = |old: Option<u64>, next: Option<u64>| {
-                if previously_empty {
-                    next
-                } else {
-                    old.zip(next).map(|(a, b)| a.saturating_add(b))
-                }
-            };
-            self.usage.input = accumulate(self.usage.input, usage.input);
-            self.usage.output = accumulate(self.usage.output, usage.output);
-            self.usage.cached = accumulate(self.usage.cached, usage.cached);
+            self.record_usage(usage);
         }
         if let Some(data) = patch.state.clone() {
             self.state.data = data.clone();
@@ -298,6 +384,10 @@ impl ContextPolicy for PluginContextPolicy {
             if recovered {
                 self.commit_patch(store, patch)?;
                 self.pending_lifecycle.clear();
+            } else if let Some(usage) = patch.usage {
+                // Failed recovery can still have made billable summary calls.
+                // Record usage without committing rejected compaction state.
+                self.record_usage(usage);
             }
             Ok(recovered)
         })
