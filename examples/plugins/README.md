@@ -2,7 +2,7 @@
 
 Kroma runs normally without plugins. Plugins are local directories with a
 `plugin.toml`, and **installed plugins are disabled by default**. Enabling a
-plugin takes effect after restart or, for safe extensions, `/plugins reload` while the TUI is idle. Model/context strategy changes and model-request Hooks still require restarting Kroma.
+plugin takes effect after restart or with `/plugins reload` while the TUI is idle. Unchanged model/context strategies and model-request Hooks can stay active during unrelated plugin reloads; actual changes to them still require restarting Kroma.
 
 The plugin process can be written in any language. The bundled examples use
 Node.js 20+ without external npm dependencies. JavaScript is not required to
@@ -116,13 +116,20 @@ In Kroma use `/plugins` with the same subcommands and
 `/plugins view <id>` for plugins declaring an information panel.
 `/plugins reload` in an **idle TUI** reloads tools, Prompt contributions,
 slash commands, event subscribers and static UI metadata. It validates the new
-registry first and keeps the old one on failure. The active conversation,
-Agent Loop and model stay unchanged. If either current or pending enabled
-plugins use a model adapter, context policy, or `before_model_request` Hook,
-restart Kroma instead; they carry state that cannot safely be hot-swapped.
+registry first and keeps the old one on failure. Unchanged plugin processes
+(and their command/event state) are reused rather than restarted. The active
+conversation, Agent Loop and model stay unchanged. Only an actual change to
+an active model, context policy or `before_model_request` Hook requires
+restarting Kroma. A broken **disabled** plugin does not block unrelated
+reloads; a broken enabled plugin cannot silently disappear. Changes to the
+directly executed entrypoint file restart that plugin process; editing nested
+dependencies may still require a restart.
 Command-line `kroma plugins ...` cannot reload a separate running process.
 The CLI `set` command saves a string value; write typed TOML values directly
-in `plugins.toml` if needed.
+in `plugins.toml` if needed. Local installation follows ordinary file and
+directory symlink targets (such as pnpm-managed dependencies) and copies
+contents, without needing symlink creation permissions in the destination.
+Recursive symlink cycles are rejected.
 
 User-global plugins and project plugins have separate enabled-state keys.
 Project activation is bound to its canonical plugin directory, so the same
@@ -166,7 +173,9 @@ The basic fields:
   `dynamic_panel = true`. A dynamic panel asks the plugin process for its
   current body whenever `/plugins view <id>` is opened; it is not polled
   per frame. TUI displays it in a scrollable overlay (Esc to close), not
-  in the conversation or model context. CLI `plugins view <id>` also works.
+  in the conversation or model context. The overlay caches its wrapped text
+  until the terminal width changes; redrawing and scrolling only copy visible
+  rows. CLI `plugins view <id>` also works.
 - `[[ui.shortcuts]]`: `key = "Alt+E"` and `command = "/echo example"` bind
   an **Alt+letter** chord to a command declared by the **same** plugin.
   Shortcuts run only while the TUI is idle. Normal typing and all Ctrl
@@ -209,10 +218,12 @@ Modifying hooks:
   tool name, call type or call ID.
 - `after_tool_result`: receives `{name,content,is_error}`; return JSON
   `{ "content": "new text", "is_error": false }`.
-- `before_model_request`: receives `{messages,tools}`; return JSON
-  `{ "messages": [ ... ] }`. The message list cannot change length,
-  roles, tool-call IDs or opaque provider items. Kroma performs budget
-  validation after modification. The durable transcript remains unchanged.
+- `before_model_request`: receives `{messages,tools}`; return any subset of
+  `{ "messages": [ ... ], "tools": [ ... ] }`. Request-only projections may
+  insert/remove/rewrite messages and adjust tool schemas. Kroma validates the
+  final request budget, while the persisted transcript and actual ToolRegistry
+  remain unchanged. Custom tool names must still be registered as executable
+  tools if the provider calls them.
 
 External model operations (`[model] protocol = "plugin"`):
 

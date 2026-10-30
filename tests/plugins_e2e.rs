@@ -50,6 +50,54 @@ impl Drop for TestDirectory {
     }
 }
 
+#[test]
+fn local_plugin_install_follows_file_and_directory_symlinks_when_supported() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let source = temp.path().join("linked");
+    let dependency = temp.path().join("dependency");
+    fs::create_dir_all(&source)?;
+    fs::create_dir_all(&dependency)?;
+    fs::write(
+        source.join("plugin.toml"),
+        "id='linked'\nname='Linked dependencies'\nprompt='Dependencies are part of this plugin'\n",
+    )?;
+    fs::write(dependency.join("dep.js"), "module.exports = 42;")?;
+    fs::write(temp.path().join("local.txt"), "linked content")?;
+    #[cfg(unix)]
+    let (file_ok, dir_ok) = {
+        use std::os::unix::fs::symlink;
+        (
+            symlink(temp.path().join("local.txt"), source.join("alias.txt")).is_ok(),
+            symlink(&dependency, source.join("deps")).is_ok(),
+        )
+    };
+    #[cfg(windows)]
+    let (file_ok, dir_ok) = {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        (
+            symlink_file(temp.path().join("local.txt"), source.join("alias.txt")).is_ok(),
+            symlink_dir(&dependency, source.join("deps")).is_ok(),
+        )
+    };
+    let dest = temp.path().join("plugins");
+    let catalog =
+        PluginCatalog::discover_at(dest.clone(), temp.path().join("plugins.toml"), temp.path())?;
+    catalog.install(&source)?;
+    if file_ok {
+        assert_eq!(
+            fs::read_to_string(dest.join("linked/alias.txt"))?,
+            "linked content"
+        );
+    }
+    if dir_ok {
+        assert_eq!(
+            fs::read_to_string(dest.join("linked/deps/dep.js"))?,
+            "module.exports = 42;"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn install_enable_configure_execute_disable() -> Result<()> {
     let temp = TestDirectory::new()?;
@@ -479,16 +527,17 @@ async fn context_policy_does_not_advance_state_when_commit_fails() -> Result<()>
 }
 
 #[derive(Default)]
-struct CaptureModel(Mutex<Vec<Message>>);
+struct CaptureModel(Mutex<Vec<Message>>, Mutex<Vec<serde_json::Value>>);
 impl ModelBackend for CaptureModel {
     fn complete<'a>(
         &'a self,
         messages: &'a [Message],
-        _tools: &'a [serde_json::Value],
+        tools: &'a [serde_json::Value],
         on_text: &'a mut (dyn FnMut(&str) + Send),
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
             *self.0.lock().unwrap() = messages.to_vec();
+            *self.1.lock().unwrap() = tools.to_vec();
             on_text("ok");
             Ok(Completion {
                 message: Message::new("assistant", "ok"),
@@ -617,8 +666,9 @@ async fn idle_reload_rebuilds_tools_prompt_commands_without_changing_history() -
 
     before.set_enabled("hello", true)?;
     before.set_enabled("status", true)?;
-    let updated = discover()?;
-    let (tools, prompt) = updated.prepare_idle_reload(&base_tools, &base_prompt)?;
+    let mut updated = discover()?;
+    let (tools, prompt) =
+        before.prepare_idle_reload_from(&mut updated, &base_tools, &base_prompt)?;
     let mut cmds = CommandRegistry::builtin(vec![])?;
     assert!(updated.register_commands(&mut cmds).is_empty());
     agent.reload_extensions(tools, prompt, None);
@@ -643,10 +693,31 @@ async fn idle_reload_rebuilds_tools_prompt_commands_without_changing_history() -
         previous,
         "plugin reload must not change the persisted transcript"
     );
+    // Reload the same manifests again: the Node process must stay alive,
+    // rather than resetting its in-process counter from the first command.
+    let mut same = discover()?;
+    let (next_tools, next_prompt) =
+        updated.prepare_idle_reload_from(&mut same, &base_tools, &base_prompt)?;
+    let mut commands_same = CommandRegistry::builtin(vec![])?;
+    assert!(same.register_commands(&mut commands_same).is_empty());
+    agent.reload_extensions(next_tools, next_prompt, None);
+    if Command::new("node").arg("--version").output().is_ok() {
+        let input = agent.task_input();
+        let result = commands_same
+            .execute_async("/echo again", &mut agent, &input)
+            .await?
+            .context("plugin command should remain active")?;
+        assert!(
+            result.output.contains("(call 2)"),
+            "worker was unexpectedly restarted: {}",
+            result.output
+        );
+    }
 
     updated.set_enabled("hello", false)?;
-    let without = discover()?;
-    let (tools, prompt) = without.prepare_idle_reload(&base_tools, &base_prompt)?;
+    let mut without = discover()?;
+    let (tools, prompt) =
+        updated.prepare_idle_reload_from(&mut without, &base_tools, &base_prompt)?;
     agent.reload_extensions(tools, prompt, None);
     assert!(!agent
         .available_tool_names()
@@ -654,9 +725,10 @@ async fn idle_reload_rebuilds_tools_prompt_commands_without_changing_history() -
     assert_eq!(serde_json::to_value(agent.messages())?, previous);
 
     without.set_enabled("model-hook", true)?;
+    let mut changed = discover()?;
     assert!(
-        discover()?
-            .prepare_idle_reload(&base_tools, &base_prompt)
+        without
+            .prepare_idle_reload_from(&mut changed, &base_tools, &base_prompt)
             .is_err(),
         "stateful model hooks require a full restart"
     );
@@ -665,6 +737,181 @@ async fn idle_reload_rebuilds_tools_prompt_commands_without_changing_history() -
             .available_tool_names()
             .contains(&"example_echo".to_string()),
         "a rejected reload must keep the original runtime intact"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_reload_restarts_worker_only_when_entrypoint_file_changes() -> Result<()> {
+    use std::io::Write;
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello");
+    let discover = || PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path());
+    discover()?.install(&root)?;
+    discover()?.set_enabled("hello", true)?;
+    let mut original = discover()?;
+    let base_tools = ToolRegistry::builtin();
+    let base_prompt = PromptComposer::default();
+    let mut commands = CommandRegistry::builtin(vec![])?;
+    assert!(original.register_commands(&mut commands).is_empty());
+    let backend = Arc::new(CaptureModel::default());
+    let mut agent = Agent::with_backends(backend, base_tools.clone(), temp.path().to_path_buf())?;
+    let input = agent.task_input();
+    assert!(commands
+        .execute_async("/echo one", &mut agent, &input)
+        .await?
+        .context("initial plugin command")?
+        .output
+        .contains("(call 1)"));
+    let mut unchanged = discover()?;
+    original.prepare_idle_reload_from(&mut unchanged, &base_tools, &base_prompt)?;
+    original = unchanged;
+    let mut commands = CommandRegistry::builtin(vec![])?;
+    assert!(original.register_commands(&mut commands).is_empty());
+    let input = agent.task_input();
+    assert!(commands
+        .execute_async("/echo two", &mut agent, &input)
+        .await?
+        .context("warm plugin command")?
+        .output
+        .contains("(call 2)"));
+    // Source edits should opt out of worker reuse and start a fresh process.
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(directory.join("hello").join("main.js"))?;
+    file.write_all(b"\n// reload marker to invalidate the entrypoint fingerprint\n")?;
+    drop(file);
+    let mut changed = discover()?;
+    original.prepare_idle_reload_from(&mut changed, &base_tools, &base_prompt)?;
+    let mut commands = CommandRegistry::builtin(vec![])?;
+    assert!(changed.register_commands(&mut commands).is_empty());
+    let input = agent.task_input();
+    assert!(
+        commands
+            .execute_async("/echo three", &mut agent, &input)
+            .await?
+            .context("reloaded plugin command")?
+            .output
+            .contains("(call 1)"),
+        "an edited entrypoint should start a fresh worker"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_reload_ignores_broken_disabled_plugins_but_preserves_active_models() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let workdir = temp.path().join("project");
+    fs::create_dir_all(&workdir)?;
+    let discover = || PluginCatalog::discover_at(directory.clone(), state.clone(), &workdir);
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins");
+    discover()?.install(&root.join("model-hook"))?;
+    discover()?.install(&root.join("hello"))?;
+    discover()?.set_enabled("model-hook", true)?;
+    let initial = discover()?;
+    initial.set_enabled("hello", true)?;
+    let invalid = directory.join("broken");
+    fs::create_dir_all(&invalid)?;
+    fs::write(invalid.join("plugin.toml"), "invalid manifest = [")?;
+    let mut next = discover()?;
+    assert!(
+        !next.warnings.is_empty(),
+        "discovery should still report malformed plugins"
+    );
+    let (tools, _) = initial.prepare_idle_reload_from(
+        &mut next,
+        &ToolRegistry::builtin(),
+        &PromptComposer::default(),
+    )?;
+    assert!(tools
+        .definitions()
+        .iter()
+        .any(|definition| definition["function"]["name"] == "example_echo"));
+    // An unchanged model-request hook must not prevent separate tools
+    // from reloading. But disabling the active hook still needs restart.
+    next.set_enabled("model-hook", false)?;
+    let mut removed = discover()?;
+    assert!(next
+        .prepare_idle_reload_from(
+            &mut removed,
+            &ToolRegistry::builtin(),
+            &PromptComposer::default()
+        )
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn idle_reload_preserves_unchanged_provider_and_context_but_blocks_actual_changes() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins");
+    let discover = || PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path());
+    for name in ["model-http", "context-demo", "hello"] {
+        discover()?.install(&root.join(name))?;
+    }
+    discover()?.set_enabled("model-http", true)?;
+    discover()?.set_enabled("context-demo", true)?;
+    let current = discover()?;
+    current.set_enabled("hello", true)?;
+    let mut next = discover()?;
+    current.prepare_idle_reload_from(
+        &mut next,
+        &ToolRegistry::builtin(),
+        &PromptComposer::default(),
+    )?;
+    // A real provider configuration edit must still require restart.
+    let manifest = directory.join("model-http").join("plugin.toml");
+    let content = fs::read_to_string(&manifest)?;
+    fs::write(&manifest, content.replace("131072", "196608"))?;
+    let mut changed = discover()?;
+    assert!(next
+        .prepare_idle_reload_from(
+            &mut changed,
+            &ToolRegistry::builtin(),
+            &PromptComposer::default()
+        )
+        .is_err());
+    // If the change is reverted, context strategy still remains the same.
+    fs::write(&manifest, content)?;
+    let mut unchanged = discover()?;
+    next.prepare_idle_reload_from(
+        &mut unchanged,
+        &ToolRegistry::builtin(),
+        &PromptComposer::default(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn idle_reload_refuses_invalid_enabled_plugin_without_blocking_other_warnings() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins");
+    let discover = || PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path());
+    discover()?.install(&root.join("hello"))?;
+    discover()?.set_enabled("hello", true)?;
+    let active = discover()?;
+    fs::write(directory.join("hello").join("plugin.toml"), "invalid = [")?;
+    let mut invalid = discover()?;
+    assert!(!invalid.warnings.is_empty());
+    let result = active.prepare_idle_reload_from(
+        &mut invalid,
+        &ToolRegistry::builtin(),
+        &PromptComposer::default(),
+    );
+    assert!(
+        result.is_err(),
+        "invalid active plugin must not silently disappear"
     );
     Ok(())
 }
@@ -950,6 +1197,62 @@ async fn model_replacement_and_pre_request_hook_keep_budget_and_original_history
             "WAL source must stay intact"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_request_hooks_can_change_projection_and_tools_without_touching_wal() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins").join("projector");
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("plugin.toml"),
+        "id='projector'\nname='Request projector'\ncommand='node'\nargs=['main.js']\nhooks=['before_model_request']\n")?;
+    fs::write(
+        directory.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin})
+.on("line",line=>{
+ const req=JSON.parse(line);
+ const messages=req.arguments.messages;
+ messages.splice(1,0,{role:"assistant",content:"request-only note"});
+ const tools=[{type:"function",function:{name:"custom_tool",description:"hooked",parameters:{type:"object"}}}];
+ process.stdout.write(JSON.stringify({content:JSON.stringify({messages,tools})})+"\n");
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let discovered = PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?;
+    discovered.set_enabled("projector", true)?;
+    let catalog = PluginCatalog::discover_at(global, state, temp.path())?;
+    let captured = Arc::new(CaptureModel::default());
+    let budget = ContextConfig::with_output_reserve(32768, 1024)?;
+    let model = catalog.model_hooks(captured.clone(), budget);
+    let history = vec![
+        Message::new("system", "original"),
+        Message::new("user", "hello"),
+    ];
+    let definitions = ToolRegistry::builtin().definitions();
+    let history_before = serde_json::to_value(&history)?;
+    let tools_before = serde_json::to_value(&definitions)?;
+    model.complete(&history, &definitions, &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    let sent_tools = captured.1.lock().unwrap().clone();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[1].content.as_deref(), Some("request-only note"));
+    assert_eq!(sent_tools.len(), 1);
+    assert_eq!(sent_tools[0]["function"]["name"], "custom_tool");
+    assert_eq!(
+        serde_json::to_value(&history)?,
+        history_before,
+        "provider projection must not modify durable chat history"
+    );
+    assert_eq!(
+        serde_json::to_value(&definitions)?,
+        tools_before,
+        "provider projection must not modify Kroma's tool registry"
+    );
     Ok(())
 }
 

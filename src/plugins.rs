@@ -95,7 +95,7 @@ fn parse_alt_shortcut(key: &str) -> Option<char> {
 
 pub type ModelOverride = (Arc<dyn ModelBackend>, ContextConfig, String);
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct PluginModelSpec {
     pub model: String,
     #[serde(default)]
@@ -117,7 +117,7 @@ fn default_protocol() -> String {
     "chat".into()
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct PluginContextSpec {
     #[serde(default = "context_version")]
     pub version: u32,
@@ -425,9 +425,24 @@ struct Plugin {
     /// None for user-global plugins; project plugins have a full path key.
     project_key: Option<String>,
     worker: Arc<PluginWorker>,
+    event_worker: Option<Arc<PluginWorker>>,
 }
 
 impl Plugin {
+    fn has_model_hook(&self) -> bool {
+        self.manifest
+            .hooks
+            .iter()
+            .any(|hook| hook == "before_model_request")
+    }
+
+    fn has_stateful_backend(&self) -> bool {
+        self.enabled
+            && (self.manifest.model.is_some()
+                || self.manifest.context.is_some()
+                || self.has_model_hook())
+    }
+
     fn is_enabled(&self, state: &PluginState) -> bool {
         match &self.project_key {
             Some(key) => state.enabled_projects.contains(key),
@@ -537,11 +552,14 @@ impl PluginCatalog {
                             &manifest,
                             serde_json::to_value(settings)?,
                         ));
+                        let event_worker =
+                            (!manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
                         plugins.push(Plugin {
                             manifest,
                             enabled,
                             project_key,
                             worker,
+                            event_worker,
                         });
                     }
                     Err(error) => warnings.push(format!("{}: {error:#}", dir.display())),
@@ -738,22 +756,70 @@ impl PluginCatalog {
         ))
     }
 
-    /// Context policies and model adapters hold session/runtime state. Hot
-    /// swapping them (or a model-request Hook wrapping the backend) would
-    /// silently change the current session's semantics. Require restart.
-    pub fn needs_restart(&self) -> bool {
-        self.plugins
-            .iter()
-            .filter(|plugin| plugin.enabled)
-            .any(|plugin| {
-                plugin.manifest.context.is_some()
-                    || plugin.manifest.model.is_some()
-                    || plugin
-                        .manifest
-                        .hooks
-                        .iter()
-                        .any(|hook| hook == "before_model_request")
-            })
+    /// Only actual changes to active model/context identity require restart.
+    /// Reuse unchanged workers so an unrelated tool reload does not erase
+    /// process-local counters, warm caches or event subscription state.
+    pub fn prepare_idle_reload_from(
+        &self,
+        next: &mut Self,
+        base_tools: &ToolRegistry,
+        base_prompt: &PromptComposer,
+    ) -> Result<(ToolRegistry, PromptComposer)> {
+        let desired = PluginState::load(&next.state_path)?;
+        for old in self.plugins.iter().filter(|plugin| plugin.enabled) {
+            let found = next.plugins.iter().any(|plugin| {
+                plugin.manifest.id == old.manifest.id && plugin.project_key == old.project_key
+            });
+            if !found && old.is_enabled(&desired) {
+                bail!(
+                    "enabled plugin '{}' is missing or invalid; fix it or disable it first",
+                    old.manifest.id
+                );
+            }
+            if !found && old.has_stateful_backend() {
+                bail!(
+                    "removing active model/context plugin '{}' requires restart",
+                    old.manifest.id
+                );
+            }
+        }
+        for plugin in &mut next.plugins {
+            let old = self.plugins.iter().find(|old| {
+                old.manifest.id == plugin.manifest.id && old.project_key == plugin.project_key
+            });
+            let Some(old) = old else {
+                if plugin.enabled && plugin.has_stateful_backend() {
+                    bail!(
+                        "enabling model/context plugin '{}' requires restart",
+                        plugin.manifest.id
+                    );
+                }
+                continue;
+            };
+            let same_worker = old.worker.same_definition(&plugin.worker);
+            if (old.has_stateful_backend() || plugin.has_stateful_backend())
+                && (old.enabled != plugin.enabled
+                    || old.manifest.model != plugin.manifest.model
+                    || old.manifest.context != plugin.manifest.context
+                    || old.has_model_hook() != plugin.has_model_hook()
+                    || !same_worker)
+            {
+                bail!(
+                    "active model/context plugin '{}' changed; restart Kroma",
+                    plugin.manifest.id
+                );
+            }
+            if same_worker {
+                plugin.worker = old.worker.clone();
+                if plugin.event_worker.is_some() {
+                    plugin.event_worker = old
+                        .event_worker
+                        .clone()
+                        .or_else(|| Some(Arc::new(old.worker.isolated())));
+                }
+            }
+        }
+        next.prepare_idle_reload(base_tools, base_prompt)
     }
 
     /// Build a replacement plugin view without touching the running agent.
@@ -764,12 +830,6 @@ impl PluginCatalog {
         base_tools: &ToolRegistry,
         base_prompt: &PromptComposer,
     ) -> Result<(ToolRegistry, PromptComposer)> {
-        if self.needs_restart() {
-            bail!("model, context or model-request Hook changes require restarting Kroma");
-        }
-        if !self.warnings.is_empty() {
-            bail!("plugin discovery warnings: {}", self.warnings.join("; "));
-        }
         let mut tools = base_tools.clone();
         let mut prompt = base_prompt.clone();
         let warnings = self.contribute(&mut tools, &mut prompt);
@@ -1006,7 +1066,11 @@ impl PluginCatalog {
                         .iter()
                         .cloned()
                         .collect::<BTreeSet<_>>(),
-                    Arc::new(plugin.worker.isolated()),
+                    plugin
+                        .event_worker
+                        .as_ref()
+                        .expect("event worker initialized")
+                        .clone(),
                 )
             })
             .collect();
@@ -1236,28 +1300,38 @@ impl PluginCatalog {
 }
 
 fn copy_directory(source: &Path, target: &Path) -> Result<()> {
-    fs::create_dir(target).with_context(|| format!("creating {}", target.display()))?;
-    let result = (|| {
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let source_child = entry.path();
-            let target_child = target.join(entry.file_name());
-            let kind = entry.file_type()?;
-            if kind.is_symlink() {
-                bail!("plugin installation does not copy symlinks");
-            }
-            if kind.is_dir() {
-                copy_directory(&source_child, &target_child)?;
-            } else if kind.is_file() {
-                fs::copy(&source_child, &target_child)?;
-            }
+    // Copy symlink *targets* so plugin bundles from pnpm or local workspaces
+    // are installable without elevated link-creation privileges on Windows.
+    // Only detect actual recursive cycles; ordinary symlinks are allowed.
+    fn copy_tree(source: &Path, target: &Path, parents: &mut Vec<PathBuf>) -> Result<()> {
+        let resolved = source.canonicalize()?;
+        if parents.contains(&resolved) {
+            bail!("cyclic plugin directory link: {}", source.display());
         }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(target);
+        parents.push(resolved);
+        let result = (|| -> Result<()> {
+            fs::create_dir(target)?;
+            for entry in fs::read_dir(source)? {
+                let entry = entry?;
+                let from = entry.path();
+                let to = target.join(entry.file_name());
+                if from.is_dir() {
+                    copy_tree(&from, &to, parents)?;
+                } else if from.is_file() {
+                    fs::copy(&from, &to)?;
+                } else {
+                    bail!("unreadable plugin entry: {}", from.display());
+                }
+            }
+            Ok(())
+        })();
+        parents.pop();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(target);
+        }
+        result
     }
-    result
+    copy_tree(source, target, &mut Vec::new())
 }
 
 struct PluginToolAdapter {
@@ -1507,6 +1581,9 @@ struct PluginWorker {
     command: Option<String>,
     args: Vec<String>,
     settings: Value,
+    // Track directly executed entrypoint files, not entire node_modules trees.
+    // A source edit can restart that worker while unrelated ones stay warm.
+    entrypoints: Vec<(PathBuf, u64, Option<SystemTime>)>,
     process: Mutex<Option<PluginProcess>>,
     next_request: AtomicU64,
     active: Mutex<Option<(u64, u32)>>,
@@ -1520,6 +1597,7 @@ impl PluginWorker {
             command: self.command.clone(),
             args: self.args.clone(),
             settings: self.settings.clone(),
+            entrypoints: self.entrypoints.clone(),
             process: Mutex::new(None),
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
@@ -1527,16 +1605,43 @@ impl PluginWorker {
     }
 
     fn new(dir: &Path, workdir: &Path, manifest: &PluginManifest, settings: Value) -> Self {
+        let entrypoints = manifest
+            .command
+            .iter()
+            .chain(&manifest.args)
+            .filter_map(|value| {
+                let candidate = Path::new(value);
+                let path = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    dir.join(candidate)
+                };
+                fs::metadata(&path)
+                    .ok()
+                    .filter(|info| info.is_file())
+                    .map(|info| (path, info.len(), info.modified().ok()))
+            })
+            .collect();
         Self {
             directory: dir.to_path_buf(),
             workdir: workdir.to_path_buf(),
             command: manifest.command.clone(),
             args: manifest.args.clone(),
             settings,
+            entrypoints,
             process: Mutex::new(None),
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
         }
+    }
+
+    fn same_definition(&self, next: &Self) -> bool {
+        self.directory == next.directory
+            && self.workdir == next.workdir
+            && self.command == next.command
+            && self.args == next.args
+            && self.settings == next.settings
+            && self.entrypoints == next.entrypoints
     }
 
     async fn invoke_async(self: &Arc<Self>, message: Value) -> Result<PluginResponse> {

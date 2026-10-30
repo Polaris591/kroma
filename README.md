@@ -106,8 +106,9 @@ support incremental text/reasoning/tool-argument streaming, per-provider
 thinking tiers, and idle reload of tool/Prompt/command/event/static UI extensions. Plugins may bind Alt+letter keys to
 registered commands without changing TUI internals; `/plugins view <id>`
 opens a cancellable scrollable panel that can fetch live plugin state.
-Model/context hot reload, tournament
-judging, and fully custom TUI layouts/animations are not implemented yet. See [implementation status](PLUGIN_ROADMAP.md).
+Changed model/context backends still require restart, while unrelated plugin
+reloads preserve them and the existing worker state. Tournament judging and
+fully custom TUI layouts/animations are not implemented yet. See [implementation status](PLUGIN_ROADMAP.md).
 
 Global/project `AGENTS.md` are loaded as before. When the task explicitly
 references a nested project file, the applicable ancestor `AGENTS.md` files

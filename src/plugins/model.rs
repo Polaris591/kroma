@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    borrow::Cow,
     sync::{Arc, RwLock},
     time::Instant,
 };
@@ -356,47 +357,48 @@ impl PluginModelHooks {
         }
     }
 
-    async fn projection(&self, messages: &[Message], tools: &[Value]) -> Result<Vec<Message>> {
-        let mut result = messages.to_vec();
+    async fn projection<'a>(
+        &self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+    ) -> Result<(Vec<Message>, Cow<'a, [Value]>)> {
+        // Model request Hooks operate on ephemeral provider input, never the
+        // durable transcript or ToolRegistry. No extra history copies when a
+        // Hook leaves the request unchanged.
+        let mut view: Cow<'_, [Message]> = Cow::Borrowed(messages);
+        let mut schemas: Cow<'_, [Value]> = Cow::Borrowed(tools);
         for worker in &self.workers {
-            let request = json!({
-                "type":"hook","name":"before_model_request",
-                "arguments":{"messages":result,"tools":tools}
-            });
-            let worker = worker.clone();
-            let reply = worker.invoke_async(request).await?;
+            let reply = worker
+                .invoke_async(json!({
+                    "type":"hook", "name":"before_model_request",
+                    "arguments":{"messages":view.as_ref(),"tools":schemas.as_ref()}
+                }))
+                .await?;
             if reply.is_error {
                 bail!("model request hook rejected: {}", reply.content);
             }
-            let patch: Value = serde_json::from_str(&reply.content)
+            let mut patch: Value = serde_json::from_str(&reply.content)
                 .context("before_model_request must return a JSON patch")?;
-            if patch.get("tools").is_some() {
-                bail!("request hooks cannot mutate tool schemas; use tool registration instead");
+            let fields = patch
+                .as_object_mut()
+                .context("model request hook must return an object")?;
+            if let Some(messages) = fields.remove("messages") {
+                view = Cow::Owned(
+                    serde_json::from_value(messages)
+                        .context("invalid replacement model messages")?,
+                );
             }
-            if let Some(new_messages) = patch.get("messages") {
-                let transformed: Vec<Message> = serde_json::from_value(new_messages.clone())
-                    .context("invalid replacement model messages")?;
-                if transformed.len() != result.len() {
-                    bail!("request hook cannot add or remove messages");
-                }
-                for (before, after) in result.iter().zip(&transformed) {
-                    if before.role != after.role
-                        || before.tool_call_id != after.tool_call_id
-                        || serde_json::to_value(&before.tool_calls)?
-                            != serde_json::to_value(&after.tool_calls)?
-                        || serde_json::to_value(&before.provider_items)?
-                            != serde_json::to_value(&after.provider_items)?
-                    {
-                        bail!("request hook cannot alter message roles, tool calls, IDs or opaque provider state");
-                    }
-                }
-                result = transformed;
+            if let Some(tools) = fields.remove("tools") {
+                schemas = Cow::Owned(
+                    serde_json::from_value(tools).context("invalid replacement model tools")?,
+                );
             }
         }
-        let mut planned = result.clone();
+        let mut planned = view.as_ref().to_vec();
         self.inner.project_for_budget(&mut planned);
-        self.budget.validate_final_request(&planned, tools)?;
-        Ok(result)
+        self.budget
+            .validate_final_request(&planned, schemas.as_ref())?;
+        Ok((view.into_owned(), schemas))
     }
 }
 
@@ -424,8 +426,8 @@ impl ModelBackend for PluginModelHooks {
         on_text: &'a mut (dyn FnMut(&str) + Send),
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
-            let view = self.projection(messages, tools).await?;
-            self.inner.complete(&view, tools, on_text).await
+            let (view, schemas) = self.projection(messages, tools).await?;
+            self.inner.complete(&view, schemas.as_ref(), on_text).await
         })
     }
 
@@ -437,9 +439,9 @@ impl ModelBackend for PluginModelHooks {
         on_reasoning: &'a mut (dyn FnMut(&str) + Send),
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
-            let view = self.projection(messages, tools).await?;
+            let (view, schemas) = self.projection(messages, tools).await?;
             self.inner
-                .complete_with_reasoning(&view, tools, on_text, on_reasoning)
+                .complete_with_reasoning(&view, schemas.as_ref(), on_text, on_reasoning)
                 .await
         })
     }
@@ -453,9 +455,9 @@ impl ModelBackend for PluginModelHooks {
         on_reasoning: &'a mut (dyn FnMut(&str) + Send),
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
-            let view = self.projection(messages, tools).await?;
+            let (view, schemas) = self.projection(messages, tools).await?;
             self.inner
-                .complete_with_task_images(&view, tools, images, on_text, on_reasoning)
+                .complete_with_task_images(&view, schemas.as_ref(), images, on_text, on_reasoning)
                 .await
         })
     }

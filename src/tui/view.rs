@@ -691,6 +691,8 @@ struct PluginPanel {
     title: String,
     body: String,
     scroll: u16,
+    wrapped_width: usize,
+    wrapped: Text<'static>,
 }
 
 impl UiState {
@@ -700,6 +702,8 @@ impl UiState {
             title: title.to_owned(),
             body: body.to_owned(),
             scroll: 0,
+            wrapped_width: 0,
+            wrapped: Text::default(),
         });
         self.picker = None;
     }
@@ -3256,17 +3260,31 @@ impl UiState {
                     .style(Style::default().bg(colors.input_surface()));
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
-                let (wrapped, _) =
-                    wrap_document(Text::raw(panel.body.clone()), inner.width as usize);
-                let max_scroll = wrapped
+                if panel.wrapped_width != usize::from(inner.width) {
+                    let (wrapped, _) =
+                        wrap_document(Text::raw(panel.body.clone()), usize::from(inner.width));
+                    panel.wrapped = wrapped;
+                    panel.wrapped_width = usize::from(inner.width);
+                }
+                let max_scroll = panel
+                    .wrapped
                     .lines
                     .len()
                     .saturating_sub(inner.height as usize)
                     .min(u16::MAX as usize) as u16;
                 panel.scroll = panel.scroll.min(max_scroll);
+                // Clone only the visible rows; never rewrap or copy the
+                // entire panel on the 180ms activity-frame redraw.
+                let visible = panel
+                    .wrapped
+                    .lines
+                    .iter()
+                    .skip(usize::from(panel.scroll))
+                    .take(usize::from(inner.height))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 frame.render_widget(
-                    Paragraph::new(wrapped)
-                        .scroll((panel.scroll, 0))
+                    Paragraph::new(visible)
                         .style(Style::default().fg(colors.text).bg(colors.input_surface())),
                     inner,
                 );
@@ -3313,6 +3331,14 @@ mod tests {
             .collect::<String>();
         assert!(all.contains("Live Plugin"));
         assert!(all.contains("line 0"));
+        let cached = ui.plugin_panel.as_ref().unwrap().wrapped.lines.as_ptr();
+        let initial_width = ui.plugin_panel.as_ref().unwrap().wrapped_width;
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert_eq!(
+            cached,
+            ui.plugin_panel.as_ref().unwrap().wrapped.lines.as_ptr(),
+            "an unchanged panel width must reuse the existing layout"
+        );
         ui.scroll_plugin_panel(12);
         assert_eq!(ui.plugin_panel.as_ref().unwrap().scroll, 12);
         terminal.draw(|frame| ui.draw(frame)).unwrap();
@@ -3324,10 +3350,19 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(scrolled.contains("line 12"));
+        assert_eq!(
+            cached,
+            ui.plugin_panel.as_ref().unwrap().wrapped.lines.as_ptr(),
+            "scrolling a panel should not force reflow"
+        );
         ui.scroll_plugin_panel(-8);
         assert_eq!(ui.plugin_panel.as_ref().unwrap().scroll, 4);
         let mut tiny = Terminal::new(TestBackend::new(22, 8)).unwrap();
         tiny.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(
+            ui.plugin_panel.as_ref().unwrap().wrapped_width < initial_width,
+            "resizing the terminal must invalidate and rebuild the cached layout"
+        );
         let visible = tiny
             .backend()
             .buffer()

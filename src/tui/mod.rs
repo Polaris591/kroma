@@ -1466,12 +1466,12 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     // no Agent task is executing. Prepare everything before
                     // swapping the active registry, so failures leave it intact.
                     let prepared = (|| -> Result<_> {
-                        let discovered = crate::plugins::PluginCatalog::discover(&workdir)?;
-                        if runtime.plugins.needs_restart() || discovered.needs_restart() {
-                            anyhow::bail!("Active model, context or model-request Hooks require a full restart");
-                        }
-                        let (tools, prompt) = discovered
-                            .prepare_idle_reload(&runtime.base_tools, &runtime.base_prompt)?;
+                        let mut discovered = crate::plugins::PluginCatalog::discover(&workdir)?;
+                        let (tools, prompt) = runtime.plugins.prepare_idle_reload_from(
+                            &mut discovered,
+                            &runtime.base_tools,
+                            &runtime.base_prompt,
+                        )?;
                         let mut next_commands = CommandRegistry::builtin_with_warnings(
                             runtime.skills.list(),
                             runtime.startup_warnings.clone(),
