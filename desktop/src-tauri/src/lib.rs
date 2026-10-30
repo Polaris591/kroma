@@ -54,7 +54,9 @@ fn initial_project() -> PathBuf {
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|v| v["project"].as_str().map(PathBuf::from))
         .filter(|p| p.is_dir())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| home().unwrap_or_default()))
+        // File-manager launches commonly inherit the executable's directory.
+        // Never treat the installation/build directory as an agent workspace.
+        .unwrap_or_else(|| home().unwrap_or_else(|_| std::env::current_dir().unwrap_or_default()))
 }
 
 impl DesktopState {

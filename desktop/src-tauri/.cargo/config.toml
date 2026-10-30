@@ -1,3 +1,4 @@
-# Windows Desktop requires MSVC. The root CLI/TUI can continue using GNU.
+# Conventional Windows MSVC linker setting. Explicit GNU-target preview builds
+# use the available MinGW toolchain; root CLI/TUI settings remain unchanged.
 [target.x86_64-pc-windows-msvc]
 linker = "link.exe"

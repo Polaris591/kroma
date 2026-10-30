@@ -13,7 +13,7 @@ Independent desktop host for the **existing Kroma Rust Core**. The terminal bina
 
 ## Build
 
-Requirements: Node.js 22, Rust and Tauri platform prerequisites. Windows uses **MSVC C++ Build Tools and WebView2** (keep Kroma's GNU CLI toolchain if desired). macOS uses Xcode command-line tools. Linux uses WebKitGTK 4.1 and matching libraries.
+Requirements: Node.js 22, Rust and Tauri platform prerequisites. Windows needs WebView2; **MSVC C++ Build Tools** are recommended for official installer builds, while the existing Windows GNU Rust toolchain also builds a working local preview (verified on this development PC). macOS uses Xcode command-line tools. Linux uses WebKitGTK 4.1 and matching libraries.
 
 In desktop/:
 
@@ -34,7 +34,23 @@ cargo --config 'source.crates-io.replace-with="rsproxy-sparse"' \
       fetch --manifest-path desktop/src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 ```
 
-Use the same two `--config` flags for subsequent `cargo check` / `cargo build` invocations; the desktop's `Cargo.lock` pins the versions. A successful GNU-target type-check does not replace Windows MSVC build/link and runtime tests.
+Use the same two `--config` flags for subsequent `cargo check` / `cargo build` invocations; the desktop's `Cargo.lock` pins the versions.
+
+### Standalone Windows GNU preview (no development server)
+
+From `desktop/` run `npm run build` to generate frontend assets. Then from the repository root run:
+
+```sh
+cargo --config 'source.crates-io.replace-with="rsproxy-sparse"' \
+      --config 'source.rsproxy-sparse.registry="sparse+https://rsproxy.cn/index/"' \
+      build --release --locked --target x86_64-pc-windows-gnu \
+      --features tauri/custom-protocol \
+      --manifest-path desktop/src-tauri/Cargo.toml
+```
+
+**The `tauri/custom-protocol` release feature is mandatory for direct `cargo build`: without it, the packaged frontend is not served and the window attempts the Vite development URL (`localhost:1420`).** Tauri CLI's official `tauri build` flow automatically selects this feature. Open `desktop/src-tauri/target/x86_64-pc-windows-gnu/release/kroma-desktop.exe`, keeping its neighboring `WebView2Loader.dll` beside the executable. No CLI subprocess, Vite server, or preinstalled Kroma binary is needed.
+
+Windows GNU startup, frontend loading, model connection, and a real model chat were smoke-tested locally on 2026-10-30. MSVC packaging, macOS/Linux GUI testing, installer signing, and performance certification remain separate release checks.
 
 ## Delivered P0–P2
 
