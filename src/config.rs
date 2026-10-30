@@ -23,11 +23,23 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        Self::from_env_for_workdir(Self::workdir_from_env()?)
+    }
+
+    /// GUI hosts choose the project without changing process-wide environment.
+    /// Provider selection and overrides remain identical to the CLI.
+    pub fn from_env_for_workdir(workdir: PathBuf) -> Result<Self> {
+        let workdir = workdir
+            .canonicalize()
+            .context("project path does not exist")?;
+        if !workdir.is_dir() {
+            bail!("project must be a directory");
+        }
         let requested = env::var("KROMA_PROVIDER_PROFILE").ok();
         let env_model = env::var("KROMA_MODEL").ok();
         let env_url = env::var("KROMA_BASE_URL").ok();
         let plugin_identity = if env_model.is_none() && requested.is_none() {
-            crate::plugins::PluginCatalog::discover(&Self::workdir_from_env()?)?
+            crate::plugins::PluginCatalog::discover(&workdir)?
                 .enabled_model_identity()
                 .map(|(model, url)| (model.to_owned(), url.to_owned()))
         } else {
@@ -72,13 +84,7 @@ impl Config {
         } else {
             selected.map(|(name, _)| name.to_owned())
         };
-        Self::resolve(
-            profile,
-            selected_profile,
-            Self::workdir_from_env()?,
-            true,
-            plugin_identity,
-        )
+        Self::resolve(profile, selected_profile, workdir, true, plugin_identity)
     }
 
     /// Explicit model selection changes connection identity, but retains

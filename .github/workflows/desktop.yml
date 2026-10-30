@@ -1,0 +1,77 @@
+name: Desktop checks
+
+on:
+  push:
+    paths:
+      - 'desktop/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/desktop.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/desktop.yml'
+
+jobs:
+  frontend:
+    name: Svelte frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: desktop
+      - run: npm run check
+        working-directory: desktop
+      - run: npm run build
+        working-directory: desktop
+
+  native:
+    name: Tauri host (${{ matrix.os }})
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux WebKit dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci --no-audit --no-fund
+        working-directory: desktop
+      - run: npm run build
+        working-directory: desktop
+      - name: Type check native desktop
+        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --all-targets
+      - name: Native desktop unit tests
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib
+      - name: Build Windows desktop preview
+        if: matrix.os == 'windows-latest'
+        run: cargo build --manifest-path desktop/src-tauri/Cargo.toml --release
+      - name: Upload Windows preview
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kroma-desktop-windows-preview
+          path: desktop/src-tauri/target/release/kroma-desktop.exe
+          if-no-files-found: error

@@ -772,6 +772,33 @@ impl PluginCatalog {
         )
     }
 
+    /// Structured plugin state for GUI hosts, using the same persisted state
+    /// and identity rules as the terminal plugin manager.
+    pub fn summaries(&self) -> Result<Vec<Value>> {
+        let fresh = self.refresh()?;
+        let state = PluginState::load(&self.state_path)?;
+        Ok(fresh
+            .plugins
+            .iter()
+            .map(|plugin| {
+                let mut settings = plugin.manifest.settings.clone();
+                settings.extend(plugin.config_overrides(&state).cloned().unwrap_or_default());
+                json!({
+                    "id": plugin.manifest.id,
+                    "name": plugin.manifest.name,
+                    "version": plugin.manifest.version,
+                    "description": plugin.manifest.description,
+                    "enabled": plugin.is_enabled(&state),
+                    "project": plugin.project_key.is_some(),
+                    "settings": settings,
+                    "has_model": plugin.manifest.model.is_some(),
+                    "has_context": plugin.manifest.context.is_some(),
+                    "has_ui": plugin.manifest.ui.is_some(),
+                })
+            })
+            .collect())
+    }
+
     pub fn list(&self) -> Result<String> {
         let mut fresh = self.refresh()?;
         // Describe current disk state while comparing it with the frozen
@@ -866,6 +893,17 @@ impl PluginCatalog {
     }
 
     pub fn set_config(&self, id: &str, key: &str, value: Option<&str>) -> Result<String> {
+        self.set_config_value(id, key, value.map(|v| toml::Value::String(v.to_owned())))
+    }
+
+    /// Preserve boolean/numeric plugin defaults in auto-generated GUI forms.
+    /// The terminal `set` command intentionally remains string-based.
+    pub fn set_config_value(
+        &self,
+        id: &str,
+        key: &str,
+        value: Option<toml::Value>,
+    ) -> Result<String> {
         let _lock = PluginStateLock::acquire(&self.state_path)?;
         let fresh = self.refresh()?;
         let plugin = fresh
@@ -885,7 +923,7 @@ impl PluginCatalog {
         let entry = settings.entry(owner.to_owned()).or_default();
         match value {
             Some(value) => {
-                entry.insert(key.to_owned(), toml::Value::String(value.to_owned()));
+                entry.insert(key.to_owned(), value);
             }
             None => {
                 entry.remove(key);
