@@ -9,5 +9,7 @@ args = ["main.js"]
 model = "stream-demo"
 protocol = "plugin"
 streaming = true
+thinking_levels = ["low", "medium", "high"]
+reasoning_level = "medium"
 context_window = 32768
 output_reserve = 2048

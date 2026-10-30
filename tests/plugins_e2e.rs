@@ -172,6 +172,17 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
             output, "Configured: third (call 3)",
             "commands and tools share one worker"
         );
+        let dynamic_panel = enabled.ui_panel_async("hello").await?;
+        assert!(
+            dynamic_panel.contains("Requests handled: 3"),
+            "{dynamic_panel}"
+        );
+        assert!(dynamic_panel.contains("Configured: "), "{dynamic_panel}");
+        assert_eq!(
+            enabled.ui_panel("hello")?,
+            dynamic_panel,
+            "sync CLI and async TUI panels should read the same worker state"
+        );
         assert!(commands
             .execute("/plugins list", &mut agent, &input)?
             .unwrap()
@@ -676,6 +687,11 @@ async fn streaming_model_emits_live_text_reasoning_tools_and_usage() -> Result<(
     let (backend, budget, name) = selected.context("streaming model not selected")?;
     assert_eq!(name, "stream-demo");
     assert_eq!(budget.window(), 32_768);
+    assert_eq!(backend.reasoning_level().as_deref(), Some("medium"));
+    assert_eq!(backend.thinking_levels(), &["low", "medium", "high"]);
+    assert!(backend.set_reasoning_level("xhigh").is_err());
+    backend.set_reasoning_level("high")?;
+    assert_eq!(backend.reasoning_level().as_deref(), Some("high"));
     let history = [
         Message::new("system", "system"),
         Message::new("user", "hello"),
@@ -734,6 +750,36 @@ async fn streaming_model_emits_live_text_reasoning_tools_and_usage() -> Result<(
         .context("missing streamed tool call")?;
     assert_eq!(tool_calls[0].function.name, "shell");
     assert_eq!(tool_calls[0].id, "call-1");
+    assert_eq!(
+        tool_calls[0].function.arguments,
+        "{\"command\":\"echo hi\"}"
+    );
+    let changed = [
+        Message::new("system", "system"),
+        Message::new("user", "show-level"),
+    ];
+    let tier = backend.complete(&changed, &[], &mut |_| {}).await?;
+    assert_eq!(
+        tier.message.content.as_deref(),
+        Some("reasoning_level=high")
+    );
+    let mismatch = [
+        Message::new("system", "system"),
+        Message::new("user", "tool-mismatch"),
+    ];
+    let error = backend
+        .complete(
+            &mismatch,
+            &[serde_json::json!({"type":"function"})],
+            &mut |_| {},
+        )
+        .await
+        .err()
+        .context("tool stream mismatch must fail")?;
+    assert!(
+        error.to_string().contains("streamed tool calls differ"),
+        "{error:#}"
+    );
     assert_eq!(
         backend
             .generate_short_text("system", "summary", 100)

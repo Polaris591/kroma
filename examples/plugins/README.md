@@ -66,12 +66,12 @@ and SearXNG unit tests use mocked responses.
 
 | Directory | How to use | What it demonstrates |
 | --- | --- | --- |
-| `hello` | `/echo hello` or Alt+E in idle TUI | Basic tool, slash command, static Prompt and declarative shortcut |
+| `hello` | `/echo hello`, Alt+E, `/plugins view hello` | Basic tool, slash command, Prompt, shortcut and live panel showing processed requests |
 | `transform` | Ask model to call `shell` | Explicit builtin tool replacement, Prompt replacement, before/after tool hooks |
 | `context-demo` | Enable before creating a **new** session | External ContextFactory/Policy state, persisted revision counter, branches; **does not compact messages** |
 | `model-http` | Edit example `base_url`, `model` and budget first | HTTP model profile replacement + context budget |
 | `model-process` | Enable in a test-only project | Model backend implemented in a separate executable, with custom wire protocol (single final response) |
-| `model-stream` | Enable in a test-only project | Incremental text, reasoning, tool calls, usage and cancellation from an external model process |
+| `model-stream` | Enable in a test-only project | Incremental text/reasoning/tool argument fragments, thinking levels, usage and cancellation |
 | `model-hook` | Enable and send a message | Request projection rewrite without mutating session history |
 | `subagents` | Ask for `subagent_run` or `subagent_parallel` | Runs separate Kroma processes/sessions, parallel task dispatch |
 | `memory` | `/remember text`, `/memories`, `/forgetnote 1` | Optional cross-session local notes, injected into model request projection |
@@ -156,12 +156,17 @@ The basic fields:
   `context_overflow` lifecycle requests. The plugin's persisted version
   is intentionally not interchangeable with version 1.
 - `[model]`: `model`, `base_url`, `protocol`, `api_key_env`,
-  `context_window`, `output_reserve`, optional `streaming = true`.
+  `context_window`, `output_reserve`, optional `streaming = true`,
+  `thinking_levels = ["low", "medium", "high"]` and
+  `reasoning_level = "medium"`.
   Set `protocol = "plugin"` to implement an external model wire format inside
   a process (no `base_url` field needed). Only process-model plugins may set
   `streaming = true`; other HTTP protocols continue to work unchanged.
-- `[ui]`: `status`, `panel_title`, `panel_text`: static declarative TUI
-  UI contributions (not layout/animation APIs).
+- `[ui]`: `status`, `panel_title`, `panel_text` and optional
+  `dynamic_panel = true`. A dynamic panel asks the plugin process for its
+  current body whenever `/plugins view <id>` is opened; it is not polled
+  per frame. TUI displays it in a scrollable overlay (Esc to close), not
+  in the conversation or model context. CLI `plugins view <id>` also works.
 - `[[ui.shortcuts]]`: `key = "Alt+E"` and `command = "/echo example"` bind
   an **Alt+letter** chord to a command declared by the **same** plugin.
   Shortcuts run only while the TUI is idle. Normal typing and all Ctrl
@@ -175,8 +180,9 @@ order determines modifying hook order.
 ## Request/response protocol
 
 Kroma lazily starts a persistent plugin process in the plugin directory and
-sends a single JSON value per line on stdin. One request must produce exactly
-one JSON response line on stdout. Log only to stderr.
+sends a single JSON value per line on stdin. Most requests produce exactly one
+JSON response line. The opt-in `model_stream` request produces multiple correlated
+frames, ending in `complete` or `error`. Log only to stderr.
 
 ```json
 {"protocol_version":1,"request_id":42,"type":"tool","name":"example_echo","arguments":{"text":"hello"},"workdir":"...","config":{"prefix":"Echo: "}}
@@ -210,15 +216,16 @@ Modifying hooks:
 
 External model operations (`[model] protocol = "plugin"`):
 
-- `model_complete`: receive `{model,messages,tools}`; return JSON inside
+- `model_complete`: receive `{model,messages,tools,reasoning_level}`; return JSON inside
   `content`: `{ "message": {"role":"assistant","content":"..."},
   "usage": {"input":12,"output":5,"cached":0} }`.
-- `model_generate`: receive `{model,system,prompt,output_tokens}`; return
+- `model_generate`: receive `{model,system,prompt,output_tokens,reasoning_level}`; return
   `{ "text":"...", "requests":1, "usage":{...} }`. Used for title/APEC.
 - By default process models return one final response and Kroma emits its
   content. With `streaming = true`, Kroma sends `model_stream` and receives
   **multiple JSONL frames** before completion. Each frame must include
-  `protocol_version:1`, the matching `request_id` and `event`:
+  `protocol_version:1`, the matching `request_id` and `event`.
+  Its request arguments include `{model,messages,tools,reasoning_level}`:
 
   ```json
   {"protocol_version":1,"request_id":42,"event":"reasoning_delta","delta":"Thinking"}
@@ -226,14 +233,31 @@ External model operations (`[model] protocol = "plugin"`):
   {"protocol_version":1,"request_id":42,"event":"complete","result":{"message":{"role":"assistant","content":"Hello"},"usage":{"input":40,"output":2,"cached":12}}}
   ```
 
+  Tools can additionally be streamed as normalized argument fragments:
+
+  ```json
+  {"protocol_version":1,"request_id":42,"event":"tool_call_delta","index":0,"id":"call-1","name":"shell","arguments_delta":"{\"command\":\""}
+  {"protocol_version":1,"request_id":42,"event":"tool_call_delta","index":0,"arguments_delta":"echo hi\"}"}
+  {"protocol_version":1,"request_id":42,"event":"complete","result":{"message":{"role":"assistant","content":null}}}
+  ```
+
+  The first fragment identifies the call; later fragments may append more
+  `arguments_delta`. Indexes must be contiguous starting at 0, IDs unique,
+  and each final argument string valid JSON object text. At most 64 calls
+  and 1 MiB arguments per call are supported. Kroma assembles the tools in
+  index order and verifies any duplicate final `message.tool_calls` match
+  semantically. Until completion, fragments are buffered internally rather
+  than displayed as executable calls.
+
   Alternatively emit `{ "event": "error", "message": "..." }` with the
-  correlation fields. The final result carries tool calls as ordinary
-  `message.tool_calls`. Streamed text/reasoning must match the final message
+  correlation fields. Streamed text/reasoning must match the final message
   when those fields are present; Kroma can fill missing final text from deltas.
   Frames are capped at 2 MiB and buffered through a 32-frame bounded queue.
   Cancelling the model call terminates the plugin worker, and the next call
   starts a clean process. `model_generate` remains a single-response request.
-  Live provider-specific thinking-level controls are not yet exposed.
+  The manifest's declared `thinking_levels` populate the TUI selector; Kroma
+  snapshots `reasoning_level` into each provider request, with no extra IPC.
+  The provider is responsible for translating it to its actual wire format.
 
 External context operations:
 
@@ -258,19 +282,29 @@ External context operations:
   automatically; run `kroma recover-context <session-id>` to explicitly
   recover using its intact original history.
 
+Dynamic UI panel request (requires `[ui] dynamic_panel = true` and `command`):
+
+- Request: `{"type":"ui","name":"panel","arguments":{"id":"hello"}}`
+  plus the standard protocol envelope.
+- Response: `{"content":"Text to show in the overlay"}`. The process may
+  use live state shared with its tools and commands. A TUI cancellation
+  aborts the panel worker request; no background polling is performed.
+
 Observer events are delivered through a bounded best-effort queue, separate
 from the tool worker. High-volume streaming deltas are not forwarded.
 
 ## Current limits
 
 There is **no plugin sandbox, marketplace, model/context hot reload,
-or arbitrary TUI layout/animation API**. TUI extension currently includes
-static status/panels, idle-reloadable commands and Alt+letter bindings. Version 2 context plugins can observe and recover,
+or arbitrary TUI layout/animation API**. TUI extensions include static
+status, cancellable on-demand panels, idle-reloadable commands and Alt+letter
+bindings. Version 2 context plugins can observe and recover,
 but production custom compression strategies must supply their own code and
 tests; the built-in TRC+APEC remains the only production default.
-Process providers can stream text and reasoning with `streaming = true`;
-provider-specific thinking settings and richer incremental tool-call fragments
-still need explicit protocol work. Subagents do not include a tournament judge or
+Process providers can stream text, reasoning and JSON tool-call fragments,
+plus advertise/switch thinking tiers. They do not yet expose a general vision
+attachment transport, provider-specific metadata discovery or a live TUI
+preview of partial tool arguments. Subagents do not include a tournament judge or
 distributed scheduling. Event observers may drop notifications when the
 queue is full. External commands and tools are cancellable; cancellation
 terminates the worker tree on Windows and the plugin's process group on Unix. Plugin code executes

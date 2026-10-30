@@ -98,13 +98,15 @@ The first practical example is **web search and webpage extraction**:
 restart Kroma (or `/plugins reload` in an idle TUI) and use `web_search` or `web_fetch` (Bing RSS by default, no key).
 `/plugins` lists or manages plugins inside CLI/TUI. Further optional examples
 include tool/Prompt replacement, model request hooks, context strategy,
-subagents, cross-session notes and a declarative TUI status/panel. Plugins are
+subagents, cross-session notes, dynamic TUI panels and plugin-defined shortcuts. Plugins are
 disabled by default; Kroma needs Node.js only for JS plugins.
 
 This is a **partial P1–P5 implementation**: external process providers now
-support incremental text/reasoning streaming and idle reload of tool/Prompt/
-command/event/static UI extensions. Plugins may bind Alt+letter keys to
-registered commands without changing TUI internals. Model/context hot reload, tournament
+support incremental text/reasoning/tool-argument streaming, per-provider
+thinking tiers, and idle reload of tool/Prompt/command/event/static UI extensions. Plugins may bind Alt+letter keys to
+registered commands without changing TUI internals; `/plugins view <id>`
+opens a cancellable scrollable panel that can fetch live plugin state.
+Model/context hot reload, tournament
 judging, and fully custom TUI layouts/animations are not implemented yet. See [implementation status](PLUGIN_ROADMAP.md).
 
 Global/project `AGENTS.md` are loaded as before. When the task explicitly

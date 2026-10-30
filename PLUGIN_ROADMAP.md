@@ -9,6 +9,13 @@
 - `[ui.shortcuts]` 支持插件注册独立的 Alt+字母命令快捷键，禁止冲突和覆盖内置 Ctrl 键；与静态面板一起构成最小 TUI 扩展契约。
 - 兼容未声明 streaming 的 V1 进程模型，原有单响应协议保持不变。
 
+### 本轮新增完善（已完成）
+
+- 模型插件支持逐段 `tool_call_delta`：根据索引拼接参数并校验 JSON、工具 ID、最终结果一致性；正文、推理、最终工具调用和原始会话之间仍有明确界限。
+- 外部模型插件清单可声明 `thinking_levels` 和 `reasoning_level`，通过原有 TUI 思考档位接口修改并在下一次请求传入；插件自行适配上游协议。
+- `[ui] dynamic_panel = true` 支持通过插件子进程按需生成面板，TUI 以支持滚动、Esc 关闭的弹层展示。获取过程可以取消，不进入模型对话上下文；原有静态状态栏保持不变。
+
+
 
 ### 插件审查修复落地（本轮）
 
@@ -30,9 +37,9 @@
 | P0 | 工具与 Hook 调用可取消，Windows 上杀死卡死进程并重新启动；JSONL 输出上限 2 MiB；V1 安装/启停/配置保持兼容 | 真正的异步 stdio、请求 ID/版本协议、所有平台进程树清理、模型/上下文插件热重载 |
 | P1 | 显式替换工具、基础 Prompt；before/after tool hooks；修改参数/结果；禁用后恢复；ToolRegistry::disable | 完整动态 Prompt 策略链、通用可视化配置 |
 | P2 | 外部 ContextFactory/Policy 初始/恢复/投影/状态提交/分支适配；独立手动跨会话笔记插件 | 完整 APEC 生命周期、overflow recovery/observe 交给插件、真正可用的替代压缩算法 |
-| P3 | 已有 Chat/Responses/Anthropic 协议的 HTTP 模型和预算联动替换；before_model_request 投影 Hook，二次预算校验 | 动态模型路由/使用量完整审计、思考档位的跨插件动态设置 |
+| P3 | 已有 Chat/Responses/Anthropic HTTP 模型和预算联动替换；before_model_request Hook；外部模型流式输出/工具增量组装、声明式思考档位 | 动态模型路由、完整协议能力发现与图像传输 |
 | P4 | 独立 Kroma 子进程和并行任务，递归深度/并发约束；默认关闭 | 真正锦标赛评分器、主子会话同步/回收完整机制 |
-| P5 | 声明式 TUI 状态栏标签与信息面板，命令搜索和 Tab 补全 | 布局/动画/键位插件、模型与上下文热重载、实时可更新面板 |
+| P5 | 声明式 TUI 状态栏、静态和按需动态弹层、插件 Alt+字母快捷键、命令搜索和空闲热重载 | 任意布局/动画替换、实时推送型 UI、模型与上下文热重载 |
 
 **第一个实用插件**：`examples/plugins/web` 支持 `web_search` 与 `web_fetch`。
 Bing RSS（免 Key）实际公网搜索、Rust 官网 HTTP 页面抓取通过；Brave、

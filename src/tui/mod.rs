@@ -547,6 +547,30 @@ fn input_event(
     {
         state.dismiss_notification();
     }
+    // The on-demand plugin panel owns navigation until Esc closes it.
+    // No key may leak through to the draft editor while this overlay is up.
+    if state.has_plugin_panel() {
+        match event {
+            Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                KeyCode::Esc => state.close_plugin_panel(),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    state.close_plugin_panel()
+                }
+                KeyCode::Up => state.scroll_plugin_panel(-1),
+                KeyCode::Down => state.scroll_plugin_panel(1),
+                KeyCode::PageUp => state.scroll_plugin_panel(-12),
+                KeyCode::PageDown => state.scroll_plugin_panel(12),
+                _ => {}
+            },
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => state.scroll_plugin_panel(-3),
+                MouseEventKind::ScrollDown => state.scroll_plugin_panel(3),
+                _ => {}
+            },
+            _ => {}
+        }
+        return InputAction::None;
+    }
     // Copy an existing selection before interpreting Ctrl+C as cancel,
     // clear-draft or quit. A copied history selection must never discard an
     // unrelated unsent draft or terminate the agent.
@@ -1399,14 +1423,15 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         screen.draw(&mut state)?;
         let action = tokio::select! {
             event=input.next() => match event {
-                Some(Ok(Event::Key(key))) if key.code==KeyCode::Char('g')
+                Some(Ok(Event::Key(key))) if !state.has_plugin_panel()
+                    && key.code==KeyCode::Char('g')
                     && key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Err(error)=screen.edit_prompt(&mut state) {
                         state.note(format!("{}: {error:#}", state.preferences.language.text("Editor", "编辑器")));
                     }
                     InputAction::None
                 },
-                Some(Ok(Event::Key(key))) if state.picker.is_none() => {
+                Some(Ok(Event::Key(key))) if state.picker.is_none() && !state.has_plugin_panel() => {
                     match plugin_shortcut_command(&key, &plugin_shortcuts) {
                         Some(command) => InputAction::Submit(command),
                         None => input_event(&mut state,Event::Key(key),false,model.as_ref(),&workdir),
@@ -1593,6 +1618,45 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     }
                 };
                 if show_local_command(&mut state, &text, model.as_ref()) {
+                    continue;
+                }
+                if let Some(id) = text.strip_prefix("/plugins view ") {
+                    let id = id.trim();
+                    if id.is_empty() || id.split_whitespace().count() != 1 {
+                        state.note("Usage: /plugins view <id>");
+                        continue;
+                    }
+                    // Dynamic panels are on-demand, never polled each frame.
+                    // A slow plugin must not freeze the TUI; Ctrl+C/Esc
+                    // drops the request and terminates its worker if needed.
+                    state.note("Loading plugin panel · Esc to cancel");
+                    screen.draw(&mut state)?;
+                    let result = {
+                        let panel = runtime.plugins.ui_panel_async(id);
+                        tokio::pin!(panel);
+                        loop {
+                            tokio::select! {
+                                done = &mut panel => break Some(done),
+                                event = input.next() => match event {
+                                    Some(Ok(Event::Key(key))) if key.code == KeyCode::Esc ||
+                                        (key.code == KeyCode::Char('c')
+                                            && key.modifiers.contains(KeyModifiers::CONTROL)) => break None,
+                                    Some(Err(error)) => return Err(error.into()),
+                                    None => break None,
+                                    _ => {}
+                                },
+                                message = rx.recv() => {
+                                    if let Some(message) = message { state.event(message); }
+                                },
+                            }
+                        }
+                    };
+                    state.dismiss_notification();
+                    match result {
+                        Some(Ok(panel)) => state.open_plugin_panel(panel),
+                        Some(Err(error)) => state.note(format!("Plugin panel: {error:#}")),
+                        None => state.note("Plugin panel cancelled"),
+                    }
                     continue;
                 }
                 let command_result = {
@@ -1806,6 +1870,38 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plugin_panel_captures_keys_without_clearing_the_unsent_draft() {
+        let (mut ui, model) = setup();
+        ui.editor.paste("unfinished draft");
+        ui.open_plugin_panel("Status\n\nline 1".into());
+        let temp = std::env::temp_dir();
+        assert!(matches!(
+            input_event(
+                &mut ui,
+                Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+                false,
+                &model,
+                &temp
+            ),
+            InputAction::None
+        ));
+        assert!(ui.has_plugin_panel());
+        assert_eq!(ui.editor.text(), "unfinished draft");
+        assert!(matches!(
+            input_event(
+                &mut ui,
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                false,
+                &model,
+                &temp
+            ),
+            InputAction::None
+        ));
+        assert!(!ui.has_plugin_panel());
+        assert_eq!(ui.editor.text(), "unfinished draft");
+    }
+
     #[test]
     fn plugin_alt_shortcuts_do_not_override_regular_input_or_ctrl_keys() {
         let bindings = vec![('e', "/echo from shortcut".to_owned())];

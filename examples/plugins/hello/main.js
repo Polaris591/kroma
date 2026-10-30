@@ -16,6 +16,8 @@ input.on("line", (line) => {
       content = `${prefix}${request.arguments.text} (call ${++calls})`;
     } else if (request.type === "command" && request.name === "/echo") {
       content = `${prefix}${request.arguments} (call ${++calls})`;
+    } else if (request.type === "ui" && request.name === "panel") {
+      content = `Echo plugin status\nRequests handled: ${calls}\nPrefix: ${prefix}`;
     } else {
       throw new Error("unknown request");
     }

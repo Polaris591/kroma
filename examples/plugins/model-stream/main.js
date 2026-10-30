@@ -37,13 +37,28 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
         send(request, { event: "error", message: "Simulated provider failure" });
         return;
       }
-      if (request.arguments.tools.length) {
+      if (prompt === "show-level") {
         send(request, { event: "complete", result: {
-          message: {
-            role: "assistant", content: null,
-            tool_calls: [{ id: "call-1", type: "function",
-              function: { name: "shell", arguments: "{\"command\":\"echo hi\"}" } }]
-          },
+          message: { role: "assistant", content: `reasoning_level=${request.arguments.reasoning_level}` },
+          usage: { input: 4, output: 1 }
+        } });
+        return;
+      }
+      if (request.arguments.tools.length) {
+        send(request, { event: "tool_call_delta", index: 0,
+          id: "call-1", name: "shell", arguments_delta: '{"command":"' });
+        await pause(20);
+        send(request, { event: "tool_call_delta", index: 0,
+          arguments_delta: 'echo hi"}' });
+        if (prompt === "tool-mismatch") {
+          send(request, { event: "complete", result: { message: {
+            role: "assistant", content: null, tool_calls: [{
+              id: "call-1", type: "function", function: {name:"shell",arguments:'{"command":"different"}'}
+            }] } } });
+          return;
+        }
+        send(request, { event: "complete", result: {
+          message: { role: "assistant", content: null },
           usage: { input: 20, output: 7 }
         } });
         return;

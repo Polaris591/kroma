@@ -1,5 +1,5 @@
 //! Pre-request projection hooks, without changing the persisted transcript.
-use super::PluginWorker;
+use super::{stream::ToolCallFragments, PluginWorker};
 use crate::{
     context::ContextConfig,
     model::{
@@ -10,7 +10,10 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, RwLock},
+    time::Instant,
+};
 
 /// A process-backed provider may opt into incremental JSONL frames. Legacy
 /// providers continue returning a single completion response. The provider
@@ -19,6 +22,34 @@ pub(super) struct ProcessModelBackend {
     worker: Arc<PluginWorker>,
     model_name: String,
     streaming: bool,
+    thinking_levels: Vec<String>,
+    reasoning_level: RwLock<Option<String>>,
+}
+
+/// Compare parsed JSON arguments rather than source formatting. Some
+/// upstream providers normalize whitespace in the final tool-call object.
+fn same_tool_calls(
+    reconstructed: &[crate::protocol::ToolCall],
+    final_calls: &[crate::protocol::ToolCall],
+) -> Result<bool> {
+    if reconstructed.len() != final_calls.len() {
+        return Ok(false);
+    }
+    for (draft, final_call) in reconstructed.iter().zip(final_calls) {
+        if draft.id != final_call.id
+            || draft.kind != final_call.kind
+            || draft.function.name != final_call.function.name
+        {
+            return Ok(false);
+        }
+        let draft_args: Value = serde_json::from_str(&draft.function.arguments)?;
+        let final_args: Value = serde_json::from_str(&final_call.function.arguments)
+            .context("final streamed tool call has invalid JSON arguments")?;
+        if draft_args != final_args {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -41,11 +72,19 @@ fn single_request() -> usize {
 }
 
 impl ProcessModelBackend {
-    pub(super) fn new(worker: Arc<PluginWorker>, model_name: String, streaming: bool) -> Self {
+    pub(super) fn new(
+        worker: Arc<PluginWorker>,
+        model_name: String,
+        streaming: bool,
+        thinking_levels: Vec<String>,
+        reasoning_level: Option<String>,
+    ) -> Self {
         Self {
             worker,
             model_name,
             streaming,
+            thinking_levels,
+            reasoning_level: RwLock::new(reasoning_level),
         }
     }
 
@@ -59,10 +98,12 @@ impl ProcessModelBackend {
         let started = Instant::now();
         let mut stream = self.worker.start_stream(json!({
             "type":"model_stream", "name":"model_stream",
-            "arguments":{"model":self.model_name,"messages":messages,"tools":tools}
+            "arguments":{"model":self.model_name,"messages":messages,"tools":tools,
+                "reasoning_level":self.reasoning_level()}
         }));
         let mut text = String::new();
         let mut reasoning = String::new();
+        let mut tool_fragments = ToolCallFragments::default();
         let mut first_token = None;
         while let Some(frame) = stream.next().await {
             match frame["event"].as_str() {
@@ -81,6 +122,10 @@ impl ProcessModelBackend {
                         }
                     }
                 }
+                Some("tool_call_delta") => {
+                    first_token.get_or_insert_with(|| started.elapsed());
+                    tool_fragments.push(&frame)?;
+                }
                 Some("error") => {
                     bail!(
                         "external model stream failed: {}",
@@ -97,6 +142,15 @@ impl ProcessModelBackend {
                     .context("invalid streaming completion payload")?;
                     if reply.message.role != "assistant" {
                         bail!("stream completion must contain an assistant message");
+                    }
+                    if let Some(reconstructed) = tool_fragments.finish()? {
+                        match reply.message.tool_calls.as_ref() {
+                            Some(final_calls) if !same_tool_calls(&reconstructed, final_calls)? => {
+                                bail!("streamed tool calls differ from final message");
+                            }
+                            Some(_) => {}
+                            None => reply.message.tool_calls = Some(reconstructed),
+                        }
                     }
                     if text.is_empty() {
                         if let Some(final_text) = reply.message.content.as_deref() {
@@ -150,6 +204,35 @@ impl ProcessModelBackend {
 }
 
 impl ModelBackend for ProcessModelBackend {
+    fn reasoning_level(&self) -> Option<String> {
+        self.reasoning_level
+            .read()
+            .ok()
+            .and_then(|value| value.clone())
+    }
+
+    fn thinking_levels(&self) -> &[String] {
+        &self.thinking_levels
+    }
+
+    fn set_reasoning_level(&self, level: &str) -> Result<()> {
+        if level.trim().is_empty()
+            || (!self.thinking_levels.is_empty()
+                && !self
+                    .thinking_levels
+                    .iter()
+                    .any(|supported| supported == level))
+        {
+            bail!("unsupported external model thinking level '{level}'");
+        }
+        *self
+            .reasoning_level
+            .write()
+            .map_err(|_| anyhow::anyhow!("model thinking state unavailable"))? =
+            Some(level.to_owned());
+        Ok(())
+    }
+
     fn complete<'a>(
         &'a self,
         messages: &'a [Message],
@@ -167,7 +250,8 @@ impl ModelBackend for ProcessModelBackend {
                 .worker
                 .invoke_async(json!({
                     "type":"model_complete", "name":"model_complete",
-                    "arguments":{"model":self.model_name,"messages":messages,"tools":tools}
+                    "arguments":{"model":self.model_name,"messages":messages,"tools":tools,
+                        "reasoning_level":self.reasoning_level()}
                 }))
                 .await?;
             if reply.is_error {
@@ -225,7 +309,8 @@ impl ModelBackend for ProcessModelBackend {
                 .invoke_async(json!({
                     "type":"model_generate", "name":"model_generate",
                     "arguments":{"model":self.model_name,"system":system,
-                        "prompt":text,"output_tokens":output_tokens}
+                        "prompt":text,"output_tokens":output_tokens,
+                        "reasoning_level":self.reasoning_level()}
                 }))
                 .await?;
             if reply.is_error {

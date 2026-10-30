@@ -75,6 +75,9 @@ pub struct PluginUiSpec {
     pub panel_title: String,
     #[serde(default)]
     pub panel_text: String,
+    /// On-demand panel body returned by the plugin process, not TUI polling.
+    #[serde(default)]
+    pub dynamic_panel: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -101,6 +104,11 @@ pub struct PluginModelSpec {
     pub protocol: String,
     #[serde(default)]
     pub streaming: bool,
+    /// Provider-advertised tiers; an empty list permits custom levels.
+    #[serde(default)]
+    pub thinking_levels: Vec<String>,
+    #[serde(default)]
+    pub reasoning_level: Option<String>,
     pub api_key_env: Option<String>,
     pub context_window: usize,
     pub output_reserve: usize,
@@ -225,6 +233,36 @@ impl PluginManifest {
         }
         if let Some(model) = &self.model {
             ContextConfig::with_output_reserve(model.context_window, model.output_reserve)?;
+            if model.protocol != "plugin"
+                && (!model.thinking_levels.is_empty() || model.reasoning_level.is_some())
+            {
+                bail!(
+                    "plugin '{}' custom thinking levels require protocol='plugin'",
+                    self.id
+                );
+            }
+            let mut levels = BTreeSet::new();
+            if model.thinking_levels.len() > 32
+                || model
+                    .thinking_levels
+                    .iter()
+                    .any(|tier| !valid_id(tier) || tier.len() > 32 || !levels.insert(tier.as_str()))
+            {
+                bail!(
+                    "plugin '{}' has invalid or duplicate thinking levels",
+                    self.id
+                );
+            }
+            if let Some(level) = &model.reasoning_level {
+                if !valid_id(level)
+                    || (!model.thinking_levels.is_empty() && !model.thinking_levels.contains(level))
+                {
+                    bail!(
+                        "plugin '{}' default reasoning level is not supported",
+                        self.id
+                    );
+                }
+            }
             if model.model.trim().is_empty()
                 || (model.protocol != "plugin" && model.base_url.trim().is_empty())
                 || (model.streaming && model.protocol != "plugin")
@@ -248,6 +286,17 @@ impl PluginManifest {
             }
         }
         if let Some(ui) = &self.ui {
+            if ui.dynamic_panel
+                && self
+                    .command
+                    .as_deref()
+                    .is_none_or(|cmd| cmd.trim().is_empty())
+            {
+                bail!(
+                    "plugin '{}' needs a command for its dynamic UI panel",
+                    self.id
+                );
+            }
             let mut bindings = BTreeSet::new();
             for shortcut in &ui.shortcuts {
                 let key = parse_alt_shortcut(&shortcut.key).ok_or_else(|| {
@@ -874,6 +923,8 @@ impl PluginCatalog {
                                 plugin.worker.clone(),
                                 spec.model.clone(),
                                 spec.streaming,
+                                spec.thinking_levels.clone(),
+                                spec.reasoning_level.clone(),
                             )),
                             window,
                         ));
@@ -1032,7 +1083,7 @@ impl PluginCatalog {
             .collect()
     }
 
-    pub fn ui_panel(&self, id: &str) -> Result<String> {
+    fn panel_details(&self, id: &str) -> Result<(String, String, bool, Arc<PluginWorker>)> {
         let plugin = self
             .plugins
             .iter()
@@ -1043,15 +1094,52 @@ impl PluginCatalog {
             .ui
             .as_ref()
             .context("plugin has no UI panel")?;
-        Ok(format!(
-            "{}\n\n{}",
-            if ui.panel_title.is_empty() {
-                &plugin.manifest.name
-            } else {
-                &ui.panel_title
-            },
-            ui.panel_text
+        let title = if ui.panel_title.is_empty() {
+            plugin.manifest.name.clone()
+        } else {
+            ui.panel_title.clone()
+        };
+        Ok((
+            title,
+            ui.panel_text.clone(),
+            ui.dynamic_panel,
+            plugin.worker.clone(),
         ))
+    }
+
+    pub fn ui_panel(&self, id: &str) -> Result<String> {
+        let (title, fallback, dynamic, worker) = self.panel_details(id)?;
+        let content = if dynamic {
+            let result = worker.invoke(json!({
+                "type":"ui", "name":"panel", "arguments":{"id":id}
+            }))?;
+            if result.is_error {
+                bail!("dynamic panel failed: {}", result.content);
+            }
+            result.content
+        } else {
+            fallback
+        };
+        Ok(format!("{title}\n\n{content}"))
+    }
+
+    /// TUI requests are cancellable and must not block the input event loop.
+    pub async fn ui_panel_async(&self, id: &str) -> Result<String> {
+        let (title, fallback, dynamic, worker) = self.panel_details(id)?;
+        let content = if dynamic {
+            let result = worker
+                .invoke_async(json!({
+                    "type":"ui", "name":"panel", "arguments":{"id":id}
+                }))
+                .await?;
+            if result.is_error {
+                bail!("dynamic panel failed: {}", result.content);
+            }
+            result.content
+        } else {
+            fallback
+        };
+        Ok(format!("{title}\n\n{content}"))
     }
 
     pub fn command_descriptions(&self) -> Vec<(String, String)> {
@@ -1732,6 +1820,54 @@ impl Drop for PluginProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_process_thinking_tiers_and_dynamic_panels() {
+        let manifest = r#"
+id = "tiers"
+name = "Thinking provider"
+command = "node"
+[model]
+protocol = "plugin"
+model = "mock"
+context_window = 8192
+output_reserve = 1024
+thinking_levels = ["low", "high"]
+reasoning_level = "high"
+"#;
+        let valid: PluginManifest = toml::from_str(manifest).unwrap();
+        assert!(valid.validate().is_ok());
+
+        let duplicate = manifest.replace(r#"["low", "high"]"#, r#"["low", "low"]"#);
+        let invalid: PluginManifest = toml::from_str(&duplicate).unwrap();
+        assert!(invalid.validate().is_err());
+
+        let unknown = manifest.replace(
+            r#"reasoning_level = "high""#,
+            r#"reasoning_level = "xhigh""#,
+        );
+        let invalid: PluginManifest = toml::from_str(&unknown).unwrap();
+        assert!(invalid.validate().is_err());
+
+        let http = manifest.replace(
+            r#"protocol = "plugin""#,
+            r#"protocol = "chat"
+base_url = "https://example.com""#,
+        );
+        let invalid: PluginManifest = toml::from_str(&http).unwrap();
+        assert!(invalid.validate().is_err());
+
+        let panel: PluginManifest =
+            toml::from_str("id='panel'\nname='Panel'\n[ui]\ndynamic_panel=true\n").unwrap();
+        assert!(
+            panel.validate().is_err(),
+            "dynamic panel requires executable"
+        );
+        let panel: PluginManifest =
+            toml::from_str("id='panel'\nname='Panel'\ncommand='node'\n[ui]\ndynamic_panel=true\n")
+                .unwrap();
+        assert!(panel.validate().is_ok());
+    }
 
     #[test]
     fn invalid_manifests_rejected() {

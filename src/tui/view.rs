@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use serde_json::Value;
@@ -618,6 +618,7 @@ pub struct UiState {
     unread_updates: usize,
     pub editor: Editor,
     pub picker: Option<Picker>,
+    plugin_panel: Option<PluginPanel>,
     pub plugin_commands: Vec<(String, String)>,
     pub plugin_statuses: Vec<String>,
     pub usage: crate::usage::UsageMeter,
@@ -686,7 +687,41 @@ pub struct UiState {
 // Three original Kroma logo wedges, lit in sequence. No generic spinner.
 const BRAND_PULSE_FRAMES: usize = 6;
 
+struct PluginPanel {
+    title: String,
+    body: String,
+    scroll: u16,
+}
+
 impl UiState {
+    pub fn open_plugin_panel(&mut self, content: String) {
+        let (title, body) = content.split_once("\n\n").unwrap_or(("Plugin", &content));
+        self.plugin_panel = Some(PluginPanel {
+            title: title.to_owned(),
+            body: body.to_owned(),
+            scroll: 0,
+        });
+        self.picker = None;
+    }
+
+    pub fn has_plugin_panel(&self) -> bool {
+        self.plugin_panel.is_some()
+    }
+
+    pub fn close_plugin_panel(&mut self) {
+        self.plugin_panel = None;
+    }
+
+    pub fn scroll_plugin_panel(&mut self, offset: i32) {
+        if let Some(panel) = &mut self.plugin_panel {
+            panel.scroll = if offset < 0 {
+                panel.scroll.saturating_sub(offset.unsigned_abs() as u16)
+            } else {
+                panel.scroll.saturating_add(offset as u16)
+            };
+        }
+    }
+
     pub fn set_link_workdir(&mut self, workdir: &Path) {
         self.link_workdir = workdir.to_path_buf();
         self.history_cache = None;
@@ -702,6 +737,7 @@ impl UiState {
             unread_updates: 0,
             editor: Editor::default(),
             picker: None,
+            plugin_panel: None,
             plugin_commands: Vec::new(),
             plugin_statuses: Vec::new(),
             usage: crate::usage::UsageMeter::default(),
@@ -3139,6 +3175,7 @@ impl UiState {
             }
         }
         if self.show_editor_cursor()
+            && self.plugin_panel.is_none()
             && editor_inner.width > 0
             && editor_inner.height > 0
             && !self.editor_selection.is_some_and(|(a, b)| a != b)
@@ -3189,6 +3226,52 @@ impl UiState {
         if let Some(picker) = &self.picker {
             picker.draw(frame, history_slot, colors, self.preferences.language);
         }
+        if let Some(panel) = &mut self.plugin_panel {
+            let width = full_area.width.saturating_sub(2).min(100);
+            let height = full_area.height.saturating_sub(2).min(26);
+            if width >= 16 && height >= 4 {
+                let area = Rect::new(
+                    full_area.x + (full_area.width - width) / 2,
+                    full_area.y + (full_area.height - height) / 2,
+                    width,
+                    height,
+                );
+                frame.render_widget(Clear, area);
+                let heading = if width < 44 {
+                    format!(
+                        " {} · Esc ",
+                        ellipsize_cells(&panel.title, width.saturating_sub(10) as usize)
+                    )
+                } else {
+                    format!(
+                        " {} · ↑↓/PgUp/PgDn · Esc {} ",
+                        ellipsize_cells(&panel.title, width.saturating_sub(28) as usize),
+                        self.preferences.language.text("Close", "关闭")
+                    )
+                };
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(heading)
+                    .border_style(Style::default().fg(colors.accent))
+                    .style(Style::default().bg(colors.input_surface()));
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+                let (wrapped, _) =
+                    wrap_document(Text::raw(panel.body.clone()), inner.width as usize);
+                let max_scroll = wrapped
+                    .lines
+                    .len()
+                    .saturating_sub(inner.height as usize)
+                    .min(u16::MAX as usize) as u16;
+                panel.scroll = panel.scroll.min(max_scroll);
+                frame.render_widget(
+                    Paragraph::new(wrapped)
+                        .scroll((panel.scroll, 0))
+                        .style(Style::default().fg(colors.text).bg(colors.input_surface())),
+                    inner,
+                );
+            }
+        }
     }
 }
 
@@ -3202,6 +3285,64 @@ impl Drop for UiState {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn plugin_panel_overlay_scrolls_and_keeps_composer_unchanged() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "session".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.editor.paste("draft must survive");
+        let body = (0..40)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ui.open_plugin_panel(format!("Live Plugin\n\n{body}"));
+        assert!(ui.has_plugin_panel());
+        assert_eq!(ui.plugin_panel.as_ref().unwrap().scroll, 0);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let all = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(all.contains("Live Plugin"));
+        assert!(all.contains("line 0"));
+        ui.scroll_plugin_panel(12);
+        assert_eq!(ui.plugin_panel.as_ref().unwrap().scroll, 12);
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let scrolled = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(scrolled.contains("line 12"));
+        ui.scroll_plugin_panel(-8);
+        assert_eq!(ui.plugin_panel.as_ref().unwrap().scroll, 4);
+        let mut tiny = Terminal::new(TestBackend::new(22, 8)).unwrap();
+        tiny.draw(|frame| ui.draw(frame)).unwrap();
+        let visible = tiny
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            visible.contains("Esc"),
+            "panel must be closable on narrow terminals"
+        );
+        ui.close_plugin_panel();
+        assert!(!ui.has_plugin_panel());
+        assert_eq!(ui.editor.text(), "draft must survive");
+    }
 
     #[test]
     fn tool_history_shows_executed_arguments_when_plugin_rewrites_call() {

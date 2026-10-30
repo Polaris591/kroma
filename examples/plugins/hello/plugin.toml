@@ -26,6 +26,10 @@ description = "Text to echo"
 name = "/echo"
 description = "Echo text from Kroma's command line"
 
+[ui]
+panel_title = "Hello plugin · live state"
+dynamic_panel = true
+
 [[ui.shortcuts]]
 key = "Alt+E"
 command = "/echo from shortcut"
