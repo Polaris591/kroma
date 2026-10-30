@@ -7,6 +7,7 @@ pub const EXECUTION_GUIDANCE: &str = "\nFor coding tasks, focus inspections on r
 
 /// A simple ordered list of projection-only prompt contributions. No event
 /// hooks, mutable global state, dynamic templates or plugin runtime.
+#[derive(Clone)]
 pub struct PromptComposer {
     system_override: Option<String>,
     /// Embedding hosts may intentionally persist a custom system identity;

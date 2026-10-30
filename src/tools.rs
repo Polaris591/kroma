@@ -71,7 +71,7 @@ pub trait ToolInterceptor: Send + Sync {
 
 /// The order of registration is the order presented to the model.
 /// Calls are still executed sequentially by Agent, not by the registry.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
     interceptors: Vec<Arc<dyn ToolInterceptor>>,

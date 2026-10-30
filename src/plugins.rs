@@ -3,6 +3,7 @@
 //! process and contributes static prompt text at runtime composition.
 mod context;
 mod model;
+mod stream;
 use crate::{
     commands::{CommandRegistry, CommandReply},
     context::{ContextConfig, ContextFactory},
@@ -65,12 +66,28 @@ pub struct PluginManifest {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct PluginUiSpec {
+    /// Optional terminal-safe Alt+letter bindings for this plugin's commands.
+    #[serde(default)]
+    pub shortcuts: Vec<PluginUiShortcut>,
     #[serde(default)]
     pub status: String,
     #[serde(default)]
     pub panel_title: String,
     #[serde(default)]
     pub panel_text: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PluginUiShortcut {
+    pub key: String,
+    pub command: String,
+}
+
+fn parse_alt_shortcut(key: &str) -> Option<char> {
+    let value = key.to_ascii_lowercase();
+    let letter = value.strip_prefix("alt+")?;
+    (letter.len() == 1 && letter.as_bytes()[0].is_ascii_alphabetic())
+        .then(|| letter.as_bytes()[0] as char)
 }
 
 pub type ModelOverride = (Arc<dyn ModelBackend>, ContextConfig, String);
@@ -82,6 +99,8 @@ pub struct PluginModelSpec {
     pub base_url: String,
     #[serde(default = "default_protocol")]
     pub protocol: String,
+    #[serde(default)]
+    pub streaming: bool,
     pub api_key_env: Option<String>,
     pub context_window: usize,
     pub output_reserve: usize,
@@ -208,6 +227,7 @@ impl PluginManifest {
             ContextConfig::with_output_reserve(model.context_window, model.output_reserve)?;
             if model.model.trim().is_empty()
                 || (model.protocol != "plugin" && model.base_url.trim().is_empty())
+                || (model.streaming && model.protocol != "plugin")
             {
                 bail!("plugin '{}' has invalid model configuration", self.id);
             }
@@ -225,6 +245,32 @@ impl PluginManifest {
                 "before_tool_call" | "after_tool_result" | "before_model_request"
             ) {
                 bail!("plugin '{}' declares unsupported hook '{hook}'", self.id);
+            }
+        }
+        if let Some(ui) = &self.ui {
+            let mut bindings = BTreeSet::new();
+            for shortcut in &ui.shortcuts {
+                let key = parse_alt_shortcut(&shortcut.key).ok_or_else(|| {
+                    anyhow!(
+                        "plugin '{}' shortcut '{}' must be Alt+A..Z",
+                        self.id,
+                        shortcut.key
+                    )
+                })?;
+                if !bindings.insert(key) {
+                    bail!("plugin '{}' has duplicate Alt+{key} shortcut", self.id);
+                }
+                let command = shortcut.command.split_whitespace().next().unwrap_or("");
+                if !self
+                    .commands
+                    .iter()
+                    .any(|registered| registered.name == command)
+                {
+                    bail!(
+                        "plugin '{}' shortcut must target its own slash command",
+                        self.id
+                    );
+                }
             }
         }
         for name in &self.events {
@@ -494,7 +540,7 @@ impl PluginCatalog {
         for plugin in &self.plugins {
             let active = plugin.is_enabled(&state);
             let restart = if active != plugin.enabled {
-                " (restart to apply)"
+                " (reload or restart to apply)"
             } else {
                 ""
             };
@@ -544,7 +590,7 @@ impl PluginCatalog {
         }
         state.save(&self.state_path)?;
         Ok(format!(
-            "Plugin '{id}' {}. Restart Kroma to apply.",
+            "Plugin '{id}' {}. Restart Kroma, or run /plugins reload while idle (model/context plugins require restart).",
             if enabled { "enabled" } else { "disabled" }
         ))
     }
@@ -579,7 +625,7 @@ impl PluginCatalog {
         }
         state.save(&self.state_path)?;
         Ok(format!(
-            "Plugin '{id}' setting '{key}' updated. Restart Kroma to apply."
+            "Plugin '{id}' setting '{key}' updated. Run /plugins reload while idle, or restart."
         ))
     }
 
@@ -641,6 +687,47 @@ impl PluginCatalog {
             "Installed '{}' (disabled). Enable with 'kroma plugins enable {}'.",
             manifest.id, manifest.id
         ))
+    }
+
+    /// Context policies and model adapters hold session/runtime state. Hot
+    /// swapping them (or a model-request Hook wrapping the backend) would
+    /// silently change the current session's semantics. Require restart.
+    pub fn needs_restart(&self) -> bool {
+        self.plugins
+            .iter()
+            .filter(|plugin| plugin.enabled)
+            .any(|plugin| {
+                plugin.manifest.context.is_some()
+                    || plugin.manifest.model.is_some()
+                    || plugin
+                        .manifest
+                        .hooks
+                        .iter()
+                        .any(|hook| hook == "before_model_request")
+            })
+    }
+
+    /// Build a replacement plugin view without touching the running agent.
+    /// Callers commit it only after tools, commands and event subscriptions
+    /// all succeed. Default tools and prompt are reusable lightweight clones.
+    pub fn prepare_idle_reload(
+        &self,
+        base_tools: &ToolRegistry,
+        base_prompt: &PromptComposer,
+    ) -> Result<(ToolRegistry, PromptComposer)> {
+        if self.needs_restart() {
+            bail!("model, context or model-request Hook changes require restarting Kroma");
+        }
+        if !self.warnings.is_empty() {
+            bail!("plugin discovery warnings: {}", self.warnings.join("; "));
+        }
+        let mut tools = base_tools.clone();
+        let mut prompt = base_prompt.clone();
+        let warnings = self.contribute(&mut tools, &mut prompt);
+        if !warnings.is_empty() {
+            bail!("plugin reload conflicts: {}", warnings.join("; "));
+        }
+        Ok((tools, prompt))
     }
 
     pub fn contribute(&self, tools: &mut ToolRegistry, prompt: &mut PromptComposer) -> Vec<String> {
@@ -786,6 +873,7 @@ impl PluginCatalog {
                             Arc::new(model::ProcessModelBackend::new(
                                 plugin.worker.clone(),
                                 spec.model.clone(),
+                                spec.streaming,
                             )),
                             window,
                         ));
@@ -906,6 +994,27 @@ impl PluginCatalog {
             .find(|plugin| plugin.enabled && plugin.manifest.model.is_some())
             .and_then(|plugin| plugin.manifest.model.as_ref())
             .map(|spec| spec.model.as_str())
+    }
+
+    /// Parse shortcut keys once per UI configuration, never on every keypress.
+    /// Collisions reject reloading the bindings instead of silently stealing
+    /// an existing plugin's shortcut; built-in Ctrl keys are not exposed.
+    pub fn ui_shortcuts(&self) -> Result<Vec<(char, String)>> {
+        let mut registered = BTreeMap::new();
+        for plugin in &self.plugins {
+            if !plugin.enabled {
+                continue;
+            }
+            if let Some(ui) = &plugin.manifest.ui {
+                for shortcut in &ui.shortcuts {
+                    let key = parse_alt_shortcut(&shortcut.key).context("invalid shortcut")?;
+                    if registered.insert(key, shortcut.command.clone()).is_some() {
+                        bail!("Alt+{key} is assigned by multiple enabled plugins");
+                    }
+                }
+            }
+        }
+        Ok(registered.into_iter().collect())
     }
 
     pub fn ui_statuses(&self) -> Vec<String> {
@@ -1378,9 +1487,18 @@ impl PluginWorker {
 
     fn invoke_inner(
         &self,
-        mut message: Value,
+        message: Value,
         cancellation: Option<(u64, &AtomicBool)>,
     ) -> Result<PluginResponse> {
+        self.invoke_with(message, cancellation, PluginProcess::request)
+    }
+
+    fn invoke_with<R>(
+        &self,
+        mut message: Value,
+        cancellation: Option<(u64, &AtomicBool)>,
+        execute: impl FnOnce(&mut PluginProcess, Value) -> Result<R>,
+    ) -> Result<R> {
         let id = cancellation
             .map(|(id, _)| id)
             .unwrap_or_else(|| self.next_request.fetch_add(1, Ordering::Relaxed));
@@ -1481,10 +1599,7 @@ impl PluginWorker {
             }
             *active = Some((id, process.as_ref().unwrap().child.id()));
         }
-        let result = process
-            .as_mut()
-            .expect("plugin process created")
-            .request(message);
+        let result = execute(process.as_mut().expect("plugin process created"), message);
         if cancellation.is_some() {
             *self
                 .active
@@ -1544,12 +1659,15 @@ struct PluginResponse {
 }
 
 impl PluginProcess {
-    fn request(&mut self, request: Value) -> Result<PluginResponse> {
-        let request_id = request.get("request_id").cloned();
+    fn write_request(&mut self, request: &Value) -> Result<()> {
         self.stdin
-            .write_all(serde_json::to_string(&request)?.as_bytes())?;
+            .write_all(serde_json::to_string(request)?.as_bytes())?;
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
+        Ok(())
+    }
+
+    fn read_frame(&mut self) -> Result<Value> {
         const MAX_RESPONSE: usize = 2 * 1024 * 1024;
         let mut response = Vec::new();
         loop {
@@ -1571,18 +1689,34 @@ impl PluginProcess {
                 break;
             }
         }
-        let parsed: Value =
-            serde_json::from_slice(&response).context("invalid plugin JSON-line response")?;
+        serde_json::from_slice(&response).context("invalid plugin JSON-line response")
+    }
+
+    fn validate_frame(parsed: &Value, request_id: Option<&Value>, strict: bool) -> Result<()> {
+        if strict && parsed.get("protocol_version").and_then(Value::as_u64) != Some(1) {
+            bail!("streaming plugin must include protocol_version=1");
+        }
+        if strict && parsed.get("request_id") != request_id {
+            bail!("streaming plugin request_id missing or mismatched");
+        }
         if let Some(version) = parsed.get("protocol_version") {
             if version.as_u64() != Some(1) {
                 bail!("plugin response protocol version mismatch");
             }
         }
         if let Some(received) = parsed.get("request_id") {
-            if Some(received) != request_id.as_ref() {
+            if Some(received) != request_id {
                 bail!("plugin response request_id mismatch");
             }
         }
+        Ok(())
+    }
+
+    fn request(&mut self, request: Value) -> Result<PluginResponse> {
+        let request_id = request.get("request_id").cloned();
+        self.write_request(&request)?;
+        let parsed = self.read_frame()?;
+        Self::validate_frame(&parsed, request_id.as_ref(), false)?;
         serde_json::from_value(parsed).context("invalid plugin response fields")
     }
 }

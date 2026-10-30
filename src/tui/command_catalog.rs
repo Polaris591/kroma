@@ -104,9 +104,9 @@ commands![
     ("/skills", "", "List available skills", "查看可用技能"),
     (
         "/plugins",
-        "[list|enable|disable|install|config|set|reset|view]",
-        "Manage plugins (restart to apply)",
-        "管理插件（重启后生效）"
+        "[list|enable|disable|install|config|set|reset|view|reload]",
+        "Manage/reload idle-safe plugins",
+        "管理插件并重载可热更新部分"
     ),
     (
         "/usage",

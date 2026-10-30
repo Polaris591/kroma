@@ -2,6 +2,14 @@
 
 ## 2026-10-30：实施状态（以测试代码为依据）
 
+### 新一轮插件能力（已实现、已有端到端测试）
+
+- 外部模型声明 `[model] streaming = true` 后通过 `model_stream` JSONL 多帧请求，支持正文/思考流式增量、最终工具调用和 Token 缓存用量；帧关联 ID 必填，32 帧背压，任务取消会终止宿主进程。
+- TUI 空闲时 `/plugins reload` 会重新发现、校验并原子替换工具、Prompt、命令、事件与静态 UI；原始会话/WAL 不变。模型、上下文与模型请求 Hook 仍要求重启。
+- `[ui.shortcuts]` 支持插件注册独立的 Alt+字母命令快捷键，禁止冲突和覆盖内置 Ctrl 键；与静态面板一起构成最小 TUI 扩展契约。
+- 兼容未声明 streaming 的 V1 进程模型，原有单响应协议保持不变。
+
+
 ### 插件审查修复落地（本轮）
 
 - Prompt 替换只更改模型请求投影，嵌入式宿主的显式 Prompt 保持兼容。
@@ -11,7 +19,7 @@
 - TUI 不让插件状态占用 Token/Cache 展示；窗口重启通过独立会话侧文件恢复已测量用量。
 - JSONL 请求携带 v1 版本及 request_id，响应可选回显（向后兼容），有回显时严格校验。
 - stderr 采用限量后台日志读取；context v2 扩展观察/收尾/溢出恢复接口。
-- 模型可通过 `protocol = "plugin"` 调用进程实现任意上游 wire format；目前仅支持最终结果回传。
+- 模型可通过 `protocol = "plugin"` 调用进程实现任意上游 wire format；新增可选 streaming 实时正文/思考输出，最终帧仍承载完整工具调用。
 
 
 
@@ -19,12 +27,12 @@
 
 | 阶段 | 已实现与可验证 | 尚未覆盖 |
 | --- | --- | --- |
-| P0 | 工具与 Hook 调用可取消，Windows 上杀死卡死进程并重新启动；JSONL 输出上限 2 MiB；V1 安装/启停/配置保持兼容 | 真正的异步 stdio、请求 ID/版本协议、所有平台进程树清理、插件热重载 |
+| P0 | 工具与 Hook 调用可取消，Windows 上杀死卡死进程并重新启动；JSONL 输出上限 2 MiB；V1 安装/启停/配置保持兼容 | 真正的异步 stdio、请求 ID/版本协议、所有平台进程树清理、模型/上下文插件热重载 |
 | P1 | 显式替换工具、基础 Prompt；before/after tool hooks；修改参数/结果；禁用后恢复；ToolRegistry::disable | 完整动态 Prompt 策略链、通用可视化配置 |
 | P2 | 外部 ContextFactory/Policy 初始/恢复/投影/状态提交/分支适配；独立手动跨会话笔记插件 | 完整 APEC 生命周期、overflow recovery/observe 交给插件、真正可用的替代压缩算法 |
-| P3 | 已有 Chat/Responses/Anthropic 协议的 HTTP 模型和预算联动替换；before_model_request 投影 Hook，二次预算校验 | 外部自定义新 wire protocol、动态模型路由/使用量完整审计 |
+| P3 | 已有 Chat/Responses/Anthropic 协议的 HTTP 模型和预算联动替换；before_model_request 投影 Hook，二次预算校验 | 动态模型路由/使用量完整审计、思考档位的跨插件动态设置 |
 | P4 | 独立 Kroma 子进程和并行任务，递归深度/并发约束；默认关闭 | 真正锦标赛评分器、主子会话同步/回收完整机制 |
-| P5 | 声明式 TUI 状态栏标签与信息面板，命令搜索和 Tab 补全 | 布局/动画/键位插件、空闲热重载、实时可更新面板 |
+| P5 | 声明式 TUI 状态栏标签与信息面板，命令搜索和 Tab 补全 | 布局/动画/键位插件、模型与上下文热重载、实时可更新面板 |
 
 **第一个实用插件**：`examples/plugins/web` 支持 `web_search` 与 `web_fetch`。
 Bing RSS（免 Key）实际公网搜索、Rust 官网 HTTP 页面抓取通过；Brave、

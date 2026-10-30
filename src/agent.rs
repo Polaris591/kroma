@@ -422,6 +422,19 @@ impl Agent {
             .collect()
     }
 
+    /// Atomically switch tool/Prompt/event contributions at an idle task
+    /// boundary. Context state and the durable transcript remain untouched.
+    pub fn reload_extensions(
+        &mut self,
+        tools: ToolRegistry,
+        prompt: PromptComposer,
+        events: Option<Arc<dyn EventSink>>,
+    ) {
+        self.prompt = prompt.for_registered_tools(tools.is_builtin_only());
+        self.tools = tools;
+        self.events = events;
+    }
+
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
         self.prompt = self.prompt.for_registered_tools(tools.is_builtin_only());
         self.tools = tools;

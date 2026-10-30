@@ -2,7 +2,7 @@
 
 Kroma runs normally without plugins. Plugins are local directories with a
 `plugin.toml`, and **installed plugins are disabled by default**. Enabling a
-plugin takes effect on the next Kroma startup; live reload is not implemented.
+plugin takes effect after restart or, for safe extensions, `/plugins reload` while the TUI is idle. Model/context strategy changes and model-request Hooks still require restarting Kroma.
 
 The plugin process can be written in any language. The bundled examples use
 Node.js 20+ without external npm dependencies. JavaScript is not required to
@@ -39,7 +39,7 @@ kroma plugins set web provider searxng
 kroma plugins set web searxng_url https://your-searxng.example
 ```
 
-Changes take effect after restarting Kroma. The Brave key is read from the
+Changes take effect after restarting Kroma or running `/plugins reload` in an idle TUI. The Brave key is read from the
 process environment, not required in the plugin TOML file. SearXNG must have
 its JSON search endpoint enabled. DuckDuckGo HTML parsing is subject to engine
 changes/rate limits. Bing's public RSS search endpoint is also not a
@@ -66,11 +66,12 @@ and SearXNG unit tests use mocked responses.
 
 | Directory | How to use | What it demonstrates |
 | --- | --- | --- |
-| `hello` | `/echo hello` | Basic custom tool + slash command + static Prompt |
+| `hello` | `/echo hello` or Alt+E in idle TUI | Basic tool, slash command, static Prompt and declarative shortcut |
 | `transform` | Ask model to call `shell` | Explicit builtin tool replacement, Prompt replacement, before/after tool hooks |
 | `context-demo` | Enable before creating a **new** session | External ContextFactory/Policy state, persisted revision counter, branches; **does not compact messages** |
 | `model-http` | Edit example `base_url`, `model` and budget first | HTTP model profile replacement + context budget |
-| `model-process` | Enable in a test-only project | Model backend implemented in a separate executable, including any custom wire protocol (V1 final-response, no streaming) |
+| `model-process` | Enable in a test-only project | Model backend implemented in a separate executable, with custom wire protocol (single final response) |
+| `model-stream` | Enable in a test-only project | Incremental text, reasoning, tool calls, usage and cancellation from an external model process |
 | `model-hook` | Enable and send a message | Request projection rewrite without mutating session history |
 | `subagents` | Ask for `subagent_run` or `subagent_parallel` | Runs separate Kroma processes/sessions, parallel task dispatch |
 | `memory` | `/remember text`, `/memories`, `/forgetnote 1` | Optional cross-session local notes, injected into model request projection |
@@ -78,7 +79,7 @@ and SearXNG unit tests use mocked responses.
 
 To try another plugin, run
 `kroma plugins install examples/plugins/<directory>`, then
-`kroma plugins enable <id>` and restart. Only enable the plugins you intend
+`kroma plugins enable <id>` and either restart or use `/plugins reload` while idle for tool/Prompt/command/UI/event changes. Only enable the plugins you intend
 to use. `subagents` uses `kroma --print` to start child agents; the Kroma
 binary must be available on PATH, or configure `kroma_bin` as an absolute path.
 It reuses your configured model provider, so running multiple agents incurs
@@ -113,7 +114,13 @@ kroma plugins reset <id> <key>
 
 In Kroma use `/plugins` with the same subcommands and
 `/plugins view <id>` for plugins declaring an information panel.
-Changing a setting on a running plugin does not hot-reload that plugin.
+`/plugins reload` in an **idle TUI** reloads tools, Prompt contributions,
+slash commands, event subscribers and static UI metadata. It validates the new
+registry first and keeps the old one on failure. The active conversation,
+Agent Loop and model stay unchanged. If either current or pending enabled
+plugins use a model adapter, context policy, or `before_model_request` Hook,
+restart Kroma instead; they carry state that cannot safely be hot-swapped.
+Command-line `kroma plugins ...` cannot reload a separate running process.
 The CLI `set` command saves a string value; write typed TOML values directly
 in `plugins.toml` if needed.
 
@@ -121,7 +128,8 @@ User-global plugins and project plugins have separate enabled-state keys.
 Project activation is bound to its canonical plugin directory, so the same
 plugin ID in another project cannot inherit the previous project's enabled
 state. Duplicate IDs in one discovery scope are reported. A newly installed
-plugin is discoverable immediately, but runtime changes still require restart.
+plugin is immediately discoverable, and safe runtime changes apply with
+`/plugins reload` or a restart.
 
 ## Manifest schema
 
@@ -148,11 +156,17 @@ The basic fields:
   `context_overflow` lifecycle requests. The plugin's persisted version
   is intentionally not interchangeable with version 1.
 - `[model]`: `model`, `base_url`, `protocol`, `api_key_env`,
-  `context_window`, `output_reserve`. Set `protocol = "plugin"` to implement
-  any external model wire format inside the plugin process (no `base_url`
-  field needed); built-in HTTP protocols continue to work unchanged.
+  `context_window`, `output_reserve`, optional `streaming = true`.
+  Set `protocol = "plugin"` to implement an external model wire format inside
+  a process (no `base_url` field needed). Only process-model plugins may set
+  `streaming = true`; other HTTP protocols continue to work unchanged.
 - `[ui]`: `status`, `panel_title`, `panel_text`: static declarative TUI
   UI contributions (not layout/animation APIs).
+- `[[ui.shortcuts]]`: `key = "Alt+E"` and `command = "/echo example"` bind
+  an **Alt+letter** chord to a command declared by the **same** plugin.
+  Shortcuts run only while the TUI is idle. Normal typing and all Ctrl
+  bindings retain their behavior. Conflicts reject the shortcut map rather
+  than silently overriding an existing plugin.
 
 Only one plugin may replace a given tool, base Prompt, context factory or
 model. Conflicts are reported, not silently overwritten. Registration
@@ -201,9 +215,25 @@ External model operations (`[model] protocol = "plugin"`):
   "usage": {"input":12,"output":5,"cached":0} }`.
 - `model_generate`: receive `{model,system,prompt,output_tokens}`; return
   `{ "text":"...", "requests":1, "usage":{...} }`. Used for title/APEC.
-- V1 process models return one final response, then Kroma emits its content.
-  Live delta streaming and provider-specific thinking-level controls are not
-  exposed by this adapter yet.
+- By default process models return one final response and Kroma emits its
+  content. With `streaming = true`, Kroma sends `model_stream` and receives
+  **multiple JSONL frames** before completion. Each frame must include
+  `protocol_version:1`, the matching `request_id` and `event`:
+
+  ```json
+  {"protocol_version":1,"request_id":42,"event":"reasoning_delta","delta":"Thinking"}
+  {"protocol_version":1,"request_id":42,"event":"text_delta","delta":"Hello"}
+  {"protocol_version":1,"request_id":42,"event":"complete","result":{"message":{"role":"assistant","content":"Hello"},"usage":{"input":40,"output":2,"cached":12}}}
+  ```
+
+  Alternatively emit `{ "event": "error", "message": "..." }` with the
+  correlation fields. The final result carries tool calls as ordinary
+  `message.tool_calls`. Streamed text/reasoning must match the final message
+  when those fields are present; Kroma can fill missing final text from deltas.
+  Frames are capped at 2 MiB and buffered through a 32-frame bounded queue.
+  Cancelling the model call terminates the plugin worker, and the next call
+  starts a clean process. `model_generate` remains a single-response request.
+  Live provider-specific thinking-level controls are not yet exposed.
 
 External context operations:
 
@@ -233,12 +263,14 @@ from the tool worker. High-volume streaming deltas are not forwarded.
 
 ## Current limits
 
-There is **no plugin sandbox, marketplace, live reload, or arbitrary TUI
-layout/animation API**. Version 2 context plugins can observe and recover,
+There is **no plugin sandbox, marketplace, model/context hot reload,
+or arbitrary TUI layout/animation API**. TUI extension currently includes
+static status/panels, idle-reloadable commands and Alt+letter bindings. Version 2 context plugins can observe and recover,
 but production custom compression strategies must supply their own code and
 tests; the built-in TRC+APEC remains the only production default.
-The process model adapter supports custom upstream protocols but does not
-stream interim tokens yet. Subagents do not include a tournament judge or
+Process providers can stream text and reasoning with `streaming = true`;
+provider-specific thinking settings and richer incremental tool-call fragments
+still need explicit protocol work. Subagents do not include a tournament judge or
 distributed scheduling. Event observers may drop notifications when the
 queue is full. External commands and tools are cancellable; cancellation
 terminates the worker tree on Windows and the plugin's process group on Unix. Plugin code executes

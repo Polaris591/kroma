@@ -1,5 +1,5 @@
 //! Default Kroma terminal UI. A thin host of the same Agent used by the CLI.
-//! Themes are TOML data. No UI plugin runtime, RPC service or second Agent loop.
+//! Themes and optional plugin key bindings are TOML data, with no second Agent loop.
 mod attachments;
 mod command_catalog;
 mod editor;
@@ -1219,6 +1219,22 @@ pub async fn run(config: Config) -> Result<()> {
     run_with_resume(config, false).await
 }
 
+/// Only explicit Alt+letter chords can invoke a plugin command. Built-in
+/// Ctrl keys, selection and normal text editing retain their original meaning.
+fn plugin_shortcut_command(key: &KeyEvent, bindings: &[(char, String)]) -> Option<String> {
+    if bindings.is_empty() || key.kind != KeyEventKind::Press || key.modifiers != KeyModifiers::ALT
+    {
+        return None;
+    }
+    let KeyCode::Char(letter) = key.code else {
+        return None;
+    };
+    bindings
+        .iter()
+        .find(|(bound, _)| *bound == letter.to_ascii_lowercase())
+        .map(|(_, command)| command.clone())
+}
+
 /// Plain `kroma` shows the welcome screen. Explicit --continue restores the
 /// latest saved session; only the first real send creates a new conversation.
 pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<()> {
@@ -1266,8 +1282,8 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     let (tx, mut rx) = mpsc::unbounded_channel();
     let observer = Arc::new(UiSink(tx.clone()));
     let mut model_handle: Option<Arc<dyn ModelBackend>> = None;
-    let runtime = app::default_runtime_with(config, |components| {
-        components.events = Some(observer);
+    let mut runtime = app::default_runtime_with(config, |components| {
+        components.events = Some(observer.clone());
         model_handle = Some(components.model());
         components.defer_initial_session = show_home;
         Ok(())
@@ -1310,6 +1326,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     state.set_link_workdir(&workdir);
     state.plugin_commands = runtime.plugins.command_descriptions();
     state.plugin_statuses = runtime.plugins.ui_statuses();
+    let mut plugin_shortcuts = match runtime.plugins.ui_shortcuts() {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            state.note(format!("Plugin shortcut: {error:#}"));
+            Vec::new()
+        }
+    };
     state.preferences_path = preferences::Preferences::path();
     match preferences::Preferences::load_at(state.preferences_path.as_deref()) {
         Ok(prefs) => state.apply_preferences(prefs),
@@ -1383,6 +1406,12 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     }
                     InputAction::None
                 },
+                Some(Ok(Event::Key(key))) if state.picker.is_none() => {
+                    match plugin_shortcut_command(&key, &plugin_shortcuts) {
+                        Some(command) => InputAction::Submit(command),
+                        None => input_event(&mut state,Event::Key(key),false,model.as_ref(),&workdir),
+                    }
+                },
                 Some(Ok(event)) => input_event(&mut state,event,false,model.as_ref(),&workdir),
                 Some(Err(error)) => return Err(error.into()),
                 None => return Ok(()),
@@ -1407,6 +1436,46 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                 }
             }
             InputAction::Submit(text) => {
+                if text == "/plugins reload" {
+                    // The outer UI event loop only receives commands while
+                    // no Agent task is executing. Prepare everything before
+                    // swapping the active registry, so failures leave it intact.
+                    let prepared = (|| -> Result<_> {
+                        let discovered = crate::plugins::PluginCatalog::discover(&workdir)?;
+                        if runtime.plugins.needs_restart() || discovered.needs_restart() {
+                            anyhow::bail!("Active model, context or model-request Hooks require a full restart");
+                        }
+                        let (tools, prompt) = discovered
+                            .prepare_idle_reload(&runtime.base_tools, &runtime.base_prompt)?;
+                        let mut next_commands = CommandRegistry::builtin_with_warnings(
+                            runtime.skills.list(),
+                            runtime.startup_warnings.clone(),
+                        )?;
+                        let command_warnings = discovered.register_commands(&mut next_commands);
+                        if !command_warnings.is_empty() {
+                            anyhow::bail!(
+                                "plugin command reload failed: {}",
+                                command_warnings.join("; ")
+                            );
+                        }
+                        let shortcuts = discovered.ui_shortcuts()?;
+                        let events = discovered.wrap_events(Some(observer.clone()))?;
+                        Ok((discovered, tools, prompt, next_commands, shortcuts, events))
+                    })();
+                    match prepared {
+                        Ok((next, tools, prompt, next_commands, shortcuts, events)) => {
+                            agent.reload_extensions(tools, prompt, events);
+                            runtime.plugins = next;
+                            commands = next_commands;
+                            plugin_shortcuts = shortcuts;
+                            state.plugin_commands = runtime.plugins.command_descriptions();
+                            state.plugin_statuses = runtime.plugins.ui_statuses();
+                            state.note("Plugins reloaded (tools, Prompt, commands, events, UI)");
+                        }
+                        Err(error) => state.note(format!("Plugin reload: {error:#}")),
+                    }
+                    continue;
+                }
                 if text == "/editor" {
                     if let Err(error) = screen.edit_prompt(&mut state) {
                         state.note(format!(
@@ -1737,6 +1806,32 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plugin_alt_shortcuts_do_not_override_regular_input_or_ctrl_keys() {
+        let bindings = vec![('e', "/echo from shortcut".to_owned())];
+        let alt_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT);
+        assert_eq!(
+            super::plugin_shortcut_command(&alt_e, &bindings),
+            Some("/echo from shortcut".into())
+        );
+        assert_eq!(
+            super::plugin_shortcut_command(
+                &KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                &bindings
+            ),
+            None
+        );
+        assert_eq!(
+            super::plugin_shortcut_command(
+                &KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+                &bindings
+            ),
+            None
+        );
+        let mut repeat = alt_e;
+        repeat.kind = KeyEventKind::Repeat;
+        assert_eq!(super::plugin_shortcut_command(&repeat, &bindings), None);
+    }
     use super::*;
     use crate::provider::ModelClient;
     use crossterm::event::KeyModifiers;

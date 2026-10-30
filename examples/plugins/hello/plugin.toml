@@ -25,3 +25,7 @@ description = "Text to echo"
 [[commands]]
 name = "/echo"
 description = "Echo text from Kroma's command line"
+
+[[ui.shortcuts]]
+key = "Alt+E"
+command = "/echo from shortcut"

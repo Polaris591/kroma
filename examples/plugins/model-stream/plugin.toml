@@ -1,0 +1,13 @@
+id = "model-stream"
+name = "Streaming Provider Example"
+version = "0.1.0"
+description = "Stream text and reasoning from an external provider with correlated JSONL frames"
+command = "node"
+args = ["main.js"]
+
+[model]
+model = "stream-demo"
+protocol = "plugin"
+streaming = true
+context_window = 32768
+output_reserve = 2048

@@ -95,15 +95,17 @@ diagnostics. Both modes share Agent, Shell, model providers, and TRC+APEC.
 Plugins: see the [plugin guide and concrete examples](examples/plugins/README.md).
 The first practical example is **web search and webpage extraction**:
 `kroma plugins install examples/plugins/web`, then `kroma plugins enable web`,
-restart Kroma and use `web_search` or `web_fetch` (Bing RSS by default, no key).
+restart Kroma (or `/plugins reload` in an idle TUI) and use `web_search` or `web_fetch` (Bing RSS by default, no key).
 `/plugins` lists or manages plugins inside CLI/TUI. Further optional examples
 include tool/Prompt replacement, model request hooks, context strategy,
 subagents, cross-session notes and a declarative TUI status/panel. Plugins are
 disabled by default; Kroma needs Node.js only for JS plugins.
 
-This is a **partial P1–P5 implementation**: full external compression lifecycle,
-new provider wire formats, tournament judging, custom TUI layout/animation and
-hot reload are not implemented yet. See [implementation status](PLUGIN_ROADMAP.md).
+This is a **partial P1–P5 implementation**: external process providers now
+support incremental text/reasoning streaming and idle reload of tool/Prompt/
+command/event/static UI extensions. Plugins may bind Alt+letter keys to
+registered commands without changing TUI internals. Model/context hot reload, tournament
+judging, and fully custom TUI layouts/animations are not implemented yet. See [implementation status](PLUGIN_ROADMAP.md).
 
 Global/project `AGENTS.md` are loaded as before. When the task explicitly
 references a nested project file, the applicable ancestor `AGENTS.md` files

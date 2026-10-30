@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use kroma::{
     agent::Agent,
     commands::CommandRegistry,
@@ -544,6 +544,267 @@ async fn process_model_backend_supports_non_http_protocol_and_correlated_jsonl()
         .await?;
     assert_eq!(summary.text, "Summary");
     assert_eq!(summary.usage.and_then(|usage| usage.output), Some(2));
+    Ok(())
+}
+
+#[test]
+fn plugin_ui_shortcut_collisions_are_rejected() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let hello = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello");
+    PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path())?.install(&hello)?;
+    let another = directory.join("other");
+    fs::create_dir_all(&another)?;
+    fs::write(another.join("plugin.toml"),
+        "id='other'\nname='Other'\ncommand='node'\nargs=['main.js']\n[[commands]]\nname='/other'\n[[ui.shortcuts]]\nkey='Alt+E'\ncommand='/other'\n")?;
+    let current = PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path())?;
+    current.set_enabled("hello", true)?;
+    current.set_enabled("other", true)?;
+    let updated = PluginCatalog::discover_at(directory, state, temp.path())?;
+    assert!(
+        updated
+            .ui_shortcuts()
+            .unwrap_err()
+            .to_string()
+            .contains("Alt+e"),
+        "conflicting shortcuts must not quietly override one another"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_reload_rebuilds_tools_prompt_commands_without_changing_history() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    fs::create_dir_all(&workdir)?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let hello = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello");
+    let status = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/status");
+    let model_hook = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/model-hook");
+    let discover = || PluginCatalog::discover_at(directory.clone(), state.clone(), &workdir);
+    discover()?.install(&hello)?;
+    discover()?.install(&status)?;
+    discover()?.install(&model_hook)?;
+    let before = discover()?;
+    let base_tools = ToolRegistry::builtin();
+    let base_prompt = PromptComposer::default();
+    let model = Arc::new(ModelClient::new(
+        "http://127.0.0.1:9/v1",
+        None,
+        "mock".into(),
+    )?);
+    let mut agent = Agent::with_backends(model, base_tools.clone(), workdir.clone())?;
+    let previous = serde_json::to_value(agent.messages())?;
+    let (plain_tools, plain_prompt) = before.prepare_idle_reload(&base_tools, &base_prompt)?;
+    agent.reload_extensions(plain_tools, plain_prompt, None);
+    assert!(agent
+        .available_tool_names()
+        .iter()
+        .all(|name| name != "example_echo"));
+
+    before.set_enabled("hello", true)?;
+    before.set_enabled("status", true)?;
+    let updated = discover()?;
+    let (tools, prompt) = updated.prepare_idle_reload(&base_tools, &base_prompt)?;
+    let mut cmds = CommandRegistry::builtin(vec![])?;
+    assert!(updated.register_commands(&mut cmds).is_empty());
+    agent.reload_extensions(tools, prompt, None);
+    assert!(agent
+        .available_tool_names()
+        .contains(&"example_echo".to_string()));
+    assert_eq!(updated.ui_statuses(), vec!["Plugin ready"]);
+    assert_eq!(
+        updated.ui_shortcuts()?,
+        vec![('e', "/echo from shortcut".to_owned())]
+    );
+    if Command::new("node").arg("--version").output().is_ok() {
+        let input = agent.task_input();
+        let result = cmds
+            .execute_async("/echo hot", &mut agent, &input)
+            .await?
+            .context("reloaded plugin command should exist")?;
+        assert!(result.output.contains("hot"), "{}", result.output);
+    }
+    assert_eq!(
+        serde_json::to_value(agent.messages())?,
+        previous,
+        "plugin reload must not change the persisted transcript"
+    );
+
+    updated.set_enabled("hello", false)?;
+    let without = discover()?;
+    let (tools, prompt) = without.prepare_idle_reload(&base_tools, &base_prompt)?;
+    agent.reload_extensions(tools, prompt, None);
+    assert!(!agent
+        .available_tool_names()
+        .contains(&"example_echo".to_string()));
+    assert_eq!(serde_json::to_value(agent.messages())?, previous);
+
+    without.set_enabled("model-hook", true)?;
+    assert!(
+        discover()?
+            .prepare_idle_reload(&base_tools, &base_prompt)
+            .is_err(),
+        "stateful model hooks require a full restart"
+    );
+    assert!(
+        !agent
+            .available_tool_names()
+            .contains(&"example_echo".to_string()),
+        "a rejected reload must keep the original runtime intact"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_model_emits_live_text_reasoning_tools_and_usage() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/model-stream");
+    PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path())?.install(&source)?;
+    PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path())?
+        .set_enabled("model-stream", true)?;
+    let catalog = PluginCatalog::discover_at(directory, state, temp.path())?;
+    let (selected, warnings) = catalog.model_override();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (backend, budget, name) = selected.context("streaming model not selected")?;
+    assert_eq!(name, "stream-demo");
+    assert_eq!(budget.window(), 32_768);
+    let history = [
+        Message::new("system", "system"),
+        Message::new("user", "hello"),
+    ];
+    let start = std::time::Instant::now();
+    let mut texts = Vec::new();
+    let mut thoughts = Vec::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(8),
+        backend.complete_with_reasoning(
+            &history,
+            &[],
+            &mut |delta| texts.push((start.elapsed(), delta.to_string())),
+            &mut |delta| thoughts.push((start.elapsed(), delta.to_string())),
+        ),
+    )
+    .await??;
+    assert_eq!(
+        texts.iter().map(|(_, s)| s.as_str()).collect::<String>(),
+        "Hello from stream."
+    );
+    assert_eq!(
+        thoughts.iter().map(|(_, s)| s.as_str()).collect::<String>(),
+        "Think first."
+    );
+    assert_eq!(texts.len(), 2);
+    assert_eq!(thoughts.len(), 2);
+    assert!(result
+        .first_token
+        .is_some_and(|first| first < result.elapsed));
+    assert!(
+        texts[0].0 < result.elapsed,
+        "text must arrive before terminal completion"
+    );
+    assert_eq!(
+        result.message.reasoning_content.as_deref(),
+        Some("Think first.")
+    );
+    assert_eq!(
+        result.message.content.as_deref(),
+        Some("Hello from stream.")
+    );
+    assert_eq!(result.usage.as_ref().and_then(|u| u.cached), Some(75));
+    let call = backend
+        .complete(
+            &history,
+            &[serde_json::json!({
+                "type":"function","function":{"name":"shell","parameters":{"type":"object"}}
+            })],
+            &mut |_| {},
+        )
+        .await?;
+    let tool_calls = call
+        .message
+        .tool_calls
+        .context("missing streamed tool call")?;
+    assert_eq!(tool_calls[0].function.name, "shell");
+    assert_eq!(tool_calls[0].id, "call-1");
+    assert_eq!(
+        backend
+            .generate_short_text("system", "summary", 100)
+            .await?
+            .text,
+        "Stream summary"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_model_cancellation_recovers_and_bad_frames_fail() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/model-stream");
+    PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path())?.install(&source)?;
+    PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path())?
+        .set_enabled("model-stream", true)?;
+    let catalog = PluginCatalog::discover_at(directory, state, temp.path())?;
+    let (selected, warnings) = catalog.model_override();
+    assert!(warnings.is_empty());
+    let (backend, _, _) = selected.context("model missing")?;
+    let bad = [
+        Message::new("system", "system"),
+        Message::new("user", "bad-id"),
+    ];
+    let error = backend
+        .complete(&bad, &[], &mut |_| {})
+        .await
+        .err()
+        .context("invalid response should fail")?;
+    assert!(
+        format!("{error:#}").contains("request_id"),
+        "unexpected error: {error:#}"
+    );
+    let stalled = [
+        Message::new("system", "system"),
+        Message::new("user", "stall"),
+    ];
+    let mut captured = String::new();
+    let timeout = tokio::time::timeout(
+        Duration::from_millis(450),
+        backend.complete(&stalled, &[], &mut |delta| captured.push_str(delta)),
+    )
+    .await;
+    assert!(
+        timeout.is_err(),
+        "missing final frame must not count as completion"
+    );
+    assert_eq!(
+        captured, "started",
+        "partial stream should be delivered before cancel"
+    );
+    let normal = [
+        Message::new("system", "system"),
+        Message::new("user", "hello"),
+    ];
+    let reply = tokio::time::timeout(
+        Duration::from_secs(8),
+        backend.complete(&normal, &[], &mut |_| {}),
+    )
+    .await??;
+    assert_eq!(
+        reply.message.content.as_deref(),
+        Some("Hello from stream."),
+        "cancelled worker must not poison the next request"
+    );
     Ok(())
 }
 

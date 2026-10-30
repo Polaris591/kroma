@@ -49,6 +49,10 @@ pub struct DefaultRuntime {
     pub startup_warnings: Vec<String>,
     pub plugin_warnings: Vec<String>,
     pub selected_model_name: Option<String>,
+    /// Unmodified application components for idle plugin reloads. Share
+    /// existing MCP/Skill adapters; never reconnect or rebuild Agent Loop.
+    pub base_tools: ToolRegistry,
+    pub base_prompt: PromptComposer,
 }
 
 pub async fn default_runtime_with(
@@ -86,6 +90,8 @@ pub async fn default_runtime_with(
         events: None,
         defer_initial_session: false,
     };
+    let base_tools = components.tools.clone();
+    let base_prompt = components.prompt.clone();
     plugin_warnings.splice(0..0, plugins.warnings.clone());
     plugin_warnings.extend(plugins.contribute(&mut components.tools, &mut components.prompt));
     plugin_warnings.extend(plugins.replace_context(&mut components.context_factory));
@@ -109,6 +115,8 @@ pub async fn default_runtime_with(
         startup_warnings: mcp_status.unavailable,
         plugin_warnings,
         selected_model_name,
+        base_tools,
+        base_prompt,
     })
 }
 
