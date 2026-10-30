@@ -5,11 +5,16 @@
 use super::{PluginCallGuard, PluginProcess, PluginWorker};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
+
+const STREAM_FRAME_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Provider-neutral streamed tool-call arguments. A process plugin normalizes
 /// upstream provider fragments into an index, stable id/name and JSON text
@@ -107,7 +112,15 @@ pub(super) struct PluginStream {
 
 impl PluginStream {
     pub(super) async fn next(&mut self) -> Option<Value> {
-        self.receiver.recv().await
+        match tokio::time::timeout(STREAM_FRAME_TIMEOUT, self.receiver.recv()).await {
+            Ok(frame) => frame,
+            Err(_) => {
+                // Abort the streaming task; its PluginCallGuard kills the
+                // plugin process tree, so a stalled plugin cannot linger.
+                self.task.abort();
+                None
+            }
+        }
     }
 
     pub(super) async fn finish(mut self) -> Result<()> {

@@ -16,6 +16,29 @@ use std::{
 };
 
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
+const MAX_SSE_PENDING_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_MODEL_METADATA_BYTES: usize = 256 * 1024;
+const MAX_APEC_RESPONSE_BYTES: usize = 1024 * 1024;
+/// A per-turn output budget, not the model's total capability. Reserving a
+/// 128k completion for every request would compress the conversation far too
+/// early; 32k is still enough for a large edit or a long explanation.
+const MAX_TURN_OUTPUT_TOKENS: usize = 32 * 1024;
+
+async fn read_limited_text(response: reqwest::Response, limit: usize) -> Result<String> {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("model response body failed")?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            bail!("model response body exceeds the configured limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApiProtocol {
@@ -440,15 +463,17 @@ impl StreamResult {
 fn process_sse_line(
     line: &[u8],
     data_lines: &mut Vec<String>,
+    data_bytes: &mut usize,
     result: &mut CompletionStream,
     on_text: &mut (impl FnMut(&str) + Send),
 ) -> Result<()> {
-    process_sse_line_with_reasoning(line, data_lines, result, on_text, &mut |_| {})
+    process_sse_line_with_reasoning(line, data_lines, data_bytes, result, on_text, &mut |_| {})
 }
 
 fn process_sse_line_with_reasoning(
     line: &[u8],
     data_lines: &mut Vec<String>,
+    data_bytes: &mut usize,
     result: &mut CompletionStream,
     on_text: &mut (impl FnMut(&str) + Send),
     on_reasoning: &mut (impl FnMut(&str) + Send),
@@ -458,9 +483,14 @@ fn process_sse_line_with_reasoning(
         if !data_lines.is_empty() {
             result.apply_with_reasoning(&data_lines.join("\n"), on_text, on_reasoning)?;
             data_lines.clear();
+            *data_bytes = 0;
         }
     } else if let Some(data) = line.strip_prefix(b"data:") {
         let data = data.strip_prefix(b" ").unwrap_or(data);
+        *data_bytes = data_bytes.saturating_add(data.len());
+        if *data_bytes > MAX_SSE_EVENT_BYTES {
+            bail!("SSE event exceeds the 2 MiB limit");
+        }
         data_lines.push(std::str::from_utf8(data)?.to_string());
     }
     Ok(())
@@ -475,11 +505,17 @@ fn consume_sse_lines(
     mut on_line: impl FnMut(&[u8]) -> Result<bool>,
 ) -> Result<bool> {
     let first_new = pending.len();
+    if pending.len().saturating_add(chunk.len()) > MAX_SSE_PENDING_BYTES {
+        bail!("SSE pending buffer exceeds the 4 MiB limit");
+    }
     pending.extend_from_slice(chunk);
     let mut start = 0;
     for end in first_new..pending.len() {
         if pending[end] != b'\n' {
             continue;
+        }
+        if end.saturating_sub(start) > MAX_SSE_EVENT_BYTES {
+            bail!("SSE event exceeds the 2 MiB limit");
         }
         if on_line(&pending[start..end])? {
             return Ok(true);
@@ -781,7 +817,11 @@ impl ModelClient {
 
     pub fn effective_output_tokens(&self) -> Option<usize> {
         self.requested_output
-            .map(|n| self.output_limit.map_or(n, |limit| n.min(limit)))
+            .map(|n| {
+                let requested = n.min(MAX_TURN_OUTPUT_TOKENS);
+                self.output_limit
+                    .map_or(requested, |limit| requested.min(limit))
+            })
             .or_else(|| self.output_limit.map(|limit| limit.min(4096)))
     }
 
@@ -821,7 +861,10 @@ impl ModelClient {
             if !response.status().is_success() {
                 return None;
             }
-            response.json::<Value>().await.ok()
+            let body = read_limited_text(response, MAX_MODEL_METADATA_BYTES)
+                .await
+                .ok()?;
+            serde_json::from_str::<Value>(&body).ok()
         })
         .await;
         let info = match result {
@@ -1360,8 +1403,7 @@ impl ModelClient {
                     .await
                     .context("tool-free model request failed")?;
                 let status = response.status();
-                let body = response
-                    .text()
+                let body = read_limited_text(response, MAX_APEC_RESPONSE_BYTES)
                     .await
                     .context("failed to read APEC response")?;
                 if !status.is_success() {
@@ -1462,10 +1504,13 @@ impl ModelClient {
         if !status.is_success() {
             let retry_after_raw = response.headers().contains_key(RETRY_AFTER);
             let retry_after = parse_retry_after(&response);
-            let text = tokio::time::timeout(self.stream_idle_timeout, response.text())
-                .await
-                .context("model error response body idle timeout")?
-                .context("failed to read model error")?;
+            let text = tokio::time::timeout(
+                self.stream_idle_timeout,
+                read_limited_text(response, MAX_ERROR_BODY_BYTES),
+            )
+            .await
+            .context("model error response body idle timeout")?
+            .context("failed to read model error")?;
             let excerpt: String = text.chars().take(1000).collect();
             // Unsupported Retry-After (e.g. HTTP-date) must not be ignored.
             let retry_after = if retry_after_raw && retry_after.is_none() {
@@ -1484,17 +1529,23 @@ impl ModelClient {
         let mut stream = response.bytes_stream();
         let mut pending = Vec::<u8>::new();
         let mut data_lines = Vec::new();
+        let mut data_bytes = 0usize;
         let mut result = match self.protocol {
             ApiProtocol::Chat => CompletionStream::Chat(StreamResult::default()),
             ApiProtocol::Responses => CompletionStream::Responses(responses::Stream::default()),
             ApiProtocol::Anthropic => CompletionStream::Anthropic(anthropic::Stream::default()),
         };
         let mut first_token = None;
+        let mut total_stream_bytes = 0usize;
         while let Some(chunk) = tokio::time::timeout(self.stream_idle_timeout, stream.next())
             .await
             .context("model streaming idle timeout")?
         {
             let chunk = chunk.context("model streaming connection failed")?;
+            total_stream_bytes = total_stream_bytes.saturating_add(chunk.len());
+            if total_stream_bytes > MAX_STREAM_BYTES {
+                bail!("model stream exceeds the 64 MiB limit");
+            }
             if !chunk.is_empty() {
                 *received_stream_data = true;
             }
@@ -1502,6 +1553,7 @@ impl ModelClient {
                 process_sse_line_with_reasoning(
                     line,
                     &mut data_lines,
+                    &mut data_bytes,
                     &mut result,
                     on_text,
                     on_reasoning,
@@ -1525,12 +1577,20 @@ impl ModelClient {
             process_sse_line_with_reasoning(
                 &pending,
                 &mut data_lines,
+                &mut data_bytes,
                 &mut result,
                 on_text,
                 on_reasoning,
             )?;
         }
-        process_sse_line_with_reasoning(&[], &mut data_lines, &mut result, on_text, on_reasoning)?;
+        process_sse_line_with_reasoning(
+            &[],
+            &mut data_lines,
+            &mut data_bytes,
+            &mut result,
+            on_text,
+            on_reasoning,
+        )?;
         if first_token.is_none() && result.received_delta() {
             first_token = Some(started.elapsed());
         }
@@ -2821,18 +2881,27 @@ mod tests {
     fn sse_handles_crlf_and_data_lines() {
         let mut stream = CompletionStream::Chat(StreamResult::default());
         let mut lines = Vec::new();
+        let mut data_bytes = 0;
         let mut tokens = String::new();
         let mut sink = |text: &str| tokens.push_str(text);
         process_sse_line(
             br#"data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}]}"#,
             &mut lines,
+            &mut data_bytes,
             &mut stream,
             &mut sink,
         )
         .unwrap();
-        process_sse_line(b"\r", &mut lines, &mut stream, &mut sink).unwrap();
-        process_sse_line(b"data: [DONE]", &mut lines, &mut stream, &mut sink).unwrap();
-        process_sse_line(b"", &mut lines, &mut stream, &mut sink).unwrap();
+        process_sse_line(b"\r", &mut lines, &mut data_bytes, &mut stream, &mut sink).unwrap();
+        process_sse_line(
+            b"data: [DONE]",
+            &mut lines,
+            &mut data_bytes,
+            &mut stream,
+            &mut sink,
+        )
+        .unwrap();
+        process_sse_line(b"", &mut lines, &mut data_bytes, &mut stream, &mut sink).unwrap();
         assert_eq!(tokens, "Hello");
         let (message, _) = stream.finish().unwrap();
         assert_eq!(message.content.as_deref(), Some("Hello"));
@@ -2952,6 +3021,10 @@ mod tests {
                 .unwrap()["max_tokens"],
             32_768
         );
+        let uncapped = ModelClient::new("https://api.example/v1", None, "model".into())
+            .unwrap()
+            .with_output_tokens(Some(128_000));
+        assert_eq!(uncapped.effective_output_tokens(), Some(32_768));
     }
 
     #[test]

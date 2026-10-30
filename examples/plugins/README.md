@@ -16,6 +16,8 @@ From the repository directory (on Windows, substitute
 ```powershell
 kroma plugins install .\examples\plugins\web
 kroma plugins enable web
+$env:EXA_API_KEY = "your-key"
+kroma plugins set web provider exa
 kroma plugins list
 kroma
 ```
@@ -24,43 +26,71 @@ Then ask Kroma to **search for a topic and read the relevant result pages**.
 The model receives two new tools:
 
 - `web_search({ "query": "Rust language", "count": 5 })`: titles, URLs and
-  snippets. **Bing RSS is the default** and does not require an API key.
+  snippets. Supports Exa, Brave, Tavily, You.com, Parallel, Firecrawl or SearXNG.
+  Default `auto` follows **Parallel → You.com → Exa → Tavily**, skipping missing
+  keys. Only network errors, timeouts, HTTP 429 or 5xx advance to the next
+  configured provider, within one total deadline. Explicit providers never switch.
+  `site:domain` and `-site:domain` restrictions are checked against returned URLs.
+  Optional `provider` selects another backend for a single call.
 - `web_fetch({ "url": "https://www.rust-lang.org/", "max_chars": 12000 })`:
-  readable page title and text, and a truncated indicator.
+  page title and structured text (headings, code, tables and links), plus
+  `next_start` for continuing a long page with `start_char` and the same URL.
 
-Search backend alternatives:
+Search backend alternatives (choose one; explicit providers never switch):
 
 ```powershell
-kroma plugins set web provider duckduckgo
-kroma plugins set web provider bing
-kroma plugins set web provider brave
+# Brave instead of Exa
 $env:BRAVE_SEARCH_API_KEY = "your-key"
-kroma plugins set web provider searxng
+kroma plugins set web provider brave
+
+# Or your own SearXNG instance
 kroma plugins set web searxng_url https://your-searxng.example
+kroma plugins set web provider searxng
+
+# Auto uses the configured priority; each backend is attempted at most once
+kroma plugins set web provider auto
+kroma plugins set web search_priority parallel,you,exa,tavily
+
+# Keyless: no API key. free walks SearXNG (if configured) -> Mwmbl ->
+# DuckDuckGo HTML/Lite -> Bing RSS; auto does the same when no key is present.
+kroma plugins set web provider free
+# kroma plugins set web provider mwmbl   # single keyless engine, no switching
 ```
 
-Changes take effect after restarting Kroma or running `/plugins reload` in an idle TUI. The Brave key is read from the
-process environment, not required in the plugin TOML file. SearXNG must have
-its JSON search endpoint enabled. DuckDuckGo HTML parsing is subject to engine
-changes/rate limits. Bing's public RSS search endpoint is also not a
-guaranteed stable API. For guaranteed API behavior, configure Brave or an
-instance of SearXNG you operate.
+Changes take effect after restarting Kroma or running `/plugins reload` in an idle TUI.
+Launch Kroma with the Exa/Brave key in its environment; environment changes need
+a restart. SearXNG must enable JSON search. Mwmbl, Bing RSS and DuckDuckGo HTML/Lite
+are keyless best-effort engines with unequal ranking quality; see the web plugin
+guide for the measured results on one network. Configure at least one keyed
+provider in the priority list, or select a backend explicitly. Auto may incur
+multiple API charges; its default per-attempt cap is 8 seconds, total 15 seconds.
 
-The fetcher uses HTTP(S) only; no headless browser or JS rendering.
-It handles basic HTML text extraction, not complex dynamic sites or PDFs.
-Webpage text is untrusted data. Pages can be truncated; use the link to
-re-fetch when more text is needed.
+The fetcher uses HTTP(S) only; no headless browser, JS rendering or PDF parsing.
+It selects static main/article content, removes navigation, preserves code and
+links, and decodes declared character sets (including Chinese GBK/GB2312).
+Blocked/empty pages fail explicitly rather than masquerading as readable content.
+Optional `provider: "firecrawl"` uses a remote, separately billed Markdown
+extraction service. Local HTTP remains the default. Credentials can be stored
+outside the plugin in a private user-data JSON file; see the web plugin guide.
+Webpage text is untrusted data, not instructions.
+
+Long pages return `next_start`; pass it as `start_char` on the same URL.
+Continuation reuses a bounded, process-local snapshot for up to two minutes;
+a read from `start_char = 0` always refreshes. After eviction/restart/expiry,
+continuation returns `CACHE_MISS` without refetching: restart at zero and use
+the new offsets. Downloads are limited to 1.5 MB; a warning distinguishes an unavailable source tail from ordinary
+pagination. Each request uses a single `timeout_ms` deadline. See the [web plugin guide](web/README.md) for examples and limits.
 
 **Tests**:
 
 ```powershell
-node --test examples/plugins/web/web.test.js
+node --test examples/plugins/web/web.test.js examples/plugins/web/http.test.js examples/plugins/web/main.test.js
 cargo test --test plugins_e2e
 ```
 
 The Rust integration test runs a local HTTP mock server, validating the full
-Kroma host -> process-plugin -> HTTP -> tool-result path. The Bing, DDG, Brave
-and SearXNG unit tests use mocked responses.
+Kroma host -> process-plugin -> HTTP -> tool-result path. The API and experimental-engine unit tests use mocked responses. Paid-provider relevance must be
+checked separately using the [live acceptance set](web/evaluation.md).
 
 ## Other included examples
 

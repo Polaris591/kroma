@@ -34,8 +34,10 @@ use std::{
         mpsc::{self, SyncSender},
         Arc, Mutex, RwLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
+
+const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct PluginManifest {
@@ -537,23 +539,19 @@ impl PluginState {
         let parent = path
             .parent()
             .context("plugin state needs a parent directory")?;
-        fs::create_dir_all(parent)?;
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let temp = parent.join(format!(".plugins-{}-{nanos}.tmp", std::process::id()));
-        let result = (|| -> Result<()> {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            file.write_all(toml::to_string(self)?.as_bytes())?;
-            file.sync_all()?;
-            drop(file); // Windows cannot atomically replace an open temporary file.
-            crate::atomic_file::replace(&temp, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temp);
+        // Plugin settings can contain provider API keys. Create the temporary
+        // file with owner-only permissions instead of inheriting the umask.
+        let temp = crate::private_file::save(
+            parent,
+            ".plugins",
+            "tmp",
+            toml::to_string(self)?.as_bytes(),
+        )?;
+        if let Err(error) = crate::atomic_file::replace(&temp, path) {
+            let _ = fs::remove_file(temp);
+            return Err(error);
         }
-        result
+        Ok(())
     }
 }
 
@@ -606,6 +604,32 @@ impl Plugin {
         match &self.project_key {
             Some(key) => state.project_settings.get(key),
             None => state.settings.get(&self.manifest.id),
+        }
+    }
+}
+
+fn is_secret_setting(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace('-', "_");
+    normalized.split('_').any(|part| {
+        matches!(
+            part,
+            "key"
+                | "token"
+                | "secret"
+                | "password"
+                | "credential"
+                | "credentials"
+                | "authorization"
+                | "auth"
+        )
+    })
+}
+
+fn redact_secret_settings(settings: &mut BTreeMap<String, toml::Value>) {
+    for (key, value) in settings.iter_mut() {
+        if is_secret_setting(key) && !matches!(value, toml::Value::String(text) if text.is_empty())
+        {
+            *value = toml::Value::String("••••".into());
         }
     }
 }
@@ -783,6 +807,12 @@ impl PluginCatalog {
             .map(|plugin| {
                 let mut settings = plugin.manifest.settings.clone();
                 settings.extend(plugin.config_overrides(&state).cloned().unwrap_or_default());
+                let secret_settings: Vec<String> = settings
+                    .keys()
+                    .filter(|key| is_secret_setting(key))
+                    .cloned()
+                    .collect();
+                redact_secret_settings(&mut settings);
                 json!({
                     "id": plugin.manifest.id,
                     "name": plugin.manifest.name,
@@ -791,6 +821,7 @@ impl PluginCatalog {
                     "enabled": plugin.is_enabled(&state),
                     "project": plugin.project_key.is_some(),
                     "settings": settings,
+                    "secret_settings": secret_settings,
                     "has_model": plugin.manifest.model.is_some(),
                     "has_context": plugin.manifest.context.is_some(),
                     "has_ui": plugin.manifest.ui.is_some(),
@@ -948,6 +979,7 @@ impl PluginCatalog {
         let mut config = plugin.manifest.settings.clone();
         let state = PluginState::load(&self.state_path)?;
         config.extend(plugin.config_overrides(&state).cloned().unwrap_or_default());
+        redact_secret_settings(&mut config);
         Ok(if config.is_empty() {
             "No settings.".into()
         } else {
@@ -2128,12 +2160,20 @@ impl PluginWorker {
             armed: true,
         };
         let worker = self.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            worker.invoke_inner(message, Some((id, &cancelled)))
-        })
-        .await?;
+        let outcome = tokio::time::timeout(
+            PLUGIN_CALL_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                worker.invoke_inner(message, Some((id, &cancelled)))
+            }),
+        )
+        .await;
+        if outcome.is_err() {
+            // Dropping the armed guard kills the plugin process tree so a
+            // timed-out call cannot keep running in the background.
+            anyhow::bail!("plugin call timed out after 120s");
+        }
         guard.armed = false;
-        outcome
+        outcome??
     }
 
     fn cancel_active_request(&self) {
@@ -2510,5 +2550,19 @@ base_url = "https://example.com""#,
         assert!(valid.validate().is_err());
         valid.command = Some("node".into());
         assert!(valid.validate().is_ok());
+    }
+
+    #[test]
+    fn plugin_summaries_redact_secret_settings() {
+        let mut settings = BTreeMap::new();
+        settings.insert("exa_api_key".into(), toml::Value::String("sk-live".into()));
+        settings.insert("mcp_token".into(), toml::Value::String("tok".into()));
+        settings.insert("provider".into(), toml::Value::String("auto".into()));
+        settings.insert("empty_secret".into(), toml::Value::String(String::new()));
+        redact_secret_settings(&mut settings);
+        assert_eq!(settings["exa_api_key"].as_str(), Some("••••"));
+        assert_eq!(settings["mcp_token"].as_str(), Some("••••"));
+        assert_eq!(settings["provider"].as_str(), Some("auto"));
+        assert_eq!(settings["empty_secret"].as_str(), Some(""));
     }
 }

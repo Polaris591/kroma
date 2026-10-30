@@ -86,14 +86,14 @@ impl TerminalScreen {
             .context("set VISUAL or EDITOR to use /editor")?;
         let mut args = editor.split_whitespace();
         let program = args.next().context("empty VISUAL/EDITOR")?;
-        let path = std::env::temp_dir().join(format!(
-            "kroma-prompt-{}-{}.md",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos()
-        ));
-        std::fs::write(&path, state.editor.text())?;
+        // Drafts may contain pasted secrets. Use owner-only storage instead
+        // of a world-readable temp file.
+        let path = crate::private_file::save(
+            &std::env::temp_dir().join("kroma-drafts"),
+            "kroma-prompt",
+            "md",
+            state.editor.text().as_bytes(),
+        )?;
         disable_raw_mode()?;
         execute!(
             io::stdout(),
@@ -1404,7 +1404,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     }
     if !runtime.startup_warnings.is_empty() {
         state.note(format!(
-            "{} MCP server(s) unavailable · /tools for details",
+            "{} MCP issue(s) · /tools for details",
             runtime.startup_warnings.len()
         ));
     }

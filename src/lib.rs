@@ -31,7 +31,9 @@ pub mod tui;
 pub mod usage;
 
 mod atomic_file;
+mod cache_trace;
 mod catalog_file;
+mod history_tools;
 mod private_file;
 #[cfg(windows)]
 mod winsys;

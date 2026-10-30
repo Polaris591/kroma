@@ -161,6 +161,20 @@ impl ContextFactory for BuiltinContextFactory {
     }
 }
 
+fn env_factor(name: &str, default: f64) -> Result<f64> {
+    let value = match env::var(name) {
+        Ok(raw) => raw
+            .parse::<f64>()
+            .with_context(|| format!("{name} must be a number between 0 and 1"))?,
+        Err(env::VarError::NotPresent) => default,
+        Err(error) => return Err(error.into()),
+    };
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        bail!("{name} must be a number between 0 and 1");
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Copy)]
 pub struct ContextConfig {
     window: usize,
@@ -168,6 +182,8 @@ pub struct ContextConfig {
     soft: usize,
     hard: usize,
     output_reserve: usize,
+    cache_read_discount: f64,
+    cache_invalidation_factor: f64,
 }
 
 impl ContextConfig {
@@ -190,7 +206,10 @@ impl ContextConfig {
             Err(env::VarError::NotPresent) => default_reserve,
             Err(error) => return Err(error.into()),
         };
-        Self::with_output_reserve(window, reserve)
+        let mut budget = Self::with_output_reserve(window, reserve)?;
+        budget.cache_read_discount = env_factor("KROMA_CACHE_READ_DISCOUNT", 0.1)?;
+        budget.cache_invalidation_factor = env_factor("KROMA_CACHE_INVALIDATION_FACTOR", 0.9)?;
+        Ok(budget)
     }
 
     #[cfg(test)]
@@ -213,6 +232,8 @@ impl ContextConfig {
             soft: available_input * 50 / 100,
             hard: available_input * 90 / 100,
             output_reserve: reserve,
+            cache_read_discount: 0.1,
+            cache_invalidation_factor: 0.9,
         })
     }
 
@@ -277,7 +298,13 @@ impl ContextConfig {
     }
 
     fn summary_tokens(&self) -> usize {
-        (self.available_input / 8).clamp(128, 1024)
+        // A 1k summary is too lossy for long coding tasks: paths, decisions and
+        // unresolved errors disappear first. Scale with the input budget but
+        // keep the result below 1/8 of the available input so a summary can
+        // never crowd out the evidence it replaces.
+        (self.available_input / 16)
+            .clamp(1024, 4096)
+            .min((self.available_input / 8).max(128))
     }
 }
 
@@ -344,7 +371,6 @@ pub struct Compression {
     request_extra_tokens: usize,
     background_compaction: bool,
     usage: CompactionUsage,
-    last_cached_tokens: u64,
     cache_observed: bool,
 }
 
@@ -382,7 +408,6 @@ impl Compression {
             request_extra_tokens: 0,
             background_compaction: true,
             usage: CompactionUsage::default(),
-            last_cached_tokens: 0,
             cache_observed: false,
         }
     }
@@ -402,7 +427,6 @@ impl Compression {
         self.calibration_observed = false;
         self.request_extra_tokens = 0;
         self.usage = CompactionUsage::default();
-        self.last_cached_tokens = 0;
         self.cache_observed = false;
     }
 
@@ -608,8 +632,7 @@ impl Compression {
                 self.calibration_observed = true;
             }
         }
-        if let Some(value) = cached {
-            self.last_cached_tokens = value;
+        if cached.is_some() {
             self.cache_observed = true;
         }
     }
@@ -664,11 +687,13 @@ impl Compression {
         }
 
         let emergency = current >= self.budget.hard;
-        // Cache-invalidation estimates previously re-serialized the entire
-        // suffix after every candidate. Precompute *raw* JSON suffix sizes
-        // (not the shortened view), matching the original heuristic.
-        let raw_suffix = if !emergency && self.cache_observed && self.last_cached_tokens > 0 {
-            Some(raw_suffix_tokens(messages))
+        // Precompute the future cacheable suffix after each candidate.
+        // A provider miss is not evidence that this prefix will stay uncached:
+        // pruning during a transient 0% hit would prevent it from warming.
+        // Estimate the full suffix rather than capping it at the *last*
+        // provider-reported cached tokens. No extra work in the hot path.
+        let projected_suffix = if !emergency && self.cache_observed {
+            Some(raw_suffix_tokens(projected))
         } else {
             None
         };
@@ -705,15 +730,16 @@ impl Compression {
                 continue;
             }
             if !emergency {
-                // Conservative one-step cost model:
-                // pruning saves cached tokens on 3 anticipated turns, but
-                // invalidates the cached suffix on the next request.
-                // Only choose changes with a positive estimated net saving.
+                // Compare savings on three future cached reads against the
+                // cost of invalidating the stable suffix once. Use the
+                // *potentially* cacheable suffix, even after a gateway miss.
                 let saved = before.saturating_sub(after);
-                let trailing_tokens = raw_suffix.as_ref().map_or(0, |sizes| sizes[index + 1]);
-                let cached_suffix = trailing_tokens.min(self.last_cached_tokens as usize);
-                let saved_credit = saved as f64 * 0.3; // 3 future cached reads @ 0.1
-                let invalidation_cost = cached_suffix as f64 * 0.9;
+                let cached_suffix = projected_suffix
+                    .as_ref()
+                    .map_or(0, |sizes| sizes[position + 1]);
+                let saved_credit = saved as f64 * 3.0 * self.budget.cache_read_discount;
+                let invalidation_cost =
+                    cached_suffix as f64 * self.budget.cache_invalidation_factor;
                 if saved_credit <= invalidation_cost {
                     continue;
                 }
@@ -1948,10 +1974,10 @@ mod tests {
                     continue;
                 }
                 let saved = before.saturating_sub(compression.tokens(&old));
-                let trailing_tokens = rough_tokens(&messages[index + 1..]);
-                let cached_suffix = trailing_tokens.min(compression.last_cached_tokens as usize);
-                let saved_credit = saved as f64 * 0.3;
-                let invalidation_cost = cached_suffix as f64 * 0.9;
+                let cached_suffix = rough_tokens(&messages[index + 1..]);
+                let saved_credit = saved as f64 * 3.0 * compression.budget.cache_read_discount;
+                let invalidation_cost =
+                    cached_suffix as f64 * compression.budget.cache_invalidation_factor;
                 if saved_credit <= invalidation_cost {
                     next.cleared_tools.remove(&index);
                     continue;
@@ -2445,6 +2471,33 @@ mod tests {
     }
 
     #[test]
+    fn transient_cache_miss_must_not_rewrite_old_cached_prefix() {
+        let mut messages = vec![Message::new("system", "base")];
+        for n in 0..5 {
+            messages.push(Message::new("user", format!("request {n}")));
+            messages.push(Message::tool(
+                format!("call_{n}"),
+                json!({"exit_code":0,"stdout":"x".repeat(9_000)}).to_string(),
+            ));
+            messages.push(Message::new("assistant", format!("done {n}")));
+        }
+        let mut compression = Compression::new(
+            CompactionState::default(),
+            ContextConfig::new(32_768).unwrap(),
+            Path::new("/tmp/transient-cache-miss.json"),
+        );
+        compression.mark_consumed(messages.len());
+        compression.observe(&messages, None, Some(15_000));
+        assert!(compression.trc_plan(&messages).is_none());
+        // An upstream miss can be transient (e.g. new gateway route or
+        // freshly committed APEC). The next request can warm this prefix.
+        compression.observe(&messages, None, Some(0));
+        assert!(compression.trc_plan(&messages).is_none());
+        compression.observe(&messages, None, Some(2_180));
+        assert!(compression.trc_plan(&messages).is_none());
+    }
+
+    #[test]
     fn cache_aware_trc_is_the_only_default_policy() {
         let mut messages = vec![Message::new("system", "base")];
         let mut tool_indexes = Vec::new();
@@ -2472,26 +2525,44 @@ mod tests {
         compression.observe(&messages, None, Some(15_000));
         assert!(compression.trc_plan(&messages).is_none());
 
-        // With no cache suffix to invalidate, clearing the oldest verbose
-        // outputs is worth it. Recent tool results remain protected.
+        // An upstream miss does not erase the *future* invalidation cost.
+        // All the early tool results have substantial history after them.
+        compression.observe(&messages, None, Some(0));
+        assert!(compression.trc_plan(&messages).is_none());
+        assert!(tool_indexes
+            .iter()
+            .all(|&i| !compression.state.cleared_tools.contains(&i)));
+    }
+
+    #[test]
+    fn trc_still_prunes_a_disproportionately_large_old_result() {
+        let mut messages = vec![Message::new("system", "base")];
+        let mut first_tool = 0;
+        for n in 0..5 {
+            messages.push(Message::new("user", format!("inspect {n}")));
+            if n == 0 {
+                first_tool = messages.len();
+            }
+            messages.push(Message::tool(
+                format!("call_{n}"),
+                json!({"exit_code":0,"stdout":"x".repeat(if n == 0 {55_000} else {900})})
+                    .to_string(),
+            ));
+            messages.push(Message::new("assistant", format!("done {n}")));
+        }
+        let mut compression = Compression::new(
+            CompactionState::default(),
+            ContextConfig::new(32_768).unwrap(),
+            Path::new("/tmp/cache-aware-large-result.json"),
+        );
+        compression.mark_consumed(messages.len());
         compression.observe(&messages, None, Some(0));
         let next = compression
             .trc_plan(&messages)
-            .expect("cache-aware clearing");
-        assert!(next.cleared_tools.contains(&tool_indexes[0]));
-        assert!(!next.cleared_tools.contains(&tool_indexes[3]));
-        assert!(!next.cleared_tools.contains(&tool_indexes[4]));
-        assert!(messages[tool_indexes[0]]
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("x".repeat(9_000).as_str()));
-        let view = compression.view_with_state(&messages, &next);
-        assert!(view[tool_indexes[0]]
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("archive_message_index"));
+            .expect("large result is worth pruning");
+        assert!(next.cleared_tools.contains(&first_tool));
+        assert_eq!(messages[first_tool].role, "tool");
+        assert!(messages[first_tool].content.as_ref().unwrap().len() > 55_000);
     }
 
     #[test]
@@ -2526,6 +2597,15 @@ mod tests {
         assert_eq!(budget.available_input, 123_904);
         assert_eq!(budget.soft, 61_952);
         assert_eq!(budget.hard, 111_513);
+    }
+
+    #[test]
+    fn summary_budget_scales_with_context_and_stays_below_input_capacity() {
+        let large = ContextConfig::with_output_reserve(128_000, 4_096).unwrap();
+        assert_eq!(large.summary_tokens(), 4_096);
+        let small = ContextConfig::with_output_reserve(8_192, 1_024).unwrap();
+        assert!(small.summary_tokens() <= small.available_input() / 8);
+        assert!(small.summary_tokens() >= 128);
     }
 
     #[test]
@@ -2600,7 +2680,6 @@ mod tests {
                 optimized.calibration_fixed_tokens
             );
             assert_eq!(legacy.cache_observed, optimized.cache_observed);
-            assert_eq!(legacy.last_cached_tokens, optimized.last_cached_tokens);
         }
     }
 

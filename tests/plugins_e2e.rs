@@ -1313,6 +1313,9 @@ process.stdout.write(JSON.stringify({content:"recovered"})+"\n");}});"#,
 
 #[tokio::test]
 async fn web_tools_roundtrip_through_kroma_to_local_http_server() -> Result<()> {
+    // The fixture intentionally listens on loopback; production defaults to
+    // rejecting private-network fetches. The plugin child inherits this flag.
+    std::env::set_var("KROMA_WEB_ALLOW_PRIVATE", "1");
     if Command::new("node").arg("--version").output().is_err() {
         return Ok(());
     }

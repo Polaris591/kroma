@@ -1,4 +1,5 @@
 use crate::{
+    cache_trace::{CacheSnapshot, CacheTrace},
     context::{
         BuiltinContextFactory, CompactionUsage, ContextConfig, ContextFactory, ContextPolicy,
     },
@@ -57,6 +58,7 @@ pub struct Agent {
     context_budget: ContextConfig,
     task_input: TaskInput,
     usage: UsageMeter,
+    cache_trace: Option<CacheTrace>,
 }
 
 /// Completed conversation checkpoints. A checkpoint is the message prefix
@@ -304,6 +306,7 @@ impl Agent {
             context_budget,
             task_input: TaskInput::default(),
             usage: UsageMeter::default(),
+            cache_trace: CacheTrace::from_env(),
         };
         agent.sync_session_context();
         if new_session && !defer_initial_save {
@@ -987,6 +990,16 @@ impl Agent {
                     view.len()
                 );
             }
+            // Opt-in, content-free per-request fingerprints of the provider
+            // budget projection. No serialization or file I/O by default.
+            let cache_snapshot = self.cache_trace.as_ref().and_then(|_| {
+                CacheSnapshot::capture(
+                    &budget_view,
+                    &tool_definitions,
+                    &self.compression.state(),
+                    self.model.reasoning_level(),
+                )
+            });
             let mut printed_text = false;
             let mut streamed_reasoning = false;
             if let Some(events) = &self.events {
@@ -1016,6 +1029,14 @@ impl Agent {
                     },
                 )
                 .await;
+            if let (Some(trace), Some(snapshot)) = (&mut self.cache_trace, cache_snapshot) {
+                trace.record(
+                    self.session.archive_path(),
+                    snapshot,
+                    completion.as_ref().ok().and_then(|c| c.usage.as_ref()),
+                    completion.is_ok(),
+                );
+            }
             let completion = match completion {
                 Ok(completion) => {
                     overflow_retries = 0;

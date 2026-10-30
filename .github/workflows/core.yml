@@ -25,7 +25,7 @@ jobs:
       - name: Test
         run: cargo test --locked
       - name: JavaScript plugin contracts
-        run: node --test examples/plugins/web/web.test.js
+        run: node --test examples/plugins/web/web.test.js examples/plugins/web/http.test.js examples/plugins/web/main.test.js
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Native PowerShell fallback
@@ -33,3 +33,21 @@ jobs:
         env:
           KROMA_SHELL: powershell.exe
         run: cargo test --locked windows_shell_reports_output_and_exit_code
+
+  desktop-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run check
+        working-directory: desktop
+      - run: npm test
+        working-directory: desktop
+      - run: npm run build
+        working-directory: desktop

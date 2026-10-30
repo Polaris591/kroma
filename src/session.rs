@@ -36,6 +36,24 @@ pub struct LoadedSession {
     pub context: PersistedContext,
 }
 
+/// Read the checkpoint portion of the durable transcript without taking the
+/// session lock. The agent already holds that lock for the live session.
+pub(crate) fn read_archive_messages(path: &Path) -> Result<Vec<Message>> {
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading session {}", path.display()))
+        }
+    };
+    let session: SavedSession = serde_json::from_slice(&data)
+        .with_context(|| format!("invalid session {}", path.display()))?;
+    if !matches!(session.version, 1..=3) {
+        bail!("unsupported session format version {}", session.version);
+    }
+    Ok(session.messages)
+}
+
 pub struct SessionStore {
     path: PathBuf,
     journal_path: PathBuf,

@@ -16,11 +16,14 @@ export interface SessionUsage {
 }
 export interface SessionSnapshot {
   session_id: string; messages: Message[]; usage: SessionUsage;
+  total_messages?: number; history_truncated?: boolean;
+  next_before?: number | null;
   context_window: number; available_input: number; tool_names: string[];
 }
 export interface PluginSummary {
   id: string; name: string; version: string; description: string;
   enabled: boolean; project: boolean; settings: Record<string, unknown>;
+  secret_settings?: string[];
   has_model: boolean; has_context: boolean; has_ui: boolean;
 }
 export interface ProfileSummary {
@@ -32,10 +35,12 @@ export interface Profiles {
   active: string | null; profiles: ProfileSummary[];
 }
 export interface SessionEntry { id: string; name: string | null; recent: boolean; }
+export interface McpProjectStatus { configured: boolean; trusted: boolean; }
 export interface Bootstrap {
   project: string; ready: boolean; running: boolean;
   snapshot: SessionSnapshot | null; sessions: SessionEntry[];
   profiles: Profiles; plugins: PluginSummary[]; plugin_warnings: string[];
+  mcp_project: McpProjectStatus;
 }
 export interface DesktopEvent {
   kind: string; text?: string; id?: string; name?: string;
@@ -59,12 +64,14 @@ export const api = {
   openProject: (path: string) => invoke<Bootstrap>('open_project', {path}),
   connect: (profile?: string) => invoke<Bootstrap>('connect', {profile: profile || null}),
   saveProfile: (profile: ProfileInput) => invoke<Profiles>('save_profile', {profile}),
+  historyPage: (before: number, limit = 200) => invoke<SessionSnapshot>("history_page", {before, limit}),
   switchSession: (id: string) => invoke<Bootstrap>('switch_session', {id}),
   newSession: () => invoke<Bootstrap>('new_session'),
   renameSession: (title: string) => invoke<Bootstrap>('rename_session', {title}),
   cancel: () => invoke<void>('cancel_task'),
   steer: (text: string) => invoke<void>('steer_task', {text}),
   queue: (text: string) => invoke<number>('queue_followup', {text}),
+  trustProjectMcp: () => invoke<{path: string; trusted: boolean}>('trust_project_mcp'),
   pluginAction: (action: string, id?: string, path?: string, key?: string, value?: unknown) =>
     invoke<{message: string; warning?: string; restart_required: boolean; plugins: PluginSummary[]}>(
       'plugin_action', {action, id: id || null, path: path || null, key: key || null, value: value ?? null}),

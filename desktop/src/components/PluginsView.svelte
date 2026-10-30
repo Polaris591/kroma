@@ -10,10 +10,13 @@
   function open(plugin: PluginSummary) {
     selected = plugin.id;
     editing = {...plugin.settings};
+    for (const key of plugin.secret_settings ?? []) editing[key] = '';
   }
   async function saveSetting(key: string) {
     if (!current) return;
-    await onAction('set', current.id, undefined, key, editing[key]);
+    const value = editing[key];
+    if (current.secret_settings?.includes(key) && (value === '' || value === '••••')) return;
+    await onAction('set', current.id, undefined, key, value);
   }
 </script>
 
@@ -63,6 +66,7 @@
                       onchange={async e => {editing[key] = Number(e.currentTarget.value); await saveSetting(key)}} />
                   {:else}
                     <div class="config-input"><input value={String(editing[key] ?? '')}
+                      placeholder={current.secret_settings?.includes(key) ? '已设置；留空保持不变' : ''}
                       onchange={e => editing[key] = e.currentTarget.value} />
                       <button class="small secondary" onclick={() => saveSetting(key)}>保存</button></div>
                   {/if}

@@ -6,7 +6,7 @@ use kroma::{
     config::Config,
     desktop_host::{self, DesktopEvents},
     events::EventSink,
-    host_attachments,
+    host_attachments, mcp,
     plugins::PluginCatalog,
     profiles::{Profiles, ProviderProfile},
     sessions::SessionCatalog,
@@ -31,7 +31,10 @@ struct Host {
     task_input: Option<kroma::steering::TaskInput>,
 }
 
-struct DesktopState(Mutex<Host>);
+/// Cloned cheaply so blocking work can run on Tauri's blocking pool without
+/// holding the UI command thread.
+#[derive(Clone)]
+struct DesktopState(Arc<Mutex<Host>>);
 
 fn ui_error(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -61,14 +64,14 @@ fn initial_project() -> PathBuf {
 
 impl DesktopState {
     fn new() -> Self {
-        Self(Mutex::new(Host {
+        Self(Arc::new(Mutex::new(Host {
             project: initial_project(),
             generation: 0,
             runtime: None,
             events: Arc::new(DesktopEvents::default()),
             cancel: None,
             task_input: None,
-        }))
+        })))
     }
 }
 
@@ -77,6 +80,20 @@ fn require_idle(host: &Host) -> Result<()> {
         bail!("A task is running. Cancel or finish it before changing sessions or plugins.");
     }
     Ok(())
+}
+
+async fn with_host<T, F>(state: State<'_, DesktopState>, work: F) -> std::result::Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Host) -> Result<T> + Send + 'static,
+{
+    let state = state.inner().0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut host = state.lock().map_err(ui_error)?;
+        work(&mut host).map_err(ui_error)
+    })
+    .await
+    .map_err(ui_error)?
 }
 
 fn profile_list() -> Result<Value> {
@@ -120,17 +137,20 @@ fn view(host: &Host) -> Result<Value> {
         "profiles":profile_list()?,
         "plugins":plugins.summaries()?,
         "plugin_warnings":plugins.warnings,
+        "mcp_project":{
+            "configured":host.project.join(".kroma/mcp.json").is_file(),
+            "trusted":mcp::project_mcp_trusted(&host.project).unwrap_or(false),
+        },
     }))
 }
 
 #[tauri::command]
-fn bootstrap(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
-    let host = state.0.lock().map_err(ui_error)?;
-    view(&host).map_err(ui_error)
+async fn bootstrap(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
+    with_host(state, |host| view(host)).await
 }
 
 #[tauri::command]
-fn open_project(
+async fn open_project(
     state: State<'_, DesktopState>,
     path: String,
 ) -> std::result::Result<Value, String> {
@@ -138,22 +158,24 @@ fn open_project(
     if !canonical.is_dir() {
         return Err("Select a project directory".into());
     }
-    let mut host = state.0.lock().map_err(ui_error)?;
-    require_idle(&host).map_err(ui_error)?;
-    if canonical != host.project {
-        host.project = canonical.clone();
-        host.generation += 1;
-        host.runtime = None; // release previous session lock
-        host.task_input = None;
-        host.events = Arc::new(DesktopEvents::default());
-    }
-    if let Ok(path) = last_project_file() {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+    with_host(state, move |host| {
+        require_idle(host)?;
+        if canonical != host.project {
+            host.project = canonical.clone();
+            host.generation += 1;
+            host.runtime = None;
+            host.task_input = None;
+            host.events = Arc::new(DesktopEvents::default());
         }
-        let _ = fs::write(path, json!({"project":canonical}).to_string());
-    }
-    view(&host).map_err(ui_error)
+        if let Ok(path) = last_project_file() {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(path, json!({"project":canonical}).to_string());
+        }
+        view(host)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -232,95 +254,105 @@ struct ProfileInput {
 }
 
 #[tauri::command]
-fn save_profile(
+async fn save_profile(
     state: State<'_, DesktopState>,
     profile: ProfileInput,
 ) -> std::result::Result<Value, String> {
-    {
-        let host = state.0.lock().map_err(ui_error)?;
-        require_idle(&host).map_err(ui_error)?;
-    }
-    let mut profiles = Profiles::load().map_err(ui_error)?;
-    let old = profiles
-        .profiles
-        .get(&profile.name)
-        .cloned()
-        .unwrap_or_default();
-    let api_key = if profile.clear_key {
-        None
-    } else {
-        profile.api_key.filter(|v| !v.is_empty()).or(old.api_key)
-    };
-    profiles.profiles.insert(
-        profile.name.clone(),
-        ProviderProfile {
-            base_url: profile.base_url,
-            model: profile.model,
-            api_key,
-            api_protocol: Some(profile.protocol),
-            reasoning_effort: Some(profile.reasoning),
-            deepseek_thinking: profile.deepseek_thinking.filter(|v| v != "off"),
-            context_window: profile.context_window,
-            max_output_tokens: profile.max_output_tokens,
-            thinking_levels: old.thinking_levels,
-        },
-    );
-    profiles.active = Some(profile.name);
-    profiles.save().map_err(ui_error)?;
-    profile_list().map_err(ui_error)
+    with_host(state, move |host| {
+        require_idle(host)?;
+        let mut profiles = Profiles::load()?;
+        let old = profiles
+            .profiles
+            .get(&profile.name)
+            .cloned()
+            .unwrap_or_default();
+        let api_key = if profile.clear_key {
+            None
+        } else {
+            profile.api_key.filter(|v| !v.is_empty()).or(old.api_key)
+        };
+        profiles.profiles.insert(
+            profile.name.clone(),
+            ProviderProfile {
+                base_url: profile.base_url,
+                model: profile.model,
+                api_key,
+                api_protocol: Some(profile.protocol),
+                reasoning_effort: Some(profile.reasoning),
+                deepseek_thinking: profile.deepseek_thinking.filter(|v| v != "off"),
+                context_window: profile.context_window,
+                max_output_tokens: profile.max_output_tokens,
+                thinking_levels: old.thinking_levels,
+            },
+        );
+        profiles.active = Some(profile.name);
+        profiles.save()?;
+        profile_list()
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_sessions(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
-    let host = state.0.lock().map_err(ui_error)?;
-    sessions_for(&host.project).map_err(ui_error)
+async fn list_sessions(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
+    with_host(state, |host| sessions_for(&host.project)).await
 }
 
 #[tauri::command]
-fn switch_session(
+async fn history_page(
+    state: State<'_, DesktopState>,
+    before: Option<usize>,
+    limit: Option<usize>,
+) -> std::result::Result<Value, String> {
+    with_host(state, move |host| {
+        let runtime = host.runtime.as_ref().context("Connect a model first")?;
+        desktop_host::snapshot_page(&runtime.agent, before, limit.unwrap_or(200))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn switch_session(
     state: State<'_, DesktopState>,
     id: String,
 ) -> std::result::Result<Value, String> {
-    let mut host = state.0.lock().map_err(ui_error)?;
-    require_idle(&host).map_err(ui_error)?;
-    let runtime = host
-        .runtime
-        .as_mut()
-        .context("Connect a model first")
-        .map_err(ui_error)?;
-    runtime.agent.resume_session(&id).map_err(ui_error)?;
-    view(&host).map_err(ui_error)
+    with_host(state, move |host| {
+        require_idle(host)?;
+        let runtime = host.runtime.as_mut().context("Connect a model first")?;
+        runtime.agent.resume_session(&id)?;
+        view(host)
+    })
+    .await
 }
 
 #[tauri::command]
-fn new_session(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
-    let mut host = state.0.lock().map_err(ui_error)?;
-    require_idle(&host).map_err(ui_error)?;
-    host.runtime
-        .as_mut()
-        .context("Connect a model first")
-        .map_err(ui_error)?
-        .agent
-        .enter_welcome()
-        .map_err(ui_error)?;
-    view(&host).map_err(ui_error)
+async fn new_session(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
+    with_host(state, |host| {
+        require_idle(host)?;
+        host.runtime
+            .as_mut()
+            .context("Connect a model first")?
+            .agent
+            .enter_welcome()?;
+        view(host)
+    })
+    .await
 }
 
 #[tauri::command]
-fn rename_session(
+async fn rename_session(
     state: State<'_, DesktopState>,
     title: String,
 ) -> std::result::Result<Value, String> {
-    let host = state.0.lock().map_err(ui_error)?;
-    require_idle(&host).map_err(ui_error)?;
-    host.runtime
-        .as_ref()
-        .context("Connect a model first")
-        .map_err(ui_error)?
-        .agent
-        .rename_session(&title)
-        .map_err(ui_error)?;
-    view(&host).map_err(ui_error)
+    with_host(state, move |host| {
+        require_idle(host)?;
+        host.runtime
+            .as_ref()
+            .context("Connect a model first")?
+            .agent
+            .rename_session(&title)?;
+        view(host)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -488,8 +520,43 @@ fn parse_setting(value: Value) -> Result<toml::Value> {
     }
 }
 
+fn validate_external_url(raw: &str) -> Result<String> {
+    if raw.len() > 4096 || raw.chars().any(char::is_control) {
+        bail!("invalid external URL");
+    }
+    let lower = raw.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        bail!("only HTTP(S) links can be opened externally");
+    }
+    Ok(raw.to_owned())
+}
+
 #[tauri::command]
-fn plugin_action(
+fn open_external(url: String) -> std::result::Result<(), String> {
+    let url = validate_external_url(&url).map_err(ui_error)?;
+    #[cfg(target_os = "windows")]
+    let child = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let child = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let child = std::process::Command::new("xdg-open").arg(&url).spawn();
+    child.map(|_| ()).map_err(ui_error)
+}
+
+#[tauri::command]
+async fn trust_project_mcp(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
+    let project = {
+        let host = state.0.lock().map_err(ui_error)?;
+        host.project.clone()
+    };
+    let path = mcp::trust_project_mcp(&project).map_err(ui_error)?;
+    Ok(json!({"path":path,"trusted":true}))
+}
+
+#[tauri::command]
+async fn plugin_action(
     state: State<'_, DesktopState>,
     action: String,
     id: Option<String>,
@@ -497,37 +564,35 @@ fn plugin_action(
     key: Option<String>,
     value: Option<Value>,
 ) -> std::result::Result<Value, String> {
-    let mut host = state.0.lock().map_err(ui_error)?;
-    require_idle(&host).map_err(ui_error)?;
-    let catalog = PluginCatalog::discover(&host.project).map_err(ui_error)?;
-    let plugin = id.as_deref().unwrap_or("");
-    let message = match action.as_str() {
-        "enable" => catalog.set_enabled(plugin, true),
-        "disable" => catalog.set_enabled(plugin, false),
-        "install" => catalog.install(Path::new(
-            path.as_deref()
-                .context("Plugin directory required")
-                .map_err(ui_error)?,
-        )),
-        "uninstall" => catalog.uninstall(plugin),
-        "set" => catalog.set_config_value(
-            plugin,
-            key.as_deref()
-                .context("Setting key required")
-                .map_err(ui_error)?,
-            value.map(parse_setting).transpose().map_err(ui_error)?,
-        ),
-        "reload" => Ok("Reloading desktop plugins".to_owned()),
-        _ => return Err("unknown plugin action".into()),
-    }
-    .map_err(ui_error)?;
-    let reload = reload_plugins(&mut host);
-    let restart_required = reload.is_err();
-    Ok(
-        json!({"message":message,"restart_required":restart_required,
-        "warning":reload.err().map(|e|e.to_string()),
-        "plugins":PluginCatalog::discover(&host.project).map_err(ui_error)?.summaries().map_err(ui_error)?}),
-    )
+    with_host(state, move |host| {
+        require_idle(host)?;
+        let catalog = PluginCatalog::discover(&host.project)?;
+        let plugin = id.as_deref().unwrap_or("");
+        let message = match action.as_str() {
+            "enable" => catalog.set_enabled(plugin, true),
+            "disable" => catalog.set_enabled(plugin, false),
+            "install" => catalog.install(Path::new(
+                path.as_deref().context("Plugin directory required")?,
+            )),
+            "uninstall" => catalog.uninstall(plugin),
+            "set" => catalog.set_config_value(
+                plugin,
+                key.as_deref().context("Setting key required")?,
+                value.map(parse_setting).transpose()?,
+            ),
+            "reload" => Ok("Reloading desktop plugins".to_owned()),
+            _ => bail!("unknown plugin action"),
+        }?;
+        let reload = reload_plugins(host);
+        let restart_required = reload.is_err();
+        Ok(json!({
+            "message":message,
+            "restart_required":restart_required,
+            "warning":reload.err().map(|e|e.to_string()),
+            "plugins":PluginCatalog::discover(&host.project)?.summaries()?,
+        }))
+    })
+    .await
 }
 
 pub fn run() {
@@ -540,6 +605,7 @@ pub fn run() {
             connect,
             save_profile,
             list_sessions,
+            history_page,
             switch_session,
             new_session,
             rename_session,
@@ -547,7 +613,9 @@ pub fn run() {
             steer_task,
             queue_followup,
             send_message,
-            plugin_action
+            plugin_action,
+            trust_project_mcp,
+            open_external
         ])
         .run(tauri::generate_context!())
         .expect("unable to start Kroma Desktop");
@@ -567,5 +635,14 @@ mod tests {
             parse_setting(json!("hello")).unwrap(),
             toml::Value::String("hello".into())
         );
+    }
+
+    #[test]
+    fn only_http_links_can_leave_the_webview() {
+        assert!(validate_external_url("https://example.org/a?b=c").is_ok());
+        assert!(validate_external_url("http://example.org").is_ok());
+        assert!(validate_external_url("file:///etc/passwd").is_err());
+        assert!(validate_external_url("javascript:alert(1)").is_err());
+        assert!(validate_external_url("https://example.org/\nmalicious").is_err());
     }
 }

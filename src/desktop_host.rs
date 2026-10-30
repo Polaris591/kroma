@@ -206,16 +206,31 @@ impl EventSink for DesktopEvents {
 
 /// The transcript is returned only at lifecycle boundaries. The frontend must
 /// never treat a partial streamed answer as durable history.
+const MAX_SNAPSHOT_MESSAGES: usize = 1_000;
+
 pub fn snapshot(agent: &Agent) -> Result<Value> {
+    snapshot_page(agent, None, MAX_SNAPSHOT_MESSAGES)
+}
+
+/// Return one contiguous slice of the durable transcript. `before` is an
+/// exclusive end index; `next_before` is the cursor for older pages.
+pub fn snapshot_page(agent: &Agent, before: Option<usize>, limit: usize) -> Result<Value> {
     let catalog = SessionCatalog::new(agent.workdir())?;
     let usage = if agent.session_id() == "unknown" {
         SessionUsage::default()
     } else {
         catalog.usage(agent.session_id())?
     };
+    let messages = agent.messages();
+    let total = messages.len();
+    let end = before.unwrap_or(total).min(total);
+    let start = end.saturating_sub(limit.clamp(1, MAX_SNAPSHOT_MESSAGES));
     Ok(json!({
         "session_id":agent.session_id(),
-        "messages":agent.messages(),
+        "messages":&messages[start..end],
+        "total_messages":total,
+        "history_truncated":start > 0,
+        "next_before":(start > 0).then_some(start),
         "usage":usage,
         "context_window":agent.context_window_tokens(),
         "available_input":agent.available_context_tokens(),

@@ -2,7 +2,7 @@
 //! No external MCP provider, API token or LLM is needed.
 use anyhow::{Context, Result};
 use kroma::{
-    mcp::register_configured,
+    mcp::register_configured_allow_project,
     protocol::{FunctionCall, ToolCall},
     skills::{LoadSkill, SkillCatalog},
     tools::{ToolContext, ToolRegistry},
@@ -75,7 +75,7 @@ for line in sys.stdin:
         }}}))?,
     )?;
     let mut tools = ToolRegistry::builtin();
-    let added = register_configured(&mut tools, &dir).await?;
+    let added = register_configured_allow_project(&mut tools, &dir).await?;
     assert_eq!(added, 2);
     let definitions = tools.definitions();
     assert_eq!(definitions.len(), 3);
@@ -218,7 +218,7 @@ async fn http_integration(version: &str, sse: bool) -> Result<()> {
         }))?,
     )?;
     let mut tools = ToolRegistry::builtin();
-    let added = register_configured(&mut tools, &dir).await?;
+    let added = register_configured_allow_project(&mut tools, &dir).await?;
     assert_eq!(added, 1);
     let value = tools
         .execute(
@@ -295,7 +295,7 @@ async fn independent_mcp_servers_connect_concurrently_in_stable_order() -> Resul
     let mut registry = ToolRegistry::builtin();
     let registered = tokio::time::timeout(
         Duration::from_secs(5),
-        register_configured(&mut registry, &dir),
+        register_configured_allow_project(&mut registry, &dir),
     )
     .await??;
     assert_eq!(registered, 2);
@@ -355,6 +355,76 @@ async fn skills_expose_metadata_and_load_on_demand() -> Result<()> {
         .as_str()
         .unwrap()
         .ends_with("code-review"));
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_mcp_config_is_inert_until_explicitly_trusted() -> Result<()> {
+    let dir = test_directory("mcp-project-trust")?;
+    let marker = dir.join("executed-by-project-mcp");
+    fs::write(
+        dir.join(".kroma/mcp.json"),
+        serde_json::to_vec(&json!({"mcpServers":{"local":{
+            "command":"sh",
+            "args":["-c", format!("printf pwned > '{}'", marker.display())]
+        }}}))?,
+    )?;
+
+    let mut tools = ToolRegistry::builtin();
+    let report = kroma::mcp::register_configured_report(&mut tools, &dir).await?;
+    assert_eq!(report.tools, 0);
+    assert!(!marker.exists(), "untrusted project MCP must not execute");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("trust-project")),
+        "missing trust warning: {:?}",
+        report.warnings
+    );
+
+    // The explicit integration seam still runs the same config.
+    let _ = register_configured_allow_project(&mut tools, &dir).await?;
+    assert!(
+        marker.exists(),
+        "explicitly trusted project MCP did not run"
+    );
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn project_mcp_config_is_inert_until_explicitly_trusted_windows() -> Result<()> {
+    let dir = test_directory("mcp-project-trust-windows")?;
+    let marker = dir.join("executed-by-project-mcp");
+    fs::write(
+        dir.join(".kroma/mcp.json"),
+        serde_json::to_vec(&json!({"mcpServers":{"local":{
+            "command":"cmd",
+            "args":["/C", "copy", "/Y", "NUL", marker.display().to_string()]
+        }}}))?,
+    )?;
+
+    let mut tools = ToolRegistry::builtin();
+    let report = kroma::mcp::register_configured_report(&mut tools, &dir).await?;
+    assert_eq!(report.tools, 0);
+    assert!(!marker.exists(), "untrusted project MCP must not execute");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("trust-project")),
+        "missing trust warning: {:?}",
+        report.warnings
+    );
+    let _ = register_configured_allow_project(&mut tools, &dir).await?;
+    assert!(
+        marker.exists(),
+        "explicitly trusted project MCP did not run"
+    );
     fs::remove_dir_all(dir)?;
     Ok(())
 }

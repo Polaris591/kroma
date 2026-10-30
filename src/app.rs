@@ -4,6 +4,7 @@ use crate::{
     config::Config,
     context::{BuiltinContextFactory, ContextConfig, ContextFactory},
     events::EventSink,
+    history_tools::{HistoryRead, HistorySearch},
     mcp,
     model::ModelBackend,
     plugins::PluginCatalog,
@@ -71,6 +72,8 @@ pub async fn default_runtime_with(
     };
     let skills = SkillCatalog::discover(&config.workdir)?;
     let mut tools = ToolRegistry::builtin();
+    tools.register(Arc::new(HistorySearch))?;
+    tools.register(Arc::new(HistoryRead))?;
     if !skills.is_empty() {
         tools.register(Arc::new(LoadSkill(skills.clone())))?;
     }
@@ -113,7 +116,11 @@ pub async fn default_runtime_with(
         agent,
         skills,
         plugins,
-        startup_warnings: mcp_status.unavailable,
+        startup_warnings: mcp_status
+            .unavailable
+            .into_iter()
+            .chain(mcp_status.warnings)
+            .collect(),
         plugin_warnings,
         selected_model_name,
         base_tools,
@@ -219,8 +226,8 @@ mod tests {
         };
         let (model, budget) = model_from_profile(&profile).await.unwrap();
         assert_eq!(budget.window(), 500_000);
-        assert_eq!(budget.output_reserve(), 128_000);
-        assert_eq!(budget.available_input(), 372_000);
+        assert_eq!(budget.output_reserve(), 32_768);
+        assert_eq!(budget.available_input(), 467_232);
         assert_eq!(model.reasoning_level().as_deref(), Some("high"));
         assert!(model.set_reasoning_level("low").is_err());
         model.set_reasoning_level("xhigh").unwrap();

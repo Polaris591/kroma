@@ -95,7 +95,7 @@ diagnostics. Both modes share Agent, Shell, model providers, and TRC+APEC.
 Plugins: see the [plugin guide and concrete examples](examples/plugins/README.md).
 The first practical example is **web search and webpage extraction**:
 `kroma plugins install examples/plugins/web`, then `kroma plugins enable web`,
-restart Kroma (or `/plugins reload` in an idle TUI) and use `web_search` or `web_fetch` (Bing RSS by default, no key).
+restart Kroma (or `/plugins reload` in an idle TUI) and use `web_search` or `web_fetch` (keyless auto mode by default; no key required, but keyless ranking quality varies).
 `/plugins` lists or manages plugins inside CLI/TUI. Further optional examples
 include tool/Prompt replacement, model request hooks, context strategy,
 subagents, cross-session notes, dynamic TUI panels and plugin-defined shortcuts. Plugins are
@@ -362,7 +362,12 @@ These entries are examples; the named server, npm installation and remote
 endpoint are not bundled with Kroma. A server uses **either** `command`
 (`args`, `env`, optional `cwd`) **or** `url` (optional `headers`).
 Use `${ENV_NAME}` placeholders to resolve credentials from the environment.
-Local stdio subprocesses inherit the Kroma environment by default.
+Host secret variables (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, cloud and
+provider credentials, and `KROMA_*`) are stripped from local stdio children.
+Project configs are disabled until approved with `kroma trust-project`; approval
+is bound to the project path and the exact config bytes, so editing the file
+requires approval again. Project configs may only expand non-secret `MCP_*` and
+basic path environment variables; credential-shaped names are rejected. Set `KROMA_TRUST_PROJECT_MCP=1` to approve for one run.
 
 The default MCP protocol version is `2025-11-25` and uses the standard
 initialize/initialized handshake. To use the newer stateless MCP API, set
@@ -370,6 +375,8 @@ initialize/initialized handshake. To use the newer stateless MCP API, set
 are supported, including JSON/SSE responses, tool-list pagination and tool
 calls. Tools are named `mcp__<server>__<tool>`; a server that fails to start
 or list its tools is skipped with a warning rather than disabling Shell.
+MCP calls have a 120-second timeout; configs, stdio/SSE frames, HTTP bodies,
+tool results and images have explicit size limits.
 MCP resources, prompts, sampling, elicitation, and OAuth discovery are not
 implemented. Local/remote MCP servers may execute arbitrary operations
 under their configured credentials; only connect servers you intend to use.
@@ -672,9 +679,11 @@ Rust and Python task histories.
 
 Kroma uses **one built-in compression strategy: cache-aware TRC + APEC** (the tested experimental C policy). There is no runtime strategy selector. The retired `KROMA_FUSION_EXPERIMENT` setting is ignored; it cannot enable any other compression behavior. Historical scripts under `benchmarks/` are experimental records and no longer compatible with the single-policy production build without modification.
 
-TRC replaces eligible, already-consumed old tool outputs only in the model's projected history; the complete session always stays on disk. **Outside hard-limit emergencies**, Kroma requires observed provider cache tokens and accepts a shortening only when an approximate three-future-read saving outweighs estimated invalidation of the cached suffix. If cache usage is unknown, non-emergency TRC conservatively does not clear. This is a heuristic, not exact pricing. At the hard limit, context safety takes precedence.
+TRC replaces eligible, already-consumed old tool outputs only in the model's projected history; the complete session always stays on disk. **Outside hard-limit emergencies**, Kroma requires observed provider cache tokens and accepts a shortening only when an approximate three-future-read saving outweighs invalidation of the *future-cacheable* history suffix. A transient 0% upstream cache hit does not mean that suffix is permanently uncacheable. If cache usage is unknown, non-emergency TRC conservatively does not clear. This is a heuristic, not exact pricing. At the hard limit, context safety takes precedence.
 
 APEC asynchronously summarizes **complete, original tool evidence**, never TRC or hard-limit previews. Existing incremental summaries are append-only until an occasional rollup; rollups can invalidate a prompt-cache prefix. No competing evidence-filtering summarizer or alternative compression modes are part of Kroma.
+
+**Opt-in cache investigation:** Set `KROMA_CACHE_TRACE=1` before launching Kroma (PowerShell: `$env:KROMA_CACHE_TRACE = '1'`). Each completed foreground request appends one JSON record to `<active-session>.json.cache-trace.jsonl` beside the session checkpoint. Records include prompt/tool fingerprints, reasoning tier, TRC/APEC revision and coverage, common-prefix length versus the preceding request, and provider-reported input/cache tokens. No raw message text, tool outputs, or API keys are written. Fingerprints describe Kroma's provider-budget projection; they cannot prove an upstream gateway's internal cache routing. Disabled by default; no additional model requests or background work.
 
 If APEC fails, Kroma suppresses repeated attempts during the current agent turn; a later user turn can retry without resetting the conversation. Session recovery for a partially completed batch retains completed tool results and marks missing results as unknown rather than automatically executing them again. Duplicate model-generated tool call IDs are rejected before execution. None of these changes alters the shell's environment-variable inheritance or the user's authority to run shell commands.
 
@@ -691,8 +700,8 @@ If APEC fails, Kroma suppresses repeated attempts during the current agent turn;
 - **TRC (Tool Result Clearing):** Only a tool result included in a **successfully completed model request** is eligible for TRC clearing. The result that just came back from Shell is passed to the model without normal TRC shortening, except for hard-limit emergency previews. Older consumed verbose results may be replaced **only in the model request** by compact previews and a pointer into the complete session archive. Normally the two newest eligible consumed tool outputs and recent messages remain intact; at the hard limit, consumed results can also be shortened.
 - **APEC (Asynchronous Progressive Context Compression):** The soft/hard triggers are **50% / 90% of available input tokens**, after reserving capacity for the model's output. A background, no-tools summarizer processes a safe **original raw-history** segment (never TRC previews) and appends a new immutable memory block S1, S2, S3, etc. Append-only blocks preserve a cache-stable prefix until an occasional summary rollup rewrites older blocks. Recent messages and pending tool calls remain untouched. At the hard threshold, Kroma waits for a background summary or runs a synchronous one; when compaction is unsafe or unsuccessful, it reports an error rather than silently dropping history. TRC and APEC may operate concurrently because an APEC snapshot is validated against the raw history and summary boundary, not the mutable TRC view.
 - **Persistence:** The complete raw history and compression state are recovered from the session checkpoint plus its append journal. v0.3 and v0.4 histories are migrated automatically: an old single summary becomes S1, and unsafe previously cleared tool results are restored in the projected view. The system prompt remains unchanged.
-- **Settings:** `KROMA_CONTEXT_WINDOW` (default 128000) should reflect the actual provider context limit. `KROMA_OUTPUT_RESERVE_TOKENS` optionally overrides the output reservation (default: min(4096, 1/8 of the context window)). With a 128000-token window and the default 4096-token output reservation, the effective input capacity is 123904 tokens, with soft/hard triggers at 61952/111513 estimated input tokens. Token size is estimated heuristically and calibrated upwards using reported input usage; estimates are **not** exact tokenization. If the provider refuses a summary call or the context is too large, compression reports an error without deleting the source transcript.
-- **Limitations:** APEC uses a separate model request and therefore consumes additional tokens. The background summary is committed on the **next model request boundary**, not necessarily as soon as it completes. Old tool output references are indexes in the saved session checkpoint and/or WAL, not a dedicated retrieval tool. APEC's non-streaming summary endpoint must be supported by the chosen model provider.
+- **Settings:** `KROMA_CONTEXT_WINDOW` (default 128000) should reflect the actual provider context limit. `KROMA_OUTPUT_RESERVE_TOKENS` optionally overrides the output reservation (default: min(4096, 1/8 of the context window)). A single turn requests at most 32k output tokens even when the profile allows more, so a 128k capability is not reserved on every request. `KROMA_CACHE_READ_DISCOUNT` (default 0.1) and `KROMA_CACHE_INVALIDATION_FACTOR` (default 0.9) tune the TRC cache tradeoff when pricing is known. Token size is estimated heuristically and calibrated upwards using reported input usage; estimates are **not** exact tokenization. If the provider refuses a summary call or the context is too large, compression reports an error without deleting the source transcript.
+- **Limitations:** APEC uses a separate model request and therefore consumes additional tokens. The background summary is committed on the **next model request boundary**, not necessarily as soon as it completes. `history_search` and `history_read` let the model search the saved checkpoint and read omitted original messages by index. APEC's non-streaming summary endpoint must be supported by the chosen model provider.
 
 ## v0.3 additions
 
@@ -744,7 +753,8 @@ in `~/.kroma/config.json`:
 
 - `context_window` replaces upstream metadata for context planning; the
   `KROMA_CONTEXT_WINDOW` environment override still wins.
-- `max_output_tokens` sets the requested completion maximum; the
+- `max_output_tokens` sets the requested completion maximum, but Kroma caps a
+  single turn at 32k so a 128k capability is not reserved on every request; the
   `KROMA_MAX_OUTPUT_TOKENS` environment override still wins, and an explicitly
   discovered upstream maximum still caps the request.
 - `thinking_levels` restricts the tiers the model accepts, in display order.
@@ -757,9 +767,10 @@ in `~/.kroma/config.json`:
   `max_output_tokens` must be smaller than `context_window`.
 
 Profiles are stored in `~/.kroma/config.json` (not the **old Kroma**'s
-`~/.kroma/config.toml`). New files are created privately, and on Unix the
-loader rejects profile files readable by other users. No credentials are
-printed by `config list` or `config show`.
+`~/.kroma/config.toml`). New files are created privately. On Unix the loader
+warns when an existing profile file is readable by other users, but does not
+silently move or delete it. No credentials are printed by `config list` or
+`config show`.
 
 When both `KROMA_MODEL` and `KROMA_BASE_URL` are explicitly set, and
 `KROMA_PROVIDER_PROFILE` is not set, Kroma uses an environment-only
@@ -824,7 +835,7 @@ Commands: `/new`, `/sessions`, `/resume <id>`, `/clear` (active session only), `
 
 Each shell result reports `exit_code`, `stdout`, and `stderr`. Shell commands have no artificial timeout or output limit. Failed commands are reported back to the model, which decides whether to retry or correct the task. Streaming model HTTP requests have a 20-second connection-establishment timeout and a 300-second idle timeout (for response headers or a gap between streamed network chunks), **not** a 120-second total-request deadline. Before receiving any stream data, transport timeouts, connect errors, and transient HTTP 429/502/503/504 may be retried up to 3 additional times. Numeric `Retry-After` values are honored up to 10 seconds; longer or unparseable server wait instructions are not silently overridden. Permanent HTTP failures (such as 401) return immediately. Partially delivered streams are never retried to avoid duplicate output or tool execution. Failed attempts have unknown provider usage unless separately reported. Separate non-streaming APEC requests retain a 120-second request deadline. Task summaries now include a `task_status` marker on completion, failure and Ctrl+C cancellation; incomplete provider usage remains unknown rather than zero.
 
-**Security:** `shell` executes arbitrary commands with the permissions of the Kroma process. The working directory is **not** a sandbox. Use a container or a restricted account for untrusted tasks, and never run this prototype with elevated privileges against important data. Unlimited command output may exhaust memory; a hanging command may run indefinitely until the user cancels it. On Unix, cancellation terminates the shell process group; independently detached descendants can survive. On Windows, cancellation terminates the job object, which contains every descendant created through the shell.
+**Security:** `shell` executes arbitrary commands with the permissions of the Kroma process. The working directory is **not** a sandbox. Use a container or a restricted account for untrusted tasks, and never run this prototype with elevated privileges against important data. Very large command output is truncated inline and written to private capture files, so it can still consume disk; a hanging command may run indefinitely until the user cancels it. On Unix, cancellation terminates the shell process group; independently detached descendants can survive. On Windows, cancellation terminates the job object, which contains every descendant created through the shell.
 
 ## Validation
 
@@ -833,3 +844,7 @@ cargo fmt -- --check
 cargo test
 cargo clippy -- -D warnings
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

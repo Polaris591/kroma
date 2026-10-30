@@ -7,7 +7,7 @@
     Send, Square, Paperclip, X, Terminal, BrainCircuit, Cpu, RefreshCw,
     LoaderCircle, ArrowDown, Sparkles, AlertCircle, Columns3, FileText
   } from '@lucide/svelte';
-  import { api, type Bootstrap, type DesktopEvent, type StreamEnvelope, type ProfileInput } from './lib/api';
+  import { api, type Bootstrap, type DesktopEvent, type StreamEnvelope, type Message, type ProfileInput } from './lib/api';
   import { compactCount, cachePercentage } from './lib/format';
   import MessageView from './components/MessageView.svelte';
   import Markdown from './components/Markdown.svelte';
@@ -29,14 +29,18 @@
   let activeTools: ActiveTool[] = [];
   let draftPrompt = '';
   let historyCount = 150;
+  let olderMessages: Message[] = [];
+  let historyHasMore = false;
+  let historyBusy = false;
   let scroller: HTMLDivElement;
   let atBottom = true;
   let initialized = false;
+  let mcpDismissed = false;
   let rename = false;
   let newTitle = '';
 
   $: snapshot = data?.snapshot ?? null;
-  $: history = snapshot?.messages.filter(m => m.role !== 'system') ?? [];
+  $: history = [...olderMessages, ...(snapshot?.messages ?? [])].filter(m => m.role !== 'system');
   $: visibleHistory = history.slice(-historyCount);
   $: modelName = data?.profiles.profiles.find(p => p.name === data?.profiles.active)?.model || '未配置模型';
   $: usage = snapshot?.usage?.coding;
@@ -45,7 +49,7 @@
 
   function showError(e: unknown) { error = e instanceof Error ? e.message : String(e); }
   function toast(message: string) { notice = message; }
-  async function refresh() { data = await api.bootstrap(); }
+  async function refresh() { data = await api.bootstrap(); syncHistoryState(); }
   async function initialize() {
     try {
       data = await api.bootstrap();
@@ -64,12 +68,44 @@
     return () => stop?.();
   });
 
+  function syncHistoryState() {
+    olderMessages = [];
+    historyHasMore = data?.snapshot?.history_truncated ?? false;
+    historyCount = 150;
+  }
+  async function loadOlderHistory() {
+    const current = data?.snapshot;
+    if (!current || historyBusy) return;
+    historyBusy = true;
+    try {
+      const loaded = olderMessages.length + current.messages.length;
+      const before = Math.max(0, (current.total_messages ?? loaded) - loaded);
+      const page = await api.historyPage(before, 200);
+      olderMessages = [...page.messages, ...olderMessages];
+      historyHasMore = page.next_before != null && page.next_before > 0;
+    } catch (e) { showError(e); }
+    finally { historyBusy = false; }
+  }
   async function doConnect(name?: string) {
     busy = true; error = ''; notice = '';
     try {
       data = await api.connect(name);
+      syncHistoryState();
       running = false; stream = ''; thinking = ''; activeTools = [];
       tab = 'chat'; await scrollDown();
+    } catch (e) { showError(e); }
+    finally { busy = false; }
+  }
+  async function approveProjectMcp() {
+    if (busy || running) return;
+    busy = true; error = ''; notice = '';
+    try {
+      await api.trustProjectMcp();
+      // Rebuild the runtime so the newly trusted tools are registered.
+      data = await api.connect(data?.profiles.active ?? undefined);
+      syncHistoryState();
+      mcpDismissed = false;
+      toast('项目 MCP 配置已批准，工具已重新加载');
     } catch (e) { showError(e); }
     finally { busy = false; }
   }
@@ -78,6 +114,7 @@
       const path = await open({directory: true, multiple: false, title: '选择工作目录'});
       if (typeof path === 'string') {
         data = await api.openProject(path);
+        syncHistoryState();
         stream = ''; thinking = ''; activeTools = [];
         if (data.profiles.profiles.length) await doConnect();
         else tab = 'settings';
@@ -89,7 +126,8 @@
     busy = true; error = '';
     try {
       data = await api.switchSession(id);
-      stream = ''; thinking = ''; activeTools = []; historyCount = 150;
+      syncHistoryState();
+      stream = ''; thinking = ''; activeTools = [];
       tab = 'chat'; await scrollDown();
     } catch(e) {showError(e)}
     finally {busy = false}
@@ -99,7 +137,8 @@
     busy = true; error = '';
     try {
       data = await api.newSession();
-      stream = ''; thinking = ''; activeTools = []; attached = []; prompt = ''; historyCount = 150;
+      syncHistoryState();
+      stream = ''; thinking = ''; activeTools = []; attached = []; prompt = '';
       tab = 'chat'; await scrollDown();
     } catch(e) {showError(e)}
     finally {busy = false}
@@ -142,7 +181,7 @@
   }
   function onStream(event: StreamEnvelope) {
     if (event.kind === 'batch') applyEvents(event.events);
-    if (event.kind === 'snapshot' && data) data = {...data, snapshot: event.snapshot};
+    if (event.kind === 'snapshot' && data) { data = {...data, snapshot: event.snapshot}; syncHistoryState(); }
     if (event.kind === 'done' && event.result.error) error = event.result.error;
   }
   async function submit() {
@@ -270,6 +309,14 @@
       <div class="page-scroll"><PluginsView plugins={data.plugins} onAction={pluginAction} onInstall={installPlugin}/></div>
     {:else}
       <div class="chat-screen">
+        {#if data?.mcp_project.configured && !data.mcp_project.trusted && !mcpDismissed}
+          <div class="banner notice-banner" role="alert">
+            <AlertCircle size={16}/>
+            <span>此项目带有 <code>.kroma/mcp.json</code>，其中命令尚未获授权。批准前不会执行任何 MCP 进程。</span>
+            <button class="primary small" onclick={approveProjectMcp} disabled={busy || running}>批准并重连</button>
+            <button title="稍后" onclick={() => mcpDismissed = true}><X size={15}/></button>
+          </div>
+        {/if}
         <div class="transcript" bind:this={scroller} onscroll={trackScroll}>
           {#if history.length === 0 && !running}
             <div class="welcome">
@@ -284,6 +331,11 @@
             </div>
           {:else}
             <div class="transcript-inner">
+              {#if historyHasMore}
+                <button class="load-earlier" onclick={loadOlderHistory} disabled={historyBusy}>
+                  {historyBusy ? '加载中…' : '加载更早的完整历史'}
+                </button>
+              {/if}
               {#if history.length > historyCount}
                 <button class="load-earlier" onclick={() => historyCount += 150}>显示更早的 {Math.min(150, history.length - historyCount)} 条消息</button>
               {/if}
