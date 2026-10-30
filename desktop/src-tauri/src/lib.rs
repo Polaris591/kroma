@@ -8,7 +8,7 @@ use kroma::{
     events::EventSink,
     host_attachments,
     plugins::PluginCatalog,
-    profiles::{self, Profiles, ProviderProfile},
+    profiles::{Profiles, ProviderProfile},
     sessions::SessionCatalog,
 };
 use serde::Deserialize;

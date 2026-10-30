@@ -24,6 +24,18 @@ In desktop/:
 
 Root repository cargo build still builds the original CLI/TUI. Desktop can launch without any model profile and expose Settings before model initialization. No CLI installation is required.
 
+### Optional Cargo mirror
+
+When crates.io is unreachable, use the RsProxy sparse registry for this command only (no change to the user's global Cargo config). From the repository root:
+
+```sh
+cargo --config 'source.crates-io.replace-with="rsproxy-sparse"' \
+      --config 'source.rsproxy-sparse.registry="sparse+https://rsproxy.cn/index/"' \
+      fetch --manifest-path desktop/src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+```
+
+Use the same two `--config` flags for subsequent `cargo check` / `cargo build` invocations; the desktop's `Cargo.lock` pins the versions. A successful GNU-target type-check does not replace Windows MSVC build/link and runtime tests.
+
 ## Delivered P0–P2
 
 Project selection, model profiles and keys, real Agent text/reasoning/tool streaming, cancellation, steer, session history/resume/rename, file and image references, Markdown, code, plugin manager, Token/cache metrics and cross-platform build workflow.
