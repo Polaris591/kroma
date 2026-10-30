@@ -438,17 +438,24 @@ async fn send_message(
     if let Err(error) = usage {
         eprintln!("[desktop] saving usage: {error:#}");
     }
-    let snapshot = desktop_host::snapshot(&runtime.agent).map_err(ui_error)?;
+    // Always restore the Agent to the host, even when a UI-only snapshot
+    // fails (for example because the usage ledger is temporarily unreadable).
+    let snapshot = desktop_host::snapshot(&runtime.agent);
     let last = events.drain();
     if !last.is_empty() {
         let _ = channel.send(json!({"kind":"batch","events":last}));
     }
-    let _ = channel.send(json!({"kind":"snapshot","snapshot":snapshot}));
+    if let Ok(ref snapshot) = snapshot {
+        let _ = channel.send(json!({"kind":"snapshot","snapshot":snapshot}));
+    }
     let _ = channel.send(json!({"kind":"done","result":result}));
-    let mut host = state.0.lock().map_err(ui_error)?;
-    host.runtime = Some(runtime);
-    host.cancel = None;
-    host.task_input = host.runtime.as_ref().map(|r| r.agent.task_input());
+    {
+        let mut host = state.0.lock().map_err(ui_error)?;
+        host.runtime = Some(runtime);
+        host.cancel = None;
+        host.task_input = host.runtime.as_ref().map(|r| r.agent.task_input());
+    }
+    let snapshot = snapshot.map_err(ui_error)?;
     Ok(json!({"result":result,"snapshot":snapshot}))
 }
 

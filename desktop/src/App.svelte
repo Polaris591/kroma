@@ -8,6 +8,7 @@
     LoaderCircle, ArrowDown, Sparkles, AlertCircle, Columns3, FileText
   } from '@lucide/svelte';
   import { api, type Bootstrap, type DesktopEvent, type StreamEnvelope, type ProfileInput } from './lib/api';
+  import { compactCount, cachePercentage } from './lib/format';
   import MessageView from './components/MessageView.svelte';
   import Markdown from './components/Markdown.svelte';
   import SettingsView from './components/SettingsView.svelte';
@@ -199,17 +200,8 @@
     if (!scroller) return;
     atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 115;
   }
-  function compact(value: number | undefined) {
-    if (value === undefined) return '—';
-    return value >= 1_000_000 ? (value / 1_000_000).toFixed(1) + 'm'
-      : value >= 1000 ? (value / 1000).toFixed(1) + 'k' : String(value);
-  }
-  function cacheRate() {
-    if (!usage || !usage.input) return '—';
-    if (usage.cached >= usage.input) return '100%';
-    const pct = usage.cached / usage.input * 100;
-    return pct >= 99.95 ? '<100%' : pct.toFixed(1) + '%';
-  }
+  function compact(value: number | undefined) { return compactCount(value); }
+  function cacheRate() { return cachePercentage(usage?.input, usage?.cached); }
 </script>
 
 <svelte:head><title>Kroma Desktop</title></svelte:head>

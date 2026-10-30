@@ -31,6 +31,8 @@ jobs:
         working-directory: desktop
       - run: npm run check
         working-directory: desktop
+      - run: npm run test
+        working-directory: desktop
       - run: npm run build
         working-directory: desktop
 
