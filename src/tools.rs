@@ -16,6 +16,9 @@ pub type HookFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
+    /// Effective arguments when a before-tool hook rewrote the call.
+    /// Original model call remains immutable for provider replay.
+    pub executed_arguments: Option<String>,
 }
 
 impl ToolResult {
@@ -23,6 +26,7 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: false,
+            executed_arguments: None,
         }
     }
 
@@ -30,6 +34,7 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: true,
+            executed_arguments: None,
         }
     }
 }
@@ -181,9 +186,19 @@ impl ToolRegistry {
                     .to_string(),
             ),
         };
+        if effective.function.arguments != call.function.arguments {
+            result.executed_arguments = Some(effective.function.arguments.clone());
+        }
         for hook in &self.interceptors {
             if let Err(error) = hook.after(&effective, &mut result, ctx.workdir).await {
-                return ToolResult::error(format!("after_tool_result failed: {error:#}"));
+                return ToolResult {
+                    content: format!(
+                        "after_tool_result failed: {error:#}; original tool returned: {}",
+                        result.content
+                    ),
+                    is_error: true,
+                    executed_arguments: result.executed_arguments,
+                };
             }
         }
         result

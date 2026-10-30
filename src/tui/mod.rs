@@ -547,6 +547,22 @@ fn input_event(
     {
         state.dismiss_notification();
     }
+    // Copy an existing selection before interpreting Ctrl+C as cancel,
+    // clear-draft or quit. A copied history selection must never discard an
+    // unrelated unsent draft or terminate the agent.
+    if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release
+        && key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        if let Some(selected) = state
+            .editor_selected_text()
+            .or_else(|| state.selected_text())
+        {
+            copy_selection_feedback(state, &selected);
+            return InputAction::None;
+        }
+    }
     if running
         && matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::SHIFT))
     {
@@ -872,11 +888,11 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
     if input == "/help" {
         state.info(state.preferences.language.text("HELP", "帮助"), state.preferences.language.text("Enter to send; Shift+Enter or Ctrl+J to add a line.\nPgUp/PgDn or mouse wheel scroll; Ctrl+End returns to latest output.\nType / or /commands for the command index; Tab completes without executing.
 Ctrl+P searches commands; Tab switches model/session/file categories.\nF2 changes theme; Shift+Tab cycles thinking (or /think high).\nContext shows window use (~ estimated); /usage shows full measurements.
-/language [en|zh] changes UI language; /layout [comfortable|wide] changes reading width.\nCtrl+O expands tool output; Ctrl+R shows reasoning.\n/history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo\n/theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]\n/queue task · /skills · /tools\nWhile running: write steering text, or /queue task; Ctrl+C cancels.\nCtrl+Q quits when idle.", "Enter 发送；Shift+Enter 或 Ctrl+J 换行。
+/language [en|zh] changes UI language; /layout [comfortable|wide] changes reading width.\nCtrl+O expands tool output; Ctrl+R shows reasoning.\nCtrl+Left/Right moves by word; Ctrl+W or Alt+Backspace deletes a word.\nWith selected text Ctrl+C copies first; otherwise it clears/cancels/quits.\n/history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo\n/theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]\n/queue task · /skills · /tools\nWhile running: write steering text, or /queue task; Ctrl+C cancels.\nCtrl+Q quits when idle.", "Enter 发送；Shift+Enter 或 Ctrl+J 换行。
 输入 / 或 /commands 查看命令索引；↑↓选择，Tab 补全，不会直接执行。
 Ctrl+P 搜索命令；搜索面板内 Tab 切换模型、会话、文件。
 PgUp/PgDn 或鼠标滚轮翻页；Ctrl+End 返回最新。
-Ctrl+O 展开原始工具命令与输出；Ctrl+R 展开推理摘要。
+Ctrl+O 展开原始工具命令与输出；Ctrl+R 展开推理摘要。\nCtrl+左右方向键按词移动；Ctrl+W 或 Alt+Backspace 删除前一个词。\n有文字选区时 Ctrl+C 优先复制，否则取消任务、清空草稿或退出。
 /language [zh|en] 切换界面语言，不更改模型回复语言。
 /layout [comfortable|wide] 切换舒适阅读或全宽；设置会保存。
 F2 切换主题；Shift+Tab 切换推理强度。
@@ -1127,6 +1143,9 @@ async fn execute_task(
     });
     state.session = agent.session_id().to_owned();
     state.refresh_session_title();
+    if let Err(error) = state.save_usage() {
+        state.note(format!("Unable to save session usage: {error:#}"));
+    }
     if let Some((label, message)) = task_notice {
         // The footer notification is transient; its failure explanation is
         // still reachable by scrolling after the footer is dismissed.
@@ -1300,6 +1319,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         )),
     }
     state.model_catalog = Some(catalog);
+    if !show_home {
+        state.restore_usage()?;
+    }
     state.refresh_session_title();
     state.model_profile = initial_profile;
     state.configure_status(agent.context_window_tokens(), model.reasoning_level());
@@ -1403,6 +1425,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     continue;
                 }
                 if text == "/new" {
+                    if let Err(error) = state.save_usage() {
+                        state.note(format!("Unable to save session usage: {error:#}"));
+                    }
                     // Do not create an empty archived session. The next
                     // actual user request allocates the session ID.
                     if let Err(error) = agent.enter_welcome() {
@@ -1501,7 +1526,28 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                 if show_local_command(&mut state, &text, model.as_ref()) {
                     continue;
                 }
-                match commands.execute(&text, &mut agent, &task_input) {
+                let command_result = {
+                    let command = commands.execute_async(&text, &mut agent, &task_input);
+                    tokio::pin!(command);
+                    loop {
+                        tokio::select! {
+                            result = &mut command => break Some(result),
+                            event = input.next() => match event {
+                                Some(Ok(Event::Key(key))) if
+                                    (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+                                    || key.code == KeyCode::Esc => break None,
+                                Some(Err(error)) => return Err(error.into()),
+                                None => break None,
+                                _ => {} // Ignore unrelated input while the command executes.
+                            }
+                        }
+                    }
+                };
+                let Some(command_result) = command_result else {
+                    state.note("Command cancelled");
+                    continue;
+                };
+                match command_result {
                     Ok(Some(reply)) => {
                         let before = state.session.clone();
                         state.session = agent.session_id().to_owned();
@@ -1572,6 +1618,11 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                 model.reasoning_level(),
                             );
                         }
+                        if matches!(text.as_str(), "/clear" | "/undo")
+                            || text.starts_with("/rewind ")
+                        {
+                            state.clear_local_info();
+                        }
                         state.load_history(agent.messages());
                         state.refresh_session_title();
                         if state.session != before
@@ -1581,6 +1632,11 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             state.reset_context();
                             state.discard_draft();
                             state.restore_input_history(agent.messages());
+                        }
+                        if state.session != before {
+                            if let Err(error) = state.restore_usage() {
+                                state.note(format!("Unable to restore session usage: {error:#}"));
+                            }
                         }
                         if !reply.output.is_empty() {
                             state.info("COMMAND", reply.output);
@@ -1673,6 +1729,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
             _ => {}
         }
     }
+    if let Err(error) = state.save_usage() {
+        crate::runtime_log!("[usage] unable to persist usage on TUI exit: {error:#}");
+    }
     Ok(())
 }
 
@@ -1733,6 +1792,7 @@ mod tests {
         })
         .unwrap();
         tx.send(UiEvent::TitleUsage {
+            session_id: ui.session.clone(),
             requests: 1,
             input: Some(117),
             output: Some(95),
@@ -2112,6 +2172,56 @@ mod tests {
         assert_eq!(new.reasoning_level().as_deref(), Some("xhigh"));
         key_action(&mut ui, key, false, &new);
         assert_eq!(new.reasoning_level().as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn ctrl_c_copies_editor_selection_without_discarding_draft_or_cancelling() {
+        let (mut ui, model) = setup();
+        ui.editor.paste("unsent draft");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        // 30-row terminal: status is row 29, composer input is row 27.
+        assert!(ui.start_editor_selection(6, 27));
+        assert!(ui.drag_editor_selection(11, 27));
+        assert_eq!(ui.editor_selected_text().as_deref(), Some("unsen"));
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            input_event(
+                &mut ui,
+                Event::Key(ctrl_c),
+                false,
+                &model,
+                std::env::temp_dir().as_path()
+            ),
+            InputAction::None
+        ));
+        assert_eq!(ui.editor.text(), "unsent draft");
+        assert!(ui.editor_selected_text().is_some());
+
+        // During a model call, an active selection also takes precedence
+        // over task cancellation; ordinary Ctrl+C still cancels.
+        assert!(matches!(
+            input_event(
+                &mut ui,
+                Event::Key(ctrl_c),
+                true,
+                &model,
+                std::env::temp_dir().as_path()
+            ),
+            InputAction::None
+        ));
+        ui.clear_editor_selection();
+        assert!(matches!(
+            input_event(
+                &mut ui,
+                Event::Key(ctrl_c),
+                true,
+                &model,
+                std::env::temp_dir().as_path()
+            ),
+            InputAction::Cancel
+        ));
     }
 
     #[test]

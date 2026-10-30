@@ -1,8 +1,10 @@
 //! Foreground model usage observed from provider responses. Missing provider
 //! measurements remain unknown; cached tokens are a subset of input tokens.
 use crate::model::Usage;
+use serde::{Deserialize, Serialize};
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UsageMeter {
     pub calls: usize,
     pub input: u64,
@@ -210,7 +212,7 @@ impl UsageMeter {
             total.merge(meter);
         }
         [
-            "Measured usage (this Kroma process only):".to_owned(),
+            "Measured usage (this session; saved across restarts):".to_owned(),
             self.summary_line("Coding"),
             title.summary_line("Auto titles"),
             apec.summary_line("APEC summaries"),

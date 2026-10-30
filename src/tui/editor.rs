@@ -125,6 +125,50 @@ impl Editor {
             })
     }
 
+    fn word_boundary(&self, backward: bool) -> usize {
+        // Work in graphemes, not bytes or code points: combining marks and
+        // emoji sequences must remain intact under Ctrl+Arrow/word deletion.
+        let mut offset = 0usize;
+        let pieces: Vec<(usize, u8)> = self
+            .text
+            .graphemes(true)
+            .map(|grapheme| {
+                let start = offset;
+                offset += grapheme.chars().count();
+                let first = grapheme.chars().next().unwrap();
+                let category = if first.is_whitespace() {
+                    0
+                } else if first.is_alphanumeric() || first == '_' {
+                    1
+                } else {
+                    2
+                };
+                (start, category)
+            })
+            .collect();
+        let mut index = pieces.partition_point(|(start, _)| *start < self.caret);
+        if backward {
+            while index > 0 && pieces[index - 1].1 == 0 {
+                index -= 1;
+            }
+            if index > 0 {
+                let category = pieces[index - 1].1;
+                while index > 0 && pieces[index - 1].1 == category {
+                    index -= 1;
+                }
+            }
+        } else if index < pieces.len() {
+            let category = pieces[index].1;
+            while index < pieces.len() && pieces[index].1 == category {
+                index += 1;
+            }
+            while index < pieces.len() && pieces[index].1 == 0 {
+                index += 1;
+            }
+        }
+        pieces.get(index).map_or(offset, |(start, _)| *start)
+    }
+
     fn visual_width(&self, start: usize, end: usize) -> usize {
         self.text[self.byte_index(start)..self.byte_index(end)]
             .graphemes(true)
@@ -389,6 +433,15 @@ impl Editor {
             }
             KeyCode::Enter => return self.take().map_or(EditAction::None, EditAction::Submit),
             KeyCode::Char('j') if ctrl => self.insert("\n"),
+            KeyCode::Char('w') if ctrl => {
+                let start = self.word_boundary(true);
+                if start != self.caret {
+                    self.checkpoint();
+                    self.text
+                        .replace_range(self.byte_index(start)..self.byte_index(self.caret), "");
+                    self.caret = start;
+                }
+            }
             KeyCode::Char('a') if ctrl => self.caret = self.line_start(),
             KeyCode::Char('e') if ctrl => self.caret = self.line_end(),
             KeyCode::Char('u') if ctrl => {
@@ -409,6 +462,15 @@ impl Editor {
                 self.insert(&c.to_string())
             }
             KeyCode::Tab => self.insert("    "),
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                let start = self.word_boundary(true);
+                if start != self.caret {
+                    self.checkpoint();
+                    self.text
+                        .replace_range(self.byte_index(start)..self.byte_index(self.caret), "");
+                    self.caret = start;
+                }
+            }
             KeyCode::Backspace if self.caret > 0 => {
                 self.checkpoint();
                 let previous = self.previous_grapheme();
@@ -423,6 +485,8 @@ impl Editor {
                     "",
                 );
             }
+            KeyCode::Left if ctrl => self.caret = self.word_boundary(true),
+            KeyCode::Right if ctrl => self.caret = self.word_boundary(false),
             KeyCode::Left => self.caret = self.previous_grapheme(),
             KeyCode::Right => self.caret = self.next_grapheme(),
             KeyCode::Home => self.caret = self.line_start(),
@@ -685,6 +749,33 @@ mod tests {
         let (text, col, row) = editor.viewport(12, 4);
         assert!(text.contains("👩‍💻"));
         assert!(col < 12 && row < 4);
+    }
+
+    #[test]
+    fn ctrl_arrow_and_word_delete_follow_grapheme_boundaries() {
+        let mut editor = Editor::default();
+        editor.paste("alpha beta");
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
+        editor.key(left);
+        assert_eq!(editor.caret, 6);
+        editor.key(left);
+        assert_eq!(editor.caret, 0);
+        editor.key(right);
+        assert_eq!(editor.caret, 6);
+        editor.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(editor.text(), "beta");
+        assert_eq!(editor.caret, 0);
+        editor.key(right);
+        editor.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert!(editor.text().is_empty());
+
+        editor.paste("a e\u{301} 👩‍💻");
+        editor.key(left);
+        editor.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(editor.text(), "a 👩‍💻");
+        editor.undo();
+        assert_eq!(editor.text(), "a e\u{301} 👩‍💻");
     }
 
     #[test]

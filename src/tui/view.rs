@@ -246,9 +246,9 @@ fn reading_area(area: Rect, _full_width: bool) -> Rect {
 }
 
 fn body_line(line: Line<'static>) -> Line<'static> {
-    // Bodies hang under the role label, so every message shares one text
-    // column instead of starting a cell left of its own title.
-    let mut spans = vec![Span::raw("     ")];
+    // Role labels start four cells from the transcript edge: "  ◆ Kroma".
+    // Keep prose on that exact column across Windows/Unix terminals.
+    let mut spans = vec![Span::raw("    ")];
     spans.extend(line.spans);
     Line::from(spans)
 }
@@ -262,6 +262,7 @@ enum Kind {
     Info,
 }
 
+#[derive(Clone)]
 struct Entry {
     kind: Kind,
     title: String,
@@ -342,6 +343,7 @@ pub enum UiEvent {
         reasoning: Option<u64>,
     },
     TitleUsage {
+        session_id: String,
         requests: usize,
         input: Option<u64>,
         output: Option<u64>,
@@ -655,6 +657,8 @@ pub struct UiState {
     visible_links: Vec<VisibleLink>,
     hover_pointer: Option<(u16, u16)>,
     entries: Vec<Entry>,
+    /// Temporary command output belongs to one session, not the model WAL.
+    info_session: String,
     pub running: bool,
     pub notification: String,
     pub scroll_from_bottom: usize,
@@ -732,6 +736,7 @@ impl UiState {
             selection_edge: 0,
             visible_links: Vec::new(),
             hover_pointer: None,
+            info_session: session.clone(),
             session,
             session_title: None,
             home: false,
@@ -840,6 +845,38 @@ impl UiState {
         }
     }
 
+    pub fn save_usage(&self) -> anyhow::Result<()> {
+        if self.home {
+            return Ok(());
+        }
+        if let Some(catalog) = &self.model_catalog {
+            catalog.set_usage(
+                &self.session,
+                crate::sessions::SessionUsage {
+                    coding: self.usage.clone(),
+                    title: self.title_usage.clone(),
+                    apec: self.apec_usage.clone(),
+                    context_input: self.context_input,
+                    context_estimated: self.context_estimated,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn restore_usage(&mut self) -> anyhow::Result<()> {
+        let snapshot = match &self.model_catalog {
+            Some(catalog) if !self.home => catalog.usage(&self.session)?,
+            _ => crate::sessions::SessionUsage::default(),
+        };
+        self.usage = snapshot.coding;
+        self.title_usage = snapshot.title;
+        self.apec_usage = snapshot.apec;
+        self.context_input = snapshot.context_input;
+        self.context_estimated = snapshot.context_estimated;
+        Ok(())
+    }
+
     pub fn usage_report(&self) -> String {
         if self.preferences.language == super::preferences::Language::En {
             return format!(
@@ -850,7 +887,10 @@ impl UiState {
             );
         }
         let context = self.context_display().replace("Ctx", "上下文");
-        let mut rows = vec![context, "本次进程的用量（不含启动前的历史请求）：".into()];
+        let mut rows = vec![
+            context,
+            "本会话已记录用量（跨重启保存；旧版未记录的请求不可恢复）：".into(),
+        ];
         for (label, meter) in [
             ("编程模型", &self.usage),
             ("自动标题", &self.title_usage),
@@ -936,12 +976,12 @@ impl UiState {
         let compact_metadata = format!("{} · {context}", self.model);
         let fallback = format!("{thinking} · {context}");
         let mut candidates = Vec::new();
-        if width >= 110 && !self.plugin_statuses.is_empty() {
-            let statuses = self.plugin_statuses.join(" · ");
-            candidates.push(format!("{metadata} · {statuses}"));
-        }
         if self.usage.calls > 0 {
             let variants = self.usage_variants();
+            if width >= 110 && !self.plugin_statuses.is_empty() {
+                let statuses = self.plugin_statuses.join(" · ");
+                candidates.push(format!("{metadata} · {} · {statuses}", variants[1]));
+            }
             // On wide terminals show input/output and cached percentage.
             // On narrower ones keep model, context and cache before detail.
             candidates.push(format!("{metadata} · {}", variants[1]));
@@ -949,6 +989,9 @@ impl UiState {
             candidates.push(format!("{compact_metadata} · {}", variants[2]));
             candidates.push(format!("{context} · {}", variants[2]));
         } else {
+            if width >= 110 && !self.plugin_statuses.is_empty() {
+                candidates.push(format!("{metadata} · {}", self.plugin_statuses.join(" · ")));
+            }
             candidates.push(metadata);
             candidates.push(fallback);
             candidates.push(compact_metadata);
@@ -1376,10 +1419,10 @@ impl UiState {
     }
 
     fn show_editor_cursor(&self) -> bool {
-        // An empty Steer/Queue composer remains usable, but its hardware
-        // caret should not blink while the model is doing the active work.
-        // The first typed character brings the caret back immediately.
-        !self.running || !self.editor.text().is_empty() || self.attach_mode
+        // The composer accepts steering while the model is connecting.
+        // Always anchor the hardware cursor here: Windows IME uses that
+        // position for its candidate/composition window before the first key.
+        true
     }
 
     /// Brief feedback is shown until the user's next interaction, not
@@ -1432,6 +1475,7 @@ impl UiState {
 
     pub fn info(&mut self, title: &str, content: impl Into<String>) {
         self.history_cache = None;
+        self.info_session = self.session.clone();
         self.entries.push(Entry::new(Kind::Info, title, content));
         // Explicit command results should be visible immediately, even when
         // the user was browsing old messages. Streaming still preserves its
@@ -1439,7 +1483,33 @@ impl UiState {
         self.scroll_to_bottom();
     }
 
+    /// Clear session-local command output after an explicit history reset.
+    pub fn clear_local_info(&mut self) {
+        self.entries
+            .retain(|entry| !matches!(entry.kind, Kind::Info));
+        self.history_cache = None;
+    }
+
     pub fn load_history(&mut self, messages: &[Message]) {
+        // Preserve ephemeral command output at its previous transcript
+        // position without writing UI-only data into the Agent journal.
+        // Session switching/welcome screens intentionally clear this list.
+        let mut info_markers = Vec::new();
+        if !self.home && self.info_session == self.session {
+            let mut durable_before = 0usize;
+            for entry in &self.entries {
+                if matches!(entry.kind, Kind::Info) {
+                    info_markers.push((durable_before, entry.clone()));
+                } else {
+                    durable_before += 1;
+                }
+            }
+        }
+        // Don't let a long series of local command results grow indefinitely.
+        if info_markers.len() > 64 {
+            info_markers.drain(..info_markers.len() - 64);
+        }
+        self.info_session = self.session.clone();
         self.task_outcome = None;
         self.unread_updates = 0;
         self.home = false;
@@ -1507,6 +1577,28 @@ impl UiState {
                     let result = message.content.as_deref().unwrap_or("");
                     if let Some(entry) = found {
                         entry.details = tool_result_details(result);
+                        if let Some(effective) = message
+                            .provider_items
+                            .as_deref()
+                            .unwrap_or(&[])
+                            .iter()
+                            .find(|item| {
+                                item.get("type").and_then(Value::as_str)
+                                    == Some("kroma_tool_execution")
+                            })
+                        {
+                            if let Some(arguments) =
+                                effective.get("arguments").and_then(Value::as_str)
+                            {
+                                let name = entry
+                                    .title
+                                    .split_once(" · ")
+                                    .map_or("shell", |(name, _)| name);
+                                let actual = tool_arguments(name, arguments);
+                                let previous = std::mem::replace(&mut entry.body, actual);
+                                entry.details = format!("Plugin adjusted tool arguments (model requested: {previous})\n{}",entry.details);
+                            }
+                        }
                         entry.failed = message.tool_failed();
                         entry.title = entry.title.replace(
                             " · running",
@@ -1524,6 +1616,10 @@ impl UiState {
                 }
                 _ => {}
             }
+        }
+        for (offset, (before, entry)) in info_markers.into_iter().enumerate() {
+            self.entries
+                .insert((before + offset).min(self.entries.len()), entry);
         }
         // Keep the disclosure of a completed tool open after the runtime
         // reconciles its durable WAL messages, but not across other sessions.
@@ -1546,6 +1642,10 @@ impl UiState {
         self.unread_updates = 0;
         self.picker = None;
         self.home = true;
+        self.usage = crate::usage::UsageMeter::default();
+        self.title_usage = crate::usage::UsageMeter::default();
+        self.apec_usage = crate::usage::UsageMeter::default();
+        self.info_session.clear();
         self.entries.clear();
         self.expanded_tool_calls.clear();
         self.session_title = None;
@@ -1562,6 +1662,8 @@ impl UiState {
     }
 
     pub fn event(&mut self, event: UiEvent) {
+        let late_usage =
+            !self.running && matches!(&event, UiEvent::Usage { .. } | UiEvent::ApecUsage { .. });
         if self.scroll_anchor.is_some()
             && matches!(
                 &event,
@@ -1612,12 +1714,30 @@ impl UiState {
                 }));
             }
             UiEvent::TitleUsage {
+                session_id,
                 requests,
                 input,
                 output,
                 cached,
                 reasoning,
             } => {
+                let usage = crate::model::Usage {
+                    input,
+                    output,
+                    cached,
+                    reasoning,
+                    total: None,
+                };
+                if let Some(catalog) = &self.model_catalog {
+                    if let Err(error) =
+                        catalog.add_title_usage(&session_id, requests, usage.clone())
+                    {
+                        crate::runtime_log!("[usage] unable to persist title usage: {error:#}");
+                    }
+                }
+                if session_id != self.session {
+                    return;
+                }
                 self.title_usage.record_batch(
                     requests,
                     Some(&crate::model::Usage {
@@ -1751,6 +1871,12 @@ impl UiState {
                     entry.failed = failed;
                     entry.duration = entry.started.take().map(|start| start.elapsed());
                 }
+            }
+        }
+        // Background APEC usage can arrive after the foreground task ends.
+        if late_usage {
+            if let Err(error) = self.save_usage() {
+                crate::runtime_log!("[usage] background usage persistence failed: {error:#}");
             }
         }
     }
@@ -2000,8 +2126,8 @@ impl UiState {
         );
         self.editor_selection = Some((index, index));
         self.editor_selecting = true;
-        // Keep the current viewport anchored while dragging. Moving the
-        // caret here could scroll a long draft under the pointer mid-drag.
+        // Keep the viewport anchored during dragging; mouse_release will
+        // move the caret for a click without a selection.
         self.selection_start = None;
         self.selection_end = None;
         self.selection_dragging = false;
@@ -2203,7 +2329,7 @@ impl UiState {
                     lines.push(Line::from(vec![
                         Span::styled("  ▎", Style::default().fg(theme.user)),
                         Span::styled(
-                            self.preferences.language.text("  You", "  你"),
+                            self.preferences.language.text(" You", " 你"),
                             role_style(theme.user),
                         ),
                     ]));
@@ -2220,7 +2346,7 @@ impl UiState {
                         Span::styled("  ◆", Style::default().fg(theme.accent)),
                         // The label shares the mark's accent: a turn is found by
                         // colour, not by reading a small bold word.
-                        Span::styled("  Kroma", role_style(theme.accent)),
+                        Span::styled(" Kroma", role_style(theme.accent)),
                     ]));
                     if !entry.body.is_empty() {
                         let prose = width.saturating_sub(5);
@@ -2565,7 +2691,8 @@ impl UiState {
         // navigation needs a separate row above the editable composer.
         let show_navigation = self.scroll_anchor.is_some() && area.height >= 10;
         let layout = Layout::vertical([
-            Constraint::Length(1),
+            // A blank row separates the session heading from the first turn.
+            Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(u16::from(show_navigation)),
             Constraint::Length(composer_height),
@@ -3077,6 +3204,260 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
+    fn tool_history_shows_executed_arguments_when_plugin_rewrites_call() {
+        let mut model_reply = Message::new("assistant", "");
+        model_reply.tool_calls = Some(vec![crate::protocol::ToolCall {
+            id: "call-1".into(),
+            kind: "function".into(),
+            function: crate::protocol::FunctionCall {
+                name: "shell".into(),
+                arguments: r#"{"command":"echo original"}"#.into(),
+            },
+        }]);
+        let mut tool = Message::tool_with_status("call-1".into(), "exit: 0".into(), false);
+        tool.provider_items = Some(vec![serde_json::json!({
+            "type":"kroma_tool_execution","name":"shell",
+            "arguments":r#"{"command":"echo adjusted"}"#
+        })]);
+        let ui = UiState::new(
+            "mock".into(),
+            "test".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("system", "system"), model_reply, tool],
+        );
+        let entry = ui
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.kind, Kind::Tool))
+            .unwrap();
+        assert!(
+            entry.body.contains("adjusted"),
+            "render the command actually executed"
+        );
+        assert!(
+            entry.details.contains("original"),
+            "retain the model's original call for tracing"
+        );
+    }
+
+    #[test]
+    fn usage_and_cache_restore_before_next_model_call_and_are_session_scoped() -> anyhow::Result<()>
+    {
+        use crate::sessions::SessionCatalog;
+        let directory = std::env::temp_dir().join(format!(
+            "kroma-usage-restore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        let default = directory.join("project.json");
+        std::fs::write(&default, b"{}")?;
+        let catalog = SessionCatalog::from_default(default.clone())?;
+        let (other, other_path) = catalog.new_path()?;
+        std::fs::write(other_path, b"{}")?;
+        let mut first = UiState::new(
+            "deepseek".into(),
+            "default".into(),
+            ThemeStore::load_at(None)?,
+            &[],
+        );
+        first.model_catalog = Some(catalog);
+        first.configure_status(120_000, Some("high".into()));
+        first.event(UiEvent::Usage {
+            input: Some(10_000),
+            output: Some(600),
+            cached: Some(8_000),
+            reasoning: Some(150),
+        });
+        first.event(UiEvent::ActualInput(10_000));
+        first.event(UiEvent::ApecUsage {
+            requests: 1,
+            input: Some(1_200),
+            output: Some(140),
+            cached: Some(200),
+        });
+        first.save_usage()?;
+        drop(first);
+
+        let mut reopened = UiState::new(
+            "deepseek".into(),
+            "default".into(),
+            ThemeStore::load_at(None)?,
+            &[],
+        );
+        reopened.model_catalog = Some(SessionCatalog::from_default(default.clone())?);
+        reopened.configure_status(120_000, Some("high".into()));
+        reopened.restore_usage()?;
+        assert_eq!(reopened.usage.calls, 1);
+        assert_eq!(reopened.usage.cached, 8_000);
+        assert_eq!(reopened.apec_usage.calls, 1);
+        assert_eq!(reopened.context_input, Some(10_000));
+        let footer = reopened
+            .footer_line(reopened.themes.colors, 180)
+            .to_string();
+        assert!(
+            footer.contains("80%"),
+            "cache ratio must display immediately: {footer}"
+        );
+        assert!(
+            footer.contains("10k"),
+            "last request usage must display immediately: {footer}"
+        );
+
+        reopened.session = other.clone();
+        reopened.restore_usage()?;
+        assert_eq!(
+            reopened.usage.calls, 0,
+            "session switch cannot inherit old counters"
+        );
+        reopened.event(UiEvent::TitleUsage {
+            session_id: "default".into(),
+            requests: 1,
+            input: Some(100),
+            output: Some(12),
+            cached: Some(0),
+            reasoning: None,
+        });
+        assert_eq!(
+            reopened.title_usage.calls, 0,
+            "late titles belong to their source session"
+        );
+        reopened.session = "default".into();
+        reopened.restore_usage()?;
+        assert_eq!(reopened.title_usage.calls, 1);
+        assert_eq!(reopened.usage.calls, 1);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn header_separation_and_role_body_columns_are_consistent() {
+        let history = vec![
+            Message::new("user", "example user line"),
+            Message::new("assistant", "Example assistant response"),
+        ];
+        let mut ui = UiState::new(
+            "test".into(),
+            "session".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &history,
+        );
+        let rows = rendered_text(&mut ui, 110, 30);
+        assert!(
+            rows[1].trim().is_empty(),
+            "title needs an independent blank row"
+        );
+        assert_eq!(ui.selection_area.y, 2);
+        let user_role = rows.iter().position(|row| row.contains("You")).unwrap();
+        let assistant_role = rows
+            .iter()
+            .enumerate()
+            .skip(2)
+            .find(|(_, row)| row.contains("◆ Kroma"))
+            .map(|(index, _)| index)
+            .unwrap();
+        let user_body = rows
+            .iter()
+            .position(|row| row.contains("example user line"))
+            .unwrap();
+        let assistant_body = rows
+            .iter()
+            .position(|row| row.contains("Example assistant response"))
+            .unwrap();
+        assert_eq!(
+            UnicodeWidthStr::width(&rows[user_role][..rows[user_role].find("You").unwrap()]),
+            UnicodeWidthStr::width(
+                &rows[user_body][..rows[user_body].find("example user line").unwrap()]
+            ),
+            "user body must begin directly under the user's role name",
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(
+                &rows[assistant_role][..rows[assistant_role].find("Kroma").unwrap()]
+            ),
+            UnicodeWidthStr::width(
+                &rows[assistant_body][..rows[assistant_body]
+                    .find("Example assistant response")
+                    .unwrap()]
+            ),
+            "assistant body must begin directly under the Kroma role name",
+        );
+    }
+
+    #[test]
+    fn connecting_steering_stays_in_composer_not_activity_row() {
+        let mut ui = UiState::new(
+            "test".into(),
+            "session".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.event(UiEvent::TaskStarted);
+        ui.event(UiEvent::ModelStarted);
+        assert!(
+            ui.show_editor_cursor(),
+            "IME requires a composer cursor before typing"
+        );
+        ui.editor.paste("测试输入法");
+        let rows = rendered_rows(&mut ui, 100, 28);
+        let waiting = rows
+            .iter()
+            .position(|row| row.contains("Connecting"))
+            .unwrap();
+        let composer = rows
+            .iter()
+            .position(|row| row.contains("测试输入法"))
+            .unwrap();
+        assert!(waiting < composer);
+        assert!(!rows[waiting].contains("测试输入法"));
+    }
+
+    #[test]
+    fn command_output_survives_same_session_reload_without_entering_wal() {
+        let history = vec![
+            Message::new("user", "first question"),
+            Message::new("assistant", "first answer"),
+        ];
+        let mut ui = UiState::new(
+            "mock".into(),
+            "session-a".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &history,
+        );
+        ui.info("DIFF", "temporary diff output");
+        let mut updated = history.clone();
+        updated.push(Message::new("user", "next question"));
+        updated.push(Message::new("assistant", "next answer"));
+        ui.load_history(&updated);
+        let info_at = ui
+            .entries
+            .iter()
+            .position(|entry| matches!(entry.kind, Kind::Info))
+            .unwrap();
+        let next_at = ui
+            .entries
+            .iter()
+            .position(|entry| entry.body == "next question")
+            .unwrap();
+        assert_eq!(info_at, 2, "local output remains after its original turn");
+        assert!(
+            info_at < next_at,
+            "history rebuild must not push old information to the end"
+        );
+        assert!(!updated
+            .iter()
+            .any(|message| message.content.as_deref() == Some("temporary diff output")));
+        ui.session = "session-b".into();
+        ui.load_history(&[Message::new("user", "another session")]);
+        assert!(!ui
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.kind, Kind::Info)));
+    }
+
+    #[test]
     fn declarative_plugin_footer_status_fits_only_wide_terminals() {
         let mut state = UiState::new(
             "mock".into(),
@@ -3153,8 +3534,8 @@ mod tests {
         terminal.draw(|frame| ui.draw(frame)).unwrap();
         assert!(ui.activity_status().starts_with("Connecting"));
         assert!(
-            !ui.show_editor_cursor(),
-            "empty composer must not blink while running"
+            ui.show_editor_cursor(),
+            "IME caret must remain anchored to the composer during model connection"
         );
         let cached = ui.history_cache.as_ref().unwrap().text.lines.as_ptr();
         let first = ui.activity_line(ui.themes.colors);
@@ -3381,8 +3762,8 @@ mod tests {
         );
         rendered_text(&mut ui, 120, 38);
         assert_eq!(
-            ui.selection_area.y, 1,
-            "short transcript starts just below header"
+            ui.selection_area.y, 2,
+            "the first turn starts below a blank title separator"
         );
         let link = ui.visible_links.first().expect("link must remain visible");
         assert_eq!(
@@ -3453,6 +3834,7 @@ mod tests {
         let coding_footer = ui.usage.compact_status(150);
         let context = ui.context_display();
         ui.event(UiEvent::TitleUsage {
+            session_id: ui.session.clone(),
             requests: 1,
             input: Some(117),
             output: Some(95),
@@ -3777,7 +4159,7 @@ mod tests {
         assert!(doc.lines.iter().any(|line| line
             .spans
             .first()
-            .is_some_and(|span| { span.content == "     " })
+            .is_some_and(|span| { span.content == "    " })
             && line.spans.iter().any(|span| span.content == "│  ")));
         assert!(text.contains("$ cargo test"));
         assert!(text.contains("error: test failed"));
@@ -5411,7 +5793,7 @@ mod tests {
             .iter()
             .position(|text| text.contains("Check Node version"))
             .expect("first tool row");
-        assert_eq!(ui.selection_area.y, 1);
+        assert_eq!(ui.selection_area.y, 2);
         let marker_x = ui.selection_area.x + 2;
         assert!(!ui.toggle_tool_at(marker_x + 12, row as u16));
         assert!(ui.toggle_tool_at(marker_x, row as u16));

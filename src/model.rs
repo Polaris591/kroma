@@ -1,6 +1,7 @@
 //! Small runtime model boundary. No protocol registry, plugin host or ABI.
 use crate::protocol::Message;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Mutex, time::Duration};
 
@@ -14,7 +15,8 @@ pub struct TaskImageCache {
 pub type StreamFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 pub type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Usage {
     pub input: Option<u64>,
     pub output: Option<u64>,

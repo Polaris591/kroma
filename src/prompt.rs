@@ -9,6 +9,9 @@ pub const EXECUTION_GUIDANCE: &str = "\nFor coding tasks, focus inspections on r
 /// hooks, mutable global state, dynamic templates or plugin runtime.
 pub struct PromptComposer {
     system_override: Option<String>,
+    /// Embedding hosts may intentionally persist a custom system identity;
+    /// plugin replacements remain request-only and never set this field.
+    initial_system_override: Option<String>,
     additions: Vec<String>,
     instruction_files: Vec<String>,
     trailing: Vec<String>,
@@ -19,6 +22,7 @@ impl Default for PromptComposer {
     fn default() -> Self {
         Self {
             system_override: None,
+            initial_system_override: None,
             additions: vec![EXECUTION_GUIDANCE.to_owned()],
             instruction_files: Vec::new(),
             trailing: Vec::new(),
@@ -121,7 +125,9 @@ impl PromptComposer {
     /// Replace the base system instruction when an embedding application
     /// explicitly chooses to do so. The default text remains byte-identical.
     pub fn with_system_prompt(mut self, system: impl Into<String>) -> Result<Self> {
-        self.replace_system_prompt(system)?;
+        let system = system.into();
+        self.replace_system_prompt(system.clone())?;
+        self.initial_system_override = Some(system);
         Ok(self)
     }
 
@@ -164,7 +170,9 @@ impl PromptComposer {
     }
 
     pub fn initial_history(&self, workdir: &Path) -> Vec<Message> {
-        if let Some(system) = &self.system_override {
+        // Host-created agents retain their explicitly chosen system identity;
+        // plugin replacements are intentionally absent from persisted history.
+        if let Some(system) = &self.initial_system_override {
             return vec![Message::new("system", system)];
         }
         let tool_description = if self.custom_tools {

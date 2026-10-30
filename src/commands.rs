@@ -3,7 +3,7 @@
 //! is intentionally handled separately; no nested agent task is started.
 use crate::{agent::Agent, skills::Skill, steering::TaskInput};
 use anyhow::{bail, Result};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, future::Future, path::PathBuf, pin::Pin};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandAction {
@@ -33,7 +33,14 @@ impl CommandReply {
     }
 }
 
-type Handler = Box<dyn Fn(&mut Agent, &TaskInput, &str) -> Result<CommandReply> + Send + Sync>;
+type SyncHandler = Box<dyn Fn(&mut Agent, &TaskInput, &str) -> Result<CommandReply> + Send + Sync>;
+type ExternalFuture = Pin<Box<dyn Future<Output = Result<CommandReply>> + Send>>;
+type ExternalHandler = Box<dyn Fn(String, PathBuf) -> ExternalFuture + Send + Sync>;
+
+enum Handler {
+    Sync(SyncHandler),
+    External(ExternalHandler),
+}
 
 #[derive(Default)]
 pub struct CommandRegistry {
@@ -56,8 +63,47 @@ impl CommandRegistry {
         if self.commands.contains_key(name) {
             bail!("duplicate command '{name}'");
         }
-        self.commands.insert(name.into(), Box::new(handler));
+        self.commands
+            .insert(name.into(), Handler::Sync(Box::new(handler)));
         Ok(())
+    }
+
+    /// External commands are asynchronous so a stalled plugin cannot freeze
+    /// the terminal UI. The callback receives only owned arguments/workdir.
+    pub fn register_async<F, Fut>(&mut self, name: &str, handler: F) -> Result<()>
+    where
+        F: Fn(String, PathBuf) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<CommandReply>> + Send + 'static,
+    {
+        if !name.starts_with('/') || name.len() < 2 || name.chars().any(char::is_whitespace) {
+            bail!("command must start with / and contain no spaces");
+        }
+        if self.commands.contains_key(name) {
+            bail!("duplicate command '{name}'");
+        }
+        self.commands.insert(
+            name.into(),
+            Handler::External(Box::new(move |args, path| Box::pin(handler(args, path)))),
+        );
+        Ok(())
+    }
+
+    pub async fn execute_async(
+        &self,
+        line: &str,
+        agent: &mut Agent,
+        input: &TaskInput,
+    ) -> Result<Option<CommandReply>> {
+        let (name, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        match self.commands.get(name) {
+            Some(Handler::Sync(handler)) => handler(agent, input, rest.trim()).map(Some),
+            Some(Handler::External(handler)) => {
+                handler(rest.trim().into(), agent.workdir().to_path_buf())
+                    .await
+                    .map(Some)
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn execute(
@@ -67,10 +113,11 @@ impl CommandRegistry {
         input: &TaskInput,
     ) -> Result<Option<CommandReply>> {
         let (name, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
-        self.commands
-            .get(name)
-            .map(|handler| handler(agent, input, rest.trim()))
-            .transpose()
+        match self.commands.get(name) {
+            Some(Handler::Sync(handler)) => handler(agent, input, rest.trim()).map(Some),
+            Some(Handler::External(_)) => bail!("external command '{name}' requires execute_async"),
+            None => Ok(None),
+        }
     }
 
     pub fn builtin(skills: Vec<Skill>) -> Result<Self> {

@@ -1,0 +1,12 @@
+id = "model-process"
+name = "Process Model Example"
+version = "0.1.0"
+description = "Example of a model provider implemented outside Rust"
+command = "node"
+args = ["main.js"]
+
+[model]
+model = "process-demo"
+protocol = "plugin"
+context_window = 32768
+output_reserve = 2048

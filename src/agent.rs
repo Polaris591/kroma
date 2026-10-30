@@ -1051,11 +1051,19 @@ impl Agent {
                         tool_started.elapsed().as_secs_f64() * 1_000.0
                     );
                 }
-                self.messages.push(Message::tool_with_status(
-                    call.id.clone(),
-                    result.content,
-                    result.is_error,
-                ));
+                let mut message =
+                    Message::tool_with_status(call.id.clone(), result.content, result.is_error);
+                if let Some(arguments) = result.executed_arguments {
+                    message
+                        .provider_items
+                        .get_or_insert_with(Vec::new)
+                        .push(serde_json::json!({
+                            "type": "kroma_tool_execution",
+                            "name": call.function.name,
+                            "arguments": arguments,
+                        }));
+                }
+                self.messages.push(message);
                 let journal_started = Instant::now();
                 self.session
                     .append(&self.messages, &self.compression.state())?;

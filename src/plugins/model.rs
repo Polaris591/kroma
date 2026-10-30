@@ -2,12 +2,141 @@
 use super::PluginWorker;
 use crate::{
     context::ContextConfig,
-    model::{Completion, ModelBackend, ModelFuture, StreamFuture, TaskImageCache, TextResult},
+    model::{
+        Completion, ModelBackend, ModelFuture, StreamFuture, TaskImageCache, TextResult, Usage,
+    },
     protocol::Message,
 };
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
+
+/// A process-backed model can speak any upstream wire protocol. JSONL V1
+/// returns a final response (not streaming deltas); model provider code and
+/// credentials remain entirely inside the external plugin executable.
+pub(super) struct ProcessModelBackend {
+    worker: Arc<PluginWorker>,
+    model_name: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ProcessCompletion {
+    message: Message,
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+#[derive(Deserialize)]
+struct ProcessGeneration {
+    text: String,
+    #[serde(default)]
+    usage: Option<Usage>,
+    #[serde(default = "single_request")]
+    requests: usize,
+}
+fn single_request() -> usize {
+    1
+}
+
+impl ProcessModelBackend {
+    pub(super) fn new(worker: Arc<PluginWorker>, model_name: String) -> Self {
+        Self { worker, model_name }
+    }
+}
+
+impl ModelBackend for ProcessModelBackend {
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let reply = self
+                .worker
+                .invoke_async(json!({
+                    "type":"model_complete", "name":"model_complete",
+                    "arguments":{"model":self.model_name,"messages":messages,"tools":tools}
+                }))
+                .await?;
+            if reply.is_error {
+                bail!("external model failed: {}", reply.content);
+            }
+            let value: ProcessCompletion = serde_json::from_str(&reply.content)
+                .context("model_complete must return {message,usage?}")?;
+            if value.message.role != "assistant" {
+                bail!("model_complete must return an assistant message");
+            }
+            if let Some(content) = value.message.content.as_deref() {
+                on_text(content);
+            }
+            let elapsed = started.elapsed();
+            Ok(Completion {
+                message: value.message,
+                usage: value.usage,
+                elapsed,
+                first_token: Some(elapsed),
+            })
+        })
+    }
+
+    fn complete_with_reasoning<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        Box::pin(async move {
+            let result = self.complete(messages, tools, on_text).await?;
+            if let Some(reasoning) = result.message.reasoning_content.as_deref() {
+                on_reasoning(reasoning);
+            }
+            Ok(result)
+        })
+    }
+
+    fn generate_text<'a>(
+        &'a self,
+        system: &'a str,
+        text: &'a str,
+        output_tokens: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let reply = self
+                .worker
+                .invoke_async(json!({
+                    "type":"model_generate", "name":"model_generate",
+                    "arguments":{"model":self.model_name,"system":system,
+                        "prompt":text,"output_tokens":output_tokens}
+                }))
+                .await?;
+            if reply.is_error {
+                bail!("external text generation failed: {}", reply.content);
+            }
+            let result: ProcessGeneration = serde_json::from_str(&reply.content)
+                .context("model_generate must return {text,usage?,requests?}")?;
+            Ok(TextResult {
+                text: result.text,
+                usage: result.usage,
+                elapsed: started.elapsed(),
+                requests: result.requests,
+            })
+        })
+    }
+
+    fn generate_short_text<'a>(
+        &'a self,
+        system: &'a str,
+        text: &'a str,
+        output_tokens: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        self.generate_text(system, text, output_tokens)
+    }
+}
 
 pub(super) struct PluginModelHooks {
     inner: Arc<dyn ModelBackend>,

@@ -26,13 +26,24 @@ impl Config {
         let requested = env::var("KROMA_PROVIDER_PROFILE").ok();
         let env_model = env::var("KROMA_MODEL").ok();
         let env_url = env::var("KROMA_BASE_URL").ok();
+        let plugin_identity = if env_model.is_none() && requested.is_none() {
+            crate::plugins::PluginCatalog::discover(&Self::workdir_from_env()?)?
+                .enabled_model_identity()
+                .map(|(model, url)| (model.to_owned(), url.to_owned()))
+        } else {
+            None
+        };
         // A complete environment-only setup must not depend on an unrelated
         // saved profile. In particular, an old config with bad JSON or file
         // permissions must not prevent an explicitly configured agent.
         // Explicit profile selection still validates the saved profile.
         let saved = if needs_saved_profiles(
-            env_model.as_deref(),
-            env_url.as_deref(),
+            env_model
+                .as_deref()
+                .or(plugin_identity.as_ref().map(|(model, _)| model.as_str())),
+            env_url
+                .as_deref()
+                .or(plugin_identity.as_ref().map(|(_, url)| url.as_str())),
             requested.as_deref(),
         ) {
             Some(Profiles::load()?)
@@ -61,7 +72,13 @@ impl Config {
         } else {
             selected.map(|(name, _)| name.to_owned())
         };
-        Self::resolve(profile, selected_profile, Self::workdir_from_env()?, true)
+        Self::resolve(
+            profile,
+            selected_profile,
+            Self::workdir_from_env()?,
+            true,
+            plugin_identity,
+        )
     }
 
     /// Explicit model selection changes connection identity, but retains
@@ -71,7 +88,7 @@ impl Config {
         workdir: PathBuf,
         name: Option<String>,
     ) -> Result<Self> {
-        Self::resolve(Some(profile), name, workdir, false)
+        Self::resolve(Some(profile), name, workdir, false, None)
     }
 
     fn workdir_from_env() -> Result<PathBuf> {
@@ -92,6 +109,7 @@ impl Config {
         selected_profile: Option<String>,
         workdir: PathBuf,
         connection_overrides: bool,
+        plugin_identity: Option<(String, String)>,
     ) -> Result<Self> {
         let connection_env = |key| {
             if connection_overrides {
@@ -102,13 +120,22 @@ impl Config {
         };
         let model = connection_env("KROMA_MODEL")
             .or_else(|| profile.map(|p| p.model.clone()))
-            .context("KROMA_MODEL is required or save a profile using 'kroma config set <name>'")?;
+            .or_else(|| plugin_identity.as_ref().map(|(name, _)| name.clone()))
+            .context("KROMA_MODEL, an enabled model plugin or a saved profile is required")?;
         if model.trim().is_empty() {
             bail!("KROMA_MODEL cannot be empty");
         }
         let base_url = profiles::normalize_endpoint(
             &connection_env("KROMA_BASE_URL")
                 .or_else(|| profile.map(|p| p.base_url.clone()))
+                // A process-protocol model has no HTTP endpoint. This URL is
+                // an unused Config fallback; model_override supplies the
+                // actual external backend before any HTTP client is started.
+                .or_else(|| {
+                    plugin_identity
+                        .as_ref()
+                        .and_then(|(_, url)| (!url.trim().is_empty()).then(|| url.clone()))
+                })
                 .unwrap_or_else(|| "https://api.openai.com/v1".into()),
         )?;
         let api_key = connection_env("KROMA_API_KEY")
@@ -172,7 +199,25 @@ fn needs_saved_profiles(
 
 #[cfg(test)]
 mod tests {
-    use super::needs_saved_profiles;
+    use super::{needs_saved_profiles, Config};
+
+    #[test]
+    fn standalone_process_model_needs_no_http_endpoint_or_saved_profile() {
+        let config = Config::resolve(
+            None,
+            None,
+            std::env::current_dir().unwrap(),
+            false,
+            Some(("external-process".into(), "".into())),
+        )
+        .unwrap();
+        assert_eq!(config.model, "external-process");
+        assert!(
+            !config.base_url.is_empty(),
+            "internal Config keeps a normalized fallback"
+        );
+        assert!(config.api_key.is_none());
+    }
 
     #[test]
     fn complete_env_is_independent_from_saved_profiles() {

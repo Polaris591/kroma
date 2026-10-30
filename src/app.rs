@@ -48,13 +48,22 @@ pub struct DefaultRuntime {
     pub plugins: PluginCatalog,
     pub startup_warnings: Vec<String>,
     pub plugin_warnings: Vec<String>,
+    pub selected_model_name: Option<String>,
 }
 
 pub async fn default_runtime_with(
     config: Config,
     customize: impl FnOnce(&mut RuntimeComponents) -> Result<()>,
 ) -> Result<DefaultRuntime> {
-    let (model, budget) = configured_model(&config).await?;
+    let plugins = PluginCatalog::discover(&config.workdir)?;
+    let (override_model, mut plugin_warnings) = plugins.model_override();
+    let (model, budget, selected_model_name) = if let Some((backend, budget, name)) = override_model
+    {
+        (backend, budget, Some(name))
+    } else {
+        let (model, budget) = configured_model(&config).await?;
+        (Arc::new(model) as Arc<dyn ModelBackend>, budget, None)
+    };
     let skills = SkillCatalog::discover(&config.workdir)?;
     let mut tools = ToolRegistry::builtin();
     if !skills.is_empty() {
@@ -69,7 +78,7 @@ pub async fn default_runtime_with(
         prompt = prompt.with_trailing(metadata)?;
     }
     let mut components = RuntimeComponents {
-        model: Arc::new(model),
+        model,
         context_budget: budget,
         tools,
         context_factory: Arc::new(BuiltinContextFactory),
@@ -77,12 +86,9 @@ pub async fn default_runtime_with(
         events: None,
         defer_initial_session: false,
     };
-    let plugins = PluginCatalog::discover(&config.workdir)?;
-    let mut plugin_warnings = plugins.warnings.clone();
+    plugin_warnings.splice(0..0, plugins.warnings.clone());
     plugin_warnings.extend(plugins.contribute(&mut components.tools, &mut components.prompt));
     plugin_warnings.extend(plugins.replace_context(&mut components.context_factory));
-    plugin_warnings
-        .extend(plugins.replace_model(&mut components.model, &mut components.context_budget));
     customize(&mut components)?;
     components.model = plugins.model_hooks(components.model, components.context_budget);
     components.events = plugins.wrap_events(components.events)?;
@@ -102,6 +108,7 @@ pub async fn default_runtime_with(
         plugins,
         startup_warnings: mcp_status.unavailable,
         plugin_warnings,
+        selected_model_name,
     })
 }
 

@@ -53,6 +53,7 @@ pub(super) fn schedule(
         // Count title generation as a separate API expense: it must never
         // become the "last coding request" or change Ctx/cache in the footer.
         let _ = sender.send(UiEvent::TitleUsage {
+            session_id: id.clone(),
             requests,
             input: usage.as_ref().and_then(|u| u.input),
             output: usage.as_ref().and_then(|u| u.output),

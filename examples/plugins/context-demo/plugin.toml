@@ -6,4 +6,4 @@ command = "node"
 args = ["main.js"]
 
 [context]
-version = 1
+version = 2

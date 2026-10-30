@@ -164,7 +164,8 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
         let mut agent = Agent::with_backends(client, ToolRegistry::builtin(), workspace.clone())?;
         let input = agent.task_input();
         let output = commands
-            .execute("/echo third", &mut agent, &input)?
+            .execute_async("/echo third", &mut agent, &input)
+            .await?
             .expect("plugin command registered")
             .output;
         assert_eq!(
@@ -365,6 +366,8 @@ async fn external_context_policy_roundtrip_and_rewind_branch() -> Result<()> {
         "mock".into(),
     )?);
     let commits = StateRecorder::default();
+    policy.new_user_turn();
+    policy.mark_consumed(history.len());
     let projected = policy.prepare(&history, &model, &commits, 0).await?;
     assert_eq!(projected.len(), history.len());
     assert_eq!(commits.0.lock().unwrap().len(), 1);
@@ -373,6 +376,26 @@ async fn external_context_policy_roundtrip_and_rewind_branch() -> Result<()> {
         panic!("missing external state")
     };
     assert_eq!(saved_state.data["revision"], 1);
+    assert_eq!(
+        saved_state.data["received"],
+        serde_json::json!(["context_new_turn", "context_mark_consumed"])
+    );
+    policy.observe_with_bytes(&projected, 512, Some(100), Some(80));
+    assert!(!policy.recover_overflow(&history, &model, &commits).await?);
+    policy.finish_task(&history, &commits).await?;
+    let PersistedContext::External(finished) = policy.state() else {
+        panic!("external state missing")
+    };
+    assert_eq!(
+        finished.data["finished"],
+        serde_json::json!(["context_observe"])
+    );
+    assert_eq!(policy.take_usage().requests, 0);
+    assert_eq!(
+        commits.0.lock().unwrap().len(),
+        2,
+        "full-lifecycle context plugin must commit its final state"
+    );
     let _reopened = factory.restore(saved.clone(), budget, temp.path())?;
     let branched =
         factory.branch_state(&saved, &history, &history[..2], temp.path(), temp.path())?;
@@ -391,6 +414,56 @@ async fn external_context_policy_roundtrip_and_rewind_branch() -> Result<()> {
             temp.path()
         )
         .is_err());
+    Ok(())
+}
+
+struct RejectContextCommit;
+impl ContextCommit for RejectContextCommit {
+    fn commit(&self, _state: &PersistedContext) -> Result<()> {
+        anyhow::bail!("simulated persistence failure")
+    }
+}
+
+#[tokio::test]
+async fn context_policy_does_not_advance_state_when_commit_fails() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/context-demo");
+    PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path())?.install(&source)?;
+    PluginCatalog::discover_at(directory.clone(), state.clone(), temp.path())?
+        .set_enabled("context-demo", true)?;
+    let catalog = PluginCatalog::discover_at(directory, state, temp.path())?;
+    let mut factory: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(catalog.replace_context(&mut factory).is_empty());
+    let mut policy = factory.restore(
+        factory.initial(),
+        ContextConfig::with_output_reserve(64000, 4096)?,
+        temp.path(),
+    )?;
+    let messages = vec![
+        Message::new("system", "system"),
+        Message::new("user", "hello"),
+    ];
+    let model: Arc<dyn ModelBackend> = Arc::new(ModelClient::new(
+        "http://127.0.0.1:9/v1",
+        None,
+        "mock".into(),
+    )?);
+    let original = serde_json::to_value(policy.state())?;
+    let error = policy
+        .prepare(&messages, &model, &RejectContextCommit, 0)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("simulated persistence failure"));
+    assert_eq!(
+        serde_json::to_value(policy.state())?,
+        original,
+        "in-memory compaction state cannot outrun the durable journal"
+    );
     Ok(())
 }
 
@@ -429,6 +502,102 @@ impl ModelBackend for CaptureModel {
             })
         })
     }
+}
+
+#[tokio::test]
+async fn process_model_backend_supports_non_http_protocol_and_correlated_jsonl() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/model-process");
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?.install(&source)?;
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?
+        .set_enabled("model-process", true)?;
+    let enabled = PluginCatalog::discover_at(user, state, temp.path())?;
+    let (resolved, warnings) = enabled.model_override();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (backend, budget, name) = resolved.expect("process model must override");
+    assert_eq!(name, "process-demo");
+    assert_eq!(budget.window(), 32768);
+    let history = [
+        Message::new("system", "system"),
+        Message::new("user", "hello"),
+    ];
+    let mut text = String::new();
+    let reply = backend
+        .complete(&history, &[], &mut |delta| text.push_str(delta))
+        .await?;
+    assert_eq!(text, "Model process replied");
+    assert_eq!(
+        reply.message.content.as_deref(),
+        Some("Model process replied")
+    );
+    assert_eq!(
+        reply.usage.as_ref().and_then(|usage| usage.cached),
+        Some(30)
+    );
+    let summary = backend
+        .generate_short_text("system", "summary", 128)
+        .await?;
+    assert_eq!(summary.text, "Summary");
+    assert_eq!(summary.usage.and_then(|usage| usage.output), Some(2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_jsonl_rejects_incorrect_response_correlation() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("wrong-id");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("plugin.toml"),
+        "id='wrong-id'\nname='Wrong ID'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='wrong_id'\ndescription='test id'\n")?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+ const request=JSON.parse(line);
+ process.stdout.write(JSON.stringify({request_id:request.request_id+1,protocol_version:1,content:"wrong"})+"\n");
+});"#,
+    )?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?
+        .set_enabled("wrong-id", true)?;
+    let enabled = PluginCatalog::discover_at(user, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    assert!(enabled
+        .contribute(&mut tools, &mut PromptComposer::default())
+        .is_empty());
+    let call = ToolCall {
+        id: "call".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "wrong_id".into(),
+            arguments: "{}".into(),
+        },
+    };
+    let result = tools
+        .execute(
+            &call,
+            ToolContext {
+                workdir: temp.path(),
+                archive: temp.path(),
+                on_output: None,
+            },
+        )
+        .await;
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("request_id mismatch"),
+        "{}",
+        result.content
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -551,10 +720,24 @@ async fn web_tools_roundtrip_through_kroma_to_local_http_server() -> Result<()> 
                     Err(error) => return Err(error.into()),
                 }
             };
-            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(Duration::from_secs(3)))?;
             let mut bytes = [0u8; 4096];
-            let n = stream.read(&mut bytes)?;
-            let request = String::from_utf8_lossy(&bytes[..n]);
+            let mut request_bytes = Vec::new();
+            loop {
+                let n = stream.read(&mut bytes)?;
+                if n == 0 {
+                    anyhow::bail!("mock client closed before request headers");
+                }
+                request_bytes.extend_from_slice(&bytes[..n]);
+                if request_bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+                if request_bytes.len() > 32 * 1024 {
+                    anyhow::bail!("mock request headers too large");
+                }
+            }
+            let request = String::from_utf8_lossy(&request_bytes);
             let (type_, body) = if request.starts_with("GET /search") {
                 (
                     "application/json",
@@ -568,6 +751,9 @@ async fn web_tools_roundtrip_through_kroma_to_local_http_server() -> Result<()> 
             };
             let response=format!("HTTP/1.1 200 OK\r\nContent-Type: {type_}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
             stream.write_all(response.as_bytes())?;
+            stream.flush()?;
+            // Give Windows TCP time to deliver the last response bytes.
+            std::thread::sleep(Duration::from_millis(25));
         }
         Ok(())
     });

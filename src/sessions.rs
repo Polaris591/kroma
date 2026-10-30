@@ -1,6 +1,6 @@
 //! Minimal session selection. Each conversation keeps its own snapshot, WAL,
 //! lock, compression state and shell capture references; no session database.
-use crate::session::SessionStore;
+use crate::{session::SessionStore, usage::UsageMeter};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,6 +24,18 @@ pub struct SessionModel {
     pub profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+}
+
+/// UI-only usage ledger. Never enters provider messages or Agent context.
+/// Older sessions without this sidecar legitimately have unavailable metrics.
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionUsage {
+    pub coding: UsageMeter,
+    pub title: UsageMeter,
+    pub apec: UsageMeter,
+    pub context_input: Option<u64>,
+    pub context_estimated: bool,
 }
 
 pub struct SessionEntry {
@@ -54,6 +66,52 @@ impl SessionCatalog {
             }
         }
         Ok(self.list()?.into_iter().next().map(|entry| entry.id))
+    }
+
+    fn usage_path(&self) -> PathBuf {
+        self.default.with_extension("usage.json")
+    }
+
+    fn usage_map(&self) -> Result<std::collections::BTreeMap<String, SessionUsage>> {
+        match fs::read(self.usage_path()) {
+            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid session usage ledger"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn usage(&self, id: &str) -> Result<SessionUsage> {
+        self.resolve(id)?;
+        Ok(self.usage_map()?.remove(id).unwrap_or_default())
+    }
+
+    pub fn set_usage(&self, id: &str, usage: SessionUsage) -> Result<()> {
+        self.resolve(id)?;
+        crate::catalog_file::update(&self.default, &self.usage_path(), || {
+            let mut entries = self.usage_map()?;
+            entries.insert(id.to_owned(), usage);
+            Ok(entries)
+        })
+    }
+
+    /// Title requests may complete after the user switches sessions. Record
+    /// their usage under the originating session without changing UI totals.
+    pub fn add_title_usage(
+        &self,
+        id: &str,
+        requests: usize,
+        usage: crate::model::Usage,
+    ) -> Result<()> {
+        self.resolve(id)?;
+        crate::catalog_file::update(&self.default, &self.usage_path(), || {
+            let mut entries = self.usage_map()?;
+            entries
+                .entry(id.to_owned())
+                .or_default()
+                .title
+                .record_batch(requests, Some(&usage));
+            Ok(entries)
+        })
     }
 
     fn models_path(&self) -> PathBuf {

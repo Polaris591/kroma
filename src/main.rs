@@ -146,8 +146,8 @@ async fn main() -> Result<()> {
         return kroma::tui::run(config).await;
     }
     let runtime = app::default_runtime(config).await?;
-    if let Some(name) = runtime.plugins.selected_model_name() {
-        model_name = name.to_owned();
+    if let Some(name) = &runtime.selected_model_name {
+        model_name = name.clone();
     }
     let mut commands =
         CommandRegistry::builtin_with_warnings(runtime.skills.list(), runtime.startup_warnings)?;
@@ -255,7 +255,19 @@ async fn main() -> Result<()> {
             }
             continue;
         }
-        match commands.execute(input, &mut agent, &input_handle) {
+        let command_result = {
+            let command_future = commands.execute_async(input, &mut agent, &input_handle);
+            tokio::pin!(command_future);
+            tokio::select! {
+                result = &mut command_future => result,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    eprintln!("[plugin] Command cancelled");
+                    continue;
+                }
+            }
+        };
+        match command_result {
             Ok(Some(reply)) => {
                 if !reply.output.is_empty() {
                     println!("{}", reply.output);

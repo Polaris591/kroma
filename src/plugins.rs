@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
         Arc, Mutex,
     },
@@ -73,9 +73,12 @@ pub struct PluginUiSpec {
     pub panel_text: String,
 }
 
+pub type ModelOverride = (Arc<dyn ModelBackend>, ContextConfig, String);
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PluginModelSpec {
     pub model: String,
+    #[serde(default)]
     pub base_url: String,
     #[serde(default = "default_protocol")]
     pub protocol: String,
@@ -157,7 +160,11 @@ impl PluginManifest {
             || !self.commands.is_empty()
             || !self.events.is_empty()
             || !self.hooks.is_empty()
-            || self.context.is_some())
+            || self.context.is_some()
+            || self
+                .model
+                .as_ref()
+                .is_some_and(|model| model.protocol == "plugin"))
             && self
                 .command
                 .as_deref()
@@ -199,7 +206,9 @@ impl PluginManifest {
         }
         if let Some(model) = &self.model {
             ContextConfig::with_output_reserve(model.context_window, model.output_reserve)?;
-            if model.model.trim().is_empty() || model.base_url.trim().is_empty() {
+            if model.model.trim().is_empty()
+                || (model.protocol != "plugin" && model.base_url.trim().is_empty())
+            {
                 bail!("plugin '{}' has invalid model configuration", self.id);
             }
         }
@@ -263,7 +272,11 @@ struct PluginState {
     #[serde(default)]
     enabled: BTreeSet<String>,
     #[serde(default)]
+    enabled_projects: BTreeSet<String>,
+    #[serde(default)]
     settings: BTreeMap<String, BTreeMap<String, toml::Value>>,
+    #[serde(default)]
+    project_settings: BTreeMap<String, BTreeMap<String, toml::Value>>,
 }
 
 impl PluginState {
@@ -305,6 +318,7 @@ impl PluginState {
 pub struct PluginCatalog {
     directory: PathBuf,
     state_path: PathBuf,
+    workdir: PathBuf,
     plugins: Vec<Plugin>,
     pub warnings: Vec<String>,
 }
@@ -313,7 +327,27 @@ pub struct PluginCatalog {
 struct Plugin {
     manifest: PluginManifest,
     enabled: bool,
+    /// None for user-global plugins; project plugins have a full path key.
+    project_key: Option<String>,
     worker: Arc<PluginWorker>,
+}
+
+impl Plugin {
+    fn is_enabled(&self, state: &PluginState) -> bool {
+        match &self.project_key {
+            Some(key) => state.enabled_projects.contains(key),
+            None => state.enabled.contains(&self.manifest.id),
+        }
+    }
+    fn config_overrides<'a>(
+        &self,
+        state: &'a PluginState,
+    ) -> Option<&'a BTreeMap<String, toml::Value>> {
+        match &self.project_key {
+            Some(key) => state.project_settings.get(key),
+            None => state.settings.get(&self.manifest.id),
+        }
+    }
 }
 
 impl PluginCatalog {
@@ -380,14 +414,27 @@ impl PluginCatalog {
                             ));
                             continue;
                         }
-                        let enabled = state.enabled.contains(&manifest.id);
+                        let project_key = if source == &directory {
+                            None
+                        } else {
+                            Some(format!(
+                                "{}::{}",
+                                source.canonicalize()?.display(),
+                                manifest.id
+                            ))
+                        };
+                        let enabled = match &project_key {
+                            Some(key) => state.enabled_projects.contains(key),
+                            None => state.enabled.contains(&manifest.id),
+                        };
                         let mut settings = manifest.settings.clone();
                         settings.extend(
-                            state
-                                .settings
-                                .get(&manifest.id)
-                                .cloned()
-                                .unwrap_or_default(),
+                            match &project_key {
+                                Some(key) => state.project_settings.get(key),
+                                None => state.settings.get(&manifest.id),
+                            }
+                            .cloned()
+                            .unwrap_or_default(),
                         );
                         let worker = Arc::new(PluginWorker::new(
                             &dir,
@@ -398,6 +445,7 @@ impl PluginCatalog {
                         plugins.push(Plugin {
                             manifest,
                             enabled,
+                            project_key,
                             worker,
                         });
                     }
@@ -408,20 +456,43 @@ impl PluginCatalog {
         Ok(Self {
             directory,
             state_path,
+            workdir: workdir.to_path_buf(),
             plugins,
             warnings,
         })
     }
 
+    fn refresh(&self) -> Result<Self> {
+        Self::discover_at(
+            self.directory.clone(),
+            self.state_path.clone(),
+            &self.workdir,
+        )
+    }
+
     pub fn list(&self) -> Result<String> {
+        let mut fresh = self.refresh()?;
+        // Describe current disk state while comparing it with the frozen
+        // runtime registry, so `restart to apply` remains accurate.
+        for plugin in &mut fresh.plugins {
+            plugin.enabled = self
+                .plugins
+                .iter()
+                .find(|old| {
+                    old.manifest.id == plugin.manifest.id && old.project_key == plugin.project_key
+                })
+                .is_some_and(|old| old.enabled);
+        }
+        fresh.list_loaded()
+    }
+
+    fn list_loaded(&self) -> Result<String> {
         // Listing must still work when an edited settings file is invalid;
         // the discovery warning explains why nothing was activated.
-        let enabled = PluginState::load(&self.state_path)
-            .unwrap_or_default()
-            .enabled;
+        let state = PluginState::load(&self.state_path).unwrap_or_default();
         let mut lines = Vec::new();
         for plugin in &self.plugins {
-            let active = enabled.contains(&plugin.manifest.id);
+            let active = plugin.is_enabled(&state);
             let restart = if active != plugin.enabled {
                 " (restart to apply)"
             } else {
@@ -454,14 +525,22 @@ impl PluginCatalog {
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<String> {
-        if !self.plugins.iter().any(|plugin| plugin.manifest.id == id) {
-            bail!("unknown plugin '{id}'");
-        }
+        let fresh = self.refresh()?;
+        let plugin = fresh
+            .plugins
+            .iter()
+            .find(|plugin| plugin.manifest.id == id)
+            .ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         let mut state = PluginState::load(&self.state_path)?;
+        let enabled_set = match &plugin.project_key {
+            Some(_) => &mut state.enabled_projects,
+            None => &mut state.enabled,
+        };
+        let key = plugin.project_key.as_deref().unwrap_or(id);
         if enabled {
-            state.enabled.insert(id.to_owned());
+            enabled_set.insert(key.to_owned());
         } else {
-            state.enabled.remove(id);
+            enabled_set.remove(key);
         }
         state.save(&self.state_path)?;
         Ok(format!(
@@ -471,14 +550,22 @@ impl PluginCatalog {
     }
 
     pub fn set_config(&self, id: &str, key: &str, value: Option<&str>) -> Result<String> {
-        if !self.plugins.iter().any(|plugin| plugin.manifest.id == id) {
-            bail!("unknown plugin '{id}'");
-        }
+        let fresh = self.refresh()?;
+        let plugin = fresh
+            .plugins
+            .iter()
+            .find(|plugin| plugin.manifest.id == id)
+            .ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         if !valid_id(key) {
             bail!("config key must be an ASCII identifier");
         }
         let mut state = PluginState::load(&self.state_path)?;
-        let entry = state.settings.entry(id.to_owned()).or_default();
+        let settings = match &plugin.project_key {
+            Some(_) => &mut state.project_settings,
+            None => &mut state.settings,
+        };
+        let owner = plugin.project_key.as_deref().unwrap_or(id);
+        let entry = settings.entry(owner.to_owned()).or_default();
         match value {
             Some(value) => {
                 entry.insert(key.to_owned(), toml::Value::String(value.to_owned()));
@@ -488,7 +575,7 @@ impl PluginCatalog {
             }
         }
         if entry.is_empty() {
-            state.settings.remove(id);
+            settings.remove(owner);
         }
         state.save(&self.state_path)?;
         Ok(format!(
@@ -497,14 +584,15 @@ impl PluginCatalog {
     }
 
     pub fn show_config(&self, id: &str) -> Result<String> {
-        let plugin = self
+        let fresh = self.refresh()?;
+        let plugin = fresh
             .plugins
             .iter()
             .find(|plugin| plugin.manifest.id == id)
             .ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         let mut config = plugin.manifest.settings.clone();
         let state = PluginState::load(&self.state_path)?;
-        config.extend(state.settings.get(id).cloned().unwrap_or_default());
+        config.extend(plugin.config_overrides(&state).cloned().unwrap_or_default());
         Ok(if config.is_empty() {
             "No settings.".into()
         } else {
@@ -521,6 +609,7 @@ impl PluginCatalog {
         }
         let manifest = PluginManifest::read(&source)?;
         if self
+            .refresh()?
             .plugins
             .iter()
             .any(|plugin| plugin.manifest.id == manifest.id)
@@ -623,7 +712,12 @@ impl PluginCatalog {
                     }
                 }
             }
-            if !plugin.manifest.hooks.is_empty() {
+            if plugin
+                .manifest
+                .hooks
+                .iter()
+                .any(|hook| hook == "before_tool_call" || hook == "after_tool_result")
+            {
                 tools.register_interceptor(Arc::new(PluginToolHooks {
                     before: plugin
                         .manifest
@@ -667,19 +761,18 @@ impl PluginCatalog {
         }
     }
 
-    pub fn replace_model(
-        &self,
-        backend: &mut Arc<dyn ModelBackend>,
-        budget: &mut ContextConfig,
-    ) -> Vec<String> {
+    /// Resolve an enabled model plugin before initializing the default
+    /// provider. This avoids optional /models requests and permits using a
+    /// plugin-provided HTTP profile without redundant default credentials.
+    pub fn model_override(&self) -> (Option<ModelOverride>, Vec<String>) {
         let mut warnings = Vec::new();
-        let mut selected = false;
+        let mut selected = None;
         for plugin in &self.plugins {
             if !plugin.enabled {
                 continue;
             }
             if let Some(spec) = &plugin.manifest.model {
-                if selected {
+                if selected.is_some() {
                     warnings.push(format!("{}: model already replaced", plugin.manifest.id));
                     continue;
                 }
@@ -688,6 +781,15 @@ impl PluginCatalog {
                         spec.context_window,
                         spec.output_reserve,
                     )?;
+                    if spec.protocol == "plugin" {
+                        return Ok((
+                            Arc::new(model::ProcessModelBackend::new(
+                                plugin.worker.clone(),
+                                spec.model.clone(),
+                            )),
+                            window,
+                        ));
+                    }
                     let key = spec
                         .api_key_env
                         .as_ref()
@@ -698,9 +800,7 @@ impl PluginCatalog {
                 })();
                 match prepared {
                     Ok((next, next_budget)) => {
-                        *backend = next;
-                        *budget = next_budget;
-                        selected = true;
+                        selected = Some((next, next_budget, spec.model.clone()));
                     }
                     Err(error) => warnings.push(format!(
                         "{}: model replacement failed: {error:#}",
@@ -708,6 +808,19 @@ impl PluginCatalog {
                     )),
                 }
             }
+        }
+        (selected, warnings)
+    }
+
+    pub fn replace_model(
+        &self,
+        backend: &mut Arc<dyn ModelBackend>,
+        budget: &mut ContextConfig,
+    ) -> Vec<String> {
+        let (selected, warnings) = self.model_override();
+        if let Some((model, context, _name)) = selected {
+            *backend = model;
+            *budget = context;
         }
         warnings
     }
@@ -777,6 +890,14 @@ impl PluginCatalog {
             listeners,
             sender,
         })))
+    }
+
+    pub fn enabled_model_identity(&self) -> Option<(&str, &str)> {
+        self.plugins
+            .iter()
+            .find(|plugin| plugin.enabled && plugin.manifest.model.is_some())
+            .and_then(|plugin| plugin.manifest.model.as_ref())
+            .map(|spec| (spec.model.as_str(), spec.base_url.as_str()))
     }
 
     pub fn selected_model_name(&self) -> Option<&str> {
@@ -872,15 +993,21 @@ impl PluginCatalog {
                 let name = spec.name.clone();
                 let label = format!("{}: {name}", plugin.manifest.id);
                 let command_name = name.clone();
-                if let Err(error) = registry.register(&name, move |agent, _, args| {
-                    let reply = worker.invoke(json!({
-                        "type": "command", "name": command_name, "arguments": args,
-                        "workdir": agent.workdir()
-                    }))?;
-                    if reply.is_error {
-                        bail!("{}", reply.content);
+                if let Err(error) = registry.register_async(&name, move |args, workdir| {
+                    let worker = worker.clone();
+                    let name = command_name.clone();
+                    async move {
+                        let reply = worker
+                            .invoke_async(json!({
+                                "type": "command", "name": name, "arguments": args,
+                                "workdir": workdir
+                            }))
+                            .await?;
+                        if reply.is_error {
+                            bail!("{}", reply.content);
+                        }
+                        Ok(CommandReply::text(reply.content))
                     }
-                    Ok(CommandReply::text(reply.content))
                 }) {
                     warnings.push(format!("{label}: {error:#}"));
                 }
@@ -1185,8 +1312,7 @@ struct PluginWorker {
     settings: Value,
     process: Mutex<Option<PluginProcess>>,
     next_request: AtomicU64,
-    active_request: AtomicU64,
-    active_pid: AtomicU32,
+    active: Mutex<Option<(u64, u32)>>,
 }
 
 impl PluginWorker {
@@ -1199,8 +1325,7 @@ impl PluginWorker {
             settings: self.settings.clone(),
             process: Mutex::new(None),
             next_request: AtomicU64::new(1),
-            active_request: AtomicU64::new(0),
-            active_pid: AtomicU32::new(0),
+            active: Mutex::new(None),
         }
     }
 
@@ -1213,8 +1338,7 @@ impl PluginWorker {
             settings,
             process: Mutex::new(None),
             next_request: AtomicU64::new(1),
-            active_request: AtomicU64::new(0),
-            active_pid: AtomicU32::new(0),
+            active: Mutex::new(None),
         }
     }
 
@@ -1237,10 +1361,13 @@ impl PluginWorker {
     }
 
     fn cancel_request(&self, id: u64) {
-        if self.active_request.load(Ordering::SeqCst) == id {
-            let pid = self.active_pid.load(Ordering::SeqCst);
-            if pid != 0 {
-                terminate_plugin(pid);
+        // Publish the request and its PID under one lock to avoid racing
+        // cancellation against the two individual atomic stores.
+        if let Ok(active) = self.active.lock() {
+            if let Some((request, pid)) = *active {
+                if request == id {
+                    terminate_plugin(pid);
+                }
             }
         }
     }
@@ -1254,7 +1381,14 @@ impl PluginWorker {
         mut message: Value,
         cancellation: Option<(u64, &AtomicBool)>,
     ) -> Result<PluginResponse> {
+        let id = cancellation
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| self.next_request.fetch_add(1, Ordering::Relaxed));
         let request = message.as_object_mut().context("invalid plugin request")?;
+        // Extra envelope fields are ignored by legacy V1 JSONL plugins.
+        // New plugins may echo request_id/version for response correlation.
+        request.insert("protocol_version".into(), json!(1));
+        request.insert("request_id".into(), json!(id));
         request.insert("config".into(), self.settings.clone());
         request
             .entry("workdir".to_owned())
@@ -1271,16 +1405,61 @@ impl PluginWorker {
                 .command
                 .as_deref()
                 .context("plugin has no executable command")?;
-            let mut child = Command::new(command)
+            let mut builder = Command::new(command);
+            builder
                 .args(&self.args)
                 .current_dir(&self.directory)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped());
+            #[cfg(unix)]
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                builder.pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+            let mut child = builder
                 .spawn()
                 .with_context(|| format!("starting plugin command '{command}'"))?;
             let stdin = child.stdin.take().context("plugin stdin unavailable")?;
             let stdout = child.stdout.take().context("plugin stdout unavailable")?;
+            if let Some(stderr) = child.stderr.take() {
+                let plugin_name = self
+                    .directory
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                // Drain stderr so verbose plugins cannot deadlock on a full
+                // pipe. Bound diagnostic volume; stdout remains JSONL only.
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut stderr = stderr;
+                    let mut buffer = [0u8; 2048];
+                    let mut remaining_log_bytes = 64 * 1024;
+                    loop {
+                        match stderr.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                let logged = n.min(remaining_log_bytes);
+                                if logged > 0 {
+                                    crate::runtime_log!(
+                                        "[plugin:{plugin_name}] {}",
+                                        String::from_utf8_lossy(&buffer[..logged]).trim_end()
+                                    );
+                                    remaining_log_bytes -= logged;
+                                }
+                                // Continue draining even after logs are capped.
+                            }
+                        }
+                    }
+                });
+            }
             *process = Some(PluginProcess {
                 child,
                 stdin,
@@ -1291,17 +1470,27 @@ impl PluginWorker {
             *process = None;
             bail!("plugin request cancelled before execution");
         }
-        if let Some((id, _)) = cancellation {
-            self.active_pid
-                .store(process.as_ref().unwrap().child.id(), Ordering::SeqCst);
-            self.active_request.store(id, Ordering::SeqCst);
+        if let Some((id, cancelled)) = cancellation {
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| anyhow!("plugin cancellation lock poisoned"))?;
+            if cancelled.load(Ordering::SeqCst) {
+                *process = None;
+                bail!("plugin request cancelled before execution");
+            }
+            *active = Some((id, process.as_ref().unwrap().child.id()));
         }
         let result = process
             .as_mut()
             .expect("plugin process created")
             .request(message);
-        self.active_request.store(0, Ordering::SeqCst);
-        self.active_pid.store(0, Ordering::SeqCst);
+        if cancellation.is_some() {
+            *self
+                .active
+                .lock()
+                .map_err(|_| anyhow!("plugin cancellation lock poisoned"))? = None;
+        }
         if result.is_err() {
             *process = None;
         }
@@ -1326,20 +1515,18 @@ impl Drop for PluginCallGuard {
 
 fn terminate_plugin(pid: u32) {
     #[cfg(windows)]
-    unsafe {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-        };
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if !handle.is_null() {
-            let _ = TerminateProcess(handle, 1);
-            let _ = CloseHandle(handle);
-        }
+    {
+        // Kill descendants, too (notably subagents launched by a Node worker).
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
     #[cfg(unix)]
     unsafe {
-        let _ = libc::kill(pid as i32, libc::SIGKILL);
+        // Workers have their own process group (see spawn below).
+        let _ = libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
 
@@ -1358,6 +1545,7 @@ struct PluginResponse {
 
 impl PluginProcess {
     fn request(&mut self, request: Value) -> Result<PluginResponse> {
+        let request_id = request.get("request_id").cloned();
         self.stdin
             .write_all(serde_json::to_string(&request)?.as_bytes())?;
         self.stdin.write_all(b"\n")?;
@@ -1383,12 +1571,25 @@ impl PluginProcess {
                 break;
             }
         }
-        serde_json::from_slice(&response).context("invalid plugin JSON-line response")
+        let parsed: Value =
+            serde_json::from_slice(&response).context("invalid plugin JSON-line response")?;
+        if let Some(version) = parsed.get("protocol_version") {
+            if version.as_u64() != Some(1) {
+                bail!("plugin response protocol version mismatch");
+            }
+        }
+        if let Some(received) = parsed.get("request_id") {
+            if Some(received) != request_id.as_ref() {
+                bail!("plugin response request_id mismatch");
+            }
+        }
+        serde_json::from_value(parsed).context("invalid plugin response fields")
     }
 }
 
 impl Drop for PluginProcess {
     fn drop(&mut self) {
+        terminate_plugin(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

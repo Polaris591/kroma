@@ -24,8 +24,9 @@ framework, a second agent loop, or a mandatory plugin dependency.
 - **`!command`** executes a command directly with the built-in Shell
   executor, without a model call. Output is shown locally, not inserted
   into the model transcript.
-- **`/usage`** separates the current process's coding requests, automatic
-  session titles, and finalized APEC summaries, then shows measured combined
+- **`/usage`** separates the current session's coding requests, automatic
+  session titles, and finalized APEC summaries, saved across TUI restarts
+  using a small usage sidecar, then shows measured combined
   totals. Unknown upstream usage stays unknown; cache reads are a subset of
   input tokens. In-flight and failed APEC attempts may not report their cost.
 - **`/diff`** previews the Git diff (truncated for a small TUI).
@@ -43,8 +44,10 @@ framework, a second agent loop, or a mandatory plugin dependency.
   until the first message is sent. Existing histories remain accessible.
 - **Mouse copy:** drag-select visible conversation text **or text in the
   composer**, then right-click to copy. The input also supports
-  **Ctrl+Shift+C / Ctrl+Insert** for selected draft text without changing
-  Ctrl+C's clear/cancel behavior. Selection preserves CJK, emoji, soft wraps,
+  **Ctrl+Shift+C / Ctrl+Insert** for selected draft text. Ctrl+C now copies
+  an active selection first; otherwise it clears the draft, cancels the task,
+  or exits as before. Ctrl+Left/Right navigates by word, while Ctrl+W and
+  Alt+Backspace delete a preceding word. Selection preserves CJK, emoji, soft wraps,
   and readable attachment labels. Transcript selection can extend past the
   top or bottom of the history:
   keep holding the left button at the edge to auto-scroll and continue
