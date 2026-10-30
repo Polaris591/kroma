@@ -12,7 +12,10 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub(super) struct PluginContextFactory {
     id: String,
@@ -43,7 +46,7 @@ impl ContextFactory for PluginContextFactory {
         &self,
         state: PersistedContext,
         budget: ContextConfig,
-        _archive: &Path,
+        archive: &Path,
     ) -> Result<Box<dyn ContextPolicy>> {
         let state = match state {
             // Existing sessions keep their builtin strategy. New sessions
@@ -52,7 +55,7 @@ impl ContextFactory for PluginContextFactory {
                 return BuiltinContextFactory.restore(
                     PersistedContext::Builtin(original),
                     budget,
-                    _archive,
+                    archive,
                 );
             }
             PersistedContext::External(state) => state,
@@ -68,6 +71,7 @@ impl ContextFactory for PluginContextFactory {
         }
         Ok(Box::new(PluginContextPolicy {
             state,
+            archive: archive.to_path_buf(),
             worker: self.worker.clone(),
             budget,
             usage: CompactionUsage::default(),
@@ -93,6 +97,15 @@ impl ContextFactory for PluginContextFactory {
                 destination_archive,
             );
         };
+        if existing.strategy != self.id || existing.version != self.version {
+            bail!(
+                "context plugin '{}' v{} cannot branch '{}' v{}; original session preserved",
+                self.id,
+                self.version,
+                existing.strategy,
+                existing.version
+            );
+        }
         if retained.len() == source.len() {
             return Ok(state.clone());
         }
@@ -101,7 +114,9 @@ impl ContextFactory for PluginContextFactory {
         }
         let response = self.worker.invoke(json!({
             "type":"context_branch", "name":"context_branch",
-            "arguments":{"source":source,"retained":retained,"state":existing.data}
+            "archive":destination_archive,
+            "arguments":{"source":source,"retained":retained,"state":existing.data,
+                "source_archive":source_archive,"destination_archive":destination_archive}
         }))?;
         if response.is_error {
             bail!("context branch failed: {}", response.content);
@@ -111,7 +126,9 @@ impl ContextFactory for PluginContextFactory {
         Ok(PersistedContext::External(ExternalContextState {
             strategy: self.id.clone(),
             version: self.version,
-            data: patch.state.unwrap_or(Value::Null),
+            data: patch
+                .state
+                .context("context_branch must provide state for shortened history")?,
         }))
     }
 }
@@ -120,7 +137,8 @@ impl ContextFactory for PluginContextFactory {
 struct ContextPatch {
     #[serde(default)]
     messages: Option<Vec<Message>>,
-    #[serde(default)]
+    // Missing means unchanged; explicit JSON null resets the plugin state.
+    #[serde(default, deserialize_with = "present_json_value")]
     state: Option<Value>,
     #[serde(default)]
     recovered: Option<bool>,
@@ -138,8 +156,16 @@ struct PluginCompactionUsage {
     cached: Option<u64>,
 }
 
+fn present_json_value<'de, D>(deserializer: D) -> std::result::Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Value::deserialize(deserializer)?))
+}
+
 struct PluginContextPolicy {
     state: ExternalContextState,
+    archive: PathBuf,
     worker: Arc<PluginWorker>,
     budget: ContextConfig,
     usage: CompactionUsage,
@@ -198,6 +224,14 @@ impl ContextPolicy for PluginContextPolicy {
         PersistedContext::External(self.state.clone())
     }
 
+    fn abort(&mut self) {
+        self.pending_lifecycle.clear();
+    }
+
+    fn task_failed(&mut self) {
+        self.pending_lifecycle.clear();
+    }
+
     fn new_user_turn(&mut self) {
         if !self.lifecycle_enabled {
             return;
@@ -249,7 +283,7 @@ impl ContextPolicy for PluginContextPolicy {
             let reply = self
                 .worker
                 .invoke_async(json!({
-                    "type":"context_overflow", "name":"context_overflow",
+                    "type":"context_overflow", "name":"context_overflow", "archive":self.archive,
                     "arguments":{"messages":messages,"state":self.state.data}
                 }))
                 .await?;
@@ -281,7 +315,7 @@ impl ContextPolicy for PluginContextPolicy {
             let reply = self
                 .worker
                 .invoke_async(json!({
-                    "type":"context_finish", "name":"context_finish",
+                    "type":"context_finish", "name":"context_finish", "archive":self.archive,
                     "arguments":{"messages":messages,"state":self.state.data,
                         "lifecycle":self.pending_lifecycle}
                 }))
@@ -306,7 +340,7 @@ impl ContextPolicy for PluginContextPolicy {
         Box::pin(async move {
             let worker = self.worker.clone();
             let snapshot = json!({
-                "type":"context_prepare","name":"context_prepare",
+                "type":"context_prepare","name":"context_prepare", "archive":self.archive,
                 "arguments":{
                     "messages":messages,
                     "state":self.state.data,
@@ -336,5 +370,20 @@ impl ContextPolicy for PluginContextPolicy {
 
     fn take_usage(&mut self) -> CompactionUsage {
         std::mem::take(&mut self.usage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_state_patch_distinguishes_missing_and_explicit_null() {
+        let missing: ContextPatch = serde_json::from_str("{}").unwrap();
+        assert!(missing.state.is_none());
+        let reset: ContextPatch = serde_json::from_str(r#"{"state":null}"#).unwrap();
+        assert_eq!(reset.state, Some(Value::Null));
+        let updated: ContextPatch = serde_json::from_str(r#"{"state":{"count":2}}"#).unwrap();
+        assert_eq!(updated.state, Some(json!({"count":2})));
     }
 }

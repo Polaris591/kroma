@@ -30,6 +30,9 @@ pub use crate::ports::ContextCommit;
 pub trait ContextPolicy: Send {
     fn state(&self) -> PersistedContext;
     fn abort(&mut self) {}
+    /// Discard per-task transient state after an ordinary task failure.
+    /// Unlike abort(), the default does not cancel useful background work.
+    fn task_failed(&mut self) {}
     /// One-shot hosts should not start optional background memory requests
     /// that would be cancelled on process exit. Required hard-limit
     /// compaction is still allowed.

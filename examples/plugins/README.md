@@ -97,6 +97,8 @@ Directories:
 - User: `~/.kroma/plugins/<id>/plugin.toml`
 - Project: `<workdir>/.kroma/plugins/<id>/plugin.toml`
 - Activation and settings: `~/.kroma/plugins.toml`
+- Persistent user-plugin data: `~/.kroma/plugin-data/<id>/`
+- Persistent project-plugin data: `<workdir>/.kroma/plugin-data/<id>/`
 - Override the user directory with `KROMA_PLUGIN_DIR`, which also relocates
   the state file to the parent of the overridden directory.
 
@@ -105,6 +107,7 @@ Commands:
 ```text
 kroma plugins list
 kroma plugins install <local-directory>
+kroma plugins uninstall <id>
 kroma plugins enable <id>
 kroma plugins disable <id>
 kroma plugins config <id>
@@ -131,6 +134,8 @@ directory symlink targets (such as pnpm-managed dependencies) and copies
 contents, without needing symlink creation permissions in the destination.
 Recursive symlink cycles are rejected.
 
+`uninstall` removes installed plugin code and its saved activation/settings, even if its manifest is damaged; it intentionally **preserves user-authored plugin data**. A damaged but previously activated plugin can still be disabled by ID. Project-local plugins are source-managed: remove their directory manually rather than using `uninstall`. Changes to a running Kroma process still require `/plugins reload` or restart; stateful replacements require restart.
+
 User-global plugins and project plugins have separate enabled-state keys.
 Project activation is bound to its canonical plugin directory, so the same
 plugin ID in another project cannot inherit the previous project's enabled
@@ -142,6 +147,7 @@ plugin is immediately discoverable, and safe runtime changes apply with
 
 The basic fields:
 
+- `api_version = 1`: optional manifest/API version (defaults to 1 for existing plugins). An unsupported version is rejected at discovery instead of being executed against the wrong contract. This is distinct from a plugin's own `version` and from `[context] version`.
 - `id` and `name`: required.
 - `description`, `version`: optional.
 - `command` and `args`: executable/arguments required for external tools,
@@ -161,16 +167,36 @@ The basic fields:
   `version = 2` additionally enables `context_new_turn`,
   `context_mark_consumed`, `context_observe`, `context_finish`, and
   `context_overflow` lifecycle requests. The plugin's persisted version
-  is intentionally not interchangeable with version 1.
+  is intentionally not interchangeable with version 1. A context response
+  with no `state` property retains the previous state; explicit `"state": null`
+  durably resets it. When shortening history for a fork/rewind,
+  `context_branch` must supply `state` explicitly. Kroma rejects an
+  incompatible strategy/version rather than silently discarding memory.
 - `[model]`: `model`, `base_url`, `protocol`, `api_key_env`,
   `context_window`, `output_reserve`, optional `streaming = true`,
-  `thinking_levels = ["low", "medium", "high"]` and
-  `reasoning_level = "medium"`.
+  `thinking_levels = ["low", "medium", "high"]`,
+  `reasoning_level = "medium"`, and optional `image_input = true/false`
+  for a process-model adapter. An omitted `image_input` means unknown.
+  Process providers receive image attachment references in `messages[].provider_items`
+  (including `path`, `mime`, and inline/reference `mode`); they read those
+  local files themselves. The plugin wire protocol does not automatically
+  transmit image bytes/base64. The flag only declares support and controls
+  which active attachment references remain inline. HTTP provider plugins
+  use their upstream provider's own vision capability discovery.
   Set `protocol = "plugin"` to implement an external model wire format inside
   a process (no `base_url` field needed). Only process-model plugins may set
   `streaming = true`; other HTTP protocols continue to work unchanged.
-- `[ui]`: `status`, `panel_title`, `panel_text` and optional
-  `dynamic_panel = true`. A dynamic panel asks the plugin process for its
+- `[ui]`: `status`, `panel_title`, `panel_text`, `activity_frames` (2–12
+  terminal-safe frames, each at most 8 cells), and optional
+  `dynamic_panel = true`. `[ui.tool_labels]` maps actual tool names to display
+  labels without changing execution. `[ui.colors]` supplies optional `#RRGGBB`
+  overrides for `accent`, `text`, `muted`, `background`, `border`, `user`, `tool`
+  and `code`; the active user theme remains the base. `[ui.layout]` optionally
+  sets `header_rows = 1..4`, `composer_max_rows = 3..14`, and
+  `full_width_prose = true/false`. The host still owns Ratatui, scroll,
+  terminal input and history geometry. Conflicting animation/layout slots,
+  overlapping color keys and tool labels are rejected during idle reload.
+  A dynamic panel asks the plugin process for its
   current body whenever `/plugins view <id>` is opened; it is not polled
   per frame. TUI displays it in a scrollable overlay (Esc to close), not
   in the conversation or model context. The overlay caches its wrapped text
@@ -194,7 +220,7 @@ JSON response line. The opt-in `model_stream` request produces multiple correlat
 frames, ending in `complete` or `error`. Log only to stderr.
 
 ```json
-{"protocol_version":1,"request_id":42,"type":"tool","name":"example_echo","arguments":{"text":"hello"},"workdir":"...","config":{"prefix":"Echo: "}}
+{"protocol_version":1,"request_id":42,"type":"tool","name":"example_echo","arguments":{"text":"hello"},"call_id":"call-1","workdir":"...","archive":".../session.json","data_dir":".../plugin-data/example","config":{"prefix":"Echo: "}}
 ```
 
 ```json
@@ -208,15 +234,22 @@ Standard error is drained into the bounded runtime log (up to 64 KiB per
 worker), never mixed with stdout.
 Tool subprocess requests and modifying hooks are cancellable; Kroma kills a
 worker on cancellation, restarts it on the next request, and rejects a JSONL
-response larger than 2 MiB.
+response larger than 2 MiB. Tools and tool hooks receive the same root-level
+`call_id` and `archive` fields, identifying the original model call and the
+current session archive. `workdir` remains the user's active project directory.
+`data_dir` is a stable, per-plugin writable directory, created lazily on the
+first process call. Global and project plugin data have separate roots. Every
+process request (tool, Hook, context, model, UI, event) receives this field.
+These fields are optional to consume; older plugins continue to work.
 
 Modifying hooks:
 
-- `before_tool_call`: receives
+- `before_tool_call`: receives root-level `call_id`/`archive` and
   `arguments = {name,arguments}`; return JSON-string-encoded
   `{ "arguments": { ... } }` in the response `content`. Cannot change
   tool name, call type or call ID.
-- `after_tool_result`: receives `{name,content,is_error}`; return JSON
+- `after_tool_result`: receives root-level `call_id`/`archive` and
+  `{name,content,is_error}`; return JSON
   `{ "content": "new text", "is_error": false }`.
 - `before_model_request`: receives `{messages,tools}`; return any subset of
   `{ "messages": [ ... ], "tools": [ ... ] }`. Request-only projections may
@@ -225,6 +258,19 @@ Modifying hooks:
   remain unchanged. Custom tool names must still be registered as executable
   tools if the provider calls them.
 
+External context operations (`[context]`):
+
+- `context_prepare`, `context_finish`, and `context_overflow` receive the active
+  session path as root-level `archive` as well as the existing messages/state
+  in `arguments`. Plugins can refer to original transcripts or keep their own
+  per-session files without modifying the WAL directly.
+- `context_branch` receives root-level `archive` set to the destination
+  session, plus `arguments.source_archive` and `arguments.destination_archive`.
+  Shortened branches must return `{ "state": ... }`; full copies keep the
+  original state. The host only persists the new branch after success.
+- Failed tasks clear unconsumed lifecycle notifications, while already
+  committed context state and original messages remain durable.
+
 External model operations (`[model] protocol = "plugin"`):
 
 - `model_complete`: receive `{model,messages,tools,reasoning_level}`; return JSON inside
@@ -232,6 +278,16 @@ External model operations (`[model] protocol = "plugin"`):
   "usage": {"input":12,"output":5,"cached":0} }`.
 - `model_generate`: receive `{model,system,prompt,output_tokens,reasoning_level}`; return
   `{ "text":"...", "requests":1, "usage":{...} }`. Used for title/APEC.
+- Both single-response and streaming completions require a real assistant
+  message with text or tool calls. Function calls need distinct nonempty IDs,
+  nonempty names, and JSON object arguments. Invalid final calls are rejected
+  before any tool execution, consistent with the built-in provider.
+- To request Kroma's existing single context-overflow recovery retry,
+  single-response models return `{ "is_error":true, "code":"context_overflow", "content":"..." }`.
+  Streaming models emit `{ "event":"error", "code":"context_overflow", "message":"..." }`
+  alongside their normal `protocol_version` and `request_id`. The host forwards
+  a typed error to the active context strategy, never guessing from arbitrary
+  error text. Other error codes remain ordinary failures.
 - By default process models return one final response and Kroma emits its
   content. With `streaming = true`, Kroma sends `model_stream` and receives
   **multiple JSONL frames** before completion. Each frame must include
@@ -301,14 +357,18 @@ Dynamic UI panel request (requires `[ui] dynamic_panel = true` and `command`):
   use live state shared with its tools and commands. A TUI cancellation
   aborts the panel worker request; no background polling is performed.
 
-Observer events are delivered through a bounded best-effort queue, separate
-from the tool worker. High-volume streaming deltas are not forwarded.
+Observer events are delivered through **independent 32-frame bounded queues
+per enabled subscriber**, separate from the tool worker. A stalled subscriber
+cannot block other plugins or the Agent; its own overflowing notifications
+are dropped. High-volume streaming deltas are not forwarded.
 
 ## Current limits
 
-There is **no plugin sandbox, marketplace, model/context hot reload,
-or arbitrary TUI layout/animation API**. TUI extensions include static
-status, cancellable on-demand panels, idle-reloadable commands and Alt+letter
+There is **no plugin sandbox, marketplace, hot replacement of live
+model/context policies, or raw Ratatui widget/terminal API**. TUI plugins
+may declare status, on-demand panels, bounded animation frames, tool labels,
+colors and layout dimensions; the host still owns terminal input and rendering.
+TUI extensions also include idle-reloadable commands and Alt+letter
 bindings. Version 2 context plugins can observe and recover,
 but production custom compression strategies must supply their own code and
 tests; the built-in TRC+APEC remains the only production default.

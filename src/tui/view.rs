@@ -5,17 +5,17 @@ use super::{
     picker::Picker,
     theme::{Theme, ThemeStore},
 };
-use crate::{events::RuntimeEvent, protocol::Message};
+use crate::{events::RuntimeEvent, plugins::PluginLayoutSpec, protocol::Message};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -621,6 +621,10 @@ pub struct UiState {
     plugin_panel: Option<PluginPanel>,
     pub plugin_commands: Vec<(String, String)>,
     pub plugin_statuses: Vec<String>,
+    plugin_activity_frames: Vec<String>,
+    plugin_tool_labels: BTreeMap<String, String>,
+    plugin_layout: Option<PluginLayoutSpec>,
+    plugin_colors: BTreeMap<String, Color>,
     pub usage: crate::usage::UsageMeter,
     pub title_usage: crate::usage::UsageMeter,
     pub apec_usage: crate::usage::UsageMeter,
@@ -726,6 +730,54 @@ impl UiState {
         }
     }
 
+    /// Declarative UI-only slots; plugins never own widgets or terminal input.
+    pub fn set_plugin_presentation(
+        &mut self,
+        activity_frames: Vec<String>,
+        tool_labels: BTreeMap<String, String>,
+        layout: Option<PluginLayoutSpec>,
+        colors: BTreeMap<String, String>,
+    ) {
+        self.plugin_activity_frames = activity_frames;
+        self.plugin_tool_labels = tool_labels;
+        self.plugin_layout = layout;
+        self.plugin_colors = colors
+            .into_iter()
+            .filter_map(|(slot, value)| {
+                super::theme::parse_hex(&value)
+                    .ok()
+                    .map(|color| (slot, color))
+            })
+            .collect();
+        self.activity_frame = 0;
+        self.history_cache = None;
+    }
+
+    fn active_colors(&self) -> Theme {
+        let mut colors = self.themes.colors;
+        for (slot, color) in &self.plugin_colors {
+            match slot.as_str() {
+                "accent" => colors.accent = *color,
+                "background" => colors.background = *color,
+                "border" => colors.border = *color,
+                "text" => colors.text = *color,
+                "muted" => colors.muted = *color,
+                "user" => colors.user = *color,
+                "tool" => colors.tool = *color,
+                "code" => colors.code = *color,
+                _ => {}
+            }
+        }
+        colors
+    }
+
+    fn full_width_prose(&self) -> bool {
+        self.plugin_layout
+            .as_ref()
+            .and_then(|layout| layout.full_width_prose)
+            .unwrap_or(self.preferences.full_width)
+    }
+
     pub fn set_link_workdir(&mut self, workdir: &Path) {
         self.link_workdir = workdir.to_path_buf();
         self.history_cache = None;
@@ -744,6 +796,10 @@ impl UiState {
             plugin_panel: None,
             plugin_commands: Vec::new(),
             plugin_statuses: Vec::new(),
+            plugin_activity_frames: Vec::new(),
+            plugin_tool_labels: BTreeMap::new(),
+            plugin_layout: None,
+            plugin_colors: BTreeMap::new(),
             usage: crate::usage::UsageMeter::default(),
             title_usage: crate::usage::UsageMeter::default(),
             apec_usage: crate::usage::UsageMeter::default(),
@@ -1374,7 +1430,12 @@ impl UiState {
             return false;
         }
         self.last_activity_frame = Instant::now();
-        self.activity_frame = (self.activity_frame + 1) % BRAND_PULSE_FRAMES;
+        let frame_count = if self.plugin_activity_frames.is_empty() {
+            BRAND_PULSE_FRAMES
+        } else {
+            self.plugin_activity_frames.len()
+        };
+        self.activity_frame = (self.activity_frame + 1) % frame_count;
         true
     }
 
@@ -1420,6 +1481,13 @@ impl UiState {
                         },
                     ),
                 ),
+            ]);
+        }
+        if let Some(frame) = self.plugin_activity_frames.get(self.activity_frame) {
+            return Line::from(vec![
+                Span::styled(frame.clone(), Style::default().fg(colors.accent)),
+                Span::raw("  "),
+                Span::styled(self.activity_status(), Style::default().fg(colors.text)),
             ]);
         }
         let mut spans = Vec::with_capacity(5);
@@ -2390,7 +2458,7 @@ impl UiState {
                     ]));
                     if !entry.body.is_empty() {
                         let prose = width.saturating_sub(5);
-                        let prose = if self.preferences.full_width {
+                        let prose = if self.full_width_prose() {
                             prose
                         } else {
                             super::tool_display::prose_width(prose)
@@ -2466,6 +2534,17 @@ impl UiState {
                         .unwrap_or_default();
                     let summary =
                         super::tool_display::summary(name, &entry.body, self.preferences.language);
+                    let summary = match self.plugin_tool_labels.get(name) {
+                        Some(label) if name != "shell" => format!(
+                            "{label} · {}",
+                            summary
+                                .strip_prefix(name)
+                                .and_then(|s| s.strip_prefix(" · "))
+                                .unwrap_or(&summary)
+                        ),
+                        Some(label) => format!("{label} · {summary}"),
+                        None => summary,
+                    };
                     let command = compact_line(
                         &summary,
                         width.saturating_sub(6 + UnicodeWidthStr::width(elapsed.as_str())),
@@ -2607,7 +2686,7 @@ impl UiState {
                     }
                     if self.reasoning_expanded {
                         let prose = width.saturating_sub(5);
-                        let prose = if self.preferences.full_width {
+                        let prose = if self.full_width_prose() {
                             prose
                         } else {
                             super::tool_display::prose_width(prose)
@@ -2696,7 +2775,7 @@ impl UiState {
     pub fn draw(&mut self, frame: &mut Frame) {
         self.editor
             .localize_attachment_labels(self.preferences.language);
-        let colors = self.themes.colors;
+        let colors = self.active_colors();
         let full_area = frame.area();
         if full_area.width < 20 || full_area.height < 8 {
             self.editor_area = Rect::default();
@@ -2723,16 +2802,28 @@ impl UiState {
             Block::default().style(Style::default().bg(colors.background)),
             full_area,
         );
-        let area = reading_area(full_area, self.preferences.full_width);
+        let area = reading_area(full_area, self.full_width_prose());
+        let header_rows = self
+            .plugin_layout
+            .as_ref()
+            .and_then(|layout| layout.header_rows)
+            .unwrap_or(2)
+            .min(area.height.saturating_sub(5));
+        let composer_max = self
+            .plugin_layout
+            .as_ref()
+            .and_then(|layout| layout.composer_max_rows)
+            .unwrap_or(10)
+            .min(area.height.saturating_sub(header_rows + 2).max(3));
         let editor_rows = self.editor.display_rows(area.width.saturating_sub(6));
-        let composer_height = editor_rows.saturating_add(2).clamp(3, 10);
+        let composer_height = editor_rows.saturating_add(2).clamp(3, composer_max);
         // The model's activity follows the conversation itself instead of
         // living in a fixed bar away from its latest output. Only history
         // navigation needs a separate row above the editable composer.
         let show_navigation = self.scroll_anchor.is_some() && area.height >= 10;
         let layout = Layout::vertical([
             // A blank row separates the session heading from the first turn.
-            Constraint::Length(2),
+            Constraint::Length(header_rows),
             Constraint::Min(1),
             Constraint::Length(u16::from(show_navigation)),
             Constraint::Length(composer_height),
@@ -3303,6 +3394,65 @@ impl Drop for UiState {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn plugin_presentation_slots_render_without_changing_model_history() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "session".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("system", "root")],
+        );
+        let mut labels = BTreeMap::new();
+        labels.insert("example_echo".into(), "Friendly Echo".into());
+        ui.set_plugin_presentation(
+            vec![".".into(), "o".into()],
+            labels,
+            Some(PluginLayoutSpec {
+                header_rows: Some(3),
+                composer_max_rows: Some(6),
+                full_width_prose: Some(true),
+            }),
+            BTreeMap::from([("accent".into(), "#112233".into())]),
+        );
+        assert_eq!(ui.active_colors().accent, Color::Rgb(17, 34, 51));
+        ui.event(UiEvent::TaskStarted);
+        ui.event(UiEvent::ToolStarted {
+            name: "example_echo".into(),
+            id: "plugin-1".into(),
+            args: "{\"text\":\"test\"}".into(),
+        });
+        let first = ui.activity_line(ui.themes.colors);
+        assert_eq!(first.spans[0].content.as_ref(), ".");
+        ui.last_activity_frame = Instant::now() - Duration::from_millis(200);
+        assert!(ui.tick_activity());
+        let next = ui.activity_line(ui.themes.colors);
+        assert_eq!(next.spans[0].content.as_ref(), "o");
+        let history = ui.history_text(ui.themes.colors, 100).to_string();
+        assert!(history.contains("Friendly Echo"), "{history}");
+        let cached = ui
+            .history_cache
+            .as_ref()
+            .map(|cache| cache.text.lines.as_ptr());
+        ui.last_activity_frame = Instant::now() - Duration::from_millis(200);
+        assert!(ui.tick_activity());
+        let next = ui.activity_line(ui.themes.colors);
+        assert_eq!(next.spans[0].content.as_ref(), ".");
+        assert_eq!(
+            cached,
+            ui.history_cache
+                .as_ref()
+                .map(|cache| cache.text.lines.as_ptr()),
+            "animation should not re-render the transcript"
+        );
+        ui.set_plugin_presentation(Vec::new(), BTreeMap::new(), None, BTreeMap::new());
+        assert_eq!(ui.active_colors().accent, ui.themes.colors.accent);
+        assert_eq!(ui.activity_line(ui.themes.colors).spans.len(), 5);
+        assert!(!ui
+            .history_text(ui.themes.colors, 100)
+            .to_string()
+            .contains("Friendly Echo"));
+    }
 
     #[test]
     fn plugin_panel_overlay_scrolls_and_keeps_composer_unchanged() {

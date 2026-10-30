@@ -16,11 +16,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Format
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
       - name: Test
         run: cargo test --locked
+      - name: JavaScript plugin contracts
+        run: node --test examples/plugins/web/web.test.js
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Native PowerShell fallback

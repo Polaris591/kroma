@@ -56,6 +56,7 @@ pub trait Tool: Send + Sync {
 /// Each hook runs in registration order. The durable tool-call id and tool
 /// name remain Kroma-owned; they cannot be changed by a plugin.
 pub trait ToolInterceptor: Send + Sync {
+    /// Legacy Rust host extension boundary; retained for source compatibility.
     fn before<'a>(&'a self, _call: &'a mut ToolCall, _workdir: &'a Path) -> HookFuture<'a> {
         Box::pin(async { Ok(()) })
     }
@@ -66,6 +67,23 @@ pub trait ToolInterceptor: Send + Sync {
         _workdir: &'a Path,
     ) -> HookFuture<'a> {
         Box::pin(async { Ok(()) })
+    }
+    /// Rich context for new plugins. Existing Rust hooks automatically retain
+    /// the original workdir-only behavior without any adapter allocation.
+    fn before_with_context<'a>(
+        &'a self,
+        call: &'a mut ToolCall,
+        ctx: ToolContext<'a>,
+    ) -> HookFuture<'a> {
+        self.before(call, ctx.workdir)
+    }
+    fn after_with_context<'a>(
+        &'a self,
+        call: &'a ToolCall,
+        result: &'a mut ToolResult,
+        ctx: ToolContext<'a>,
+    ) -> HookFuture<'a> {
+        self.after(call, result, ctx.workdir)
     }
 }
 
@@ -165,7 +183,7 @@ impl ToolRegistry {
         }
         let mut effective = call.clone();
         for hook in &self.interceptors {
-            if let Err(error) = hook.before(&mut effective, ctx.workdir).await {
+            if let Err(error) = hook.before_with_context(&mut effective, ctx).await {
                 return ToolResult::error(format!("before_tool_call failed: {error:#}"));
             }
             if effective.id != call.id
@@ -190,7 +208,7 @@ impl ToolRegistry {
             result.executed_arguments = Some(effective.function.arguments.clone());
         }
         for hook in &self.interceptors {
-            if let Err(error) = hook.after(&effective, &mut result, ctx.workdir).await {
+            if let Err(error) = hook.after_with_context(&effective, &mut result, ctx).await {
                 return ToolResult {
                     content: format!(
                         "after_tool_result failed: {error:#}; original tool returned: {}",
@@ -313,6 +331,61 @@ async fn execute_inner(
 mod tests {
     use super::*;
     use crate::provider::FunctionCall;
+
+    struct EchoForHook;
+    impl Tool for EchoForHook {
+        fn name(&self) -> &str {
+            "echo_hook"
+        }
+        fn definition(&self) -> Value {
+            json!({"type":"function","function":{"name":"echo_hook","parameters":{"type":"object"}}})
+        }
+        fn execute<'a>(&'a self, call: &'a ToolCall, _ctx: ToolContext<'a>) -> ToolFuture<'a> {
+            Box::pin(async move { ToolResult::ok(call.function.arguments.clone()) })
+        }
+    }
+
+    struct LegacyHook;
+    impl ToolInterceptor for LegacyHook {
+        fn before<'a>(&'a self, call: &'a mut ToolCall, _workdir: &'a Path) -> HookFuture<'a> {
+            Box::pin(async move {
+                call.function.arguments = r#"{"origin":"legacy"}"#.into();
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn older_rust_hook_signature_remains_source_compatible() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoForHook)).unwrap();
+        registry.register_interceptor(Arc::new(LegacyHook));
+        let call = ToolCall {
+            id: "old".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "echo_hook".into(),
+                arguments: "{}".into(),
+            },
+        };
+        let result = registry
+            .execute(
+                &call,
+                ToolContext {
+                    workdir: Path::new("."),
+                    archive: Path::new("session.json"),
+                    on_output: None,
+                },
+            )
+            .await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, r#"{"origin":"legacy"}"#);
+        assert_eq!(
+            result.executed_arguments.as_deref(),
+            Some(r#"{"origin":"legacy"}"#)
+        );
+        assert_eq!(call.function.arguments, "{}", "durable call stays intact");
+    }
 
     #[tokio::test]
     async fn tool_dispatch_rejects_unknown_tool_without_execution() {

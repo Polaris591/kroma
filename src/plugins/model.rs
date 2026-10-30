@@ -1,9 +1,10 @@
 //! Pre-request projection hooks, without changing the persisted transcript.
-use super::{stream::ToolCallFragments, PluginWorker};
+use super::{stream::ToolCallFragments, PluginResponse, PluginWorker};
 use crate::{
     context::ContextConfig,
     model::{
-        Completion, ModelBackend, ModelFuture, StreamFuture, TaskImageCache, TextResult, Usage,
+        Completion, ContextOverflow, ModelBackend, ModelFuture, StreamFuture, TaskImageCache,
+        TextResult, Usage,
     },
     protocol::Message,
 };
@@ -25,10 +26,50 @@ pub(super) struct ProcessModelBackend {
     streaming: bool,
     thinking_levels: Vec<String>,
     reasoning_level: RwLock<Option<String>>,
+    image_input: Option<bool>,
 }
 
 /// Compare parsed JSON arguments rather than source formatting. Some
 /// upstream providers normalize whitespace in the final tool-call object.
+fn process_model_error(reply: &PluginResponse, operation: &str) -> anyhow::Error {
+    if reply.code.as_deref() == Some("context_overflow") {
+        ContextOverflow(reply.content.clone()).into()
+    } else {
+        anyhow::anyhow!("{operation}: {}", reply.content)
+    }
+}
+
+fn validate_assistant_reply(message: &Message) -> Result<()> {
+    if message.role != "assistant" || message.tool_call_id.is_some() {
+        bail!("process model must return an assistant message without tool_call_id");
+    }
+    let calls = message.tool_calls.as_deref().unwrap_or(&[]);
+    let mut seen = std::collections::BTreeSet::new();
+    for call in calls {
+        if call.kind != "function"
+            || call.id.is_empty()
+            || call.function.name.is_empty()
+            || !seen.insert(call.id.as_str())
+        {
+            bail!("process model returned incomplete or duplicate tool calls");
+        }
+        let arguments: Value = serde_json::from_str(&call.function.arguments)
+            .context("process model tool arguments must contain valid JSON")?;
+        if !arguments.is_object() {
+            bail!("process model tool arguments must be a JSON object");
+        }
+    }
+    if calls.is_empty()
+        && message
+            .content
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+    {
+        bail!("process model returned neither text nor a tool call");
+    }
+    Ok(())
+}
+
 fn same_tool_calls(
     reconstructed: &[crate::protocol::ToolCall],
     final_calls: &[crate::protocol::ToolCall],
@@ -79,6 +120,7 @@ impl ProcessModelBackend {
         streaming: bool,
         thinking_levels: Vec<String>,
         reasoning_level: Option<String>,
+        image_input: Option<bool>,
     ) -> Self {
         Self {
             worker,
@@ -86,6 +128,7 @@ impl ProcessModelBackend {
             streaming,
             thinking_levels,
             reasoning_level: RwLock::new(reasoning_level),
+            image_input,
         }
     }
 
@@ -128,10 +171,11 @@ impl ProcessModelBackend {
                     tool_fragments.push(&frame)?;
                 }
                 Some("error") => {
-                    bail!(
-                        "external model stream failed: {}",
-                        frame["message"].as_str().unwrap_or("unknown plugin error")
-                    );
+                    let message = frame["message"].as_str().unwrap_or("unknown plugin error");
+                    if frame["code"] == "context_overflow" {
+                        return Err(ContextOverflow(message.to_owned()).into());
+                    }
+                    bail!("external model stream failed: {message}");
                 }
                 Some("complete") => {
                     let mut reply: ProcessCompletion = serde_json::from_value(
@@ -187,6 +231,7 @@ impl ProcessModelBackend {
                             _ => {}
                         }
                     }
+                    validate_assistant_reply(&reply.message)?;
                     stream.finish().await?;
                     let elapsed = started.elapsed();
                     return Ok(Completion {
@@ -205,6 +250,10 @@ impl ProcessModelBackend {
 }
 
 impl ModelBackend for ProcessModelBackend {
+    fn accepts_images(&self) -> Option<bool> {
+        self.image_input
+    }
+
     fn reasoning_level(&self) -> Option<String> {
         self.reasoning_level
             .read()
@@ -256,13 +305,11 @@ impl ModelBackend for ProcessModelBackend {
                 }))
                 .await?;
             if reply.is_error {
-                bail!("external model failed: {}", reply.content);
+                return Err(process_model_error(&reply, "external model failed"));
             }
             let value: ProcessCompletion = serde_json::from_str(&reply.content)
                 .context("model_complete must return {message,usage?}")?;
-            if value.message.role != "assistant" {
-                bail!("model_complete must return an assistant message");
-            }
+            validate_assistant_reply(&value.message)?;
             if let Some(content) = value.message.content.as_deref() {
                 on_text(content);
             }
@@ -315,7 +362,10 @@ impl ModelBackend for ProcessModelBackend {
                 }))
                 .await?;
             if reply.is_error {
-                bail!("external text generation failed: {}", reply.content);
+                return Err(process_model_error(
+                    &reply,
+                    "external text generation failed",
+                ));
             }
             let result: ProcessGeneration = serde_json::from_str(&reply.content)
                 .context("model_generate must return {text,usage?,requests?}")?;

@@ -12,6 +12,18 @@ pub struct TaskImageCache {
     pub(crate) encoded: Mutex<HashMap<String, String>>,
 }
 
+/// A provider-neutral signal to let the existing Agent overflow recovery
+/// work with external model plugins, not only built-in HTTP responses.
+#[derive(Debug)]
+pub struct ContextOverflow(pub String);
+
+impl std::fmt::Display for ContextOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "model context overflow: {}", self.0)
+    }
+}
+impl std::error::Error for ContextOverflow {}
+
 pub type StreamFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 pub type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 

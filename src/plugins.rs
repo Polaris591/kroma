@@ -4,6 +4,12 @@
 mod context;
 mod model;
 mod stream;
+const PLUGIN_API_VERSION: u32 = 1;
+
+fn default_plugin_api_version() -> u32 {
+    PLUGIN_API_VERSION
+}
+
 use crate::{
     commands::{CommandRegistry, CommandReply},
     context::{ContextConfig, ContextFactory},
@@ -33,6 +39,8 @@ use std::{
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct PluginManifest {
+    #[serde(default = "default_plugin_api_version")]
+    pub api_version: u32,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -69,6 +77,17 @@ pub struct PluginUiSpec {
     /// Optional terminal-safe Alt+letter bindings for this plugin's commands.
     #[serde(default)]
     pub shortcuts: Vec<PluginUiShortcut>,
+    /// Host-rendered activity indicator, at most one enabled plugin may own it.
+    #[serde(default)]
+    pub activity_frames: Vec<String>,
+    /// Display labels for registered tool names, without changing dispatch.
+    #[serde(default)]
+    pub tool_labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub layout: Option<PluginLayoutSpec>,
+    /// Optional palette overrides rendered by the host, never raw ANSI escapes.
+    #[serde(default)]
+    pub colors: BTreeMap<String, String>,
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -78,6 +97,17 @@ pub struct PluginUiSpec {
     /// On-demand panel body returned by the plugin process, not TUI polling.
     #[serde(default)]
     pub dynamic_panel: bool,
+}
+
+/// Minimal host-owned layout knobs; plugins never receive raw terminal control.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct PluginLayoutSpec {
+    #[serde(default)]
+    pub header_rows: Option<u16>,
+    #[serde(default)]
+    pub composer_max_rows: Option<u16>,
+    #[serde(default)]
+    pub full_width_prose: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -112,6 +142,9 @@ pub struct PluginModelSpec {
     pub api_key_env: Option<String>,
     pub context_window: usize,
     pub output_reserve: usize,
+    /// Explicit vision support for process model adapters. Unknown by default.
+    #[serde(default)]
+    pub image_input: Option<bool>,
 }
 fn default_protocol() -> String {
     "chat".into()
@@ -160,6 +193,14 @@ impl PluginManifest {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.api_version != PLUGIN_API_VERSION {
+            bail!(
+                "plugin '{}' requires API version {}; Kroma supports version {}",
+                self.id,
+                self.api_version,
+                PLUGIN_API_VERSION
+            );
+        }
         if !valid_id(&self.id) {
             bail!("plugin id must contain only ASCII letters, digits, '-' or '_'");
         }
@@ -234,10 +275,12 @@ impl PluginManifest {
         if let Some(model) = &self.model {
             ContextConfig::with_output_reserve(model.context_window, model.output_reserve)?;
             if model.protocol != "plugin"
-                && (!model.thinking_levels.is_empty() || model.reasoning_level.is_some())
+                && (!model.thinking_levels.is_empty()
+                    || model.reasoning_level.is_some()
+                    || model.image_input.is_some())
             {
                 bail!(
-                    "plugin '{}' custom thinking levels require protocol='plugin'",
+                    "plugin '{}' custom model capabilities require protocol='plugin'",
                     self.id
                 );
             }
@@ -286,6 +329,58 @@ impl PluginManifest {
             }
         }
         if let Some(ui) = &self.ui {
+            for (slot, color) in &ui.colors {
+                let hex = color.strip_prefix('#').unwrap_or(color);
+                if !matches!(
+                    slot.as_str(),
+                    "accent"
+                        | "background"
+                        | "border"
+                        | "text"
+                        | "muted"
+                        | "user"
+                        | "tool"
+                        | "code"
+                ) || hex.len() != 6
+                    || !hex.bytes().all(|ch| ch.is_ascii_hexdigit())
+                {
+                    bail!("plugin '{}' has an invalid UI color '{slot}'", self.id);
+                }
+            }
+            if let Some(layout) = &ui.layout {
+                if layout
+                    .header_rows
+                    .is_some_and(|rows| !(1..=4).contains(&rows))
+                    || layout
+                        .composer_max_rows
+                        .is_some_and(|rows| !(3..=14).contains(&rows))
+                {
+                    bail!("plugin '{}' has invalid UI layout dimensions", self.id);
+                }
+            }
+            if !ui.activity_frames.is_empty()
+                && (ui.activity_frames.len() < 2
+                    || ui.activity_frames.len() > 12
+                    || ui.activity_frames.iter().any(|frame| {
+                        frame.trim().is_empty()
+                            || frame.chars().any(char::is_control)
+                            || unicode_width::UnicodeWidthStr::width(frame.as_str()) > 8
+                    }))
+            {
+                bail!(
+                    "plugin '{}' activity_frames must contain 2–12 short terminal-safe frames",
+                    self.id
+                );
+            }
+            for (tool, label) in &ui.tool_labels {
+                if !valid_tool_name(tool)
+                    || label.trim().is_empty()
+                    || label.chars().count() > 48
+                    || label.chars().any(char::is_control)
+                {
+                    bail!("plugin '{}' has an invalid tool display label", self.id);
+                }
+            }
             if ui.dynamic_panel
                 && self
                     .command
@@ -546,11 +641,20 @@ impl PluginCatalog {
                             .cloned()
                             .unwrap_or_default(),
                         );
+                        let data_root = if project_key.is_some() {
+                            workdir.join(".kroma").join("plugin-data")
+                        } else {
+                            state_path
+                                .parent()
+                                .context("plugin state needs a parent")?
+                                .join("plugin-data")
+                        };
                         let worker = Arc::new(PluginWorker::new(
                             &dir,
                             workdir,
                             &manifest,
                             serde_json::to_value(settings)?,
+                            data_root.join(&manifest.id),
                         ));
                         let event_worker =
                             (!manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
@@ -639,12 +743,25 @@ impl PluginCatalog {
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<String> {
         let fresh = self.refresh()?;
-        let plugin = fresh
-            .plugins
-            .iter()
-            .find(|plugin| plugin.manifest.id == id)
-            .ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         let mut state = PluginState::load(&self.state_path)?;
+        let plugin = fresh.plugins.iter().find(|plugin| plugin.manifest.id == id);
+        if plugin.is_none() && !enabled && valid_id(id) {
+            // A broken manifest is not discoverable, but must still be
+            // possible to disable so a later reload can drop the old worker.
+            let mut found = state.enabled.remove(id);
+            let project_dir = self.workdir.join(".kroma").join("plugins");
+            if let Ok(directory) = project_dir.canonicalize() {
+                let key = format!("{}::{id}", directory.display());
+                found |= state.enabled_projects.remove(&key);
+            }
+            if found {
+                state.save(&self.state_path)?;
+                return Ok(format!(
+                    "Plugin '{id}' disabled. Reload or restart Kroma to apply."
+                ));
+            }
+        }
+        let plugin = plugin.ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         let enabled_set = match &plugin.project_key {
             Some(_) => &mut state.enabled_projects,
             None => &mut state.enabled,
@@ -711,6 +828,40 @@ impl PluginCatalog {
         } else {
             toml::to_string_pretty(&config)?
         })
+    }
+
+    /// Remove an installed user plugin and its activation/configuration.
+    /// Project-local plugin sources are managed in their project directory.
+    pub fn uninstall(&self, id: &str) -> Result<String> {
+        if !valid_id(id) {
+            bail!("invalid plugin ID");
+        }
+        let fresh = self.refresh()?;
+        let target = fresh
+            .plugins
+            .iter()
+            .find(|plugin| plugin.project_key.is_none() && plugin.manifest.id == id)
+            .map(|plugin| plugin.worker.directory.clone())
+            .unwrap_or_else(|| self.directory.join(id));
+        if !target.is_dir() {
+            let project = self.workdir.join(".kroma").join("plugins").join(id);
+            if project.is_dir() {
+                bail!(
+                    "project plugin '{id}' is source-managed; remove it from .kroma/plugins manually"
+                );
+            }
+            bail!("unknown installed plugin '{id}'");
+        }
+        // Resolve by its installation directory, not the manifest. A broken
+        // plugin must remain uninstallable without editing its TOML first.
+        let mut state = PluginState::load(&self.state_path)?;
+        fs::remove_dir_all(&target).with_context(|| format!("uninstalling plugin '{id}'"))?;
+        state.enabled.remove(id);
+        state.settings.remove(id);
+        state.save(&self.state_path)?;
+        Ok(format!(
+            "Uninstalled '{id}'. Reload or restart Kroma to apply."
+        ))
     }
 
     pub fn install(&self, directory: &Path) -> Result<String> {
@@ -985,6 +1136,7 @@ impl PluginCatalog {
                                 spec.streaming,
                                 spec.thinking_levels.clone(),
                                 spec.reasoning_level.clone(),
+                                spec.image_input,
                             )),
                             window,
                         ));
@@ -1077,21 +1229,25 @@ impl PluginCatalog {
         if listeners.is_empty() {
             return Ok(host);
         }
-        // A single best-effort background queue keeps slow plugins off the model's hot path.
-        let (sender, receiver) = mpsc::sync_channel::<(Arc<PluginWorker>, Value)>(64);
-        std::thread::Builder::new()
-            .name("kroma-plugin-events".into())
-            .spawn(move || {
-                while let Ok((worker, message)) = receiver.recv() {
-                    if let Err(error) = worker.invoke(message) {
-                        crate::runtime_log!("[plugin] event handler: {error:#}");
+        // Independent bounded queues: one stalled subscriber must not block
+        // unrelated subscribers. No event thread or IPC when none are enabled.
+        let mut subscriptions = Vec::with_capacity(listeners.len());
+        for (events, worker) in listeners {
+            let (sender, receiver) = mpsc::sync_channel::<Value>(32);
+            std::thread::Builder::new()
+                .name("kroma-plugin-events".into())
+                .spawn(move || {
+                    while let Ok(message) = receiver.recv() {
+                        if let Err(error) = worker.invoke(message) {
+                            crate::runtime_log!("[plugin] event handler: {error:#}");
+                        }
                     }
-                }
-            })?;
+                })?;
+            subscriptions.push((events, sender));
+        }
         Ok(Some(Arc::new(PluginEventSink {
             host,
-            listeners,
-            sender,
+            listeners: subscriptions,
         })))
     }
 
@@ -1130,6 +1286,69 @@ impl PluginCatalog {
             }
         }
         Ok(registered.into_iter().collect())
+    }
+
+    pub fn ui_activity_frames(&self) -> Result<Vec<String>> {
+        let mut active = None;
+        for plugin in self.plugins.iter().filter(|plugin| plugin.enabled) {
+            let Some(ui) = &plugin.manifest.ui else {
+                continue;
+            };
+            if ui.activity_frames.is_empty() {
+                continue;
+            }
+            if active.is_some() {
+                bail!("multiple plugins declare activity_frames; disable one before reloading");
+            }
+            active = Some(ui.activity_frames.clone());
+        }
+        Ok(active.unwrap_or_default())
+    }
+
+    pub fn ui_colors(&self) -> Result<BTreeMap<String, String>> {
+        let mut colors = BTreeMap::new();
+        for plugin in self.plugins.iter().filter(|plugin| plugin.enabled) {
+            if let Some(ui) = &plugin.manifest.ui {
+                for (slot, value) in &ui.colors {
+                    if colors.insert(slot.clone(), value.clone()).is_some() {
+                        bail!("multiple plugins define UI color '{slot}'");
+                    }
+                }
+            }
+        }
+        Ok(colors)
+    }
+
+    pub fn ui_layout(&self) -> Result<Option<PluginLayoutSpec>> {
+        let mut selected = None;
+        for plugin in self.plugins.iter().filter(|plugin| plugin.enabled) {
+            if let Some(spec) = plugin
+                .manifest
+                .ui
+                .as_ref()
+                .and_then(|ui| ui.layout.as_ref())
+            {
+                if selected.is_some() {
+                    bail!("multiple plugins declare a TUI layout; disable one before reloading");
+                }
+                selected = Some(spec.clone());
+            }
+        }
+        Ok(selected)
+    }
+
+    pub fn ui_tool_labels(&self) -> Result<BTreeMap<String, String>> {
+        let mut labels = BTreeMap::new();
+        for plugin in self.plugins.iter().filter(|plugin| plugin.enabled) {
+            if let Some(ui) = &plugin.manifest.ui {
+                for (name, label) in &ui.tool_labels {
+                    if labels.insert(name.clone(), label.clone()).is_some() {
+                        bail!("multiple plugins define tool label for '{name}'");
+                    }
+                }
+            }
+        }
+        Ok(labels)
     }
 
     pub fn ui_statuses(&self) -> Vec<String> {
@@ -1235,11 +1454,12 @@ impl PluginCatalog {
                 ["enable", id] => catalog.set_enabled(id, true),
                 ["disable", id] => catalog.set_enabled(id, false),
                 ["install", path] => catalog.install(Path::new(path)),
+                ["uninstall", id] => catalog.uninstall(id),
                 ["config", id] => catalog.show_config(id),
                 ["view", id] => catalog.ui_panel(id),
                 ["set", id, key, value @ ..] if !value.is_empty() => catalog.set_config(id, key, Some(&value.join(" "))),
                 ["reset", id, key] => catalog.set_config(id, key, None),
-                _ => bail!("Usage: /plugins [list|enable <id>|disable <id>|install <path>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
+                _ => bail!("Usage: /plugins [list|enable <id>|disable <id>|install <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
             }?;
             Ok(CommandReply::text(result))
         }) {
@@ -1288,11 +1508,12 @@ impl PluginCatalog {
             [action, id] if action == "enable" => catalog.set_enabled(id, true)?,
             [action, id] if action == "disable" => catalog.set_enabled(id, false)?,
             [action, path] if action == "install" => catalog.install(Path::new(path))?,
+            [action, id] if action == "uninstall" => catalog.uninstall(id)?,
             [action, id] if action == "config" => catalog.show_config(id)?,
             [action, id] if action == "view" => catalog.ui_panel(id)?,
             [action, id, key, value @ ..] if action == "set" && !value.is_empty() => catalog.set_config(id, key, Some(&value.join(" ")))?,
             [action, id, key] if action == "reset" => catalog.set_config(id, key, None)?,
-            _ => bail!("Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
+            _ => bail!("Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
         };
         println!("{output}");
         Ok(())
@@ -1358,6 +1579,8 @@ impl Tool for PluginToolAdapter {
         let worker = self.worker.clone();
         let name = self.name.clone();
         let workdir = context.workdir.to_path_buf();
+        let archive = context.archive.to_path_buf();
+        let call_id = call.id.clone();
         Box::pin(async move {
             let Ok(arguments) = arguments else {
                 return ToolResult::error(format!(
@@ -1367,7 +1590,8 @@ impl Tool for PluginToolAdapter {
             };
             let result = worker
                 .invoke_async(
-                    json!({"type":"tool", "name":name, "arguments":arguments, "workdir":workdir}),
+                    json!({"type":"tool", "name":name, "arguments":arguments, "workdir":workdir,
+                        "archive":archive, "call_id":call_id}),
                 )
                 .await;
             match result {
@@ -1386,7 +1610,11 @@ struct PluginToolHooks {
 }
 
 impl ToolInterceptor for PluginToolHooks {
-    fn before<'a>(&'a self, call: &'a mut ToolCall, workdir: &'a Path) -> HookFuture<'a> {
+    fn before_with_context<'a>(
+        &'a self,
+        call: &'a mut ToolCall,
+        ctx: ToolContext<'a>,
+    ) -> HookFuture<'a> {
         Box::pin(async move {
             if !self.before {
                 return Ok(());
@@ -1394,7 +1622,7 @@ impl ToolInterceptor for PluginToolHooks {
             let worker = self.worker.clone();
             let snapshot = json!({"type":"hook","name":"before_tool_call",
                 "arguments":{"name":call.function.name,"arguments":serde_json::from_str::<Value>(&call.function.arguments)?},
-                "workdir":workdir});
+                "call_id":call.id, "workdir":ctx.workdir, "archive":ctx.archive});
             let reply = worker.invoke_async(snapshot).await?;
             if reply.is_error {
                 bail!("plugin rejected tool call: {}", reply.content);
@@ -1411,11 +1639,11 @@ impl ToolInterceptor for PluginToolHooks {
         })
     }
 
-    fn after<'a>(
+    fn after_with_context<'a>(
         &'a self,
         call: &'a ToolCall,
         result: &'a mut ToolResult,
-        workdir: &'a Path,
+        ctx: ToolContext<'a>,
     ) -> HookFuture<'a> {
         Box::pin(async move {
             if !self.after {
@@ -1424,7 +1652,7 @@ impl ToolInterceptor for PluginToolHooks {
             let worker = self.worker.clone();
             let snapshot = json!({"type":"hook","name":"after_tool_result",
                 "arguments":{"name":call.function.name,"content":result.content,"is_error":result.is_error},
-                "workdir":workdir});
+                "call_id":call.id, "workdir":ctx.workdir, "archive":ctx.archive});
             let reply = worker.invoke_async(snapshot).await?;
             if reply.is_error {
                 bail!("plugin rejected tool result: {}", reply.content);
@@ -1449,8 +1677,7 @@ impl ToolInterceptor for PluginToolHooks {
 
 struct PluginEventSink {
     host: Option<Arc<dyn EventSink>>,
-    listeners: Vec<(BTreeSet<String>, Arc<PluginWorker>)>,
-    sender: SyncSender<(Arc<PluginWorker>, Value)>,
+    listeners: Vec<(BTreeSet<String>, SyncSender<Value>)>,
 }
 
 impl EventSink for PluginEventSink {
@@ -1463,11 +1690,11 @@ impl EventSink for PluginEventSink {
             {
                 let payload =
                     json!({"type":"event", "name":name, "arguments":plugin_event_fields(&event)});
-                for (events, worker) in &self.listeners {
+                for (events, sender) in &self.listeners {
                     if events.contains(name) {
-                        // Never hold up the agent for a plugin: overflow drops only
-                        // notifications, not tools, prompts or durable session state.
-                        let _ = self.sender.try_send((worker.clone(), payload.clone()));
+                        // A slow listener drops only its own notifications;
+                        // tools, transcripts, and other plugins stay live.
+                        let _ = sender.try_send(payload.clone());
                     }
                 }
             }
@@ -1578,6 +1805,7 @@ fn plugin_event_fields(event: &RuntimeEvent<'_>) -> Value {
 struct PluginWorker {
     directory: PathBuf,
     workdir: PathBuf,
+    data_dir: PathBuf,
     command: Option<String>,
     args: Vec<String>,
     settings: Value,
@@ -1594,6 +1822,7 @@ impl PluginWorker {
         Self {
             directory: self.directory.clone(),
             workdir: self.workdir.clone(),
+            data_dir: self.data_dir.clone(),
             command: self.command.clone(),
             args: self.args.clone(),
             settings: self.settings.clone(),
@@ -1604,7 +1833,13 @@ impl PluginWorker {
         }
     }
 
-    fn new(dir: &Path, workdir: &Path, manifest: &PluginManifest, settings: Value) -> Self {
+    fn new(
+        dir: &Path,
+        workdir: &Path,
+        manifest: &PluginManifest,
+        settings: Value,
+        data_dir: PathBuf,
+    ) -> Self {
         let entrypoints = manifest
             .command
             .iter()
@@ -1625,6 +1860,7 @@ impl PluginWorker {
         Self {
             directory: dir.to_path_buf(),
             workdir: workdir.to_path_buf(),
+            data_dir,
             command: manifest.command.clone(),
             args: manifest.args.clone(),
             settings,
@@ -1638,6 +1874,7 @@ impl PluginWorker {
     fn same_definition(&self, next: &Self) -> bool {
         self.directory == next.directory
             && self.workdir == next.workdir
+            && self.data_dir == next.data_dir
             && self.command == next.command
             && self.args == next.args
             && self.settings == next.settings
@@ -1698,9 +1935,10 @@ impl PluginWorker {
         let request = message.as_object_mut().context("invalid plugin request")?;
         // Extra envelope fields are ignored by legacy V1 JSONL plugins.
         // New plugins may echo request_id/version for response correlation.
-        request.insert("protocol_version".into(), json!(1));
+        request.insert("protocol_version".into(), json!(PLUGIN_API_VERSION));
         request.insert("request_id".into(), json!(id));
         request.insert("config".into(), self.settings.clone());
+        request.insert("data_dir".into(), json!(self.data_dir));
         request
             .entry("workdir".to_owned())
             .or_insert_with(|| json!(self.workdir));
@@ -1712,6 +1950,11 @@ impl PluginWorker {
             bail!("plugin request cancelled before execution");
         }
         if process.is_none() {
+            // No persistent data directory or disk IO for disabled/unused
+            // plugins. Keep stored plugin data separate from installed code.
+            fs::create_dir_all(&self.data_dir).with_context(|| {
+                format!("creating plugin data directory {}", self.data_dir.display())
+            })?;
             let command = self
                 .command
                 .as_deref()
@@ -1849,6 +2092,8 @@ struct PluginResponse {
     content: String,
     #[serde(default)]
     is_error: bool,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 impl PluginProcess {
@@ -1886,14 +2131,17 @@ impl PluginProcess {
     }
 
     fn validate_frame(parsed: &Value, request_id: Option<&Value>, strict: bool) -> Result<()> {
-        if strict && parsed.get("protocol_version").and_then(Value::as_u64) != Some(1) {
+        if strict
+            && parsed.get("protocol_version").and_then(Value::as_u64)
+                != Some(PLUGIN_API_VERSION as u64)
+        {
             bail!("streaming plugin must include protocol_version=1");
         }
         if strict && parsed.get("request_id") != request_id {
             bail!("streaming plugin request_id missing or mismatched");
         }
         if let Some(version) = parsed.get("protocol_version") {
-            if version.as_u64() != Some(1) {
+            if version.as_u64() != Some(PLUGIN_API_VERSION as u64) {
                 bail!("plugin response protocol version mismatch");
             }
         }
@@ -1941,7 +2189,15 @@ thinking_levels = ["low", "high"]
 reasoning_level = "high"
 "#;
         let valid: PluginManifest = toml::from_str(manifest).unwrap();
+        assert_eq!(valid.api_version, 1, "V1 manifests remain compatible");
         assert!(valid.validate().is_ok());
+        let unsupported: PluginManifest =
+            toml::from_str(&format!("api_version = 2\n{manifest}")).unwrap();
+        assert!(unsupported
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("API version 2"));
 
         let duplicate = manifest.replace(r#"["low", "high"]"#, r#"["low", "low"]"#);
         let invalid: PluginManifest = toml::from_str(&duplicate).unwrap();
@@ -1977,6 +2233,7 @@ base_url = "https://example.com""#,
     #[test]
     fn invalid_manifests_rejected() {
         let invalid = PluginManifest {
+            api_version: PLUGIN_API_VERSION,
             id: "../escape".into(),
             name: "Escape".into(),
             version: String::new(),

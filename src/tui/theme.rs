@@ -127,7 +127,7 @@ impl Theme {
     }
 }
 
-fn parse_hex(raw: &str) -> Result<Color> {
+pub(crate) fn parse_hex(raw: &str) -> Result<Color> {
     let hex = raw.strip_prefix('#').unwrap_or(raw);
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("theme color '{raw}' must be #RRGGBB");

@@ -1440,6 +1440,77 @@ fn declarative_tui_status_panel_only_from_enabled_plugin() -> Result<()> {
 }
 
 #[test]
+fn declarative_ui_slots_compose_and_detect_conflicting_owners() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    for (id, frames) in [("a-ui", true), ("b-ui", true)] {
+        let directory = user.join(id);
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("plugin.toml"),
+            format!(
+                "id='{id}'\nname='UI slots'\n[ui]\nstatus='ready'\n{}\n[ui.layout]\nheader_rows=3\ncomposer_max_rows=6\nfull_width_prose=true\n[ui.colors]\naccent='#112233'\n[ui.tool_labels]\nexample_echo='Echo label'\n",
+                if frames { "activity_frames=['a','b']" } else { "" }
+            ),
+        )?;
+    }
+    let state = temp.path().join("plugins.toml");
+    let load = || PluginCatalog::discover_at(user.clone(), state.clone(), temp.path());
+    assert!(load()?.ui_activity_frames()?.is_empty());
+    assert!(load()?.ui_tool_labels()?.is_empty());
+    assert!(load()?.ui_layout()?.is_none());
+    assert!(load()?.ui_colors()?.is_empty());
+    load()?.set_enabled("a-ui", true)?;
+    assert_eq!(load()?.ui_activity_frames()?, vec!["a", "b"]);
+    assert_eq!(load()?.ui_layout()?.unwrap().header_rows, Some(3));
+    assert_eq!(
+        load()?.ui_colors()?.get("accent").map(String::as_str),
+        Some("#112233")
+    );
+    assert_eq!(
+        load()?
+            .ui_tool_labels()?
+            .get("example_echo")
+            .map(String::as_str),
+        Some("Echo label")
+    );
+    load()?.set_enabled("b-ui", true)?;
+    assert!(
+        load()?.ui_activity_frames().is_err(),
+        "animation slot must have one owner"
+    );
+    assert!(
+        load()?.ui_layout().is_err(),
+        "layout slot must have one owner"
+    );
+    assert!(
+        load()?.ui_colors().is_err(),
+        "theme color collision must be rejected"
+    );
+    assert!(
+        load()?.ui_tool_labels().is_err(),
+        "duplicate tool labels must be rejected"
+    );
+    load()?.set_enabled("b-ui", false)?;
+    assert_eq!(load()?.ui_activity_frames()?.len(), 2);
+    load()?.set_enabled("a-ui", false)?;
+    assert!(load()?.ui_activity_frames()?.is_empty());
+
+    let invalid = user.join("bad-frame");
+    fs::create_dir_all(&invalid)?;
+    fs::write(
+        invalid.join("plugin.toml"),
+        "id='bad-frame'\nname='Bad UI'\n[ui]\nactivity_frames=['x','this-is-very-wide']\n",
+    )?;
+    let catalog = load()?;
+    assert!(catalog
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("bad-frame")));
+    Ok(())
+}
+
+#[test]
 fn invalid_plugin_does_not_prevent_loading_other_plugins() -> Result<()> {
     let temp = TestDirectory::new()?;
     let user = temp.path().join("plugins");
@@ -1497,5 +1568,1013 @@ fn plugin_tool_name_collision_does_not_change_builtin_tools_or_prompt() -> Resul
         .as_deref()
         .unwrap_or("")
         .contains("SHOULD_NOT_APPEAR"));
+    Ok(())
+}
+
+#[test]
+fn invalid_manifest_can_be_disabled_and_uninstalled() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello");
+    let catalog = PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?;
+    catalog.install(&source)?;
+    catalog.set_enabled("hello", true)?;
+    catalog.set_config("hello", "prefix", Some("old value"))?;
+    fs::write(user.join("hello/plugin.toml"), "not valid [toml")?;
+    assert!(catalog.set_enabled("hello", false)?.contains("disabled"));
+    assert!(catalog.uninstall("hello")?.contains("Uninstalled"));
+    assert!(!user.join("hello").exists());
+    assert!(catalog.uninstall("../other").is_err());
+    catalog.install(&source)?;
+    let fresh = PluginCatalog::discover_at(user, state, temp.path())?;
+    assert!(fresh.list()?.contains("off  hello"));
+    assert!(!fresh.show_config("hello")?.contains("old value"));
+    let alias_dir = temp.path().join("plugins").join("renamed-directory");
+    fs::create_dir_all(&alias_dir)?;
+    fs::write(
+        alias_dir.join("plugin.toml"),
+        "id='alias'\nname='Renamed directory'\nprompt='hello'\n",
+    )?;
+    let with_alias = PluginCatalog::discover_at(
+        temp.path().join("plugins"),
+        temp.path().join("plugins.toml"),
+        temp.path(),
+    )?;
+    with_alias.uninstall("alias")?;
+    assert!(!alias_dir.exists(), "uninstall resolves the manifest ID");
+    Ok(())
+}
+
+#[test]
+fn process_model_declares_vision_without_changing_http_model_contracts() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let path = user.join("vision");
+    fs::create_dir_all(&path)?;
+    let manifest = "id='vision'\nname='Vision backend'\ncommand='node'\n[model]\nprotocol='plugin'\nmodel='vision-test'\ncontext_window=8192\noutput_reserve=1024\nimage_input=true\n";
+    fs::write(path.join("plugin.toml"), manifest)?;
+    let state = temp.path().join("plugins.toml");
+    let catalog = PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?;
+    catalog.set_enabled("vision", true)?;
+    let active = PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?;
+    let (selected, warnings) = active.model_override();
+    assert!(warnings.is_empty());
+    let (backend, _, _) = selected.expect("model replacement");
+    assert_eq!(backend.accepts_images(), Some(true));
+
+    fs::write(
+        path.join("plugin.toml"),
+        manifest.replace("protocol='plugin'", "protocol='chat'"),
+    )?;
+    let invalid = PluginCatalog::discover_at(user, state, temp.path())?;
+    assert!(
+        !invalid.warnings.is_empty(),
+        "HTTP providers discover vision from upstream"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_context_can_reset_state_and_requires_explicit_branch_state() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let global = temp.path().join("plugins");
+    let path = global.join("context-reset");
+    fs::create_dir_all(&path)?;
+    fs::write(path.join("plugin.toml"),
+        "id='context-reset'\nname='Context replacement fixture'\ncommand='node'\nargs=['main.js']\n[context]\nversion=2\n")?;
+    fs::write(
+        path.join("main.js"),
+        r#"
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+  const req = JSON.parse(line);
+  const {messages} = req.arguments;
+  let result;
+  if (req.type === 'context_prepare') {
+    result = {messages: [messages[0], messages[messages.length - 1]],
+              state: {original_count: messages.length}};
+  } else if (req.type === 'context_finish') {
+    result = {state: null,usage:{requests:1,input:120,output:30,cached:80,elapsed_ms:15}};
+  } else if (req.type === 'context_branch') {
+    result = {};
+  } else if (req.type === 'context_overflow') {
+    result = {recovered: false};
+  } else throw new Error(req.type);
+  process.stdout.write(JSON.stringify({request_id: req.request_id,
+    protocol_version: req.protocol_version, content: JSON.stringify(result)}) + '\n');
+});
+"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    let catalog = PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?;
+    catalog.set_enabled("context-reset", true)?;
+    let enabled = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut factory: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(enabled.replace_context(&mut factory).is_empty());
+    let budget = ContextConfig::with_output_reserve(8192, 1024)?;
+    let mut policy = factory.restore(factory.initial(), budget, temp.path())?;
+    let history = vec![
+        Message::new("system", "root"),
+        Message::new("user", "u"),
+        Message::new("assistant", "a"),
+        Message::new("user", "next"),
+    ];
+    let original = serde_json::to_value(&history)?;
+    let model: Arc<dyn ModelBackend> = Arc::new(ModelClient::new(
+        "http://127.0.0.1:9/v1",
+        None,
+        "mock".into(),
+    )?);
+    let commits = StateRecorder::default();
+    let projection = policy.prepare(&history, &model, &commits, 0).await?;
+    assert_eq!(
+        projection.len(),
+        2,
+        "external strategy replaces the model view"
+    );
+    assert_eq!(
+        serde_json::to_value(&history)?,
+        original,
+        "raw history remains intact"
+    );
+    policy.finish_task(&history, &commits).await?;
+    let PersistedContext::External(finished) = policy.state() else {
+        panic!("missing context state")
+    };
+    assert!(
+        finished.data.is_null(),
+        "explicit state:null must commit a reset"
+    );
+    assert_eq!(commits.0.lock().unwrap().len(), 2);
+    let usage = policy.take_usage();
+    assert_eq!(usage.requests, 1);
+    assert_eq!(usage.input, Some(120));
+    assert_eq!(usage.output, Some(30));
+    assert_eq!(usage.cached, Some(80));
+    assert_eq!(
+        policy.take_usage().requests,
+        0,
+        "usage must be drained once"
+    );
+    factory.restore(
+        PersistedContext::External(finished.clone()),
+        budget,
+        temp.path(),
+    )?;
+    assert!(
+        factory
+            .branch_state(
+                &PersistedContext::External(finished.clone()),
+                &history,
+                &history[..2],
+                temp.path(),
+                temp.path()
+            )
+            .is_err(),
+        "partial history needs a plugin-provided branch state"
+    );
+    let mut incompatible = finished;
+    incompatible.version = 3;
+    assert!(factory
+        .branch_state(
+            &PersistedContext::External(incompatible),
+            &history,
+            &history[..2],
+            temp.path(),
+            temp.path()
+        )
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn disabled_plugin_has_no_model_wrapper_event_worker_or_tool_replacement() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let plugins = temp.path().join("plugins");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello");
+    let catalog = PluginCatalog::discover_at(
+        plugins.clone(),
+        temp.path().join("plugins.toml"),
+        temp.path(),
+    )?;
+    catalog.install(&source)?; // Remains disabled; no process should start.
+    let disabled =
+        PluginCatalog::discover_at(plugins, temp.path().join("plugins.toml"), temp.path())?;
+    let model: Arc<dyn ModelBackend> = Arc::new(ModelClient::new(
+        "http://127.0.0.1:9/v1",
+        None,
+        "mock".into(),
+    )?);
+    let budget = ContextConfig::with_output_reserve(8192, 1024)?;
+    let wrapped = disabled.model_hooks(model.clone(), budget);
+    assert!(Arc::ptr_eq(&wrapped, &model), "no hidden model adapter");
+    assert!(disabled.model_override().0.is_none());
+    assert!(
+        disabled.wrap_events(None)?.is_none(),
+        "no event worker thread"
+    );
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    let before = prompt.initial_history(temp.path());
+    assert!(disabled.contribute(&mut tools, &mut prompt).is_empty());
+    assert!(tools.is_builtin_only());
+    assert_eq!(
+        serde_json::to_value(prompt.initial_history(temp.path()))?,
+        serde_json::to_value(before)?,
+        "disabled plugin must not alter the default prompt"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_model_rejects_invalid_tool_calls_before_executing_them() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("checked-model");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "id='checked-model'\nname='Validated process model'\ncommand='node'\nargs=['main.js']\n[model]\nprotocol='plugin'\nmodel='checked'\ncontext_window=8192\noutput_reserve=1024\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin})
+.on("line",line=>{
+  const req=JSON.parse(line);
+  const prompt=req.arguments.messages.at(-1).content;
+  const call=(id,args)=>({id,type:"function",function:{name:"shell",arguments:args}});
+  if(prompt==="overflow" || prompt==="plain-error") {
+    process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+      is_error:true,content:"context overflow",
+      ...(prompt==="overflow"?{code:"context_overflow"}:{})})+"\n");
+    return;
+  }
+  let message={role:"assistant",content:"ok"};
+  if(prompt==="duplicate") message={role:"assistant",content:null,tool_calls:[call("same","{}"),call("same","{}")]};
+  if(prompt==="bad-json") message={role:"assistant",content:null,tool_calls:[call("a","{")]};
+  if(prompt==="not-object") message={role:"assistant",content:null,tool_calls:[call("a","[]")]};
+  if(prompt==="empty") message={role:"assistant",content:"  "};
+  if(prompt==="wrong-role") message={role:"tool",content:"oops"};
+  if(prompt==="valid-tool") message={role:"assistant",content:null,tool_calls:[call("a","{}")]};
+  process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+    content:JSON.stringify({message})})+"\n");
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("checked-model", true)?;
+    let active = PluginCatalog::discover_at(global, state, temp.path())?;
+    let (model, _, _) = active.model_override().0.context("model missing")?;
+    for (input, expected) in [
+        ("duplicate", "duplicate tool"),
+        ("bad-json", "valid JSON"),
+        ("not-object", "JSON object"),
+        ("empty", "neither text"),
+        ("wrong-role", "assistant message"),
+    ] {
+        let messages = [Message::new("system", "root"), Message::new("user", input)];
+        let mut deltas = String::new();
+        let error = model
+            .complete(&messages, &[], &mut |delta| deltas.push_str(delta))
+            .await
+            .err()
+            .context("invalid model response must fail")?;
+        assert!(
+            format!("{error:#}").contains(expected),
+            "unexpected rejection for {input}: {error:#}"
+        );
+        assert!(
+            deltas.is_empty(),
+            "invalid results must not emit final text"
+        );
+    }
+    for (input, should_recover) in [("overflow", true), ("plain-error", false)] {
+        let messages = [Message::new("system", "root"), Message::new("user", input)];
+        let error = model
+            .complete(&messages, &[], &mut |_| {})
+            .await
+            .err()
+            .context("expected process model rejection")?;
+        assert_eq!(
+            kroma::provider::is_context_overflow(&error),
+            should_recover,
+            "recovery requires a structured error code"
+        );
+    }
+    let tool_messages = [
+        Message::new("system", "root"),
+        Message::new("user", "valid-tool"),
+    ];
+    let tool = model.complete(&tool_messages, &[], &mut |_| {}).await?;
+    assert_eq!(tool.message.tool_calls.as_ref().unwrap()[0].id, "a");
+    let normal_messages = [
+        Message::new("system", "root"),
+        Message::new("user", "normal"),
+    ];
+    assert_eq!(
+        model
+            .complete(&normal_messages, &[], &mut |_| {})
+            .await?
+            .message
+            .content
+            .as_deref(),
+        Some("ok"),
+        "invalid responses must not poison later model requests"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_external_context_task_does_not_replay_old_lifecycle() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    fs::create_dir_all(&workdir)?;
+    let directory = temp.path().join("plugins");
+    let plugin = directory.join("context-fail-once");
+    fs::create_dir_all(&plugin)?;
+    fs::write(
+        plugin.join("plugin.toml"),
+        "id='context-fail-once'\nname='Context lifecycle regression'\ncommand='node'\nargs=['main.js']\n[context]\nversion=2\n",
+    )?;
+    fs::write(
+        plugin.join("main.js"),
+        r#"let failed=false;
+require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+  const req=JSON.parse(line);
+  let body;
+  if(req.type==="context_prepare" && !failed) {
+    failed=true;
+    process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+      is_error:true,content:"simulated failed preparation"})+"\n");
+    return;
+  }
+  if(req.type==="context_prepare") {
+    const userTurns=(req.arguments.lifecycle||[]).filter(x=>x.type==="context_new_turn");
+    const prior=req.arguments.state?.turn_events??0;
+    const projected=[{...req.arguments.messages[0],
+      content:req.arguments.messages[0].content+"\nprior_turn_events="+prior},
+      ...req.arguments.messages.slice(1)];
+    body={messages:projected, state:{turn_events:userTurns.length,prior}};
+  } else if(req.type==="context_finish") {
+    body={state:req.arguments.state};
+  } else {
+    throw Error(req.type);
+  }
+  process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+    content:JSON.stringify(body)})+"\n");
+});"#,
+    )?;
+    let state_path = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(directory.clone(), state_path.clone(), &workdir)?
+        .set_enabled("context-fail-once", true)?;
+    let catalog = PluginCatalog::discover_at(directory, state_path, &workdir)?;
+    let mut factory: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(catalog.replace_context(&mut factory).is_empty());
+    let captured = Arc::new(CaptureModel::default());
+    let model: Arc<dyn ModelBackend> = captured.clone();
+    let budget = ContextConfig::with_output_reserve(32768, 2048)?;
+    let mut agent = Agent::with_runtime_budget(
+        model.clone(),
+        ToolRegistry::builtin(),
+        factory.clone(),
+        PromptComposer::default(),
+        None,
+        workdir.clone(),
+        budget,
+    )?;
+    let err = agent.run("first", &mut |_| {}).await.unwrap_err();
+    assert!(format!("{err:#}").contains("simulated failed preparation"));
+    assert_eq!(agent.run("second", &mut |_| {}).await?, "ok");
+    assert!(agent
+        .messages()
+        .iter()
+        .any(|m| m.content.as_deref() == Some("first")));
+    assert!(captured.0.lock().unwrap()[0]
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .contains("prior_turn_events=0"));
+    drop(agent);
+    // Restore the real WAL-backed session and verify the next projection sees
+    // exactly one committed user-turn event, not the abandoned first task.
+    let mut reopened = Agent::with_runtime_budget(
+        model,
+        ToolRegistry::builtin(),
+        factory,
+        PromptComposer::default(),
+        None,
+        workdir,
+        budget,
+    )?;
+    assert_eq!(reopened.run("third", &mut |_| {}).await?, "ok");
+    assert!(captured.0.lock().unwrap()[0]
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .contains("prior_turn_events=1"));
+    assert_eq!(
+        reopened
+            .messages()
+            .iter()
+            .filter(|m| m.role == "user")
+            .count(),
+        3
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_tools_and_hooks_receive_matching_session_archive_and_call_id() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("session-metadata");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "id='session-metadata'\nname='Session metadata'\ncommand='node'\nargs=['main.js']\nhooks=['before_tool_call','after_tool_result']\n[[tools]]\nname='session_echo'\ndescription='Echo metadata'\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"let previous;
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const req=JSON.parse(line);
+  let content;
+  if(req.type==='hook' && req.name==='before_tool_call') {
+    previous={archive:req.archive,call_id:req.call_id};
+    content=JSON.stringify({arguments:req.arguments.arguments});
+  } else if(req.type==='tool') {
+    content=req.archive+'|'+req.call_id+'|'+req.workdir;
+  } else if(req.type==='hook' && req.name==='after_tool_result') {
+    if(previous.archive!==req.archive || previous.call_id!==req.call_id)
+      throw Error('hook received a different session or call');
+    content=JSON.stringify({content:req.arguments.content+'|hooks-matched'});
+  } else throw Error(req.type);
+  process.stdout.write(JSON.stringify({request_id:req.request_id,
+    protocol_version:1,content})+'\n');
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("session-metadata", true)?;
+    let active = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    assert!(active
+        .contribute(&mut tools, &mut PromptComposer::default())
+        .is_empty());
+    let call = ToolCall {
+        id: "unique-call-id".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "session_echo".into(),
+            arguments: "{}".into(),
+        },
+    };
+    let archive = temp.path().join("sessions").join("session.json");
+    let outcome = tools
+        .execute(
+            &call,
+            ToolContext {
+                workdir: temp.path(),
+                archive: &archive,
+                on_output: None,
+            },
+        )
+        .await;
+    assert!(!outcome.is_error, "{}", outcome.content);
+    assert_eq!(
+        outcome.content,
+        format!(
+            "{}|unique-call-id|{}|hooks-matched",
+            archive.display(),
+            temp.path().display()
+        )
+    );
+    assert!(outcome.executed_arguments.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_context_plugin_tracks_fork_rewind_and_resume_archives() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    fs::create_dir_all(&workdir)?;
+    let plugins = temp.path().join("plugins");
+    let directory = plugins.join("branch-context");
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join("plugin.toml"),
+        "id='branch-context'\nname='Branch context contract'\ncommand='node'\nargs=['main.js']\n[context]\nversion=2\n",
+    )?;
+    fs::write(
+        directory.join("main.js"),
+        r#"require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const req=JSON.parse(line);
+  const args=req.arguments;
+  let body;
+  if(req.type==='context_prepare') {
+    const s=args.state??{};
+    const projected=[{...args.messages[0],content:args.messages[0].content+
+      '\ncurrent_archive='+req.archive+'\nbranch_from='+(s.branchFrom??'')+
+      '\nbranch_to='+(s.branchTo??'')},...args.messages.slice(1)];
+    body={messages:projected,state:s};
+  } else if(req.type==='context_finish') {
+    body={state:args.state};
+  } else if(req.type==='context_branch') {
+    if(!args.source_archive || !args.destination_archive ||
+       req.archive!==args.destination_archive || args.retained.length>=args.source.length)
+      throw Error('invalid branch archive contract');
+    body={state:{branchFrom:args.source_archive,branchTo:args.destination_archive}};
+  } else throw Error(req.type);
+  process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+    content:JSON.stringify(body)})+'\n');
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(plugins.clone(), state.clone(), &workdir)?
+        .set_enabled("branch-context", true)?;
+    let catalog = PluginCatalog::discover_at(plugins, state, &workdir)?;
+    let mut factory: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(catalog.replace_context(&mut factory).is_empty());
+    let captured = Arc::new(CaptureModel::default());
+    let budget = ContextConfig::with_output_reserve(32768, 2048)?;
+    let mut agent = Agent::with_runtime_budget(
+        captured.clone(),
+        ToolRegistry::builtin(),
+        factory,
+        PromptComposer::default(),
+        None,
+        workdir,
+        budget,
+    )?;
+    assert_eq!(agent.run("one", &mut |_| {}).await?, "ok");
+    assert_eq!(agent.run("two", &mut |_| {}).await?, "ok");
+    let original = agent.archive_path().to_string_lossy().to_string();
+    let _branch_id = agent.fork(Some(1))?;
+    let fork_archive = agent.archive_path().to_string_lossy().to_string();
+    assert_ne!(original, fork_archive);
+    agent.run("forked", &mut |_| {}).await?;
+    let prompt = captured.0.lock().unwrap()[0]
+        .content
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        prompt.contains(&format!("current_archive={fork_archive}")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("branch_from={original}")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("branch_to={fork_archive}")),
+        "{prompt}"
+    );
+    let backup_id = agent.rewind(1)?;
+    agent.run("after-rewind", &mut |_| {}).await?;
+    let prompt = captured.0.lock().unwrap()[0]
+        .content
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        prompt.contains(&format!("current_archive={fork_archive}")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("branch_from={fork_archive}")),
+        "{prompt}"
+    );
+    agent.resume_session(&backup_id)?;
+    agent.run("backup", &mut |_| {}).await?;
+    let backup_archive = agent.archive_path().to_string_lossy().to_string();
+    let prompt = captured.0.lock().unwrap()[0]
+        .content
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        prompt.contains(&format!("current_archive={backup_archive}")),
+        "{prompt}"
+    );
+    assert_ne!(backup_archive, fork_archive);
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_process_model_context_overflow_retries_through_external_policy() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    fs::create_dir_all(&workdir)?;
+    let global = temp.path().join("plugins");
+    let model_dir = global.join("overflow-model");
+    let context_dir = global.join("overflow-context");
+    fs::create_dir_all(&model_dir)?;
+    fs::create_dir_all(&context_dir)?;
+    fs::write(
+        model_dir.join("plugin.toml"),
+        "id='overflow-model'\nname='Overflow model'\ncommand='node'\nargs=['main.js']\n[model]\nmodel='overflow-demo'\nprotocol='plugin'\nstreaming=true\ncontext_window=8192\noutput_reserve=1024\n",
+    )?;
+    fs::write(
+        model_dir.join("main.js"),
+        r#"require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const req=JSON.parse(line);
+  const recovered=req.arguments.messages[0].content.includes('PLUGIN_RECOVERED');
+  const base={request_id:req.request_id,protocol_version:1};
+  const frame=recovered
+    ? {...base,event:'complete',result:{message:{role:'assistant',content:'recovered'}}}
+    : {...base,event:'error',code:'context_overflow',message:'upstream context exhausted'};
+  process.stdout.write(JSON.stringify(frame)+'\n');
+});"#,
+    )?;
+    fs::write(
+        context_dir.join("plugin.toml"),
+        "id='overflow-context'\nname='Overflow recovery policy'\ncommand='node'\nargs=['main.js']\n[context]\nversion=2\n",
+    )?;
+    fs::write(
+        context_dir.join("main.js"),
+        r#"require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const req=JSON.parse(line);
+  const state=req.arguments.state;
+  let body;
+  if(req.type==='context_prepare') {
+    const messages=req.arguments.messages.slice();
+    if(state?.recovered)
+      messages[0]={...messages[0],content:messages[0].content+'\nPLUGIN_RECOVERED'};
+    body={messages,state};
+  } else if(req.type==='context_overflow') {
+    body={recovered:true,state:{recovered:true}};
+  } else if(req.type==='context_finish') {
+    body={state};
+  } else throw Error(req.type);
+  process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+    content:JSON.stringify(body)})+'\n');
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    let initial = PluginCatalog::discover_at(global.clone(), state.clone(), &workdir)?;
+    initial.set_enabled("overflow-model", true)?;
+    initial.set_enabled("overflow-context", true)?;
+    let enabled = PluginCatalog::discover_at(global, state, &workdir)?;
+    let (selected, warnings) = enabled.model_override();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (model, budget, _) = selected.context("missing external process model")?;
+    let mut factory: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(enabled.replace_context(&mut factory).is_empty());
+    let mut agent = Agent::with_runtime_budget(
+        model,
+        ToolRegistry::builtin(),
+        factory,
+        PromptComposer::default(),
+        None,
+        workdir,
+        budget,
+    )?;
+    let mut streamed = String::new();
+    assert_eq!(
+        agent
+            .run("hello", &mut |delta| streamed.push_str(delta))
+            .await?,
+        "recovered"
+    );
+    assert_eq!(streamed.trim(), "recovered");
+    assert!(agent
+        .messages()
+        .iter()
+        .any(|m| m.content.as_deref() == Some("recovered")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn slow_event_plugin_cannot_block_other_event_subscribers() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let root = temp.path().join("plugins");
+    for (name, wait_ms) in [("a-slow", 1800), ("z-fast", 0)] {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir)?;
+        fs::write(
+            dir.join("plugin.toml"),
+            format!("id='{name}'\nname='Subscriber'\ncommand='node'\nargs=['main.js']\nevents=['task_started']\n"),
+        )?;
+        fs::write(
+            dir.join("main.js"),
+            format!(
+                r#"const fs=require('node:fs');
+require('node:readline').createInterface({{input:process.stdin}}).on('line',line=>{{
+  const req=JSON.parse(line);
+  setTimeout(()=>{{
+    fs.writeFileSync('delivered',String(req.request_id));
+    process.stdout.write(JSON.stringify({{request_id:req.request_id,protocol_version:1,content:'ok'}})+'\n');
+  }},{wait_ms});
+}});
+"#
+            ),
+        )?;
+    }
+    let state = temp.path().join("plugins.toml");
+    let catalog = PluginCatalog::discover_at(root.clone(), state.clone(), temp.path())?;
+    catalog.set_enabled("a-slow", true)?;
+    catalog.set_enabled("z-fast", true)?;
+    let active = PluginCatalog::discover_at(root.clone(), state, temp.path())?;
+    let sink = active.wrap_events(None)?.context("missing event sink")?;
+    sink.on_event(kroma::events::RuntimeEvent::TaskStarted);
+    // The first manifest sorts before the second. A shared event queue would
+    // make z-fast wait for a-slow's 1.8 second reply.
+    let fast_file = root.join("z-fast/delivered");
+    for _ in 0..60 {
+        if fast_file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(fast_file.exists(), "one slow event plugin blocked another");
+    drop(sink);
+    // Let the fixture exit cleanly before Windows removes its test directory.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_private_data_is_lazy_scoped_and_persists_across_restart() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    let root = temp.path().join("plugins");
+    let project_root = workdir.join(".kroma/plugins");
+    for (directory, id, tool_name) in [
+        (root.join("scope-g"), "scope-g", "scope_global"),
+        (project_root.join("scope-p"), "scope-p", "scope_project"),
+    ] {
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("plugin.toml"), format!(
+            "id='{id}'\nname='Scope test'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='{tool_name}'\ndescription='Store in plugin data directory'\n"
+        ))?;
+        fs::write(
+            directory.join("main.js"),
+            r#"const fs=require('node:fs'),path=require('node:path');
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const req=JSON.parse(line);
+  const file=path.join(req.data_dir,'count.txt');
+  const count=fs.existsSync(file)?Number(fs.readFileSync(file,'utf8'))+1:1;
+  fs.writeFileSync(file,String(count));
+  process.stdout.write(JSON.stringify({
+    protocol_version:1,request_id:req.request_id,
+    content:JSON.stringify({data_dir:req.data_dir,count})
+  })+'\n');
+});"#,
+        )?;
+    }
+    let state_path = temp.path().join("plugins.toml");
+    let load = || PluginCatalog::discover_at(root.clone(), state_path.clone(), &workdir);
+    let global_dir = temp.path().join("plugin-data/scope-g");
+    let project_dir = workdir.join(".kroma/plugin-data/scope-p");
+    assert!(!global_dir.exists() && !project_dir.exists());
+    load()?.set_enabled("scope-g", true)?;
+    load()?.set_enabled("scope-p", true)?;
+    assert!(
+        !global_dir.exists() && !project_dir.exists(),
+        "discovery must not create plugin data"
+    );
+    for expected_count in [1, 2] {
+        let catalog = load()?;
+        let mut registry = ToolRegistry::builtin();
+        assert!(catalog
+            .contribute(&mut registry, &mut PromptComposer::default())
+            .is_empty());
+        for (tool_name, expected_dir) in [
+            ("scope_global", &global_dir),
+            ("scope_project", &project_dir),
+        ] {
+            let call = ToolCall {
+                id: "data-call".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: tool_name.into(),
+                    arguments: "{}".into(),
+                },
+            };
+            let result = registry
+                .execute(
+                    &call,
+                    ToolContext {
+                        workdir: &workdir,
+                        archive: temp.path(),
+                        on_output: None,
+                    },
+                )
+                .await;
+            assert!(!result.is_error, "{}", result.content);
+            let payload: serde_json::Value = serde_json::from_str(&result.content)?;
+            let reported = payload["data_dir"].as_str().context("missing data_dir")?;
+            assert_eq!(
+                fs::canonicalize(reported)?,
+                fs::canonicalize(expected_dir)?,
+                "data_dir is scoped to the correct plugin"
+            );
+            assert_eq!(payload["count"], expected_count);
+        }
+    }
+    assert_eq!(fs::read_to_string(global_dir.join("count.txt"))?, "2");
+    assert_eq!(fs::read_to_string(project_dir.join("count.txt"))?, "2");
+    load()?.uninstall("scope-g")?;
+    assert!(
+        global_dir.exists(),
+        "uninstall preserves user-created plugin data"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn actual_external_compaction_shortens_model_view_without_dropping_wal_history() -> Result<()>
+{
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    fs::create_dir_all(&workdir)?;
+    let root = temp.path().join("plugins");
+    let dir = root.join("compacting-policy");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "id='compacting-policy'\nname='Compacting fixture'\ncommand='node'\nargs=['main.js']\n[context]\nversion=2\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const req=JSON.parse(line);
+  const args=req.arguments;
+  let body;
+  if(req.type==='context_prepare') {
+    const previous=args.state?.compactions??0;
+    let messages=args.messages;
+    if(messages.length>6) {
+      const old=messages.slice(1,-2).map(m=>m.role+':'+(m.content??'')).join(';');
+      messages=[messages[0],{role:'system',content:'summary='+old+';previous='+previous},
+        ...messages.slice(-2)];
+    }
+    body={messages,state:{compactions:previous+1}};
+  } else if(req.type==='context_finish') {
+    body={state:args.state};
+  } else throw Error(req.type);
+  process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+    content:JSON.stringify(body)})+'\n');
+});"#,
+    )?;
+    let state_path = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(root.clone(), state_path.clone(), &workdir)?
+        .set_enabled("compacting-policy", true)?;
+    let active = PluginCatalog::discover_at(root, state_path, &workdir)?;
+    let mut factory: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(active.replace_context(&mut factory).is_empty());
+    let capture = Arc::new(CaptureModel::default());
+    let budget = ContextConfig::with_output_reserve(32768, 2048)?;
+    let mut agent = Agent::with_runtime_budget(
+        capture.clone(),
+        ToolRegistry::builtin(),
+        factory.clone(),
+        PromptComposer::default(),
+        None,
+        workdir.clone(),
+        budget,
+    )?;
+    for i in 0..7 {
+        assert_eq!(agent.run(&format!("turn {i}"), &mut |_| {}).await?, "ok");
+    }
+    assert_eq!(
+        agent.messages().len(),
+        15,
+        "the original conversation is complete"
+    );
+    let view = capture.0.lock().unwrap().clone();
+    assert_eq!(
+        view.len(),
+        4,
+        "plugin replaces long history with a summary view"
+    );
+    assert!(view[1].content.as_deref().unwrap_or("").contains("turn 0"));
+    assert!(view[1]
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .contains("previous=6"));
+    assert_eq!(view[3].content.as_deref(), Some("turn 6"));
+    drop(agent);
+
+    let mut reopened = Agent::with_runtime_budget(
+        capture.clone(),
+        ToolRegistry::builtin(),
+        factory,
+        PromptComposer::default(),
+        None,
+        workdir,
+        budget,
+    )?;
+    assert_eq!(reopened.run("after restart", &mut |_| {}).await?, "ok");
+    let view = capture.0.lock().unwrap().clone();
+    assert_eq!(view.len(), 4);
+    assert!(view[1]
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .contains("previous=7"));
+    assert_eq!(
+        reopened.messages().len(),
+        17,
+        "restart must recover original WAL"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_external_context_prepare_restarts_worker_without_losing_session() -> Result<()>
+{
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    fs::create_dir_all(&workdir)?;
+    let root = temp.path().join("plugins");
+    let dir = root.join("context-cancel");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "id='context-cancel'\nname='Cancel context'\ncommand='node'\nargs=['main.js']\n[context]\nversion=2\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+ const req=JSON.parse(line),args=req.arguments;
+ if(req.type==='context_prepare' && args.messages.at(-1)?.content==='hang') return;
+ const events=(args.lifecycle??[]).filter(e=>e.type==='context_new_turn').length;
+ const body=req.type==='context_prepare'
+   ? {messages:[{...args.messages[0],
+       content:args.messages[0].content+'\nlifecycle='+events},...args.messages.slice(1)],
+       state:{events}}
+   : {state:args.state};
+ process.stdout.write(JSON.stringify({request_id:req.request_id,protocol_version:1,
+   content:JSON.stringify(body)})+'\n');
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(root.clone(), state.clone(), &workdir)?
+        .set_enabled("context-cancel", true)?;
+    let catalog = PluginCatalog::discover_at(root, state, &workdir)?;
+    let mut factory: Arc<dyn ContextFactory> = Arc::new(kroma::context::BuiltinContextFactory);
+    assert!(catalog.replace_context(&mut factory).is_empty());
+    let captured = Arc::new(CaptureModel::default());
+    let budget = ContextConfig::with_output_reserve(32768, 2048)?;
+    let mut agent = Agent::with_runtime_budget(
+        captured.clone(),
+        ToolRegistry::builtin(),
+        factory,
+        PromptComposer::default(),
+        None,
+        workdir,
+        budget,
+    )?;
+    let timeout =
+        tokio::time::timeout(Duration::from_millis(500), agent.run("hang", &mut |_| {})).await;
+    assert!(timeout.is_err(), "context plugin was expected to stall");
+    agent.cancel()?;
+    assert_eq!(agent.run("resume", &mut |_| {}).await?, "ok");
+    assert!(
+        captured.0.lock().unwrap()[0]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("lifecycle=1"),
+        "cancelled task events must not be replayed"
+    );
+    assert!(agent
+        .messages()
+        .iter()
+        .any(|m| m.content.as_deref() == Some("hang")));
+    assert!(agent
+        .messages()
+        .iter()
+        .any(|m| m.content.as_deref() == Some("resume")));
     Ok(())
 }

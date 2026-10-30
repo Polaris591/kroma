@@ -1350,6 +1350,26 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     state.set_link_workdir(&workdir);
     state.plugin_commands = runtime.plugins.command_descriptions();
     state.plugin_statuses = runtime.plugins.ui_statuses();
+    let activity_frames = runtime
+        .plugins
+        .ui_activity_frames()
+        .unwrap_or_else(|error| {
+            plugin_warnings.push(format!("Activity UI: {error:#}"));
+            Vec::new()
+        });
+    let tool_labels = runtime.plugins.ui_tool_labels().unwrap_or_else(|error| {
+        plugin_warnings.push(format!("Tool labels: {error:#}"));
+        Default::default()
+    });
+    let layout = runtime.plugins.ui_layout().unwrap_or_else(|error| {
+        plugin_warnings.push(format!("TUI layout: {error:#}"));
+        None
+    });
+    let colors = runtime.plugins.ui_colors().unwrap_or_else(|error| {
+        plugin_warnings.push(format!("TUI colors: {error:#}"));
+        Default::default()
+    });
+    state.set_plugin_presentation(activity_frames, tool_labels, layout, colors);
     let mut plugin_shortcuts = match runtime.plugins.ui_shortcuts() {
         Ok(bindings) => bindings,
         Err(error) => {
@@ -1484,17 +1504,49 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             );
                         }
                         let shortcuts = discovered.ui_shortcuts()?;
+                        let activity_frames = discovered.ui_activity_frames()?;
+                        let tool_labels = discovered.ui_tool_labels()?;
+                        let layout = discovered.ui_layout()?;
+                        let colors = discovered.ui_colors()?;
                         let events = discovered.wrap_events(Some(observer.clone()))?;
-                        Ok((discovered, tools, prompt, next_commands, shortcuts, events))
+                        Ok((
+                            discovered,
+                            tools,
+                            prompt,
+                            next_commands,
+                            shortcuts,
+                            events,
+                            activity_frames,
+                            tool_labels,
+                            layout,
+                            colors,
+                        ))
                     })();
                     match prepared {
-                        Ok((next, tools, prompt, next_commands, shortcuts, events)) => {
+                        Ok((
+                            next,
+                            tools,
+                            prompt,
+                            next_commands,
+                            shortcuts,
+                            events,
+                            activity_frames,
+                            tool_labels,
+                            layout,
+                            colors,
+                        )) => {
                             agent.reload_extensions(tools, prompt, events);
                             runtime.plugins = next;
                             commands = next_commands;
                             plugin_shortcuts = shortcuts;
                             state.plugin_commands = runtime.plugins.command_descriptions();
                             state.plugin_statuses = runtime.plugins.ui_statuses();
+                            state.set_plugin_presentation(
+                                activity_frames,
+                                tool_labels,
+                                layout,
+                                colors,
+                            );
                             state.note("Plugins reloaded (tools, Prompt, commands, events, UI)");
                         }
                         Err(error) => state.note(format!("Plugin reload: {error:#}")),

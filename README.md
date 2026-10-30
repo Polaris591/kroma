@@ -99,16 +99,27 @@ restart Kroma (or `/plugins reload` in an idle TUI) and use `web_search` or `web
 `/plugins` lists or manages plugins inside CLI/TUI. Further optional examples
 include tool/Prompt replacement, model request hooks, context strategy,
 subagents, cross-session notes, dynamic TUI panels and plugin-defined shortcuts. Plugins are
-disabled by default; Kroma needs Node.js only for JS plugins.
+disabled by default; Kroma needs Node.js only for JS plugins. User-installed
+plugins can be removed with `kroma plugins uninstall <id>` or
+`/plugins uninstall <id>`; project-local plugin directories remain source-managed.
 
-This is a **partial P1–P5 implementation**: external process providers now
-support incremental text/reasoning/tool-argument streaming, per-provider
-thinking tiers, and idle reload of tool/Prompt/command/event/static UI extensions. Plugins may bind Alt+letter keys to
-registered commands without changing TUI internals; `/plugins view <id>`
-opens a cancellable scrollable panel that can fetch live plugin state.
-Changed model/context backends still require restart, while unrelated plugin
-reloads preserve them and the existing worker state. Tournament judging and
-fully custom TUI layouts/animations are not implemented yet. See [implementation status](PLUGIN_ROADMAP.md).
+The **V1 plugin host** exposes tools, Prompt/Hook rewriting, process-backed
+model Providers (including streaming tools/reasoning and image-reference
+capability declarations), external context strategies, lifecycle events,
+private persistent data, commands, and declarative TUI extensions. UI plugins
+can add a status/panel, Alt+letter bindings, tool labels, animation frames,
+color overrides, and bounded layout adjustments without owning the terminal.
+`/plugins reload` atomically replaces safe idle extensions and retains unchanged
+workers. Changed model/context backends and model-request hooks still require
+restart. Failed/cancelled external context work preserves WAL history, while
+context-overflow errors can request a single recovery retry. Event subscribers
+have separate bounded queues so a slow plugin cannot stall other subscribers.
+
+The host deliberately does not expose raw terminal widgets, unrestricted
+process sandboxing, or an alternate Agent Loop. Official subagents, tournament
+judging and memory implementations are separate optional-plugin work, not part
+of the V1 host acceptance. Windows verification and cross-platform CI scope
+are tracked in [plugin acceptance](PLUGIN_ROADMAP.md).
 
 Global/project `AGENTS.md` are loaded as before. When the task explicitly
 references a nested project file, the applicable ancestor `AGENTS.md` files

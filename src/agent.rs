@@ -718,6 +718,11 @@ impl Agent {
         let result = self
             .run_inner(user_input, attachments, on_text, &mut stats)
             .await;
+        if result.is_err() {
+            // Abandon unconsumed plugin lifecycle notifications without
+            // cancelling useful built-in background APEC maintenance.
+            self.compression.task_failed();
+        }
         stats.record_compaction(self.compression.take_usage());
         if stats.compaction.requests > 0 {
             if let Some(events) = &self.events {
@@ -901,10 +906,10 @@ impl Agent {
                             &self.session.context_committer(&self.messages),
                         ).await {
                             Ok(true) => {
-                                crate::runtime_log!("[context] upstream context overflow; APEC recovered one history segment, retrying request once");
+                                crate::runtime_log!("[context] upstream context overflow; context policy recovered, retrying request once");
                                 continue;
                             }
-                            Ok(false) => crate::runtime_log!("[context] upstream context overflow; no complete history segment available for recovery"),
+                            Ok(false) => crate::runtime_log!("[context] upstream context overflow; context policy could not recover"),
                             Err(recovery_error) => crate::runtime_log!("[context] overflow recovery unavailable: {recovery_error:#}"),
                         }
                     }

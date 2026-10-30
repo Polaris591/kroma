@@ -100,6 +100,12 @@ struct ModelHttpError {
 }
 
 pub fn is_context_overflow(error: &anyhow::Error) -> bool {
+    if error
+        .chain()
+        .any(|source| source.is::<crate::model::ContextOverflow>())
+    {
+        return true;
+    }
     error
         .chain()
         .find_map(|source| source.downcast_ref::<ModelHttpError>())
