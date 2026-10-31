@@ -3,14 +3,16 @@ use crate::protocol::Message;
 use anyhow::{bail, Context, Result};
 use std::{env, fs, io, path::Path};
 
-pub const EXECUTION_GUIDANCE: &str = "\nFor coding tasks, focus inspections on relevant files; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.";
+pub const EXECUTION_GUIDANCE: &str = "\nFor coding tasks, locate relevant symbols before reading large files and keep inspections focused on relevant files and ranges; prefer focused ranges and diagnostic excerpts over dumping entire files or logs unless full context is necessary; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.";
 
 // V7 (F+C+E) is layered on the same built-in guidance used in the ablation.
-// Keep the three trialed instructions verbatim and in their tested order.
+// Keep the three trialed instructions in their tested order, but do not repeat
+// execution guidance here: the final response should be concise without a
+// fixed sentence limit, so complex work can explain verification and risk.
 pub const V7_GUIDANCE: &str = concat!(
-    "\nAvoid nonessential narration between tool calls. After completing the task, respond in at most two concise sentences covering the change and verification result. Report failures or uncertainty accurately. Provide a longer explanation only when explicitly requested.",
+    "\nAvoid nonessential narration between tool calls. When you finish, reply concisely and accurately about what changed and what was verified. Complex tasks may warrant a fuller explanation of the modifications, verification evidence, failure causes and remaining risks; report uncertainty rather than hiding it.",
     "\nPrefer the simplest correct implementation consistent with the existing codebase. Avoid redundant comments, explanatory boilerplate, unnecessary helper layers, and unrelated refactoring. Preserve required APIs, edge cases, tests, and non-obvious invariants. Never sacrifice correctness just to reduce code length.",
-    "\nLocate relevant symbols before reading large files. Prefer focused file ranges and diagnostic excerpts over dumping entire files or logs, unless full context is necessary. When tests fail, investigate the concrete failure and make a targeted fix. After all required checks pass, finish without unrelated exploration or repeated verification. Investigate tooling internals only when the evidence points there."
+    "\nInvestigate tooling internals only when the evidence points there."
 );
 
 /// A simple ordered list of projection-only prompt contributions. No event
@@ -316,6 +318,14 @@ mod tests {
         let projected = outbound[0].content.as_deref().unwrap().to_owned();
         assert!(projected.contains(EXECUTION_GUIDANCE));
         assert!(projected.ends_with(V7_GUIDANCE));
+        assert!(
+            !V7_GUIDANCE.contains("at most two")
+                && !V7_GUIDANCE.contains("two concise")
+                && !V7_GUIDANCE.to_ascii_lowercase().contains("sentences"),
+            "the default prompt must not impose a fixed sentence limit"
+        );
+        assert!(V7_GUIDANCE.contains("Complex tasks may"));
+        assert!(V7_GUIDANCE.contains("remaining risks"));
         assert_eq!(outbound[0].content.as_deref(), Some(projected.as_str()));
         let expected = projected.len() - original[0].content.as_deref().unwrap().len();
         assert_eq!(
@@ -330,6 +340,24 @@ mod tests {
             Some(projected.as_str()),
             "repeated projections must not duplicate guidance"
         );
+    }
+
+    #[test]
+    fn built_in_guidance_does_not_repeat_core_execution_directives() {
+        let combined = format!("{EXECUTION_GUIDANCE}{V7_GUIDANCE}");
+        for directive in [
+            "If a check fails",
+            "unrelated doctests",
+            "locate relevant symbols",
+            "requested tests",
+            "re-inspecting unchanged files",
+        ] {
+            assert_eq!(
+                combined.matches(directive).count(),
+                1,
+                "{directive:?} must have one authoritative instruction"
+            );
+        }
     }
 
     #[test]

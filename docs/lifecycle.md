@@ -83,3 +83,8 @@ append. Tool and model failures are not replayed into the next task.
   notifications. The built-in context policy runs checkpoints synchronously and
   has no background maintenance to preserve or cancel.
 - There is no automatic replay of interrupted commands.
+- Shell risk boundary: commands have no default timeout and no output quota.
+  A command that blocks indefinitely runs until the user cancels it; continuous
+  output can consume disk because complete captures are retained. On Unix,
+  descendants that deliberately leave the shell process group can survive
+  cancellation. These are explicit tradeoffs, not missing background cleanup.

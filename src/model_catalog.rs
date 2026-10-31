@@ -7,7 +7,7 @@
 use serde::Serialize;
 use std::fmt;
 
-pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+pub const CATALOG_SCHEMA_VERSION: u32 = 2;
 
 /// Bump this when a record is added or corrected. The source and verification
 /// date stay attached to each record so a future update can be audited.
@@ -74,14 +74,38 @@ const RECORDS: &[CatalogRecord] = &[
         source_url: "https://platform.claude.com/docs/en/models/overview",
         verified: "2026-10-31",
     },
+    CatalogRecord {
+        provider: "anthropic",
+        model: "claude-haiku-5-5",
+        context_window: Some(1_000_000),
+        max_output_tokens: Some(128_000),
+        image_input: Some(true),
+        thinking_levels: None,
+        source_url: "https://platform.claude.com/docs/en/models/overview",
+        verified: "2026-10-31",
+    },
+    CatalogRecord {
+        provider: "anthropic",
+        model: "claude-fable-5-1",
+        context_window: Some(1_000_000),
+        max_output_tokens: Some(128_000),
+        image_input: Some(true),
+        thinking_levels: None,
+        source_url: "https://platform.claude.com/docs/en/models/overview",
+        verified: "2026-10-31",
+    },
 ];
 
-/// Provider identity comes from the exact endpoint host, not the model name.
+/// Provider identity comes from the exact official HTTPS endpoint, not the
+/// model name or a same-named local proxy.
 pub fn provider_for_endpoint(base_url: &str) -> Option<&'static str> {
-    let host = reqwest::Url::parse(base_url)
-        .ok()?
-        .host_str()?
-        .to_ascii_lowercase();
+    let url = reqwest::Url::parse(base_url).ok()?;
+    // A reverse proxy or hosts-file forward on another scheme/port is not the
+    // official provider even when it reuses the same host name.
+    if url.scheme() != "https" || url.port_or_known_default() != Some(443) {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
     match host.as_str() {
         "api.deepseek.com" => Some("deepseek"),
         "api.anthropic.com" => Some("anthropic"),
@@ -752,6 +776,34 @@ mod tests {
             "deepseek/deepseek-flash"
         );
         assert!(select("https://proxy.example/v1", "x", Some("missing/model")).is_err());
+    }
+
+    #[test]
+    fn official_catalog_requires_the_official_https_endpoint() {
+        assert_eq!(
+            provider_for_endpoint("https://api.deepseek.com/v1"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            provider_for_endpoint("https://API.ANTHROPIC.COM:443/v1"),
+            Some("anthropic")
+        );
+        for endpoint in [
+            "http://api.deepseek.com/v1",
+            "https://api.deepseek.com:444/v1",
+            "https://api.deepseek.com.local/v1",
+            "https://api.deepseek.com@proxy.example/v1",
+            "https://proxy.example/api.deepseek.com",
+        ] {
+            assert!(
+                provider_for_endpoint(endpoint).is_none(),
+                "{endpoint} must not inherit official capabilities"
+            );
+            assert!(
+                select(endpoint, "deepseek-flash", None).unwrap().is_none(),
+                "{endpoint} must not select a catalog record"
+            );
+        }
     }
 
     #[test]

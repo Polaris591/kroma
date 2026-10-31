@@ -253,6 +253,28 @@ struct ProfileInput {
     max_output_tokens: Option<usize>,
 }
 
+fn merge_profile_input(old: ProviderProfile, profile: ProfileInput) -> ProviderProfile {
+    let api_key = if profile.clear_key {
+        None
+    } else {
+        profile.api_key.filter(|v| !v.is_empty()).or(old.api_key)
+    };
+    ProviderProfile {
+        base_url: profile.base_url,
+        model: profile.model,
+        api_key,
+        api_protocol: Some(profile.protocol),
+        reasoning_effort: Some(profile.reasoning),
+        deepseek_thinking: profile.deepseek_thinking.filter(|v| v != "off"),
+        context_window: profile.context_window,
+        max_output_tokens: profile.max_output_tokens,
+        // These fields are not exposed by the compact Desktop form. Preserve
+        // them across saves, including the explicit catalog alias.
+        thinking_levels: old.thinking_levels,
+        catalog_model: old.catalog_model,
+    }
+}
+
 #[tauri::command]
 async fn save_profile(
     state: State<'_, DesktopState>,
@@ -266,27 +288,11 @@ async fn save_profile(
             .get(&profile.name)
             .cloned()
             .unwrap_or_default();
-        let api_key = if profile.clear_key {
-            None
-        } else {
-            profile.api_key.filter(|v| !v.is_empty()).or(old.api_key)
-        };
-        profiles.profiles.insert(
-            profile.name.clone(),
-            ProviderProfile {
-                base_url: profile.base_url,
-                model: profile.model,
-                api_key,
-                api_protocol: Some(profile.protocol),
-                reasoning_effort: Some(profile.reasoning),
-                deepseek_thinking: profile.deepseek_thinking.filter(|v| v != "off"),
-                context_window: profile.context_window,
-                max_output_tokens: profile.max_output_tokens,
-                thinking_levels: old.thinking_levels,
-                catalog_model: old.catalog_model,
-            },
-        );
-        profiles.active = Some(profile.name);
+        let name = profile.name.clone();
+        profiles
+            .profiles
+            .insert(name.clone(), merge_profile_input(old, profile));
+        profiles.active = Some(name);
         profiles.save()?;
         profile_list()
     })
@@ -645,5 +651,39 @@ mod tests {
         assert!(validate_external_url("file:///etc/passwd").is_err());
         assert!(validate_external_url("javascript:alert(1)").is_err());
         assert!(validate_external_url("https://example.org/\nmalicious").is_err());
+    }
+
+    #[test]
+    fn saving_a_desktop_profile_preserves_the_catalog_alias() {
+        let old = ProviderProfile {
+            base_url: "https://proxy.example/v1".into(),
+            model: "renamed".into(),
+            api_key: Some("old-key".into()),
+            thinking_levels: Some(vec!["low".into()]),
+            catalog_model: Some("anthropic/claude-sonnet-5-5".into()),
+            ..Default::default()
+        };
+        let saved = merge_profile_input(
+            old,
+            ProfileInput {
+                name: "work".into(),
+                base_url: "https://proxy.example/v1".into(),
+                model: "renamed".into(),
+                api_key: None,
+                clear_key: false,
+                protocol: "anthropic".into(),
+                reasoning: "auto".into(),
+                deepseek_thinking: None,
+                context_window: Some(200_000),
+                max_output_tokens: Some(8_000),
+            },
+        );
+        assert_eq!(
+            saved.catalog_model.as_deref(),
+            Some("anthropic/claude-sonnet-5-5")
+        );
+        assert_eq!(saved.thinking_levels, Some(vec!["low".into()]));
+        assert_eq!(saved.api_key.as_deref(), Some("old-key"));
+        assert_eq!(saved.context_window, Some(200_000));
     }
 }

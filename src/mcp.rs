@@ -20,7 +20,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::Arc,
     time::Duration,
 };
@@ -44,6 +44,7 @@ const PROJECT_ENV_ALLOW: [&str; 12] = [
     "LOCALAPPDATA",
     "APPDATA",
 ];
+const CHILD_ENV_ALLOW: [&str; 3] = ["KROMA_WORKDIR", "KROMA_PLUGIN_DIR", "KROMA_CONFIG_FILE"];
 const HOST_SECRET_ENV: [&str; 12] = [
     "KROMA_API_KEY",
     "OPENAI_API_KEY",
@@ -87,10 +88,23 @@ fn is_host_secret(name: &str) -> bool {
 
 fn is_child_secret(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    HOST_SECRET_ENV
-        .iter()
-        .any(|blocked| blocked.eq_ignore_ascii_case(&upper))
-        || (!upper.starts_with("KROMA_") && is_host_secret(name))
+    if upper.starts_with("KROMA_") {
+        return !CHILD_ENV_ALLOW
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(&upper));
+    }
+    is_host_secret(name)
+}
+
+fn filter_child_environment(
+    process: &mut Command,
+    variables: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) {
+    for (key, _) in variables {
+        if is_child_secret(&key.to_string_lossy()) {
+            process.env_remove(key);
+        }
+    }
 }
 
 fn project_env_allowed(name: &str) -> bool {
@@ -499,9 +513,16 @@ fn expand_env(raw: &str, allow_host_secrets: bool) -> Result<String> {
     Ok(output)
 }
 
+#[cfg(unix)]
+type StdioProcessGuard = crate::shell::ProcessGroupGuard;
+#[cfg(windows)]
+type StdioProcessGuard = crate::winsys::ChildTreeGuard;
+
 enum Transport {
     Stdio {
         _child: Box<Child>,
+        #[cfg(any(unix, windows))]
+        _process_tree: Arc<StdioProcessGuard>,
         stdin: ChildStdin,
         stdout: BufReader<ChildStdout>,
     },
@@ -511,12 +532,16 @@ enum Transport {
         headers: HeaderMap,
         session_id: Option<String>,
     },
+    Closed,
 }
 
 struct Connection {
     transport: Transport,
     version: String,
     next_id: u64,
+    invalid: Option<String>,
+    cancelled: Arc<AtomicBool>,
+    request_timeout: Duration,
 }
 
 impl Connection {
@@ -531,11 +556,7 @@ impl Connection {
                 for arg in &config.args {
                     process.arg(expand_env(arg, !config.project)?);
                 }
-                for (key, _) in env::vars_os() {
-                    if is_child_secret(&key.to_string_lossy()) {
-                        process.env_remove(key);
-                    }
-                }
+                filter_child_environment(&mut process, env::vars_os());
                 if config.project && config.env.keys().any(|key| is_host_secret(key)) {
                     bail!("project MCP config may not set host secret environment variables");
                 }
@@ -560,9 +581,23 @@ impl Connection {
                     },
                 );
                 process.kill_on_drop(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    process.as_std_mut().process_group(0);
+                }
+                #[cfg(windows)]
+                let (mut child, process_tree) = crate::winsys::ChildTreeGuard::spawn(&mut process)
+                    .context("unable to launch contained MCP server process")?;
+                #[cfg(not(windows))]
                 let mut child = process
                     .spawn()
                     .context("unable to launch MCP server process")?;
+                #[cfg(unix)]
+                let process_tree = {
+                    let pid = child.id().context("MCP server process has no PID")?;
+                    crate::shell::ProcessGroupGuard::new(pid as i32)
+                };
                 let stdin = child.stdin.take().context("MCP server stdin unavailable")?;
                 let stdout = child
                     .stdout
@@ -570,6 +605,8 @@ impl Connection {
                     .context("MCP server stdout unavailable")?;
                 Transport::Stdio {
                     _child: Box::new(child),
+                    #[cfg(any(unix, windows))]
+                    _process_tree: Arc::new(process_tree),
                     stdin,
                     stdout: BufReader::new(stdout),
                 }
@@ -603,6 +640,9 @@ impl Connection {
             transport,
             version: version.into(),
             next_id: 0,
+            invalid: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            request_timeout: MCP_REQUEST_TIMEOUT,
         };
         if connection.version != MODERN_VERSION {
             let result = connection
@@ -696,12 +736,58 @@ impl Connection {
         Ok((self.next_id, value))
     }
 
+    fn ensure_usable(&self) -> Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            bail!("MCP stdio connection is unusable after a cancelled request");
+        }
+        if let Some(reason) = &self.invalid {
+            bail!("MCP stdio connection is unusable after a previous failure: {reason}");
+        }
+        Ok(())
+    }
+
+    fn invalidate(&mut self, reason: impl Into<String>) {
+        if self.invalid.is_none() {
+            self.invalid = Some(reason.into());
+            self.transport = Transport::Closed;
+        }
+    }
+
+    fn is_invalid(&self) -> bool {
+        self.invalid.is_some() || self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn cancel_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
+    #[cfg(any(unix, windows))]
+    fn process_tree(&self) -> Option<Arc<StdioProcessGuard>> {
+        match &self.transport {
+            Transport::Stdio { _process_tree, .. } => Some(Arc::clone(_process_tree)),
+            Transport::Http { .. } | Transport::Closed => None,
+        }
+    }
+
     async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.ensure_usable()?;
         let (id, message) = self.message(method, params, true)?;
-        let response = tokio::time::timeout(MCP_REQUEST_TIMEOUT, self.send(message, Some(id)))
-            .await
-            .with_context(|| format!("MCP {method} timed out after 120s"))??
-            .with_context(|| format!("MCP {method} did not return a response"))?;
+        let timeout = self.request_timeout;
+        let stdio = matches!(&self.transport, Transport::Stdio { .. });
+        let response = match tokio::time::timeout(timeout, self.send(message, Some(id))).await {
+            Ok(result) => {
+                result?.with_context(|| format!("MCP {method} did not return a response"))?
+            }
+            Err(_) => {
+                if stdio {
+                    self.invalidate(format!(
+                        "MCP {method} timed out after {}s",
+                        timeout.as_secs()
+                    ));
+                }
+                bail!("MCP {method} timed out after {}s", timeout.as_secs());
+            }
+        };
         if let Some(error) = response.get("error") {
             bail!("MCP {method} failed: {error}");
         }
@@ -712,14 +798,40 @@ impl Connection {
     }
 
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        self.ensure_usable()?;
         let (_, message) = self.message(method, params, false)?;
-        tokio::time::timeout(MCP_REQUEST_TIMEOUT, self.send(message, None))
-            .await
-            .with_context(|| format!("MCP {method} timed out after 120s"))??;
+        let timeout = self.request_timeout;
+        let stdio = matches!(&self.transport, Transport::Stdio { .. });
+        match tokio::time::timeout(timeout, self.send(message, None)).await {
+            Ok(result) => {
+                result?;
+            }
+            Err(_) => {
+                if stdio {
+                    self.invalidate(format!(
+                        "MCP {method} timed out after {}s",
+                        timeout.as_secs()
+                    ));
+                }
+                bail!("MCP {method} timed out after {}s", timeout.as_secs());
+            }
+        }
         Ok(())
     }
 
     async fn send(&mut self, message: Value, id: Option<u64>) -> Result<Option<Value>> {
+        self.ensure_usable()?;
+        let stdio = matches!(&self.transport, Transport::Stdio { .. });
+        let result = self.send_inner(message, id).await;
+        if let Err(error) = &result {
+            if stdio {
+                self.invalidate(format!("{error:#}"));
+            }
+        }
+        result
+    }
+
+    async fn send_inner(&mut self, message: Value, id: Option<u64>) -> Result<Option<Value>> {
         match &mut self.transport {
             Transport::Stdio { stdin, stdout, .. } => {
                 let mut raw = serde_json::to_vec(&message)?;
@@ -812,6 +924,7 @@ impl Connection {
                     Ok(None)
                 }
             }
+            Transport::Closed => bail!("MCP connection is closed"),
         }
     }
 }
@@ -975,6 +1088,30 @@ fn tool_name(server: &str, remote: &str) -> Option<String> {
     (!server.is_empty() && !remote.is_empty() && name.len() <= 64).then_some(name)
 }
 
+#[cfg(any(unix, windows))]
+struct McpCancelGuard {
+    tree: Arc<StdioProcessGuard>,
+    cancelled: Arc<AtomicBool>,
+    armed: bool,
+}
+
+#[cfg(any(unix, windows))]
+impl McpCancelGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl Drop for McpCancelGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled.store(true, Ordering::Release);
+            self.tree.terminate();
+        }
+    }
+}
+
 struct McpTool {
     local_name: String,
     remote_name: String,
@@ -1002,14 +1139,28 @@ impl Tool for McpTool {
                 if !args.is_object() {
                     bail!("MCP tool arguments must be an object");
                 }
+                let mut connection = self.connection.lock().await;
+                // A waiter that is cancelled before this point has no guard and
+                // must not affect the call currently holding the shared lock.
+                #[cfg(any(unix, windows))]
+                let mut cancel = connection.process_tree().map(|tree| McpCancelGuard {
+                    tree,
+                    cancelled: connection.cancel_signal(),
+                    armed: true,
+                });
                 // Tool operations may legitimately run for minutes. Unlike
                 // startup, an active MCP call has no arbitrary hard deadline;
-                // cancelling the Agent drops the pending request future.
-                self.connection
-                    .lock()
-                    .await
-                    .call_tool(&self.remote_name, args)
-                    .await
+                // cancelling the Agent drops this future and the guard closes
+                // the server process tree so a partially read stdio frame is
+                // never reused by a later call.
+                let result = connection.call_tool(&self.remote_name, args).await;
+                #[cfg(any(unix, windows))]
+                if let Some(cancel) = cancel.as_mut() {
+                    if result.is_ok() || !connection.is_invalid() {
+                        cancel.disarm();
+                    }
+                }
+                result
             }
             .await;
             match outcome {
@@ -1215,6 +1366,9 @@ mod tests {
             },
             version: MODERN_VERSION.into(),
             next_id: 0,
+            invalid: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            request_timeout: MCP_REQUEST_TIMEOUT,
         };
         let (_, request) = connection.message("tools/list", json!({}), true).unwrap();
         assert_eq!(
@@ -1262,5 +1416,525 @@ mod tests {
         assert!(!project_env_allowed("AWS_PROFILE"));
         assert!(!project_env_allowed("OPENAI_API_KEY"));
         assert!(!project_env_allowed("UNRELATED"));
+    }
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-mcp-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn mock_server_script(dir: &Path, body: &str) -> (String, Vec<String>) {
+        let path = dir.join("server.sh");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        ("sh".into(), vec![path.to_string_lossy().into_owned()])
+    }
+
+    #[cfg(windows)]
+    fn mock_server_script(dir: &Path, body: &str) -> (String, Vec<String>) {
+        let path = dir.join("server.ps1");
+        fs::write(&path, body).unwrap();
+        (
+            "powershell.exe".into(),
+            vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        )
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MockMode {
+        Normal,
+        NearLimit,
+        OverLimit,
+        InvalidJson,
+        Eof,
+        Timeout,
+        ProcessTree,
+        TreeTimeout,
+        Serialized,
+    }
+
+    fn mock_config(dir: &Path, mode: MockMode) -> ServerConfig {
+        let (command, args) = mock_server_script(dir, &mock_script_body(dir, mode));
+        ServerConfig {
+            command: Some(command),
+            args,
+            env: BTreeMap::new(),
+            cwd: Some(dir.to_path_buf()),
+            url: None,
+            headers: BTreeMap::new(),
+            protocol_version: Some(MODERN_VERSION.into()),
+            project: false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn mock_script_body(dir: &Path, mode: MockMode) -> String {
+        match mode {
+            MockMode::Normal => "read line\nprintf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":1}}'\nread line\nprintf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":2}}'".into(),
+            MockMode::NearLimit => "read line\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"'\nhead -c 8300000 /dev/zero | tr '\0' x\nprintf '\"}}\n'".into(),
+            MockMode::OverLimit => "read line\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"'\nhead -c 8400000 /dev/zero | tr '\0' x\nprintf '\"}}\n'".into(),
+            MockMode::InvalidJson => "read line\nprintf '%s\n' 'not-json'".into(),
+            MockMode::Eof => "read line\nexit 0".into(),
+            MockMode::Timeout => "read line\nsleep 5".into(),
+            MockMode::ProcessTree | MockMode::TreeTimeout => format!(
+                "cd '{}'\n(sleep 2; printf survived > survived.txt) &\nprintf started > started.txt\nread line\nsleep 5",
+                dir.display()
+            ),
+            MockMode::Serialized => format!(
+                "cd '{}'\n(sleep 5; printf survived > survived.txt) &\nprintf started > started.txt\nread line\nwhile [ ! -f release.txt ]; do sleep 0.05; done\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"ok\":1}}}}'\nread line\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"ok\":2}}}}'\nsleep 2",
+                dir.display()
+            ),
+        }
+    }
+
+    #[cfg(windows)]
+    fn mock_script_body(dir: &Path, mode: MockMode) -> String {
+        match mode {
+            MockMode::Normal => "[Console]::In.ReadLine() | Out-Null\n[Console]::Out.WriteLine('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":1}}')\n[Console]::In.ReadLine() | Out-Null\n[Console]::Out.WriteLine('{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":2}}')".into(),
+            MockMode::NearLimit => "[Console]::In.ReadLine() | Out-Null\n$p = '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"' + ('x' * 8300000) + '\"}}'\n[Console]::Out.WriteLine($p)".into(),
+            MockMode::OverLimit => "[Console]::In.ReadLine() | Out-Null\n$p = '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"' + ('x' * 8400000) + '\"}}'\n[Console]::Out.WriteLine($p)".into(),
+            MockMode::InvalidJson => "[Console]::In.ReadLine() | Out-Null\n[Console]::Out.WriteLine('not-json')".into(),
+            MockMode::Eof => "[Console]::In.ReadLine() | Out-Null\nexit 0".into(),
+            MockMode::Timeout => "[Console]::In.ReadLine() | Out-Null\nStart-Sleep -Seconds 5".into(),
+            MockMode::ProcessTree | MockMode::TreeTimeout => format!(
+                "Set-Location '{}'\n$null = Start-Process -FilePath 'cmd.exe' -ArgumentList '/C','ping -n 3 127.0.0.1 >nul & echo survived>survived.txt' -NoNewWindow -PassThru\nSet-Content -Path 'started.txt' -Value 'started'\n[Console]::In.ReadLine() | Out-Null\nStart-Sleep -Seconds 5",
+                dir.display()
+            ),
+            MockMode::Serialized => format!(
+                "Set-Location '{}'\n$null = Start-Process -FilePath 'cmd.exe' -ArgumentList '/C','ping -n 6 127.0.0.1 >nul & echo survived>survived.txt' -NoNewWindow -PassThru\nSet-Content -Path 'started.txt' -Value 'started'\n[Console]::In.ReadLine() | Out-Null\nwhile (-not (Test-Path 'release.txt')) {{ Start-Sleep -Milliseconds 50 }}\n[Console]::Out.WriteLine('{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"ok\":1}}}}')\n[Console]::In.ReadLine() | Out-Null\n[Console]::Out.WriteLine('{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"ok\":2}}}}')\nStart-Sleep -Seconds 2",
+                dir.display()
+            ),
+        }
+    }
+
+    async fn connect_mock(dir: &Path, mode: MockMode) -> Result<Connection> {
+        let config = mock_config(dir, mode);
+        Connection::connect(&config, dir).await
+    }
+
+    async fn with_test_timeout<F, T>(future: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        tokio::time::timeout(Duration::from_secs(20), future)
+            .await
+            .context("mock MCP test exceeded its hard timeout")?
+    }
+
+    #[tokio::test]
+    async fn child_environment_filters_sensitive_kroma_names() -> Result<()> {
+        for name in [
+            "KROMA_API_KEY",
+            "KROMA_PROXY_TOKEN",
+            "KROMA_CUSTOM_KEY",
+            "KROMA_WEBHOOK_SECRET",
+            "KROMA_MCP_PASSWORD",
+            "UNKNOWN_TOKEN",
+            "CUSTOM_SECRET",
+        ] {
+            assert!(is_child_secret(name), "{name} must be filtered");
+        }
+        for name in [
+            "KROMA_WORKDIR",
+            "KROMA_PLUGIN_DIR",
+            "KROMA_CONFIG_FILE",
+            "PATH",
+        ] {
+            assert!(!is_child_secret(name), "{name} is an explicit non-secret");
+        }
+
+        #[cfg(unix)]
+        let mut command = Command::new("/bin/sh");
+        #[cfg(unix)]
+        command.args(["-c", "env"]);
+        #[cfg(windows)]
+        let mut command =
+            Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+        #[cfg(windows)]
+        command.args(["/C", "set"]);
+        command.env_clear();
+        let values = [
+            ("KROMA_PROXY_TOKEN", "proxy-secret"),
+            ("KROMA_CUSTOM_KEY", "custom-secret"),
+            ("KROMA_WEBHOOK_SECRET", "webhook-secret"),
+            ("KROMA_MCP_PASSWORD", "mcp-password"),
+            ("UNKNOWN_TOKEN", "unknown-secret"),
+            ("KROMA_WORKDIR", "safe-workdir"),
+            ("MCP_SAFE_VALUE", "safe-value"),
+        ];
+        for (key, value) in values {
+            command.env(key, value);
+        }
+        let fake: Vec<(std::ffi::OsString, std::ffi::OsString)> = values
+            .iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect();
+        filter_child_environment(&mut command, fake.clone());
+        // This mirrors the explicit global MCP config path: config.env is
+        // applied after inherited values were filtered.
+        command.env("KROMA_EXPLICIT_CONFIG", "explicit-allowed");
+        let output = with_test_timeout(async move {
+            command.output().await.context("spawning environment probe")
+        })
+        .await?;
+        assert!(output.status.success());
+        let text = String::from_utf8_lossy(&output.stdout);
+        for allowed in [
+            "KROMA_WORKDIR=safe-workdir",
+            "MCP_SAFE_VALUE=safe-value",
+            "KROMA_EXPLICIT_CONFIG=explicit-allowed",
+        ] {
+            assert!(text.contains(allowed), "missing {allowed}: {text}");
+        }
+        for secret in [
+            "KROMA_PROXY_TOKEN=proxy-secret",
+            "KROMA_CUSTOM_KEY=custom-secret",
+            "KROMA_WEBHOOK_SECRET=webhook-secret",
+            "KROMA_MCP_PASSWORD=mcp-password",
+            "UNKNOWN_TOKEN=unknown-secret",
+        ] {
+            assert!(!text.contains(secret), "leaked {secret}: {text}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdio_normal_and_near_limit_responses_work() -> Result<()> {
+        let dir = scratch("normal");
+        let mut connection = with_test_timeout(connect_mock(&dir, MockMode::Normal)).await?;
+        let first = with_test_timeout(connection.rpc("first", json!({}))).await?;
+        assert_eq!(first["ok"], 1);
+        let second = with_test_timeout(connection.rpc("second", json!({}))).await?;
+        assert_eq!(second["ok"], 2);
+        drop(connection);
+
+        let near_dir = scratch("near-limit");
+        let mut near = with_test_timeout(connect_mock(&near_dir, MockMode::NearLimit)).await?;
+        let result = with_test_timeout(near.rpc("near", json!({}))).await?;
+        assert_eq!(result["data"].as_str().unwrap().len(), 8_300_000);
+        drop(near);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(near_dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdio_overlimit_invalidates_without_reusing_stale_bytes() -> Result<()> {
+        let dir = scratch("over-limit");
+        let mut connection = with_test_timeout(connect_mock(&dir, MockMode::OverLimit)).await?;
+        let error = with_test_timeout(connection.rpc("first", json!({})))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("8 MiB"), "{error:#}");
+        let second = with_test_timeout(connection.rpc("second", json!({})))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{second:#}").contains("unusable"),
+            "stale connection was reused: {second:#}"
+        );
+        drop(connection);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdio_invalid_json_and_eof_invalidate_connection() -> Result<()> {
+        for mode in [MockMode::InvalidJson, MockMode::Eof] {
+            let dir = scratch("broken");
+            let mut connection = with_test_timeout(connect_mock(&dir, mode)).await?;
+            let error = with_test_timeout(connection.rpc("first", json!({})))
+                .await
+                .unwrap_err();
+            assert!(!error.to_string().is_empty());
+            let second = with_test_timeout(connection.rpc("second", json!({})))
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{second:#}").contains("unusable"),
+                "connection was reused after {mode:?}: {second:#}"
+            );
+            drop(connection);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdio_timeout_invalidates_connection() -> Result<()> {
+        let dir = scratch("timeout");
+        let mut connection = with_test_timeout(connect_mock(&dir, MockMode::Timeout)).await?;
+        connection.request_timeout = Duration::from_millis(250);
+        let started = std::time::Instant::now();
+        let error = with_test_timeout(connection.rpc("first", json!({})))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let second = with_test_timeout(connection.rpc("second", json!({})))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{second:#}").contains("unusable"),
+            "timed-out connection was reused: {second:#}"
+        );
+        drop(connection);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn one_failed_mcp_server_does_not_break_independent_connection() -> Result<()> {
+        let broken_dir = scratch("independent-broken");
+        let mut broken =
+            with_test_timeout(connect_mock(&broken_dir, MockMode::InvalidJson)).await?;
+        assert!(with_test_timeout(broken.rpc("broken", json!({})))
+            .await
+            .is_err());
+        drop(broken);
+
+        let good_dir = scratch("independent-good");
+        let mut good = with_test_timeout(connect_mock(&good_dir, MockMode::Normal)).await?;
+        let result = with_test_timeout(good.rpc("good", json!({}))).await?;
+        assert_eq!(result["ok"], 1);
+        drop(good);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = fs::remove_dir_all(broken_dir);
+        let _ = fs::remove_dir_all(good_dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mcp_timeout_cleans_up_descendant_processes() -> Result<()> {
+        let dir = scratch("timeout-tree");
+        let mut connection = with_test_timeout(connect_mock(&dir, MockMode::TreeTimeout)).await?;
+        let started = dir.join("started.txt");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .context("mock MCP descendant never started")?;
+        connection.request_timeout = Duration::from_millis(250);
+        let error = with_test_timeout(connection.rpc("timeout", json!({})))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(
+            !dir.join("survived.txt").exists(),
+            "MCP descendant survived timeout cleanup"
+        );
+        drop(connection);
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiting_shared_tool_cancel_does_not_interrupt_active_call() -> Result<()> {
+        let dir = scratch("shared-serialized");
+        let tool = Arc::new(McpTool {
+            local_name: "mcp__test__serialized".into(),
+            remote_name: "serialized".into(),
+            description: "serialized test tool".into(),
+            schema: json!({"type":"object","properties":{}}),
+            connection: Arc::new(tokio::sync::Mutex::new(
+                with_test_timeout(connect_mock(&dir, MockMode::Serialized)).await?,
+            )),
+        });
+        let call_a = ToolCall {
+            id: "call-a".into(),
+            kind: "function".into(),
+            function: crate::provider::FunctionCall {
+                name: "mcp__test__serialized".into(),
+                arguments: "{}".into(),
+            },
+        };
+        let archive_a = dir.join("session-a.json");
+        let mut active = Box::pin(tool.execute(
+            &call_a,
+            ToolContext {
+                workdir: &dir,
+                archive: &archive_a,
+                on_output: None,
+            },
+        ));
+        // Let A enter the connection lock and send the request. The mock waits
+        // for release.txt, so it cannot complete yet.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while tool.connection.try_lock().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "active call did not acquire the shared connection"
+            );
+            tokio::select! {
+                result = &mut active => panic!("active call completed before release: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+
+        let waiting_tool = Arc::clone(&tool);
+        let waiting_dir = dir.clone();
+        let waiting = tokio::spawn(async move {
+            let archive = waiting_dir.join("session-b.json");
+            let call = ToolCall {
+                id: "call-b".into(),
+                kind: "function".into(),
+                function: crate::provider::FunctionCall {
+                    name: "mcp__test__serialized".into(),
+                    arguments: "{}".into(),
+                },
+            };
+            waiting_tool
+                .execute(
+                    &call,
+                    ToolContext {
+                        workdir: &waiting_dir,
+                        archive: &archive,
+                        on_output: None,
+                    },
+                )
+                .await
+        });
+        // B must be blocked on the same mutex while A owns it. It has no
+        // process-tree guard yet, so aborting B must not kill A's server.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiting.is_finished(),
+            "B should still be waiting for the lock"
+        );
+        waiting.abort();
+        let _ = waiting.await;
+
+        fs::write(dir.join("release.txt"), "go")?;
+        let first = tokio::time::timeout(Duration::from_secs(5), &mut active)
+            .await
+            .context("active call did not finish after releasing the mock")?;
+        assert!(!first.is_error, "active call failed: {}", first.content);
+        assert!(first.content.contains("\"ok\":1"), "{}", first.content);
+
+        let mut connection = tokio::time::timeout(Duration::from_secs(2), tool.connection.lock())
+            .await
+            .context("connection remained locked after the active call")?;
+        let second = with_test_timeout(connection.rpc("second", json!({}))).await?;
+        assert_eq!(
+            second["ok"], 2,
+            "B cancellation damaged the shared connection"
+        );
+        drop(connection);
+        drop(active);
+        drop(tool);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_mcp_tool_closes_descendant_process_tree() -> Result<()> {
+        let dir = scratch("cancel-tree");
+        let connection = Arc::new(tokio::sync::Mutex::new(
+            with_test_timeout(connect_mock(&dir, MockMode::ProcessTree)).await?,
+        ));
+        let tool = McpTool {
+            local_name: "mcp__test__slow".into(),
+            remote_name: "slow".into(),
+            description: "slow test tool".into(),
+            schema: json!({"type":"object","properties":{}}),
+            connection,
+        };
+        let call = ToolCall {
+            id: "call".into(),
+            kind: "function".into(),
+            function: crate::provider::FunctionCall {
+                name: "mcp__test__slow".into(),
+                arguments: "{}".into(),
+            },
+        };
+        let started = dir.join("started.txt");
+        let archive = dir.join("session.json");
+        let mut future = Box::pin(tool.execute(
+            &call,
+            ToolContext {
+                workdir: &dir,
+                archive: &archive,
+                on_output: None,
+            },
+        ));
+        tokio::select! {
+            _ = async {
+                while !started.exists() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            } => {}
+            result = &mut future => panic!("MCP tool completed instead of staying pending: {result:?}"),
+        }
+        drop(future);
+        let mut connection = tokio::time::timeout(Duration::from_secs(2), tool.connection.lock())
+            .await
+            .context("cancelled MCP tool retained the connection lock")?;
+        assert!(
+            connection.is_invalid(),
+            "cancelled MCP tool did not invalidate the connection"
+        );
+        let first_after_cancel = with_test_timeout(connection.rpc("after-cancel", json!({}))).await;
+        assert!(
+            first_after_cancel.is_err(),
+            "cancelled MCP connection still served a request: {first_after_cancel:?}"
+        );
+        let second_after_cancel = with_test_timeout(connection.rpc("still-cancelled", json!({})))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{second_after_cancel:#}").contains("unusable"),
+            "cancelled MCP connection was reused: {second_after_cancel:#}"
+        );
+        drop(connection);
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(
+            !dir.join("survived.txt").exists(),
+            "cancelled MCP tool left a descendant process alive"
+        );
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mcp_drop_cleans_up_descendant_processes() -> Result<()> {
+        let dir = scratch("process-tree");
+        let connection = with_test_timeout(connect_mock(&dir, MockMode::ProcessTree)).await?;
+        let started = dir.join("started.txt");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .context("mock MCP descendant never started")?;
+        drop(connection);
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(
+            !dir.join("survived.txt").exists(),
+            "MCP descendant escaped process-tree cleanup"
+        );
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
     }
 }

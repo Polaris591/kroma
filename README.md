@@ -546,7 +546,8 @@ Chat retains its previous behavior when no limit is available.
 Kroma also ships a very small built-in catalog for exact public
 `(provider, model-id)` pairs. It fills fields the endpoint did not provide,
 using `explicit configuration → current endpoint metadata → catalog → conservative default`.
-A custom proxy does **not** inherit capabilities from a same-named official
+Only the official HTTPS endpoint on its default port is recognized as the
+provider; a custom proxy does **not** inherit capabilities from a same-named official
 model. To opt in explicitly, set `KROMA_MODEL_CATALOG_MODEL` or the profile's
 `catalog_model` to an exact alias such as `anthropic/claude-sonnet-5-5`.
 Unknown aliases fail at startup. Every catalog record carries its source URL

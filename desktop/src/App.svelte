@@ -9,6 +9,7 @@
   } from '@lucide/svelte';
   import { api, type Bootstrap, type DesktopEvent, type StreamEnvelope, type Message, type ProfileInput } from './lib/api';
   import { compactCount, cachePercentage } from './lib/format';
+  import { applySnapshot, isActiveTask } from './lib/snapshot';
   import MessageView from './components/MessageView.svelte';
   import Markdown from './components/Markdown.svelte';
   import SettingsView from './components/SettingsView.svelte';
@@ -38,6 +39,7 @@
   let mcpDismissed = false;
   let rename = false;
   let newTitle = '';
+  let taskGeneration = 0;
 
   $: snapshot = data?.snapshot ?? null;
   $: history = [...olderMessages, ...(snapshot?.messages ?? [])].filter(m => m.role !== 'system');
@@ -87,6 +89,8 @@
     finally { historyBusy = false; }
   }
   async function doConnect(name?: string) {
+    if (busy || running) return;
+    taskGeneration += 1;
     busy = true; error = ''; notice = '';
     try {
       data = await api.connect(name);
@@ -98,6 +102,7 @@
   }
   async function approveProjectMcp() {
     if (busy || running) return;
+    taskGeneration += 1;
     busy = true; error = ''; notice = '';
     try {
       await api.trustProjectMcp();
@@ -110,9 +115,11 @@
     finally { busy = false; }
   }
   async function chooseProject() {
+    if (busy || running) return;
     try {
       const path = await open({directory: true, multiple: false, title: '选择工作目录'});
       if (typeof path === 'string') {
+        taskGeneration += 1;
         data = await api.openProject(path);
         syncHistoryState();
         stream = ''; thinking = ''; activeTools = [];
@@ -123,6 +130,7 @@
   }
   async function switchSession(id: string) {
     if (running || busy) return;
+    taskGeneration += 1;
     busy = true; error = '';
     try {
       data = await api.switchSession(id);
@@ -134,6 +142,7 @@
   }
   async function newSession() {
     if (running || busy) return;
+    taskGeneration += 1;
     busy = true; error = '';
     try {
       data = await api.newSession();
@@ -179,9 +188,13 @@
     }
     void scrollIfBottom();
   }
-  function onStream(event: StreamEnvelope) {
+  function onStream(event: StreamEnvelope, generation: number) {
+    if (!isActiveTask(generation, taskGeneration)) return;
     if (event.kind === 'batch') applyEvents(event.events);
-    if (event.kind === 'snapshot' && data) { data = {...data, snapshot: event.snapshot}; syncHistoryState(); }
+    if (event.kind === 'snapshot' && data) {
+      data = applySnapshot(data, event.snapshot);
+      syncHistoryState();
+    }
     if (event.kind === 'done' && event.result.error) error = event.result.error;
   }
   async function submit() {
@@ -194,17 +207,38 @@
     if (!canSend) {if (!data?.ready) tab = 'settings';return;}
     const text = prompt.trim();
     const paths = [...attached];
+    const generation = ++taskGeneration;
+    let sawSnapshot = false;
+    let appliedSnapshot = false;
     draftPrompt = text || ('已添加 ' + paths.length + ' 个文件');
     prompt = ''; attached = []; running = true; stream = ''; thinking = ''; activeTools = []; error = '';
     await scrollDown();
     try {
-      const result = await api.send(text, paths, onStream);
+      const result = await api.send(text, paths, event => {
+        if (event.kind === 'snapshot' && isActiveTask(generation, taskGeneration)) {
+          if (appliedSnapshot) return;
+          sawSnapshot = true;
+        }
+        onStream(event, generation);
+      });
       if (result.result.error) error = result.result.error;
+      // The channel snapshot is authoritative at the task boundary. The RPC
+      // return value is only a fallback when that event was not delivered;
+      // never rebuild the whole bootstrap for the same completion.
+      if (!sawSnapshot && isActiveTask(generation, taskGeneration) && data) {
+        data = applySnapshot(data, result.snapshot);
+        syncHistoryState();
+        appliedSnapshot = true;
+      }
     } catch(e) { showError(e); }
     finally {
-      running = false; draftPrompt = ''; stream = ''; thinking = ''; activeTools = [];
-      try {await refresh();} catch(e) {showError(e)}
-      await scrollDown();
+      if (isActiveTask(generation, taskGeneration)) {
+        running = false; draftPrompt = ''; stream = ''; thinking = ''; activeTools = [];
+        if (!sawSnapshot && !appliedSnapshot) {
+          try {await refresh();} catch(e) {showError(e)}
+        }
+        await scrollDown();
+      }
     }
   }
   function handleEditor(event: KeyboardEvent) {

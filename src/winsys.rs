@@ -79,6 +79,13 @@ impl ChildTreeGuard {
     pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
+
+    pub(crate) fn terminate(&self) {
+        if self.armed {
+            // SAFETY: job is exclusively owned and live; no user memory passed.
+            unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
+        }
+    }
 }
 
 fn resume_initial_thread(pid: u32) -> io::Result<()> {

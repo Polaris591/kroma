@@ -326,14 +326,28 @@ impl Drop for CaptureCleanup {
 // On Unix, isolate each shell in its own process group. When a task future is
 // cancelled, killing only the parent shell would leave spawned children alive.
 #[cfg(unix)]
-struct ProcessGroupGuard {
+pub(crate) struct ProcessGroupGuard {
     pgid: i32,
     armed: bool,
 }
 
 #[cfg(unix)]
 impl ProcessGroupGuard {
-    fn disarm(&mut self) {
+    pub(crate) fn new(pgid: i32) -> Self {
+        Self { pgid, armed: true }
+    }
+
+    pub(crate) fn terminate(&self) {
+        if self.armed && self.pgid > 0 {
+            // SAFETY: the process group is owned by the spawned child; a
+            // negative PID targets that group and never Kroma's own group.
+            unsafe {
+                libc::kill(-self.pgid, libc::SIGKILL);
+            }
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -876,10 +890,7 @@ async fn execute_internal(
     #[cfg(unix)]
     let pid = child.id().context("shell process has no PID")?;
     #[cfg(unix)]
-    let mut guard = ProcessGroupGuard {
-        pgid: pid as i32,
-        armed: true,
-    };
+    let mut guard = ProcessGroupGuard::new(pid as i32);
     let status = if let Some(on_output) = on_output {
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
