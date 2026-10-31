@@ -43,3 +43,13 @@ HEAD 上原本有 2 个失败，均与 TUI 改动无关，已用 `git archive HE
 ## 明确不做（保留在文档中）
 
 审批 UI、侧栏、默认双栏 IDE、全屏卡片墙、复杂动画系统、新 UI runtime、自动文件回滚。
+
+## 部署记录（2026-11-01）
+
+- 远端提交：\`35524fb\`（\`a2c7e05..35524fb main -> main\`）
+- 构建：\`cargo build --release --locked\` → \`target/release/kroma.exe\`，\`--build-info\` 为 \`kroma 0.4.0 (35524fb9416a)\`
+- 安装：\`C:\Users\24524\.cargo\bin\kroma.exe\`，SHA256 \`61B877FC26A70CF97284DDC8B64ABDCD6B3E6AB6FEB79FC5ED255D0EE01B3A1B\`
+- 备份：\`C:\Users\24524\.kroma\backups\tui-20261101-035420\kroma.exe\`（含旧哈希与部署信息）
+- 部署时 PID 26316 仍在运行旧镜像，未终止任何进程；旧镜像被重命名为 \`kroma-previous-20261101-035420.exe\`，新会话使用新二进制。
+- 冒烟：\`--build-info\`、\`--help\` 均通过；\`where.exe kroma\` 指向 \`C:\Users\24524\.cargo\bin\kroma.exe\`
+- 回滚：关闭 Kroma 后用备份覆盖安装路径即可；静态官网（\`D:\Kroma\site\`）未部署（无托管目标，本地预览 \`node site/serve.mjs\`）。
