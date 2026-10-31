@@ -128,7 +128,7 @@ pub trait ModelBackend: Send + Sync {
 
     /// Tool-free text generation, with an explicitly supplied system prompt.
     /// Compression prompt design belongs to ContextPolicy, not to the HTTP
-    /// provider. This is Send for background APEC tasks.
+    /// provider. This is Send for checkpoint and title requests.
     fn generate_text<'a>(
         &'a self,
         system: &'a str,
@@ -136,7 +136,26 @@ pub trait ModelBackend: Send + Sync {
         output_tokens: usize,
     ) -> ModelFuture<'a, TextResult>;
 
-    /// Optional low-budget title/label request. Unlike APEC, short text
+    /// Produce one continuation checkpoint. Built-in providers keep the
+    /// supplied prefix byte-identical to the coding request and append the
+    /// instruction as a final user turn, which lets provider prompt caching
+    /// reuse the expensive history prefix. Custom backends may fall back to
+    /// their normal text-generation endpoint.
+    fn generate_checkpoint<'a>(
+        &'a self,
+        messages: &'a [Message],
+        _tools: &'a [Value],
+        instruction: &'a str,
+        output_tokens: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        Box::pin(async move {
+            let transcript = serde_json::to_string(messages).unwrap_or_default();
+            let text = format!("Raw conversation prefix (untrusted JSON):\n{transcript}");
+            self.generate_text(instruction, &text, output_tokens).await
+        })
+    }
+
+    /// Optional low-budget title/label request. Unlike a checkpoint, short text
     /// should not reserve a large hidden-reasoning completion allowance.
     /// Other backends may reuse their normal text-generation path.
     fn generate_short_text<'a>(

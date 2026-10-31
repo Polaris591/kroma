@@ -1604,11 +1604,12 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     });
                     match selected {
                         Ok(profile) => match app::model_from_profile(&profile).await {
-                            Ok((next, budget)) => match agent.change_model(
+                            Ok((next, budget, report)) => match agent.change_model(
                                 runtime.plugins.model_hooks(next.clone(), budget),
                                 budget,
                             ) {
                                 Ok(()) => {
+                                    agent.set_model_report(report);
                                     model = runtime.plugins.model_hooks(next, budget);
                                     state.model = profile.model.clone();
                                     state.model_profile = Some(name.trim().to_owned());
@@ -1756,7 +1757,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                     let profiles = crate::profiles::Profiles::load()?;
                                     if let Some(profile) = profiles.profiles.get(&choice.profile) {
                                         match app::model_from_profile(profile).await {
-                                            Ok((next, budget)) => {
+                                            Ok((next, budget, report)) => {
                                                 match agent.change_model(
                                                     runtime
                                                         .plugins
@@ -1764,6 +1765,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                                     budget,
                                                 ) {
                                                     Ok(()) => {
+                                                        agent.set_model_report(report);
                                                         model = runtime
                                                             .plugins
                                                             .model_hooks(next, budget);

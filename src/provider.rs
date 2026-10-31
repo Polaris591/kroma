@@ -25,7 +25,7 @@ const MAX_APEC_RESPONSE_BYTES: usize = 1024 * 1024;
 /// A per-turn output budget, not the model's total capability. Reserving a
 /// 128k completion for every request would compress the conversation far too
 /// early; 32k is still enough for a large edit or a long explanation.
-const MAX_TURN_OUTPUT_TOKENS: usize = 32 * 1024;
+pub(crate) const MAX_TURN_OUTPUT_TOKENS: usize = 32 * 1024;
 
 async fn read_limited_text(response: reqwest::Response, limit: usize) -> Result<String> {
     let mut stream = response.bytes_stream();
@@ -54,6 +54,14 @@ pub struct ModelInfo {
     /// Raw capability object from the upstream endpoint, not a model-name guess.
     pub capabilities: Option<Value>,
     pub image_input: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MetadataStatus {
+    #[default]
+    NotQueried,
+    Available,
+    Unavailable,
 }
 
 impl ModelInfo {
@@ -548,6 +556,11 @@ pub struct ModelClient {
     reasoning_summary_rejected: Arc<AtomicBool>,
     anthropic_cache_rejected: Arc<AtomicBool>,
     model_info: ModelInfo,
+    /// Catalog values are fallbacks only; upstream metadata still wins.
+    catalog_output_limit: Option<usize>,
+    catalog_image_input: Option<bool>,
+    metadata_status: MetadataStatus,
+    metadata_detail: Option<String>,
     output_limit: Option<usize>,
     requested_output: Option<usize>,
     stream_idle_timeout: Duration,
@@ -631,7 +644,10 @@ fn parse_apec_text_response(body: &str) -> Result<ApecTextAttempt> {
         return Ok(ApecTextAttempt::Truncated(usage));
     }
     if !matches!(first.finish_reason.as_deref(), Some("stop")) {
-        bail!("APEC summary ended unexpectedly: {:?}", first.finish_reason);
+        bail!(
+            "checkpoint summary ended unexpectedly: {:?}",
+            first.finish_reason
+        );
     }
     let text = first.message.content.unwrap_or_default();
     if first.message.role != "assistant"
@@ -642,7 +658,7 @@ fn parse_apec_text_response(body: &str) -> Result<ApecTextAttempt> {
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
     {
-        bail!("APEC model did not provide a valid text summary");
+        bail!("checkpoint model did not provide a valid text summary");
     }
     Ok(ApecTextAttempt::Complete(text.trim().to_owned(), usage))
 }
@@ -663,13 +679,13 @@ fn combine_apec_usage(first: Option<Usage>, second: Option<Usage>) -> Option<Usa
     })
 }
 
-// APEC still targets a short memory segment. The larger completion allowance
-// is for hidden reasoning tokens, not a larger persisted summary.
-fn apec_completion_budget(output_tokens: usize, truncated_responses: u32) -> usize {
+// The checkpoint output target is deliberately short. The larger completion
+// allowance is for hidden reasoning tokens, not a larger persisted summary.
+fn summary_completion_budget(output_tokens: usize, truncated_responses: u32) -> usize {
     output_tokens
         .max(128)
         .saturating_mul(2)
-        .max(1024)
+        .max(512)
         .saturating_mul(1usize << truncated_responses.min(3))
 }
 
@@ -777,6 +793,10 @@ impl ModelClient {
             reasoning_summary_rejected: Arc::new(AtomicBool::new(false)),
             anthropic_cache_rejected: Arc::new(AtomicBool::new(false)),
             model_info: ModelInfo::default(),
+            catalog_output_limit: None,
+            catalog_image_input: None,
+            metadata_status: MetadataStatus::NotQueried,
+            metadata_detail: None,
             output_limit: None,
             requested_output: None,
             stream_idle_timeout: Duration::from_secs(300),
@@ -815,14 +835,34 @@ impl ModelClient {
         self
     }
 
+    /// Fields absent from the current endpoint may use the verified catalog.
+    /// These are fallbacks, never overrides of upstream metadata.
+    pub fn with_catalog_defaults(
+        mut self,
+        max_output_tokens: Option<usize>,
+        image_input: Option<bool>,
+    ) -> Self {
+        self.catalog_output_limit = max_output_tokens;
+        self.catalog_image_input = image_input;
+        self
+    }
+
+    pub fn metadata_status(&self) -> MetadataStatus {
+        self.metadata_status
+    }
+
+    pub fn metadata_detail(&self) -> Option<&str> {
+        self.metadata_detail.as_deref()
+    }
+
     pub fn effective_output_tokens(&self) -> Option<usize> {
+        let hard_limit = self.output_limit.or(self.catalog_output_limit);
         self.requested_output
             .map(|n| {
                 let requested = n.min(MAX_TURN_OUTPUT_TOKENS);
-                self.output_limit
-                    .map_or(requested, |limit| requested.min(limit))
+                hard_limit.map_or(requested, |limit| requested.min(limit))
             })
-            .or_else(|| self.output_limit.map(|limit| limit.min(4096)))
+            .or_else(|| hard_limit.map(|limit| limit.min(4096)))
     }
 
     fn authenticated(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -845,36 +885,75 @@ impl ModelClient {
     /// A metadata lookup is optional. Many OpenAI-compatible /models
     /// endpoints return only the ID and omit token limits.
     pub async fn discover_model(&mut self) -> Option<ModelInfo> {
-        let mut endpoint = reqwest::Url::parse(&self.base_url).ok()?;
+        self.discover_model_with_timeout(Duration::from_secs(4))
+            .await
+    }
+
+    async fn discover_model_with_timeout(&mut self, timeout: Duration) -> Option<ModelInfo> {
+        let mut endpoint = match reqwest::Url::parse(&self.base_url).ok().and_then(|url| {
+            let mut url = url;
+            url.path_segments_mut().ok()?.pop_if_empty();
+            Some(url)
+        }) {
+            Some(url) => url,
+            None => {
+                self.metadata_status = MetadataStatus::Unavailable;
+                self.metadata_detail = Some("invalid API base URL".into());
+                return Some(ModelInfo::default());
+            }
+        };
         endpoint
             .path_segments_mut()
             .ok()?
-            .pop_if_empty()
             .push("models")
             .push(&self.model);
         let mut req = self.http.get(endpoint);
         if self.protocol == ApiProtocol::Anthropic {
             req = req.header("anthropic-version", "2023-06-01");
         }
-        let result = tokio::time::timeout(Duration::from_secs(4), async {
-            let response = self.authenticated(req).send().await.ok()?;
+        let result = tokio::time::timeout(timeout, async {
+            let response = self
+                .authenticated(req)
+                .send()
+                .await
+                .map_err(|_| "metadata request failed".to_owned())?;
             if !response.status().is_success() {
-                return None;
+                return Err(format!("HTTP {}", response.status().as_u16()));
             }
             let body = read_limited_text(response, MAX_MODEL_METADATA_BYTES)
                 .await
-                .ok()?;
-            serde_json::from_str::<Value>(&body).ok()
+                .map_err(|_| "metadata body unreadable".to_owned())?;
+            serde_json::from_str::<Value>(&body).map_err(|_| "invalid metadata JSON".to_owned())
         })
         .await;
-        let info = match result {
-            Ok(Some(value)) => ModelInfo::parse(&value),
-            _ => ModelInfo::default(),
+        let (info, status, detail) = match result {
+            Ok(Ok(value)) => (ModelInfo::parse(&value), MetadataStatus::Available, None),
+            Ok(Err(detail)) => (
+                ModelInfo::default(),
+                MetadataStatus::Unavailable,
+                Some(detail),
+            ),
+            Err(_) => (
+                ModelInfo::default(),
+                MetadataStatus::Unavailable,
+                Some(format!("timed out after {}s", timeout.as_secs())),
+            ),
         };
+        self.metadata_status = status;
+        self.metadata_detail = detail.clone();
         crate::runtime_log!(
-            "[model] upstream limits: context={:?} output={:?} (missing values use Kroma defaults)",
+            "[model] upstream limits: context={:?} output={:?} ({}{}; missing values use Kroma defaults)",
             info.context_window,
-            info.max_output_tokens
+            info.max_output_tokens,
+            match status {
+                MetadataStatus::Available => "available",
+                MetadataStatus::Unavailable => "unavailable",
+                MetadataStatus::NotQueried => "not queried",
+            },
+            detail
+                .as_deref()
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default()
         );
         self.output_limit = info.max_output_tokens;
         self.model_info = info.clone();
@@ -1057,6 +1136,18 @@ impl ModelClient {
     }
 
     fn chat_payload_with_tools(&self, messages: &[Message], tools: &[Value]) -> Value {
+        self.chat_payload_with_tools_active(messages, tools, None)
+    }
+
+    /// `active_turn` lets a checkpoint request keep the same reasoning
+    /// projection as the coding request even though it appends a final
+    /// summarization instruction.
+    fn chat_payload_with_tools_active(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        active_turn: Option<usize>,
+    ) -> Value {
         // DeepSeek V4 requires a non-null content field on assistant tool
         // messages; older persisted sessions had content=null. Fix the
         // outbound projection without rewriting authoritative raw history.
@@ -1077,10 +1168,12 @@ impl ModelClient {
         // history can be safely replayed across user turns/model switches.
         // Older untagged records are accepted only in the active user turn:
         // their origin cannot be established after a model switch.
-        let active_turn = messages
-            .iter()
-            .rposition(|message| message.role == "user")
-            .map_or(0, |index| index + 1);
+        let active_turn = active_turn.unwrap_or_else(|| {
+            messages
+                .iter()
+                .rposition(|message| message.role == "user")
+                .map_or(0, |index| index + 1)
+        });
         let replay_reasoning = !tools.is_empty()
             && (self.deepseek_thinking.is_some()
                 || self.model.to_ascii_lowercase().contains("deepseek"))
@@ -1320,13 +1413,18 @@ impl ModelClient {
             .await
     }
 
-    async fn text_completion_with_budget(
+    /// Shared non-streaming text-generation loop. The caller owns the
+    /// protocol-specific payload; the loop handles bounded truncation and
+    /// timeout retries plus usage accounting for titles and checkpoints.
+    async fn text_generation_with_budget<F>(
         &self,
-        system: &str,
-        text: &str,
         output_tokens: usize,
         short: bool,
-    ) -> Result<SummaryResult> {
+        mut payload_for: F,
+    ) -> Result<SummaryResult>
+    where
+        F: FnMut(usize) -> Result<Value>,
+    {
         let mut timeouts = 0;
         let mut truncations = 0;
         let mut requests = 0;
@@ -1334,81 +1432,31 @@ impl ModelClient {
         let mut spent_usage: Option<Usage> = None;
         let mut usage_known = true;
         loop {
-            // APEC needs a large hidden-reasoning reserve. A short session
+            // Checkpoints need hidden-reasoning headroom. A short session
             // title does not: cap the generation budget and never retry a
             // truncated title with an exponentially larger allowance.
             let budget = if short {
                 output_tokens.clamp(32, 160)
             } else {
-                apec_completion_budget(output_tokens, truncations)
+                summary_completion_budget(output_tokens, truncations)
             };
             let max_tokens = self.output_limit.map_or(budget, |limit| budget.min(limit));
-            let mut payload = json!({
-                "model": self.model,
-                "stream": false,
-                "max_tokens": max_tokens,
-                "messages": [
-                    {"role":"system", "content": system},
-                    {"role":"user", "content": text}
-                ]
-            });
-            // Memory consolidation needs inexpensive factual extraction, not
-            // the coding task's High reasoning budget. DeepSeek defaults to
-            // High unless an effort is explicitly requested. For generic
-            // OpenAI-compatible models avoid sending a nonstandard field.
-            if self.deepseek_thinking.is_some()
-                || self.model.to_ascii_lowercase().contains("deepseek")
-            {
-                payload["reasoning_effort"] = json!("low");
-            }
-            let start = Instant::now();
             requests += 1;
-            let payload = match self.protocol {
-                ApiProtocol::Chat => payload,
-                ApiProtocol::Responses => {
-                    let mut p = responses::payload(
-                        &self.model,
-                        &[Message::new("system", system), Message::new("user", text)],
-                        &[],
-                        Some(max_tokens),
-                        "auto",
-                        &self.opaque_reasoning_origin(),
-                    )?;
-                    p["stream"] = json!(false);
-                    // Tool-free memory generation does not display reasoning.
-                    p.as_object_mut().unwrap().remove("reasoning");
-                    p
-                }
-                ApiProtocol::Anthropic => {
-                    let mut p = anthropic::payload(
-                        &self.model,
-                        &[Message::new("system", system), Message::new("user", text)],
-                        &[],
-                        max_tokens,
-                        "auto",
-                        &self.model_info,
-                        &self.opaque_reasoning_origin(),
-                    )?;
-                    p["stream"] = json!(false);
-                    // Each APEC summary is a one-off prompt. Caching it would
-                    // pay a write premium without expecting a read.
-                    p.as_object_mut().unwrap().remove("cache_control");
-                    p
-                }
-            };
+            let payload = payload_for(max_tokens)?;
             let request = self.request(&payload);
+            let start = Instant::now();
             let result = tokio::time::timeout(Duration::from_secs(120), async {
                 let response = request
                     .send()
                     .await
-                    .context("tool-free model request failed")?;
+                    .context("text-generation model request failed")?;
                 let status = response.status();
                 let body = read_limited_text(response, MAX_APEC_RESPONSE_BYTES)
                     .await
-                    .context("failed to read APEC response")?;
+                    .context("failed to read text-generation response")?;
                 if !status.is_success() {
                     let excerpt: String = body.chars().take(500).collect();
-                    bail!("tool-free model returned HTTP {status}: {excerpt}");
+                    bail!("text-generation model returned HTTP {status}: {excerpt}");
                 }
                 match self.protocol {
                     ApiProtocol::Chat => parse_apec_text_response(&body),
@@ -1418,7 +1466,8 @@ impl ModelClient {
             })
             .await
             .map_err(|err| {
-                anyhow::Error::new(err).context("tool-free model request exceeded 120 seconds")
+                anyhow::Error::new(err)
+                    .context("text-generation model request exceeded 120 seconds")
             })
             .and_then(|response| response);
             elapsed += start.elapsed();
@@ -1465,20 +1514,210 @@ impl ModelClient {
                     };
                     usage_known &= spent_usage.is_some();
                     if truncations >= 3 {
-                        bail!("APEC summary remained truncated after 4 completion budgets; original history preserved");
+                        bail!("checkpoint summary remained truncated after 4 completion budgets; original history preserved");
                     }
                     truncations += 1;
                     crate::runtime_log!(
-                        "[apec] summary truncated; retrying with a larger completion allowance (attempt {}/4)",
+                        "[compact] summary truncated; retrying with a larger completion allowance (attempt {}/4)",
                         truncations + 1
                     );
                 }
                 Err(error) if !short && timeouts < 3 && is_timeout(&error) => {
                     timeouts += 1;
                     usage_known = false;
-                    crate::runtime_log!("[apec] request timed out; retrying ({timeouts}/3)");
+                    crate::runtime_log!("[compact] request timed out; retrying ({timeouts}/3)");
                 }
                 Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn text_completion_with_budget(
+        &self,
+        system: &str,
+        text: &str,
+        output_tokens: usize,
+        short: bool,
+    ) -> Result<SummaryResult> {
+        self.text_generation_with_budget(output_tokens, short, |max_tokens| {
+            let mut payload = json!({
+                "model": self.model,
+                "stream": false,
+                "max_tokens": max_tokens,
+                "messages": [
+                    {"role":"system", "content": system},
+                    {"role":"user", "content": text}
+                ]
+            });
+            // Memory consolidation needs inexpensive factual extraction, not
+            // the coding task's High reasoning budget. DeepSeek defaults to
+            // High unless an effort is explicitly requested. For generic
+            // OpenAI-compatible models avoid sending a nonstandard field.
+            if self.deepseek_thinking.is_some()
+                || self.model.to_ascii_lowercase().contains("deepseek")
+            {
+                payload["reasoning_effort"] = json!("low");
+            }
+            match self.protocol {
+                ApiProtocol::Chat => Ok(payload),
+                ApiProtocol::Responses => {
+                    let mut p = responses::payload(
+                        &self.model,
+                        &[Message::new("system", system), Message::new("user", text)],
+                        &[],
+                        Some(max_tokens),
+                        "auto",
+                        &self.opaque_reasoning_origin(),
+                    )?;
+                    p["stream"] = json!(false);
+                    // Tool-free memory generation does not display reasoning.
+                    p.as_object_mut().unwrap().remove("reasoning");
+                    Ok(p)
+                }
+                ApiProtocol::Anthropic => {
+                    let mut p = anthropic::payload(
+                        &self.model,
+                        &[Message::new("system", system), Message::new("user", text)],
+                        &[],
+                        max_tokens,
+                        "auto",
+                        &self.model_info,
+                        &self.opaque_reasoning_origin(),
+                    )?;
+                    p["stream"] = json!(false);
+                    // Each old-style memory summary is a one-off prompt.
+                    // Caching it would pay a write premium without a read.
+                    p.as_object_mut().unwrap().remove("cache_control");
+                    Ok(p)
+                }
+            }
+        })
+        .await
+    }
+
+    /// One continuation checkpoint that reuses the coding request's message
+    /// and tool prefix, with only the final instruction appended. The first
+    /// attempt must preserve every cache-relevant request parameter too:
+    /// DeepSeek's prompt cache is keyed on reasoning settings and max_tokens,
+    /// not just the message/tool prefix. A truncated retry may use a larger
+    /// non-cache-matching completion budget.
+    async fn checkpoint_completion(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        instruction: &str,
+        output_tokens: usize,
+    ) -> Result<SummaryResult> {
+        let mut conversation = messages.to_vec();
+        conversation.push(Message::new("user", instruction));
+        let active_turn = messages
+            .iter()
+            .rposition(|message| message.role == "user")
+            .map_or(0, |index| index + 1);
+        let cache_max_tokens = match self.protocol {
+            // Chat omits max_tokens unless the profile explicitly requested
+            // one; match that exactly for the cached first attempt.
+            ApiProtocol::Chat => self
+                .requested_output
+                .map(|_| self.effective_output_tokens().unwrap_or(4096)),
+            ApiProtocol::Responses | ApiProtocol::Anthropic => {
+                Some(self.effective_output_tokens().unwrap_or(4096))
+            }
+        };
+        let mut attempt = 0usize;
+        self.text_generation_with_budget(output_tokens, false, |retry_budget| {
+            let max_tokens = if attempt == 0 {
+                cache_max_tokens
+            } else {
+                Some(retry_budget)
+            };
+            attempt += 1;
+            self.checkpoint_payload(&conversation, tools, max_tokens, active_turn)
+        })
+        .await
+    }
+
+    fn main_reasoning_effort(&self) -> String {
+        self.reasoning_override
+            .read()
+            .expect("reasoning lock poisoned")
+            .clone()
+            .unwrap_or_else(|| self.reasoning_effort.clone())
+    }
+
+    fn checkpoint_payload(
+        &self,
+        conversation: &[Message],
+        tools: &[Value],
+        max_tokens: Option<usize>,
+        active_turn: usize,
+    ) -> Result<Value> {
+        match self.protocol {
+            ApiProtocol::Chat => {
+                let mut payload =
+                    self.chat_payload_with_tools_active(conversation, tools, Some(active_turn));
+                if let Some(items) = payload.get_mut("messages").and_then(Value::as_array_mut) {
+                    for (item, message) in items.iter_mut().zip(conversation.iter()) {
+                        if message.role == "user" {
+                            item["content"] = crate::attachments::content_with_cache(
+                                message.content.as_deref().unwrap_or(""),
+                                message.provider_items.as_deref().unwrap_or(&[]),
+                                "chat",
+                                None,
+                            )?;
+                        }
+                    }
+                }
+                payload["stream"] = json!(false);
+                if let Some(object) = payload.as_object_mut() {
+                    object.remove("stream_options");
+                    match max_tokens {
+                        Some(limit) => {
+                            object.insert("max_tokens".into(), json!(limit));
+                        }
+                        None => {
+                            object.remove("max_tokens");
+                        }
+                    }
+                }
+                // Never override reasoning_effort here: the provider cache is
+                // keyed on it, and a different value turns the checkpoint
+                // prefix into a full-price cache miss.
+                Ok(payload)
+            }
+            ApiProtocol::Responses => {
+                let effort = self.main_reasoning_effort();
+                let mut payload = responses::payload_with_cache_at(
+                    &self.model,
+                    conversation,
+                    tools,
+                    Some(max_tokens.unwrap_or(4096)),
+                    &effort,
+                    &self.opaque_reasoning_origin(),
+                    None,
+                    Some(active_turn),
+                )?;
+                payload["stream"] = json!(false);
+                Ok(payload)
+            }
+            ApiProtocol::Anthropic => {
+                let effort = self.main_reasoning_effort();
+                let mut payload = anthropic::payload_with_cache_at(
+                    &self.model,
+                    conversation,
+                    tools,
+                    max_tokens.unwrap_or(4096),
+                    &effort,
+                    &self.model_info,
+                    &self.opaque_reasoning_origin(),
+                    None,
+                    Some(active_turn),
+                )?;
+                payload["stream"] = json!(false);
+                if self.anthropic_cache_rejected.load(Ordering::Relaxed) {
+                    payload.as_object_mut().unwrap().remove("cache_control");
+                }
+                Ok(payload)
             }
         }
     }
@@ -1667,6 +1906,9 @@ impl ModelBackend for ModelClient {
         if let Some(value) = self.model_info.image_input {
             return Some(value);
         }
+        if let Some(value) = self.catalog_image_input {
+            return Some(value);
+        }
         let caps = self.model_info.capabilities.as_ref()?;
         for path in [
             "/input/image/supported",
@@ -1788,6 +2030,16 @@ impl ModelBackend for ModelClient {
         Box::pin(self.text_completion(system, text, output_tokens))
     }
 
+    fn generate_checkpoint<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        instruction: &'a str,
+        output_tokens: usize,
+    ) -> ModelFuture<'a, SummaryResult> {
+        Box::pin(self.checkpoint_completion(messages, tools, instruction, output_tokens))
+    }
+
     fn generate_short_text<'a>(
         &'a self,
         system: &'a str,
@@ -1859,6 +2111,124 @@ mod tests {
         assert!(!summary_capability_rejection(&error(
             r#"{"error":{"type":"invalid_request_error","message":"reasoning.summary generated successfully"}}"#
         )));
+    }
+
+    #[test]
+    fn checkpoint_payload_preserves_the_cached_prefix_and_appends_one_instruction() {
+        let client = ModelClient::new("http://127.0.0.1:9/v1", None, "deepseek-chat".into())
+            .unwrap()
+            .with_output_tokens(Some(4096))
+            .with_reasoning("max".into(), Some("max".into()));
+        let tools = vec![json!({"type":"function","function":{
+            "name":"shell","description":"run a command",
+            "parameters":{"type":"object","properties":{"command":{"type":"string"}}}
+        }})];
+        let messages = vec![
+            Message::new("system", "coding agent"),
+            Message::new("user", "inspect the build"),
+            Message {
+                role: "assistant".into(),
+                content: Some(String::new()),
+                reasoning_content: Some("keep this tool-turn thought".into()),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call-1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "shell".into(),
+                        arguments: r#"{"command":"cargo build"}"#.into(),
+                    },
+                }]),
+                tool_call_id: None,
+                provider_items: None,
+            },
+            Message::tool("call-1".into(), r#"{"exit_code":0}"#.into()),
+            Message::new("assistant", "build finished"),
+        ];
+        let active_turn = messages
+            .iter()
+            .rposition(|message| message.role == "user")
+            .map_or(0, |index| index + 1);
+        let mut conversation = messages.clone();
+        conversation.push(Message::new("user", "CHECKPOINT INSTRUCTION"));
+        let base = client.chat_payload_with_tools_active(&messages, &tools, Some(active_turn));
+        let main = client
+            .payload_with_images(&messages, &tools, None, None)
+            .unwrap();
+        let payload = client
+            .checkpoint_payload(&conversation, &tools, Some(4096), active_turn)
+            .unwrap();
+        let prefix = payload["messages"].as_array().unwrap();
+        assert_eq!(
+            &prefix[..messages.len()],
+            base["messages"].as_array().unwrap().as_slice()
+        );
+        assert_eq!(payload["tools"], base["tools"]);
+        assert_eq!(payload["stream"], false);
+        assert_eq!(payload["max_tokens"], 4096);
+        assert_eq!(payload["max_tokens"], main["max_tokens"]);
+        assert_eq!(payload["reasoning_effort"], main["reasoning_effort"]);
+        assert_eq!(payload["thinking"], main["thinking"]);
+        assert_eq!(prefix[messages.len()]["role"], "user");
+        assert_eq!(prefix[messages.len()]["content"], "CHECKPOINT INSTRUCTION");
+        assert_eq!(
+            prefix[2]["reasoning_content"],
+            "keep this tool-turn thought"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_replays_old_reasoning_by_origin_like_the_coding_request() {
+        let client = ModelClient::new("http://127.0.0.1:9/v1", None, "deepseek-chat".into())
+            .unwrap()
+            .with_output_tokens(Some(4096))
+            .with_reasoning("max".into(), Some("max".into()));
+        let origin = client.chat_reasoning_origin();
+        let tools = vec![json!({"type":"function","function":{
+            "name":"shell","description":"run a command",
+            "parameters":{"type":"object","properties":{"command":{"type":"string"}}}
+        }})];
+        let messages = vec![
+            Message::new("system", "coding agent"),
+            Message::new("user", "earlier task"),
+            Message {
+                role: "assistant".into(),
+                content: Some("earlier answer".into()),
+                reasoning_content: Some("old provider thought".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                provider_items: Some(vec![json!({
+                    "type":"kroma_chat_reasoning_origin", "id":origin
+                })]),
+            },
+            Message::new("user", "current task"),
+        ];
+        let active_turn = messages
+            .iter()
+            .rposition(|message| message.role == "user")
+            .map_or(0, |index| index + 1);
+        let mut conversation = messages.clone();
+        conversation.push(Message::new("user", "CHECKPOINT"));
+        let main = client
+            .payload_with_images(&messages, &tools, None, None)
+            .unwrap();
+        let checkpoint = client
+            .checkpoint_payload(&conversation, &tools, Some(4096), active_turn)
+            .unwrap();
+        assert_eq!(
+            main["messages"][2]["reasoning_content"],
+            "old provider thought"
+        );
+        assert_eq!(
+            checkpoint["messages"][2]["reasoning_content"],
+            main["messages"][2]["reasoning_content"],
+            "checkpoint must not strip reasoning that the coding request replays"
+        );
+        for index in 0..messages.len() {
+            assert_eq!(
+                checkpoint["messages"][index], main["messages"][index],
+                "cached prefix differs at message {index}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2229,9 +2599,9 @@ mod tests {
             parse_apec_text_response(&body).unwrap(),
             ApecTextAttempt::Truncated(Some(_))
         ));
-        assert_eq!(apec_completion_budget(1024, 0), 2048);
-        assert_eq!(apec_completion_budget(1024, 1), 4096);
-        assert_eq!(apec_completion_budget(1024, 3), 16384);
+        assert_eq!(summary_completion_budget(1024, 0), 2048);
+        assert_eq!(summary_completion_budget(1024, 1), 4096);
+        assert_eq!(summary_completion_budget(1024, 3), 16384);
     }
 
     #[tokio::test]
@@ -3229,5 +3599,71 @@ mod tests {
             );
             server.join().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn metadata_404_invalid_json_and_timeout_are_bounded_and_diagnosable() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        for (status, body) in [
+            ("404 Not Found", r#"{"error":"metadata endpoint missing"}"#),
+            ("200 OK", "not-json"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                drop(reader);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            });
+            let mut client =
+                ModelClient::new(&format!("http://{addr}/v1"), None, "mock-model".into())
+                    .unwrap()
+                    .with_protocol("responses")
+                    .unwrap();
+            let metadata = client.discover_model().await.unwrap();
+            assert_eq!(metadata.context_window, None);
+            assert_eq!(metadata.max_output_tokens, None);
+            assert_eq!(client.metadata_status(), MetadataStatus::Unavailable);
+            assert!(client.metadata_detail().is_some());
+            server.join().unwrap();
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let mut client =
+            ModelClient::new(&format!("http://{addr}/v1"), None, "mock-model".into()).unwrap();
+        let metadata = client
+            .discover_model_with_timeout(Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(metadata.context_window, None);
+        assert_eq!(client.metadata_status(), MetadataStatus::Unavailable);
+        assert!(client.metadata_detail().unwrap().contains("timed out"));
+        server.join().unwrap();
     }
 }

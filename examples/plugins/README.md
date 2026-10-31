@@ -120,6 +120,38 @@ The `memory` plugin stores notes in its installed directory as
 are stored only when you run `/remember`. Do not store secrets in notes you
 do not intend to include in subsequent model requests.
 
+## Develop and try a plugin without installing it
+
+Use the same manifest validator and process protocol as the runtime, but do
+not write activation state:
+
+```powershell
+# 1. Validate manifest/API version and run one bounded JSONL smoke request.
+kroma plugins check .\examples\plugins\hello
+
+# 2. Load this directory for this process only. plugins.toml is not changed.
+$env:KROMA_PLUGIN_TRY = (Resolve-Path .\examples\plugins\hello)
+kroma
+Remove-Item Env:KROMA_PLUGIN_TRY
+```
+
+`KROMA_PLUGIN_TRY` accepts one explicit directory. It uses the normal manifest
+validation, command launch, protocol envelope, cancellation and trust boundary;
+it does not inherit persisted settings, and `plugins enable/disable/set/uninstall`
+refuse to persist it. The process starts only when a tool/command/event is
+actually used. A prompt-only plugin does not need a process. This is one
+explicit user-supplied path; it does not auto-load project plugins or change
+project activation/trust decisions.
+
+The smoke probe sends a harmless `{"type":"ping"}` request. A plugin may reply
+with `is_error: true` for an unknown request; that still proves JSONL framing
+and response correlation. A crash, timeout, non-JSON frame, mismatched
+`request_id`/`protocol_version`, or a missing executable fails the check. The
+check never starts a model request and never enables the plugin.
+
+When the plugin is ready, use the normal install/enable flow below. Exit the
+trial process or remove `KROMA_PLUGIN_TRY` to stop trying it.
+
 ## Installation and configuration
 
 Directories:
@@ -137,6 +169,7 @@ Commands:
 ```text
 kroma plugins list
 kroma plugins install <local-directory>
+kroma plugins check <local-directory>
 kroma plugins uninstall <id>
 kroma plugins enable <id>
 kroma plugins disable <id>

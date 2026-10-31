@@ -25,11 +25,36 @@ pub(super) fn payload_with_cache(
     origin: &str,
     image_cache: Option<&crate::model::TaskImageCache>,
 ) -> Result<Value> {
+    payload_with_cache_at(
+        model,
+        messages,
+        tools,
+        max_output,
+        effort,
+        origin,
+        image_cache,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn payload_with_cache_at(
+    model: &str,
+    messages: &[Message],
+    tools: &[Value],
+    max_output: Option<usize>,
+    effort: &str,
+    origin: &str,
+    image_cache: Option<&crate::model::TaskImageCache>,
+    active_turn_override: Option<usize>,
+) -> Result<Value> {
     let mut input = Vec::new();
-    let active_turn = messages
-        .iter()
-        .rposition(|msg| msg.role == "user")
-        .unwrap_or(0);
+    let active_turn = active_turn_override.unwrap_or_else(|| {
+        messages
+            .iter()
+            .rposition(|msg| msg.role == "user")
+            .unwrap_or(0)
+    });
     for (index, msg) in messages.iter().enumerate() {
         match msg.role.as_str() {
             "system" | "developer" | "user" => {

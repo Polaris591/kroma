@@ -1,5 +1,5 @@
 //! Read-only access to the durable session checkpoint. These tools let the
-//! model retrieve evidence that APEC/TRC omitted from the current projection.
+//! model retrieve evidence omitted from the current compacted projection.
 use crate::{
     protocol::ToolCall,
     session::read_archive_messages,

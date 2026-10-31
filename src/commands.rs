@@ -259,6 +259,21 @@ impl CommandRegistry {
             require_no_args(args, "/usage")?;
             Ok(CommandReply::text(agent.usage().report()))
         })?;
+        registry.register("/model-status", |agent, _, args| {
+            require_no_args(args, "/model-status")?;
+            Ok(CommandReply::text(
+                agent
+                    .model_report()
+                    .map(|report| report.status_text())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Effective model limits were not resolved for this host; showing context budget only.\ncontext={} available_input={}",
+                            agent.context_window_tokens(),
+                            agent.available_context_tokens()
+                        )
+                    }),
+            ))
+        })?;
         registry.register("/diff", |agent, _, args| {
             require_no_args(args, "/diff")?;
             Ok(CommandReply::text(crate::convenience::git_diff(

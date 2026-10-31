@@ -560,6 +560,17 @@ impl ModelBackend for PluginModelHooks {
         self.inner.generate_text(system, text, output_tokens)
     }
 
+    fn generate_checkpoint<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        instruction: &'a str,
+        output_tokens: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        self.inner
+            .generate_checkpoint(messages, tools, instruction, output_tokens)
+    }
+
     fn generate_short_text<'a>(
         &'a self,
         system: &'a str,

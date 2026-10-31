@@ -7,9 +7,10 @@ use crate::{
     history_tools::{HistoryRead, HistorySearch},
     mcp,
     model::ModelBackend,
+    model_catalog::{self, FieldSource, MetadataState, ModelInputs, ModelReport, UpstreamLimits},
     plugins::PluginCatalog,
     prompt::PromptComposer,
-    provider::ModelClient,
+    provider::{MetadataStatus, ModelClient},
     skills::{LoadSkill, SkillCatalog},
     tools::ToolRegistry,
 };
@@ -63,13 +64,25 @@ pub async fn default_runtime_with(
     let plugins = PluginCatalog::discover(&config.workdir)?;
     let override_model = plugins.checked_model_override()?;
     let mut plugin_warnings = Vec::new();
-    let (model, budget, selected_model_name) = if let Some((backend, budget, name)) = override_model
-    {
-        (backend, budget, Some(name))
-    } else {
-        let (model, budget) = configured_model(&config).await?;
-        (Arc::new(model) as Arc<dyn ModelBackend>, budget, None)
-    };
+    let (model, budget, selected_model_name, model_report) =
+        if let Some((backend, budget, name)) = override_model {
+            let report = model_catalog::plugin_report(
+                &name,
+                budget.window(),
+                budget.output_reserve(),
+                backend.accepts_images(),
+                backend.thinking_levels(),
+            );
+            (backend, budget, Some(name), report)
+        } else {
+            let (model, budget, report) = configured_model(&config).await?;
+            (
+                Arc::new(model) as Arc<dyn ModelBackend>,
+                budget,
+                None,
+                report,
+            )
+        };
     let skills = SkillCatalog::discover(&config.workdir)?;
     let mut tools = ToolRegistry::builtin();
     tools.register(Arc::new(HistorySearch))?;
@@ -112,6 +125,8 @@ pub async fn default_runtime_with(
         components.context_budget,
         components.defer_initial_session,
     )?;
+    let mut agent = agent;
+    agent.set_model_report(model_report);
     Ok(DefaultRuntime {
         agent,
         skills,
@@ -134,13 +149,13 @@ pub async fn default_runtime(config: Config) -> Result<DefaultRuntime> {
 
 pub async fn model_from_profile(
     profile: &crate::profiles::ProviderProfile,
-) -> Result<(Arc<dyn ModelBackend>, ContextConfig)> {
+) -> Result<(Arc<dyn ModelBackend>, ContextConfig, ModelReport)> {
     let config = Config::from_profile(profile, Default::default(), None)?;
-    let (model, budget) = configured_model(&config).await?;
-    Ok((Arc::new(model), budget))
+    let (model, budget, report) = configured_model(&config).await?;
+    Ok((Arc::new(model), budget, report))
 }
 
-async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig)> {
+async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig, ModelReport)> {
     let mut model = ModelClient::new(
         &config.base_url,
         config.api_key.clone(),
@@ -153,12 +168,17 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
     )
     .with_output_tokens(config.max_output_tokens)
     .with_thinking_levels(config.thinking_levels.clone());
+    // Validate an explicit alias before doing any optional network work.
+    let catalog = model_catalog::select(
+        &config.base_url,
+        &config.model,
+        config.catalog_model.as_deref(),
+    )?;
     // A configured Chat context is enough to avoid the optional /models call.
     // Other protocols can also skip it if every discoverable limit and
     // thinking tier has been specified. Otherwise preserve capability
     // discovery (including image support) rather than guessing.
-    let has_context =
-        config.context_window.is_some() || std::env::var_os("KROMA_CONTEXT_WINDOW").is_some();
+    let has_context = config.context_window.is_some();
     let configured_fully = config.max_output_tokens.is_some() && !config.thinking_levels.is_empty();
     let limits = if has_context && (config.api_protocol == "chat" || configured_fully) {
         crate::runtime_log!("[model] using configured limits; skipping optional metadata lookup");
@@ -166,15 +186,55 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
     } else {
         model.discover_model().await
     };
-    // Precedence: environment override, then the saved profile, then upstream
-    // metadata, then Kroma's conservative default.
-    let budget = ContextConfig::from_env_with_limits(
-        config
-            .context_window
-            .or_else(|| limits.as_ref().and_then(|m| m.context_window)),
-        model.effective_output_tokens(),
-    )?;
-    Ok((model, budget))
+    let metadata = match model.metadata_status() {
+        MetadataStatus::NotQueried => MetadataState::NotQueried,
+        MetadataStatus::Available => MetadataState::Available,
+        MetadataStatus::Unavailable => MetadataState::Unavailable,
+    };
+    let upstream = UpstreamLimits {
+        context_window: limits.as_ref().and_then(|info| info.context_window),
+        max_output_tokens: limits.as_ref().and_then(|info| info.max_output_tokens),
+        image_input: limits.as_ref().and_then(|info| info.image_input),
+    };
+    let inputs = ModelInputs {
+        model: &config.model,
+        base_url: &config.base_url,
+        context_window: config.context_window,
+        context_source: config.context_window_source.unwrap_or(FieldSource::Unknown),
+        requested_output: config.max_output_tokens,
+        requested_output_source: config
+            .max_output_tokens_source
+            .unwrap_or(FieldSource::Unknown),
+        thinking_levels: &config.thinking_levels,
+        thinking_levels_source: config
+            .thinking_levels_source
+            .unwrap_or(FieldSource::Unknown),
+    };
+    let resolved = model_catalog::resolve(
+        &inputs,
+        &upstream,
+        metadata,
+        model.metadata_detail().map(str::to_owned),
+        catalog,
+    );
+    // Catalog values only fill fields the endpoint did not provide. They are
+    // also used by ModelClient for image acceptance and output hard caps.
+    model = model.with_catalog_defaults(
+        resolved.catalog_max_output_tokens,
+        resolved.catalog_image_input,
+    );
+    let budget =
+        ContextConfig::from_limits(resolved.context_window, resolved.effective_turn_output)?;
+    let reserve_source = if std::env::var_os("KROMA_OUTPUT_RESERVE_TOKENS").is_some() {
+        FieldSource::Environment
+    } else if resolved.effective_turn_output.is_some() {
+        FieldSource::Computed
+    } else {
+        FieldSource::Default
+    };
+    let report =
+        model_catalog::finish_report(resolved.report, budget.output_reserve(), reserve_source);
+    Ok((model, budget, report))
 }
 
 pub async fn default_agent(config: Config) -> Result<Agent> {
@@ -223,8 +283,9 @@ mod tests {
             context_window: Some(500_000),
             max_output_tokens: Some(128_000),
             thinking_levels: Some(vec!["medium".into(), "high".into(), "xhigh".into()]),
+            catalog_model: None,
         };
-        let (model, budget) = model_from_profile(&profile).await.unwrap();
+        let (model, budget, report) = model_from_profile(&profile).await.unwrap();
         assert_eq!(budget.window(), 500_000);
         assert_eq!(budget.output_reserve(), 32_768);
         assert_eq!(budget.available_input(), 467_232);
@@ -232,6 +293,8 @@ mod tests {
         assert!(model.set_reasoning_level("low").is_err());
         model.set_reasoning_level("xhigh").unwrap();
         assert_eq!(model.reasoning_level().as_deref(), Some("xhigh"));
+        assert_eq!(report.context_window.value, Some(500_000));
+        assert_eq!(report.output_reserve.value, Some(32_768));
     }
 
     #[tokio::test]
@@ -250,8 +313,9 @@ mod tests {
                 context_window: Some(240_000),
                 max_output_tokens: Some(8192),
                 thinking_levels: Some(vec!["medium".into(), "high".into()]),
+                catalog_model: None,
             };
-            let (_, budget) = tokio::time::timeout(
+            let (_, budget, _) = tokio::time::timeout(
                 std::time::Duration::from_millis(200),
                 model_from_profile(&profile),
             )
@@ -283,8 +347,9 @@ mod tests {
             context_window: Some(50_000),
             max_output_tokens: None,
             thinking_levels: None,
+            catalog_model: None,
         };
-        let (_, budget) = tokio::time::timeout(
+        let (_, budget, _) = tokio::time::timeout(
             std::time::Duration::from_millis(200),
             model_from_profile(&profile),
         )

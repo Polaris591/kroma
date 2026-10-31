@@ -1,10 +1,10 @@
-# Kroma v0.4 — Cache-aware TRC + APEC
+# Kroma v0.4 — Lazy single-pass compaction
 
 Minimal AI agent harness written in Rust. This is a **new, independent project**; it does not import code from the previous Kroma.
 
 Kroma supports Chat Completions, Responses and Anthropic Messages; streaming
 model/tool execution; a built-in Shell tool with optional MCP tools and
-on-demand Agent Skills; saved chat history; and TRC + APEC compression.
+on-demand Agent Skills; saved chat history; and lazy single-pass context compaction.
 It has an optional process-plugin host (tools, prompts, context/model strategies, commands, lifecycle hooks), but no web UI. Interactive terminals use
 a lightweight Rust TUI by default; scripts and one-shot commands remain CLI.
 
@@ -29,10 +29,10 @@ framework, a second agent loop, or a mandatory plugin dependency.
   executor, without a model call. Output is shown locally, not inserted
   into the model transcript.
 - **`/usage`** separates the current session's coding requests, automatic
-  session titles, and finalized APEC summaries, saved across TUI restarts
+  session titles, and finalized checkpoint summaries, saved across TUI restarts
   using a small usage sidecar, then shows measured combined
   totals. Unknown upstream usage stays unknown; cache reads are a subset of
-  input tokens. In-flight and failed APEC attempts may not report their cost.
+  input tokens. Failed checkpoint attempts may not report their cost.
 - **`/diff`** previews the Git diff (truncated for a small TUI).
   **`/tools`** also displays MCP servers that failed to connect at startup.
 - **`/model`** lists saved profiles; **`/model profile-name`** switches
@@ -94,7 +94,7 @@ such as `task_started`, `text_delta`, `tool_started`,
 `tool_finished`, `model_finished` and `result`. Both accept piped stdin:
 `cargo test 2>&1 | kroma --print "analyze failures"`. Large piped inputs
 are stored as file references. JSONL uses stdout for events and stderr for
-diagnostics. Both modes share Agent, Shell, model providers, and TRC+APEC.
+diagnostics. Both modes share Agent, Shell, model providers, and lazy single-pass compaction.
 
 Plugins: see the [plugin guide and concrete examples](examples/plugins/README.md).
 The first practical example is **web search and webpage extraction**:
@@ -106,6 +106,9 @@ subagents, cross-session notes, dynamic TUI panels and plugin-defined shortcuts.
 disabled by default; Kroma needs Node.js only for JS plugins. User-installed
 plugins can be removed with `kroma plugins uninstall <id>` or
 `/plugins uninstall <id>`; project-local plugin directories remain source-managed.
+For development, `kroma plugins check <dir>` validates the manifest and runs a
+bounded process-smoke request. `KROMA_PLUGIN_TRY=<dir>` loads one directory for
+this process only without writing activation state; see the plugin guide.
 
 The **V1 plugin host** exposes tools, Prompt/Hook rewriting, process-backed
 model Providers (including streaming tools/reasoning and image-reference
@@ -199,7 +202,7 @@ sessions and the existing slash commands. Shortcuts:
   During a request `~` denotes a conservative estimate including tool schemas;
   after completion, upstream input-token usage replaces that estimate when
   supplied. `—` means no measurement, not zero usage. Background automatic
-  title and APEC requests never replace coding metrics. Cache rates retain
+  title and checkpoint requests never replace coding metrics. Cache rates retain
   decimal precision and do not round a partial hit to exactly 100%. Run
   `/usage` for the complete breakdown. **Shift+Tab** cycles
   auto/off/low/medium/high/xhigh/max, or use `/think high` to select directly.
@@ -260,7 +263,7 @@ sessions and the existing slash commands. Shortcuts:
   Responses and Anthropic requests. Current images have a separate
   approximate input-budget allowance and 16 MiB combined wire-size cap;
   image tokens remain provider-specific rather than exactly predictable.
-  Image-heavy requests do not recalibrate the text-only APEC budget heuristic.
+  Image-heavy requests are charged before the final request budget check and do not silently inflate text-only estimates.
   Existing saved media files remain available to other sessions and branches;
   Kroma does not guess that a media file is unreferenced and delete it.
   Sending an image never makes a text-only model visual.
@@ -330,7 +333,7 @@ messages. Branches are regular named sessions, visible via `/sessions`.
 
 Only conversation state is forked/rewound: commands, edited files, Git
 commits, detached processes and external MCP side effects are **not**
-reverted. Use Git for source changes. Derived APEC/TRC context starts fresh
+reverted. Use Git for source changes. Derived compaction context starts fresh
 from the original preserved transcript after a branch or rewind; it is
 reconstructed on subsequent requests instead of copying summary indexes
 from an abandoned future. This keeps session history readable without a
@@ -437,7 +440,7 @@ P12 review repairs tighten the extension boundaries: a ContextPolicy can no
 longer overwrite the original transcript when persisting strategy state;
 extensions' prompt/tool definitions count toward the final request budget;
 the Agent future can run on Tokio's multi-thread runtime; model adapters
-provide generic tool-free text generation rather than APEC-specific prompts;
+provide generic tool-free text generation rather than checkpoint-specific prompts;
 and tool/model completion events occur after the corresponding WAL entry.
 Custom context state can be explicitly reset with
 `kroma recover-context [session-id]` when the custom implementation is no
@@ -446,7 +449,7 @@ summaries. See `benchmarks/P12_ARCHITECTURE_REVIEW_REPAIRS.md`.
 
 Kroma now exposes a Rust library as well as its original CLI. The default
 implementation still runs **one Shell** and the same OpenAI-compatible
-provider, stable prompt and cache-aware TRC + APEC.
+provider, stable prompt and lazy single-pass compaction.
 
 - `app::default_agent` combines the built-in implementations.
 - `model::ModelBackend` accepts tool definitions supplied by the runtime;
@@ -472,7 +475,7 @@ Set `KROMA_PROFILE=1` when running a real task to print lightweight
 task-total `[profile]` line at completion, failure or cancellation. Phase markers help
 identify the last active phase if a long task is interrupted. The total includes wall time,
 context preparation (including any asynchronous compaction waits/checkpoints),
-model-response time, tool execution time, session journal writes, APEC finalization,
+model-response time, tool execution time, session journal writes, checkpoint finalization,
 request/tool counts, and JSON byte counts for original history versus model
 request messages. The optional byte measurement adds a serialization pass per
 request, so leave profiling off for normal low-latency operation. Existing
@@ -540,11 +543,30 @@ metadata. The fallback context window is 128000 tokens. For Responses and Anthro
 the default generation maximum is 4096 tokens if the upstream limit is unknown;
 Chat retains its previous behavior when no limit is available.
 
+Kroma also ships a very small built-in catalog for exact public
+`(provider, model-id)` pairs. It fills fields the endpoint did not provide,
+using `explicit configuration → current endpoint metadata → catalog → conservative default`.
+A custom proxy does **not** inherit capabilities from a same-named official
+model. To opt in explicitly, set `KROMA_MODEL_CATALOG_MODEL` or the profile's
+`catalog_model` to an exact alias such as `anthropic/claude-sonnet-5-5`.
+Unknown aliases fail at startup. Every catalog record carries its source URL
+and verification date; unknown image/thinking capability stays `unknown`, not
+`false`.
+
+Explicit context settings are retained when smaller than a known endpoint or
+catalog maximum; a larger value is capped by that hard maximum and the report
+shows the cap. Catalog maximum output is a capability, not a request: Kroma
+still sends no explicit Chat output cap unless configured, and its per-turn
+request stays at most 32k. `kroma config show` displays configured/catalog
+effective fields without contacting the network; `/model-status` shows the
+runtime report after startup discovery. The same report is exposed in the
+desktop snapshot and updated atomically with a model switch.
+
 `KROMA_CONTEXT_WINDOW` overrides the model context limit,
 `KROMA_MAX_OUTPUT_TOKENS` controls requested output tokens, and
 `KROMA_OUTPUT_RESERVE_TOKENS` overrides output reservation for context planning.
 The effective requested maximum is capped by a discovered upstream maximum.
-APEC summary generation also respects the known provider output ceiling.
+Checkpoint generation also respects the known provider output ceiling.
 No separate third-party model database is required.
 
 Example:
@@ -569,18 +591,36 @@ cargo test --test model_protocol_mock_e2e
 
 They use a local HTTP/SSE server and execute a real Shell command through
 Agent, then verify the tool-result continuation, WAL restart and standalone
-APEC summary on both wire formats. They do **not** prove compatibility
+checkpoint summary on both wire formats. They do **not** prove compatibility
 with a real provider or any particular proxy. Run live integration tests
 before advertising production-level support.
 
 - Streaming `reasoning_content` deltas are reassembled into a **separate** assistant-message field, persisted in snapshots and WAL, and replayed with the corresponding tool calls and results. The classic line-oriented CLI outputs only `content`; the TUI may show the persisted reasoning when the user presses Ctrl+R. Saved sessions without the new optional field continue to load.
-- With the `tools` parameter present, DeepSeek thinking mode requires the reasoning field on previous assistant messages. Kroma leaves it intact in un-compacted history, including across restart and `/resume`. TRC changes only eligible tool **results**; APEC may replace entire old **completed** turns with summaries. The raw transcript, including reasoning content, remains on disk. Summaries do not reproduce reasoning verbatim.
+- With the `tools` parameter present, DeepSeek thinking mode requires the reasoning field on previous assistant messages. Kroma leaves it intact in un-compacted history, including across restart and `/resume`. Compaction replaces entire old **completed** turns with one checkpoint summary; it never splits a tool call from its results. The raw transcript, including reasoning content, remains on disk. Summaries do not reproduce reasoning verbatim.
 - OpenAI-compatible tool requests now omit the redundant `tool_choice: auto` parameter (DeepSeek V4 thinking can reject it). Older assistant tool-call messages with `content: null` are projected as `content: ""` for provider requests without altering saved raw records.
 - **Opt-in DeepSeek V4 thinking:** set `KROMA_DEEPSEEK_THINKING=enabled` to send `thinking: {"type":"enabled"}`, or set `high`/`max` to additionally send `reasoning_effort`. Leave it unset for providers or gateways that do not accept these fields. This does not auto-detect models or force thinking on; some reverse proxies implement different semantics.
 
+## Local diagnostics and lifecycle
+
+`kroma diagnostics [--output <new-directory>]` writes a local-only,
+allowlisted bundle (`summary.json` and `README.txt`). It includes version,
+build revision, executable path, OS/architecture, model limit sources,
+plugin enabled/protocol state, and bounded errors. It does **not** include API
+keys, Authorization/Cookie headers, environment values, plugin settings,
+conversation messages, tool inputs/outputs, or source files. It does not run
+credential commands, start plugins, request a model, use the network, or
+overwrite an existing target. Paths under HOME/USERPROFILE are redacted; other
+paths may still identify a machine. Session excerpts are not supported in this
+format. The command is explicit; there is no background upload or telemetry.
+
+The foreground state machine and durability boundaries for runtime events are
+documented in [docs/lifecycle.md](docs/lifecycle.md). `TaskFinished` means the
+foreground host may accept another operation; no background checkpoint work
+exists.
+
 ## P2: Lean modules and multiple conversations
 
-The runtime is split by responsibility: `provider.rs` (HTTP/SSE and API request mapping), `protocol.rs` (shared messages), `context.rs` (TRC/APEC), `tools.rs` (tool dispatch/schema), `shell.rs` (process execution), `session.rs` (checkpoint/WAL/lock), `sessions.rs` (session directory and IDs), and `agent.rs` (small execution loop). Optional process plugins are hosted at the application boundary; there is no new provider registry or database.
+The runtime is split by responsibility: `provider.rs` (HTTP/SSE and API request mapping), `protocol.rs` (shared messages), `context.rs` (lazy single-pass compaction), `tools.rs` (tool dispatch/schema), `shell.rs` (process execution), `session.rs` (checkpoint/WAL/lock), `sessions.rs` (session directory and IDs), and `agent.rs` (small execution loop). Optional process plugins are hosted at the application boundary; there is no new provider registry or database.
 
 Interactive commands:
 
@@ -604,15 +644,14 @@ replays complete records, ignores a truncated tail and marks interrupted
 tool calls **unknown**, never rerunning commands. Back up or move both the
 `.json` checkpoint and its `.json.wal` journal when transporting a session.
 
-APEC memory requests keep the final factual summary concise, but leave
+Checkpoint requests keep the final factual summary concise, but leave
 additional completion allowance for reasoning-capable models. A truncated
 summary (`finish_reason=length`) is never accepted as memory: Kroma retries
 with more completion headroom and reports an explicit failure if all retries
-are exhausted. A failed background summary is not repeatedly restarted by
-TRC-only state changes in the same user turn; a subsequent user turn may
-retry. Full original conversation history is always retained. This recovery
-path was validated against a real saved multi-stage development session;
-see `benchmarks/P3_REVIEW.md`.
+are exhausted. A failed checkpoint is not repeated on every tool round in the
+same user turn; a subsequent user turn may retry. Full original conversation
+history is always retained. This recovery path was validated against a real
+saved multi-stage development session; see `benchmarks/P3_REVIEW.md`.
 
 ## P4: Shell usability and real task comparison
 
@@ -646,7 +685,7 @@ output remains readable by Shell in smaller slices. The context planner also
 uses an emergency *request-only* preview of unconsumed tool results when an
 old inline output or several results would overflow the hard context limit.
 It preserves original saved messages and does not mark unread results as
-TRC-consumed. Temporary output captures
+consumed. Temporary output captures
 from cancelled/failed commands are removed. New captures belong to their
 specific session; Kroma cleans up that session's unreferenced captures after
 24 hours and `/clear` removes its captured outputs. There is no blanket
@@ -657,7 +696,7 @@ inheritance changed, and the same compression scheme remains in place.
 ## P8: P7-winning F execution guidance, serial tool execution
 
 P7 tested 72 isolated coding stages across A/B/F. F reduced total foreground
-requests, shell calls, and combined foreground+APEC uncached tokens, but
+requests, shell calls, and combined foreground+checkpoint uncached tokens, but
 three F integration-review stages and one B stage failed to *finish* because
 model streams timed out; all 72 stages passed independent code acceptance.
 See `benchmarks/P7_FINAL_REPORT.md` for the full results and caveats.
@@ -670,7 +709,7 @@ If the model returns multiple tool calls together, Kroma executes them **strictl
 
 The previous experimental `KROMA_TOOL_EXPERIMENT` selector and parallel-read dispatcher were removed from production code. Historical `benchmarks/tool_batch*.py` files document exploratory experiments and **must not be used as live B/C selectors** on this single-policy build.
 
-## v0.4: Single compression policy
+## v0.4: Lazy single-pass compaction
 
 ### Tool-output preservation (P10 simplification)
 
@@ -681,31 +720,57 @@ projections keep the original message in the saved history. This removes a
 special-case path which showed no compressible results in the sampled real
 Rust and Python task histories.
 
-Kroma uses **one built-in compression strategy: cache-aware TRC + APEC** (the tested experimental C policy). There is no runtime strategy selector. The retired `KROMA_FUSION_EXPERIMENT` setting is ignored; it cannot enable any other compression behavior. Historical scripts under `benchmarks/` are experimental records and no longer compatible with the single-policy production build without modification.
+Kroma uses **one built-in context strategy: lazy single-pass compaction**.
+There is no runtime strategy selector. The retired `KROMA_FUSION_EXPERIMENT`
+setting is ignored; it cannot enable any other behavior. Historical scripts
+under `benchmarks/` are experimental records and may not match the current
+single-policy build.
 
-TRC replaces eligible, already-consumed old tool outputs only in the model's projected history; the complete session always stays on disk. **Outside hard-limit emergencies**, Kroma requires observed provider cache tokens and accepts a shortening only when an approximate three-future-read saving outweighs invalidation of the *future-cacheable* history suffix. A transient 0% upstream cache hit does not mean that suffix is permanently uncacheable. If cache usage is unknown, non-emergency TRC conservatively does not clear. This is a heuristic, not exact pricing. At the hard limit, context safety takes precedence.
+Normal requests keep the complete projected conversation. There is no
+background pre-summary, no routine rewriting of already-consumed tool output,
+and no cache-benefit calculation that silently changes the prompt prefix. Large
+Shell streams remain file-backed from the first tool result; the complete raw
+transcript is always retained and remains available through `history_search`
+and `history_read`.
 
-APEC asynchronously summarizes **complete, original tool evidence**, never TRC or hard-limit previews. Existing incremental summaries are append-only until an occasional rollup; rollups can invalidate a prompt-cache prefix. No competing evidence-filtering summarizer or alternative compression modes are part of Kroma.
+When the provider-reported projected input reaches **90% of the full model
+window**, Kroma sends one checkpoint request using the same model, endpoint,
+tool definitions and history prefix, with only a final checkpoint instruction
+appended. The trigger is capped below the real input capacity for small
+windows: a small estimator-error margin is reserved, so 90% is never forced
+when the output reserve leaves less room. The checkpoint replaces older
+projected history with a structured continuation summary and keeps roughly the
+newest 32k tokens raw (scaled down for small windows). A commit requires a
+non-empty, plausibly complete, shorter and actually reducing summary;
+otherwise the original history is preserved. At most one checkpoint is
+committed per `prepare()`, and a failed attempt is retried only on a later
+user turn. If one tool result is too large at the hard limit, request-only
+previews point to the complete original on disk.
 
-**Opt-in cache investigation:** Set `KROMA_CACHE_TRACE=1` before launching Kroma (PowerShell: `$env:KROMA_CACHE_TRACE = '1'`). Each completed foreground request appends one JSON record to `<active-session>.json.cache-trace.jsonl` beside the session checkpoint. Records include prompt/tool fingerprints, reasoning tier, TRC/APEC revision and coverage, common-prefix length versus the preceding request, and provider-reported input/cache tokens. No raw message text, tool outputs, or API keys are written. Fingerprints describe Kroma's provider-budget projection; they cannot prove an upstream gateway's internal cache routing. Disabled by default; no additional model requests or background work.
+For the default policy the limits are:
 
-If APEC fails, Kroma suppresses repeated attempts during the current agent turn; a later user turn can retry without resetting the conversation. Session recovery for a partially completed batch retains completed tool results and marks missing results as unknown rather than automatically executing them again. Duplicate model-generated tool call IDs are rejected before execution. None of these changes alters the shell's environment-variable inheritance or the user's authority to run shell commands.
+```
+margin      = max(window / 100, 1024), capped at available_input / 8
+safe_input  = available_input - margin
+soft_limit  = min(window * 90 / 100, safe_input - margin)
+hard_limit  = safe_input
+available_input = window - output_reserve
+```
+
+For a 500k window with a 32768-token output reserve this is
+`available_input=467232`, `soft_limit=450000`, `hard_limit=462232`.
+Every request ceiling plus its output reserve remains inside the model window.
 
 ### Review fixes
 
-- APEC splits oversized historical evidence into bounded chunks for summarization instead of blocking on a single oversized completed turn. It finalizes an in-flight summary before successful one-shot task exit, and cancels it on Ctrl+C.
-- Generated memories are supplied as untrusted assistant-role history, never as additional system instructions.
-- Old memory segments are periodically consolidated when their count or token footprint grows; full original history remains on disk.
+- Generated checkpoints are supplied as untrusted assistant-role history, never as additional system instructions or a new user task.
 - Session JSON has an adjacent process-lifetime lock file to prevent concurrent Kroma writers on Unix/Windows.
 - Shell stdout/stderr is written directly to private per-workspace capture files. Outputs up to 64 KiB per stream are returned inline; larger streams return a short preview and an absolute path to the complete file. This avoids unlimited output buffering and avoids silently throwing away bytes.
-- Nonstandard model `finish_reason` values are now treated as errors. APEC cost is reported separately from primary model traffic.
-- **Known tradeoffs:** journal entries are synchronized for durability, and periodic checkpoints still rewrite the full JSON history; a very long single session may still incur occasional large writes. APEC adds summarization requests and may postpone completion while a pending summary is finalized. Summaries remain lossy; source history is authoritative. Context tokens are still estimated rather than counted with a model-specific tokenizer.
-
-- **TRC (Tool Result Clearing):** Only a tool result included in a **successfully completed model request** is eligible for TRC clearing. The result that just came back from Shell is passed to the model without normal TRC shortening, except for hard-limit emergency previews. Older consumed verbose results may be replaced **only in the model request** by compact previews and a pointer into the complete session archive. Normally the two newest eligible consumed tool outputs and recent messages remain intact; at the hard limit, consumed results can also be shortened.
-- **APEC (Asynchronous Progressive Context Compression):** The soft/hard triggers are **50% / 90% of available input tokens**, after reserving capacity for the model's output. A background, no-tools summarizer processes a safe **original raw-history** segment (never TRC previews) and appends a new immutable memory block S1, S2, S3, etc. Append-only blocks preserve a cache-stable prefix until an occasional summary rollup rewrites older blocks. Recent messages and pending tool calls remain untouched. At the hard threshold, Kroma waits for a background summary or runs a synchronous one; when compaction is unsafe or unsuccessful, it reports an error rather than silently dropping history. TRC and APEC may operate concurrently because an APEC snapshot is validated against the raw history and summary boundary, not the mutable TRC view.
-- **Persistence:** The complete raw history and compression state are recovered from the session checkpoint plus its append journal. v0.3 and v0.4 histories are migrated automatically: an old single summary becomes S1, and unsafe previously cleared tool results are restored in the projected view. The system prompt remains unchanged.
-- **Settings:** `KROMA_CONTEXT_WINDOW` (default 128000) should reflect the actual provider context limit. `KROMA_OUTPUT_RESERVE_TOKENS` optionally overrides the output reservation (default: min(4096, 1/8 of the context window)). A single turn requests at most 32k output tokens even when the profile allows more, so a 128k capability is not reserved on every request. `KROMA_CACHE_READ_DISCOUNT` (default 0.1) and `KROMA_CACHE_INVALIDATION_FACTOR` (default 0.9) tune the TRC cache tradeoff when pricing is known. Token size is estimated heuristically and calibrated upwards using reported input usage; estimates are **not** exact tokenization. If the provider refuses a summary call or the context is too large, compression reports an error without deleting the source transcript.
-- **Limitations:** APEC uses a separate model request and therefore consumes additional tokens. The background summary is committed on the **next model request boundary**, not necessarily as soon as it completes. `history_search` and `history_read` let the model search the saved checkpoint and read omitted original messages by index. APEC's non-streaming summary endpoint must be supported by the chosen model provider.
+- Nonstandard model `finish_reason` values are treated as errors. Checkpoint cost is reported separately from primary model traffic.
+- **Known tradeoffs:** journal entries are synchronized for durability, and periodic checkpoints still rewrite the full JSON history; a very long single session may still incur occasional large writes. A checkpoint adds one summarization request near the input limit. Summaries remain lossy; source history is authoritative. Token water marks use provider-reported input when the measured prefix is unchanged, with a conservative estimate for appended messages.
+- **Persistence:** The complete raw history and compaction state are recovered from the session checkpoint plus its append journal. Older v0.3/v0.4 histories and legacy cleared-tool projections remain readable and are migrated in the projected view without rewriting the raw transcript.
+- **Settings:** `KROMA_CONTEXT_WINDOW` (default 128000) should reflect the actual provider context limit. `KROMA_OUTPUT_RESERVE_TOKENS` optionally overrides the output reservation (default: min(4096, 1/8 of the context window)). A single turn requests at most 32k output tokens even when the profile allows more, so a 128k capability is not reserved on every request. Token size is estimated heuristically when no matching provider measurement is available; estimates are **not** exact tokenization.
+- **Limitations:** A checkpoint is a separate non-streaming model request and therefore consumes additional tokens. It must be supported by the chosen provider/model. `history_search` and `history_read` let the model inspect the complete saved transcript after the projection has been compacted.
 
 ## v0.3 additions
 
@@ -755,12 +820,18 @@ in `~/.kroma/config.json`:
 }
 ```
 
-- `context_window` replaces upstream metadata for context planning; the
-  `KROMA_CONTEXT_WINDOW` environment override still wins.
+- `context_window` supplies context planning when the endpoint does not; the
+  `KROMA_CONTEXT_WINDOW` environment override still wins. A value larger than a
+  known endpoint/catalog hard maximum is capped, and the cap is shown in the
+  source report.
 - `max_output_tokens` sets the requested completion maximum, but Kroma caps a
   single turn at 32k so a 128k capability is not reserved on every request; the
   `KROMA_MAX_OUTPUT_TOKENS` environment override still wins, and an explicitly
   discovered upstream maximum still caps the request.
+- `catalog_model` is an optional explicit `provider/model-id` alias for a proxy
+  or renamed model, for example `anthropic/claude-sonnet-5-5`. It is never
+  inferred from a same-named model ID; an unknown alias fails validation. The
+  equivalent environment override is `KROMA_MODEL_CATALOG_MODEL`.
 - `thinking_levels` restricts the tiers the model accepts, in display order.
   Shift+Tab cycles only those levels, and an unsupported level is refused
   instead of being sent. `auto` stays available as "provider default", and the
@@ -837,7 +908,7 @@ Commands: `/new`, `/sessions`, `/resume <id>`, `/clear` (active session only), `
 3. If the model returns `tool_calls`, Kroma executes each `shell(command)` call in order and appends the result with its `tool_call_id`.
 4. Kroma sends the updated history to the model, repeating until it receives a normal assistant response. There is no artificial Agent Loop step limit.
 
-Each shell result reports `exit_code`, `stdout`, and `stderr`. Shell commands have no artificial timeout or output limit. Failed commands are reported back to the model, which decides whether to retry or correct the task. Streaming model HTTP requests have a 20-second connection-establishment timeout and a 300-second idle timeout (for response headers or a gap between streamed network chunks), **not** a 120-second total-request deadline. Before receiving any stream data, transport timeouts, connect errors, and transient HTTP 429/502/503/504 may be retried up to 3 additional times. Numeric `Retry-After` values are honored up to 10 seconds; longer or unparseable server wait instructions are not silently overridden. Permanent HTTP failures (such as 401) return immediately. Partially delivered streams are never retried to avoid duplicate output or tool execution. Failed attempts have unknown provider usage unless separately reported. Separate non-streaming APEC requests retain a 120-second request deadline. Task summaries now include a `task_status` marker on completion, failure and Ctrl+C cancellation; incomplete provider usage remains unknown rather than zero.
+Each shell result reports `exit_code`, `stdout`, and `stderr`. Shell commands have no artificial timeout or output limit. Failed commands are reported back to the model, which decides whether to retry or correct the task. Streaming model HTTP requests have a 20-second connection-establishment timeout and a 300-second idle timeout (for response headers or a gap between streamed network chunks), **not** a 120-second total-request deadline. Before receiving any stream data, transport timeouts, connect errors, and transient HTTP 429/502/503/504 may be retried up to 3 additional times. Numeric `Retry-After` values are honored up to 10 seconds; longer or unparseable server wait instructions are not silently overridden. Permanent HTTP failures (such as 401) return immediately. Partially delivered streams are never retried to avoid duplicate output or tool execution. Failed attempts have unknown provider usage unless separately reported. Separate non-streaming checkpoint requests retain a 120-second request deadline. Task summaries now include a `task_status` marker on completion, failure and Ctrl+C cancellation; incomplete provider usage remains unknown rather than zero.
 
 **Security:** `shell` executes arbitrary commands with the permissions of the Kroma process. The working directory is **not** a sandbox. Use a container or a restricted account for untrusted tasks, and never run this prototype with elevated privileges against important data. Very large command output is truncated inline and written to private capture files, so it can still consume disk; a hanging command may run indefinitely until the user cancels it. On Unix, cancellation terminates the shell process group; independently detached descendants can survive. On Windows, cancellation terminates the job object, which contains every descendant created through the shell.
 

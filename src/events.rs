@@ -24,8 +24,12 @@ pub enum RuntimeEvent<'a> {
         reasoning_tokens: Option<u64>,
         cached_tokens: Option<u64>,
     },
+    /// Emitted after the failed model turn's durable interruption attempt.
+    /// A partially streamed response was not committed as assistant content.
     ModelFailed,
-    /// Aggregated, finalized APEC generation usage; not a foreground request.
+    /// Aggregated, finalized checkpoint generation usage; not a foreground request.
+    /// Checkpoints are synchronous, so no background summary traffic remains
+    /// after this event is emitted.
     CompactionUsage {
         requests: usize,
         input_tokens: Option<u64>,
@@ -74,6 +78,10 @@ pub enum RuntimeEvent<'a> {
         saved_future: &'a str,
         checkpoint: usize,
     },
+    /// Final foreground task notification. For `completed`, the assistant
+    /// turn is durable and any required checkpoint has already completed; for
+    /// `failed`/`cancelled`, the durable interruption/cancel records were
+    /// attempted first. The host may accept the next user operation.
     TaskFinished {
         status: &'a str,
     },

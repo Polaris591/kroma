@@ -360,8 +360,13 @@ async fn exercise(wire: Wire) -> Result<()> {
         api_protocol: wire.label().into(),
         reasoning_effort: "auto".into(),
         max_output_tokens: None,
+        max_output_tokens_source: None,
         context_window: None,
+        context_window_source: None,
         thinking_levels: Vec::new(),
+        thinking_levels_source: None,
+        catalog_model: None,
+        catalog_model_source: None,
         selected_profile: None,
     };
     let mut agent = app::default_agent(config()).await?;

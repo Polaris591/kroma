@@ -1,4 +1,7 @@
-use crate::profiles::{self, Profiles};
+use crate::{
+    model_catalog::FieldSource,
+    profiles::{self, Profiles},
+};
 use anyhow::{bail, Context, Result};
 use std::{env, path::PathBuf};
 
@@ -13,10 +16,17 @@ pub struct Config {
     pub api_protocol: String,
     pub reasoning_effort: String,
     pub max_output_tokens: Option<usize>,
+    pub max_output_tokens_source: Option<FieldSource>,
     /// Per-profile context capacity; `KROMA_CONTEXT_WINDOW` still wins.
     pub context_window: Option<usize>,
+    pub context_window_source: Option<FieldSource>,
     /// Per-profile reasoning levels; empty means every level is allowed.
     pub thinking_levels: Vec<String>,
+    pub thinking_levels_source: Option<FieldSource>,
+    /// Explicit `provider/model` opt-in for a proxy or renamed model. Without
+    /// this, only an exact known provider host and exact model ID may match.
+    pub catalog_model: Option<String>,
+    pub catalog_model_source: Option<FieldSource>,
     /// Saved profile name, not credentials, for session-scoped TUI restoration.
     pub selected_profile: Option<String>,
 }
@@ -164,21 +174,65 @@ impl Config {
                 .or_else(|| profile.and_then(|p| p.reasoning_effort.clone()))
                 .unwrap_or_else(|| "auto".into()),
         )?;
-        let max_output_tokens = match env::var("KROMA_MAX_OUTPUT_TOKENS") {
+        let (max_output_tokens, max_output_tokens_source) =
+            match env::var("KROMA_MAX_OUTPUT_TOKENS") {
+                Ok(raw) => {
+                    let n: usize = raw
+                        .parse()
+                        .context("KROMA_MAX_OUTPUT_TOKENS must be an integer")?;
+                    if !(1..=2_000_000).contains(&n) {
+                        bail!("KROMA_MAX_OUTPUT_TOKENS must be between 1 and 2000000");
+                    }
+                    (Some(n), Some(FieldSource::Environment))
+                }
+                Err(env::VarError::NotPresent) => (
+                    profile.and_then(|p| p.output_limit()),
+                    profile
+                        .and_then(|p| p.output_limit())
+                        .map(|_| FieldSource::Profile),
+                ),
+                Err(error) => return Err(error.into()),
+            };
+        // Resolve the context override here, not only inside ContextConfig,
+        // so its source is visible and a known hard cap can be applied once.
+        let (context_window, context_window_source) = match env::var("KROMA_CONTEXT_WINDOW") {
             Ok(raw) => {
                 let n: usize = raw
                     .parse()
-                    .context("KROMA_MAX_OUTPUT_TOKENS must be an integer")?;
-                if !(1..=2_000_000).contains(&n) {
-                    bail!("KROMA_MAX_OUTPUT_TOKENS must be between 1 and 2000000");
-                }
-                Some(n)
+                    .context("KROMA_CONTEXT_WINDOW must be an integer token count")?;
+                (
+                    Some(profiles::validate_context_window(n)?),
+                    Some(FieldSource::Environment),
+                )
             }
-            Err(env::VarError::NotPresent) => profile.and_then(|p| p.output_limit()),
+            Err(env::VarError::NotPresent) => (
+                profile.and_then(|p| p.context_limit()),
+                profile
+                    .and_then(|p| p.context_limit())
+                    .map(|_| FieldSource::Profile),
+            ),
             Err(error) => return Err(error.into()),
         };
-        let context_window = profile.and_then(|p| p.context_limit());
-        let thinking_levels = profile.map(|p| p.levels()).transpose()?.unwrap_or_default();
+        let (thinking_levels, thinking_levels_source) = match profile {
+            Some(profile) => (profile.levels()?, Some(FieldSource::Profile)),
+            None => (Vec::new(), None),
+        };
+        let (catalog_model, catalog_model_source) = match env::var("KROMA_MODEL_CATALOG_MODEL") {
+            Ok(raw) => {
+                let value = raw.trim();
+                if value.is_empty() {
+                    bail!("KROMA_MODEL_CATALOG_MODEL cannot be empty");
+                }
+                (Some(value.to_owned()), Some(FieldSource::Environment))
+            }
+            Err(env::VarError::NotPresent) => (
+                profile.and_then(|p| p.catalog_model.clone()),
+                profile
+                    .and_then(|p| p.catalog_model.as_ref())
+                    .map(|_| FieldSource::Profile),
+            ),
+            Err(error) => return Err(error.into()),
+        };
         Ok(Self {
             base_url,
             api_key,
@@ -188,10 +242,66 @@ impl Config {
             api_protocol,
             reasoning_effort,
             max_output_tokens,
+            max_output_tokens_source,
             context_window,
+            context_window_source,
             thinking_levels,
+            thinking_levels_source,
+            catalog_model,
+            catalog_model_source,
             selected_profile,
         })
+    }
+
+    /// Resolve configured + catalog fallback without contacting the endpoint
+    /// or executing credential commands. Used by `config show` and diagnostics.
+    pub fn resolved_limits_without_probe(
+        &self,
+    ) -> Result<(
+        crate::context::ContextConfig,
+        crate::model_catalog::ModelReport,
+    )> {
+        let catalog = crate::model_catalog::select(
+            &self.base_url,
+            &self.model,
+            self.catalog_model.as_deref(),
+        )?;
+        let inputs = crate::model_catalog::ModelInputs {
+            model: &self.model,
+            base_url: &self.base_url,
+            context_window: self.context_window,
+            context_source: self.context_window_source.unwrap_or(FieldSource::Unknown),
+            requested_output: self.max_output_tokens,
+            requested_output_source: self
+                .max_output_tokens_source
+                .unwrap_or(FieldSource::Unknown),
+            thinking_levels: &self.thinking_levels,
+            thinking_levels_source: self.thinking_levels_source.unwrap_or(FieldSource::Unknown),
+        };
+        let resolved = crate::model_catalog::resolve(
+            &inputs,
+            &crate::model_catalog::UpstreamLimits::default(),
+            crate::model_catalog::MetadataState::NotQueried,
+            None,
+            catalog,
+        );
+        let budget = crate::context::ContextConfig::from_limits(
+            resolved.context_window,
+            resolved.effective_turn_output,
+        )?;
+        let reserve_source = if env::var_os("KROMA_OUTPUT_RESERVE_TOKENS").is_some() {
+            FieldSource::Environment
+        } else if resolved.effective_turn_output.is_some() {
+            FieldSource::Computed
+        } else {
+            FieldSource::Default
+        };
+        let report = crate::model_catalog::finish_report(
+            resolved.report,
+            budget.output_reserve(),
+            reserve_source,
+        );
+        Ok((budget, report))
     }
 }
 

@@ -114,6 +114,12 @@ commands![
         "Detailed usage and cache statistics",
         "查看详细用量与缓存统计"
     ),
+    (
+        "/model-status",
+        "",
+        "Effective model limits and their sources",
+        "查看有效模型限制及其来源"
+    ),
     ("/diff", "", "Show workspace changes", "查看工作区修改"),
     (
         "/export",

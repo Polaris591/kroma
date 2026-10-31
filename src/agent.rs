@@ -6,6 +6,7 @@ use crate::{
     context_state::{CompactionState, PersistedContext},
     events::{EventSink, RuntimeEvent},
     model::ModelBackend,
+    model_catalog::ModelReport,
     prompt::PromptComposer,
     protocol::Message,
     provider::{Completion, ModelClient},
@@ -58,6 +59,7 @@ pub struct Agent {
     context_budget: ContextConfig,
     task_input: TaskInput,
     usage: UsageMeter,
+    model_report: Option<ModelReport>,
     cache_trace: Option<CacheTrace>,
 }
 
@@ -306,6 +308,7 @@ impl Agent {
             context_budget,
             task_input: TaskInput::default(),
             usage: UsageMeter::default(),
+            model_report: None,
             cache_trace: CacheTrace::from_env(),
         };
         agent.sync_session_context();
@@ -387,8 +390,18 @@ impl Agent {
         &self.usage
     }
 
-    /// Suppress speculative memory requests in a one-shot process. Synchronous
-    /// compaction needed to fit the next model request remains enabled.
+    /// Effective model limits and their sources, when the host resolved them.
+    /// The report is diagnostic metadata, never part of the conversation.
+    pub fn model_report(&self) -> Option<&ModelReport> {
+        self.model_report.as_ref()
+    }
+
+    pub fn set_model_report(&mut self, report: ModelReport) {
+        self.model_report = Some(report);
+    }
+
+    /// Retained for host compatibility. Built-in compaction is on-demand and
+    /// synchronous, so there is no speculative background work to toggle.
     pub fn set_background_compaction(&mut self, enabled: bool) {
         self.compression.set_background_compaction(enabled);
     }
@@ -414,6 +427,9 @@ impl Agent {
         self.compression = context;
         self.model = model;
         self.context_budget = budget;
+        // Old limits must not be shown for a new model. Hosts that have a
+        // resolved report attach it after both model and budget are swapped.
+        self.model_report = None;
         self.sync_session_context();
         Ok(())
     }
@@ -850,8 +866,8 @@ impl Agent {
             .run_inner(user_input, attachments, on_text, &mut stats)
             .await;
         if result.is_err() {
-            // Abandon unconsumed plugin lifecycle notifications without
-            // cancelling useful built-in background APEC maintenance.
+            // Abandon unconsumed plugin lifecycle notifications. Built-in
+            // checkpoints are synchronous and have nothing left to cancel.
             self.compression.task_failed();
         }
         stats.record_compaction(self.compression.take_usage());
@@ -914,6 +930,11 @@ impl Agent {
         // schema and serializing it on every model round trip.
         let tool_definitions = self.tools.definitions();
         let tool_schema_bytes = serde_json::to_vec(&tool_definitions)?.len();
+        // Checkpoints must reuse the same endpoint, model and tool prefix as
+        // the coding request. This also invalidates stale measured water
+        // lines when either side changes.
+        self.compression
+            .set_request_context(&self.model, &tool_definitions);
         let base_extra_tokens = self
             .prompt
             .extra_estimated_tokens(&self.messages[0])
@@ -1062,9 +1083,6 @@ impl Agent {
                             Err(recovery_error) => crate::runtime_log!("[context] overflow recovery unavailable: {recovery_error:#}"),
                         }
                     }
-                    if let Some(events) = &self.events {
-                        events.on_event(RuntimeEvent::ModelFailed);
-                    }
                     // A partially streamed answer is not a valid assistant
                     // message or tool call. Only durable earlier tool results
                     // may be trusted when the next user turn resumes.
@@ -1074,17 +1092,28 @@ impl Agent {
                         "[Kroma interrupted before a complete model response. Prior completed tool results are preserved; unfinished work has not been verified.]"
                     };
                     self.messages.push(Message::new("assistant", note));
-                    if let Err(journal_error) = self
+                    let persisted = match self
                         .session
                         .append(&self.messages, &self.compression.state())
                     {
-                        self.messages.pop();
-                        crate::runtime_log!(
-                            "[session] failed to save interruption note: {journal_error:#}"
-                        );
+                        Ok(()) => true,
+                        Err(journal_error) => {
+                            self.messages.pop();
+                            crate::runtime_log!(
+                                "[session] failed to save interruption note: {journal_error:#}"
+                            );
+                            false
+                        }
+                    };
+                    // Notify only after the durability attempt, matching the
+                    // ToolFinished/ModelFinished ordering contract. A failed
+                    // append remains a failed task, but the sink never gets a
+                    // pre-persistence success-looking model event.
+                    if let Some(events) = &self.events {
+                        events.on_event(RuntimeEvent::ModelFailed);
                     }
                     crate::runtime_log!(
-                        "[usage] incomplete model request: token usage unknown; {} completed request(s) this turn",
+                        "[usage] incomplete model request: token usage unknown; {} completed request(s) this turn; interruption_note_durable={persisted}",
                         stats.calls
                     );
                     return Err(error);
@@ -1150,7 +1179,7 @@ impl Agent {
                     // Nonessential memory maintenance must not turn an
                     // otherwise successful user task into a failed task.
                     crate::runtime_log!(
-                        "[apec] task completed; summary was not committed: {error:#}"
+                        "[compact] task completed; checkpoint was not committed: {error:#}"
                     );
                 }
                 stats.apec_finalize_time += finish_started.elapsed();
@@ -1363,7 +1392,7 @@ impl TaskStats {
         );
         if self.compaction.requests > 0 {
             crate::runtime_log!(
-                "[usage] APEC: {} request(s), {:.2}s model time | input: {} | output: {} | cached: {}",
+                "[usage] checkpoint: {} request(s), {:.2}s model time | input: {} | output: {} | cached: {}",
                 self.compaction.requests,
                 self.compaction.elapsed.as_secs_f64(),
                 display_count(self.compaction.input),
@@ -1390,7 +1419,7 @@ impl TaskStats {
         let uncached =
             total_input.and_then(|input| total_cached.and_then(|cached| input.checked_sub(cached)));
         crate::runtime_log!(
-            "[usage] effective: foreground={} APEC={} | uncached_input={} | cached_input={} | failed_attempt_usage=unknown_if_any",
+            "[usage] effective: foreground={} checkpoint={} | uncached_input={} | cached_input={} | failed_attempt_usage=unknown_if_any",
             self.calls,
             self.compaction.requests,
             display_count(uncached),

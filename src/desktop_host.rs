@@ -233,6 +233,7 @@ pub fn snapshot_page(agent: &Agent, before: Option<usize>, limit: usize) -> Resu
         "next_before":(start > 0).then_some(start),
         "usage":usage,
         "context_window":agent.context_window_tokens(),
+        "model_limits":agent.model_report(),
         "available_input":agent.available_context_tokens(),
         "tool_names":agent.available_tool_names(),
     }))

@@ -39,6 +39,10 @@ pub struct ProviderProfile {
     /// level Kroma knows about is allowed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_levels: Option<Vec<String>>,
+    /// Explicit catalog alias (`provider/model-id`) for a proxy or renamed
+    /// endpoint. Never inferred from a same-named model ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_model: Option<String>,
 }
 
 impl ProviderProfile {
@@ -234,6 +238,14 @@ impl Profiles {
                     levels.join(", ")
                 );
             }
+            if let Some(alias) = &profile.catalog_model {
+                if crate::model_catalog::find_alias(alias.trim()).is_none() {
+                    bail!(
+                        "Kroma profile '{name}' has unknown catalog_model '{}'; use an exact provider/model alias",
+                        alias.trim()
+                    );
+                }
+            }
         }
         if let Some(active) = &self.active {
             if !self.profiles.contains_key(active) {
@@ -383,11 +395,10 @@ fn prompt_optional_tokens(label: &str, current: Option<usize>) -> Result<Option<
 
 /// Optional level list: Enter keeps the stored value, "-" allows every level.
 fn prompt_levels(current: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    let shown = current
-        .map(|levels| levels.join(","))
-        .filter(|levels| !levels.is_empty())
-        .unwrap_or_else(|| "all".into());
-    print!("Thinking levels, comma separated (Enter=keep, '-'=all) [{shown}]: ");
+    print!(
+        "Thinking levels, comma separated (Enter=keep, '-'=all) [{}]: ",
+        display_levels(current)
+    );
     io::stdout().flush()?;
     let mut value = String::new();
     if io::stdin().read_line(&mut value)? == 0 {
@@ -407,6 +418,31 @@ fn prompt_levels(current: Option<&[String]>) -> Result<Option<Vec<String>>> {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     Ok(Some(normalize_levels(&levels)?))
+}
+
+/// Explicit catalog alias for proxies/renamed models. Enter keeps it, `-`
+/// clears it. The value is validated against the small built-in catalog.
+fn prompt_catalog_model(current: Option<&str>) -> Result<Option<String>> {
+    print!(
+        "Built-in catalog model alias, provider/model-id (Enter=keep, '-'=auto) [{}]: ",
+        current.unwrap_or("auto")
+    );
+    io::stdout().flush()?;
+    let mut value = String::new();
+    if io::stdin().read_line(&mut value)? == 0 {
+        bail!("configuration cancelled (stdin closed)");
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(current.map(str::to_owned));
+    }
+    if trimmed == "-" || trimmed.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    if crate::model_catalog::find_alias(trimmed).is_none() {
+        bail!("unknown built-in catalog alias '{trimmed}'");
+    }
+    Ok(Some(trimmed.to_owned()))
 }
 
 #[cfg(unix)]
@@ -504,13 +540,13 @@ pub fn cli(args: &[String]) -> Result<()> {
                 .host_str()
                 .unwrap_or("")
                 .to_owned();
-            let context = env::var("KROMA_CONTEXT_WINDOW")
-                .ok()
-                .or_else(|| config.context_window.map(|value| value.to_string()))
+            let context = config
+                .context_window
+                .map(|value| value.to_string())
                 .unwrap_or_else(|| "auto".into());
-            let output = env::var("KROMA_MAX_OUTPUT_TOKENS")
-                .ok()
-                .or_else(|| config.max_output_tokens.map(|value| value.to_string()))
+            let output = config
+                .max_output_tokens
+                .map(|value| value.to_string())
                 .unwrap_or_else(|| "auto".into());
             println!(
                 "model={} | host={} | protocol={} | reasoning={} | deepseek_thinking={} | context={} | output={} | levels={} | key={} (environment overrides saved profile)",
@@ -527,6 +563,10 @@ pub fn cli(args: &[String]) -> Result<()> {
                 } else {
                     "none"
                 }
+            );
+            let (_budget, report) = config.resolved_limits_without_probe()?;
+            println!(
+                "\nEffective model limits and sources (upstream metadata not queried):\n{report}"
             );
             Ok(())
         }
@@ -579,6 +619,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                     .map(validate_output_tokens)
                     .transpose()?;
             let thinking_levels = prompt_levels(original.thinking_levels.as_deref())?;
+            let catalog_model = prompt_catalog_model(original.catalog_model.as_deref())?;
             let api_key = match prompt_key(original.api_key.is_some())? {
                 None => original.api_key,
                 Some(key) if key.is_empty() => None,
@@ -596,6 +637,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                     context_window,
                     max_output_tokens,
                     thinking_levels,
+                    catalog_model,
                 },
             );
             if profiles.active.is_none() {
@@ -678,6 +720,7 @@ mod tests {
                 context_window: None,
                 max_output_tokens: None,
                 thinking_levels: None,
+                catalog_model: None,
             },
         );
         profiles

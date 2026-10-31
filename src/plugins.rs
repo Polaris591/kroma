@@ -38,6 +38,7 @@ use std::{
 };
 
 const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+const PLUGIN_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct PluginManifest {
@@ -561,6 +562,8 @@ pub struct PluginCatalog {
     state_path: PathBuf,
     workdir: PathBuf,
     plugins: Vec<Plugin>,
+    /// One explicit directory loaded for this process only; never persisted.
+    transient: Option<PathBuf>,
     pub warnings: Vec<String>,
     /// Enabled plugins with unreadable manifests cannot be silently omitted.
     invalid_enabled: Vec<String>,
@@ -572,6 +575,8 @@ struct Plugin {
     enabled: bool,
     /// None for user-global plugins; project plugins have a full path key.
     project_key: Option<String>,
+    /// Explicit `KROMA_PLUGIN_TRY` plugin: not backed by plugins.toml state.
+    transient: bool,
     worker: Arc<PluginWorker>,
     event_worker: Option<Arc<PluginWorker>>,
 }
@@ -592,6 +597,9 @@ impl Plugin {
     }
 
     fn is_enabled(&self, state: &PluginState) -> bool {
+        if self.transient {
+            return self.enabled;
+        }
         match &self.project_key {
             Some(key) => state.enabled_projects.contains(key),
             None => state.enabled.contains(&self.manifest.id),
@@ -654,11 +662,27 @@ impl PluginCatalog {
             .parent()
             .context("plugin directory needs a parent")?
             .join("plugins.toml");
-        Self::discover_at(directory, state_path, workdir)
+        let transient = match env::var_os("KROMA_PLUGIN_TRY") {
+            Some(value) if value.is_empty() => {
+                bail!("KROMA_PLUGIN_TRY cannot be empty")
+            }
+            Some(value) => Some(PathBuf::from(value)),
+            None => None,
+        };
+        Self::discover_at_with_transient(directory, state_path, workdir, transient)
     }
 
     /// Explicit paths avoid changing process-wide environment variables in tests.
     pub fn discover_at(directory: PathBuf, state_path: PathBuf, workdir: &Path) -> Result<Self> {
+        Self::discover_at_with_transient(directory, state_path, workdir, None)
+    }
+
+    fn discover_at_with_transient(
+        directory: PathBuf,
+        state_path: PathBuf,
+        workdir: &Path,
+        transient: Option<PathBuf>,
+    ) -> Result<Self> {
         let mut warnings = Vec::new();
         let mut invalid_enabled = Vec::new();
         let state = match PluginState::load(&state_path) {
@@ -742,6 +766,7 @@ impl PluginCatalog {
                             manifest,
                             enabled,
                             project_key,
+                            transient: false,
                             worker,
                             event_worker,
                         });
@@ -766,11 +791,48 @@ impl PluginCatalog {
                 }
             }
         }
+        if let Some(source) = transient.clone() {
+            let source = source
+                .canonicalize()
+                .with_context(|| format!("opening transient plugin {}", source.display()))?;
+            if !source.is_dir() {
+                bail!("KROMA_PLUGIN_TRY must point to a plugin directory");
+            }
+            let manifest = PluginManifest::read(&source)
+                .with_context(|| format!("loading transient plugin {}", source.display()))?;
+            if !seen.insert(manifest.id.clone()) {
+                bail!(
+                    "transient plugin '{}' conflicts with an already discovered plugin",
+                    manifest.id
+                );
+            }
+            let data_root = state_path
+                .parent()
+                .context("plugin state needs a parent")?
+                .join("plugin-data");
+            let worker = Arc::new(PluginWorker::new(
+                &source,
+                workdir,
+                &manifest,
+                serde_json::to_value(&manifest.settings)?,
+                data_root.join(&manifest.id),
+            ));
+            let event_worker = (!manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
+            plugins.push(Plugin {
+                manifest,
+                enabled: true,
+                project_key: None,
+                transient: true,
+                worker,
+                event_worker,
+            });
+        }
         Ok(Self {
             directory,
             state_path,
             workdir: workdir.to_path_buf(),
             plugins,
+            transient,
             warnings,
             invalid_enabled,
         })
@@ -789,10 +851,11 @@ impl PluginCatalog {
     }
 
     fn refresh(&self) -> Result<Self> {
-        Self::discover_at(
+        Self::discover_at_with_transient(
             self.directory.clone(),
             self.state_path.clone(),
             &self.workdir,
+            self.transient.clone(),
         )
     }
 
@@ -806,7 +869,9 @@ impl PluginCatalog {
             .iter()
             .map(|plugin| {
                 let mut settings = plugin.manifest.settings.clone();
-                settings.extend(plugin.config_overrides(&state).cloned().unwrap_or_default());
+                if !plugin.transient {
+                    settings.extend(plugin.config_overrides(&state).cloned().unwrap_or_default());
+                }
                 let secret_settings: Vec<String> = settings
                     .keys()
                     .filter(|key| is_secret_setting(key))
@@ -820,6 +885,9 @@ impl PluginCatalog {
                     "description": plugin.manifest.description,
                     "enabled": plugin.is_enabled(&state),
                     "project": plugin.project_key.is_some(),
+                    "transient": plugin.transient,
+                    "api_version": plugin.manifest.api_version,
+                    "protocol_version": PLUGIN_API_VERSION,
                     "settings": settings,
                     "secret_settings": secret_settings,
                     "has_model": plugin.manifest.model.is_some(),
@@ -863,12 +931,14 @@ impl PluginCatalog {
             } else {
                 &plugin.manifest.version
             };
+            let scope = if plugin.transient { " [try]" } else { "" };
             lines.push(format!(
-                "{}  {} {}  [{}]{}",
+                "{}  {} {}  [{}]{}{}",
                 if active { "on " } else { "off" },
                 plugin.manifest.id,
                 version,
                 plugin.manifest.name,
+                scope,
                 restart
             ));
         }
@@ -889,6 +959,11 @@ impl PluginCatalog {
         let fresh = self.refresh()?;
         let mut state = PluginState::load(&self.state_path)?;
         let plugin = fresh.plugins.iter().find(|plugin| plugin.manifest.id == id);
+        if plugin.is_some_and(|plugin| plugin.transient) {
+            bail!(
+                "plugin '{id}' is a transient KROMA_PLUGIN_TRY plugin; install it before changing activation"
+            );
+        }
         if plugin.is_none() && !enabled && valid_id(id) {
             // A broken manifest is not discoverable, but must still be
             // possible to disable so a later reload can drop the old worker.
@@ -942,6 +1017,9 @@ impl PluginCatalog {
             .iter()
             .find(|plugin| plugin.manifest.id == id)
             .ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
+        if plugin.transient {
+            bail!("plugin '{id}' is transient (KROMA_PLUGIN_TRY); its settings are not persisted");
+        }
         if !valid_id(key) {
             bail!("config key must be an ASCII identifier");
         }
@@ -977,8 +1055,10 @@ impl PluginCatalog {
             .find(|plugin| plugin.manifest.id == id)
             .ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         let mut config = plugin.manifest.settings.clone();
-        let state = PluginState::load(&self.state_path)?;
-        config.extend(plugin.config_overrides(&state).cloned().unwrap_or_default());
+        if !plugin.transient {
+            let state = PluginState::load(&self.state_path)?;
+            config.extend(plugin.config_overrides(&state).cloned().unwrap_or_default());
+        }
         redact_secret_settings(&mut config);
         Ok(if config.is_empty() {
             "No settings.".into()
@@ -995,6 +1075,11 @@ impl PluginCatalog {
             bail!("invalid plugin ID");
         }
         let fresh = self.refresh()?;
+        if fresh.plugins.iter().any(|plugin| {
+            plugin.transient && plugin.project_key.is_none() && plugin.manifest.id == id
+        }) {
+            bail!("cannot uninstall transient plugin '{id}'; it is only loaded for this run");
+        }
         let target = fresh
             .plugins
             .iter()
@@ -1064,6 +1149,83 @@ impl PluginCatalog {
             "Installed '{}' (disabled). Enable with 'kroma plugins enable {}'.",
             manifest.id, manifest.id
         ))
+    }
+
+    /// Validate a plugin with the same manifest/process contract used by the
+    /// runtime. This starts one explicit process for a bounded `ping`; it
+    /// never persists activation, calls a model, or uses plugin settings.
+    pub fn check(&self, directory: &Path) -> Result<String> {
+        let source = directory
+            .canonicalize()
+            .with_context(|| format!("opening {}", directory.display()))?;
+        if !source.is_dir() {
+            bail!("plugin source must be a directory");
+        }
+        let manifest = PluginManifest::read(&source)?;
+        let contributions = format!(
+            "tools={} commands={} hooks={} events={} context={} model={} ui={}",
+            manifest.tools.len(),
+            manifest.commands.len(),
+            manifest.hooks.len(),
+            manifest.events.len(),
+            manifest.context.is_some(),
+            manifest.model.is_some(),
+            manifest.ui.is_some()
+        );
+        let mut lines = vec![
+            format!("plugin={} name={}", manifest.id, manifest.name),
+            format!(
+                "api_version={} protocol_version={}",
+                manifest.api_version, PLUGIN_API_VERSION
+            ),
+            format!("contributions: {contributions}"),
+        ];
+        if manifest
+            .command
+            .as_deref()
+            .is_none_or(|command| command.trim().is_empty())
+        {
+            lines.push("process=not applicable (static prompt/UI only)".into());
+            return Ok(lines.join("\n"));
+        }
+        let data_dir = env::temp_dir().join(format!(
+            "kroma-plugin-check-{}-{}-{}",
+            std::process::id(),
+            manifest.id,
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let worker = Arc::new(PluginWorker::new(
+            &source,
+            &self.workdir,
+            &manifest,
+            serde_json::to_value(&manifest.settings)?,
+            data_dir.clone(),
+        ));
+        let request = json!({"type":"ping", "name":"ping"});
+        let reply = std::thread::spawn(move || -> Result<PluginResponse> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()?;
+            runtime.block_on(worker.invoke_async_timeout(request, PLUGIN_CHECK_TIMEOUT))
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("plugin check worker panicked"));
+        let _ = fs::remove_dir_all(&data_dir);
+        let reply = reply??;
+        let response: String = reply.content.chars().take(200).collect();
+        lines.push(format!(
+            "smoke=response is_error={} content={}",
+            reply.is_error,
+            response.replace('\n', "\\n")
+        ));
+        lines.push(
+            "note=a plugin may reject the optional ping; a valid JSON response still proves framing"
+                .into(),
+        );
+        Ok(lines.join("\n"))
     }
 
     /// Only actual changes to active model/context identity require restart.
@@ -1648,12 +1810,13 @@ impl PluginCatalog {
                 ["enable", id] => catalog.set_enabled(id, true),
                 ["disable", id] => catalog.set_enabled(id, false),
                 ["install", path] => catalog.install(Path::new(path)),
+                ["check", path] => catalog.check(Path::new(path)),
                 ["uninstall", id] => catalog.uninstall(id),
                 ["config", id] => catalog.show_config(id),
                 ["view", id] => catalog.ui_panel(id),
                 ["set", id, key, value @ ..] if !value.is_empty() => catalog.set_config(id, key, Some(&value.join(" "))),
                 ["reset", id, key] => catalog.set_config(id, key, None),
-                _ => bail!("Usage: /plugins [list|enable <id>|disable <id>|install <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
+                _ => bail!("Usage: /plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
             }?;
             Ok(CommandReply::text(result))
         }) {
@@ -1704,12 +1867,13 @@ impl PluginCatalog {
             [action, id] if action == "enable" => catalog.set_enabled(id, true)?,
             [action, id] if action == "disable" => catalog.set_enabled(id, false)?,
             [action, path] if action == "install" => catalog.install(Path::new(path))?,
+            [action, path] if action == "check" => catalog.check(Path::new(path))?,
             [action, id] if action == "uninstall" => catalog.uninstall(id)?,
             [action, id] if action == "config" => catalog.show_config(id)?,
             [action, id] if action == "view" => catalog.ui_panel(id)?,
             [action, id, key, value @ ..] if action == "set" && !value.is_empty() => catalog.set_config(id, key, Some(&value.join(" ")))?,
             [action, id, key] if action == "reset" => catalog.set_config(id, key, None)?,
-            _ => bail!("Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
+            _ => bail!("Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
         };
         println!("{output}");
         Ok(())
@@ -2151,6 +2315,15 @@ impl PluginWorker {
     }
 
     async fn invoke_async(self: &Arc<Self>, message: Value) -> Result<PluginResponse> {
+        self.invoke_async_timeout(message, PLUGIN_CALL_TIMEOUT)
+            .await
+    }
+
+    async fn invoke_async_timeout(
+        self: &Arc<Self>,
+        message: Value,
+        timeout: Duration,
+    ) -> Result<PluginResponse> {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut guard = PluginCallGuard {
@@ -2161,7 +2334,7 @@ impl PluginWorker {
         };
         let worker = self.clone();
         let outcome = tokio::time::timeout(
-            PLUGIN_CALL_TIMEOUT,
+            timeout,
             tokio::task::spawn_blocking(move || {
                 worker.invoke_inner(message, Some((id, &cancelled)))
             }),
@@ -2170,7 +2343,7 @@ impl PluginWorker {
         if outcome.is_err() {
             // Dropping the armed guard kills the plugin process tree so a
             // timed-out call cannot keep running in the background.
-            anyhow::bail!("plugin call timed out after 120s");
+            anyhow::bail!("plugin call timed out after {}s", timeout.as_secs());
         }
         guard.armed = false;
         outcome??
@@ -2550,6 +2723,112 @@ base_url = "https://example.com""#,
         assert!(valid.validate().is_err());
         valid.command = Some("node".into());
         assert!(valid.validate().is_ok());
+    }
+
+    fn test_root(label: &str) -> PathBuf {
+        let root = env::temp_dir().join(format!(
+            "kroma-plugin-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn transient_try_is_enabled_but_never_persisted_or_configurable() {
+        let root = test_root("try");
+        let plugins = root.join("plugins");
+        let source = root.join("source");
+        let project = root.join("project");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            source.join("plugin.toml"),
+            "id='transient-demo'
+name='Transient demo'
+prompt='try me'
+",
+        )
+        .unwrap();
+        let state = root.join("plugins.toml");
+        let catalog = PluginCatalog::discover_at_with_transient(
+            plugins,
+            state.clone(),
+            &project,
+            Some(source.clone()),
+        )
+        .unwrap();
+        let listed = catalog.list().unwrap();
+        assert!(
+            listed.contains("transient-demo") && listed.contains("[try]"),
+            "{listed}"
+        );
+        assert!(listed.starts_with("on "), "{listed}");
+        assert!(!state.exists(), "transient discovery must not write state");
+        let summaries = catalog.summaries().unwrap();
+        assert_eq!(summaries[0]["enabled"], true);
+        assert_eq!(summaries[0]["transient"], true);
+        assert_eq!(summaries[0]["protocol_version"], PLUGIN_API_VERSION);
+        assert!(catalog.set_enabled("transient-demo", false).is_err());
+        assert!(catalog.uninstall("transient-demo").is_err());
+        assert!(
+            !state.exists(),
+            "rejected operations must not persist state"
+        );
+        let check = catalog.check(&source).unwrap();
+        assert!(check.contains("process=not applicable"), "{check}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plugin_check_smoke_talks_to_the_process_without_persisting_activation() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let root = test_root("check");
+        let plugins = root.join("plugins");
+        let source = root.join("source");
+        let project = root.join("project");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            source.join("plugin.toml"),
+            "id='checked'
+name='Checked'
+command='node'
+args=['main.js']
+[[tools]]
+name='ping_tool'
+description='Ping'
+[tools.parameters]
+type='object'
+",
+        )
+        .unwrap();
+        fs::write(
+            source.join("main.js"),
+            "require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);process.stdout.write(JSON.stringify({request_id:r.request_id,protocol_version:r.protocol_version,content:'pong'})+String.fromCharCode(10));});",
+        )
+        .unwrap();
+        let state = root.join("plugins.toml");
+        let catalog = PluginCatalog::discover_at(plugins, state.clone(), &project).unwrap();
+        let check = catalog.check(&source).unwrap();
+        assert!(
+            check.contains("api_version=1 protocol_version=1"),
+            "{check}"
+        );
+        assert!(
+            check.contains("smoke=response is_error=false content=pong"),
+            "{check}"
+        );
+        assert!(!state.exists(), "check must not write activation state");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

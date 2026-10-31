@@ -369,8 +369,8 @@ fn external_context_policy_can_read_budgets_without_private_fields() -> Result<(
     assert_eq!(config.window(), 8192);
     assert_eq!(config.available_input(), 7168);
     assert_eq!(config.output_reserve(), 1024);
-    assert_eq!(config.soft_limit(), 3584);
-    assert_eq!(config.hard_limit(), 6451);
+    assert_eq!(config.soft_limit(), 5_376);
+    assert_eq!(config.hard_limit(), 6_272);
     Ok(())
 }
 
