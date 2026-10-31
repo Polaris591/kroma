@@ -5,6 +5,14 @@ use std::{env, fs, io, path::Path};
 
 pub const EXECUTION_GUIDANCE: &str = "\nFor coding tasks, focus inspections on relevant files; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.";
 
+// V7 (F+C+E) is layered on the same built-in guidance used in the ablation.
+// Keep the three trialed instructions verbatim and in their tested order.
+pub const V7_GUIDANCE: &str = concat!(
+    "\nAvoid nonessential narration between tool calls. After completing the task, respond in at most two concise sentences covering the change and verification result. Report failures or uncertainty accurately. Provide a longer explanation only when explicitly requested.",
+    "\nPrefer the simplest correct implementation consistent with the existing codebase. Avoid redundant comments, explanatory boilerplate, unnecessary helper layers, and unrelated refactoring. Preserve required APIs, edge cases, tests, and non-obvious invariants. Never sacrifice correctness just to reduce code length.",
+    "\nLocate relevant symbols before reading large files. Prefer focused file ranges and diagnostic excerpts over dumping entire files or logs, unless full context is necessary. When tests fail, investigate the concrete failure and make a targeted fix. After all required checks pass, finish without unrelated exploration or repeated verification. Investigate tooling internals only when the evidence points there."
+);
+
 /// A simple ordered list of projection-only prompt contributions. No event
 /// hooks, mutable global state, dynamic templates or plugin runtime.
 #[derive(Clone)]
@@ -24,7 +32,7 @@ impl Default for PromptComposer {
         Self {
             system_override: None,
             initial_system_override: None,
-            additions: vec![EXECUTION_GUIDANCE.to_owned()],
+            additions: vec![EXECUTION_GUIDANCE.to_owned(), V7_GUIDANCE.to_owned()],
             instruction_files: Vec::new(),
             trailing: Vec::new(),
             custom_tools: false,
@@ -257,6 +265,25 @@ fn read_instruction_file(path: &Path) -> Result<Option<String>> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn v7_is_projected_once_without_mutating_persisted_history() {
+        let composer = PromptComposer::default();
+        let original = composer.initial_history(Path::new("/tmp/kroma-v7-test"));
+        assert!(!original[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains(V7_GUIDANCE));
+        let mut outbound = original.clone();
+        composer.apply(&mut outbound);
+        let projected = outbound[0].content.as_deref().unwrap().to_owned();
+        assert!(projected.contains(EXECUTION_GUIDANCE));
+        assert!(projected.ends_with(V7_GUIDANCE));
+        composer.apply(&mut outbound);
+        assert_eq!(outbound[0].content.as_deref(), Some(projected.as_str()));
+        assert_eq!(composer.extra_estimated_tokens(&original[0]), 0);
+    }
 
     #[test]
     fn global_and_project_instructions_are_projected_in_order_and_reload() -> Result<()> {
