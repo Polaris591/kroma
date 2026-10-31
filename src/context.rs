@@ -25,6 +25,16 @@ const OVERFLOW_PREVIEW_CHARS: usize = 160;
 const RETAIN_RECENT_TOKENS: usize = 32_000;
 const MIN_CHECKPOINT_CHARS: usize = 200;
 const MIN_CHECKPOINT_SOURCE_BYTES: usize = 1_024;
+const CHECKPOINT_SECTIONS: [(&str, &str); 8] = [
+    ("OBJECTIVE", "OBJECTIVE"),
+    ("CONSTRAINTS", "CONSTRAINTS"),
+    ("PROGRESS", "PROGRESS"),
+    ("CODE STATE", "CODE STATE"),
+    ("UNRESOLVED ISSUES", "UNRESOLVED"),
+    ("UNRESOLVED", "UNRESOLVED"),
+    ("KEY DECISIONS", "KEY DECISIONS"),
+    ("NEXT ACTION", "NEXT ACTION"),
+];
 
 const CHECKPOINT_PROMPT: &str = r#"You are creating a continuation checkpoint for a coding agent.
 
@@ -101,6 +111,10 @@ pub trait ContextPolicy: Send {
     /// to reuse the exact tool definitions and model endpoint for the single
     /// checkpoint request. Custom policies may ignore it.
     fn set_request_context(&mut self, _model: &Arc<dyn ModelBackend>, _tools: &[Value]) {}
+    /// The exact prompt-composed system message that the next request will
+    /// send. Built-in compaction fingerprints it so dynamic instructions can
+    /// invalidate a measured prefix even when their byte length is unchanged.
+    fn set_prompt_context(&mut self, _system: Option<&Message>) {}
     fn take_usage(&mut self) -> CompactionUsage {
         CompactionUsage::default()
     }
@@ -353,6 +367,7 @@ impl ContextConfig {
 struct MeasuredRequest {
     sent: Vec<Message>,
     raw_system: Message,
+    prompt_fingerprint: u64,
     message_count: usize,
     state_revision: u64,
     covered_until: usize,
@@ -407,6 +422,8 @@ pub struct Compression {
     request_tool_bytes: usize,
     request_tools_hash: u64,
     request_model_ptr: usize,
+    request_prompt_fingerprint: u64,
+    request_system: Option<Message>,
     current_raw_system: Option<Message>,
     measured: Option<MeasuredRequest>,
     usage: CompactionUsage,
@@ -444,6 +461,8 @@ impl Compression {
             request_tool_bytes: 0,
             request_tools_hash: hash_bytes(b"[]"),
             request_model_ptr: 0,
+            request_prompt_fingerprint: 0,
+            request_system: None,
             current_raw_system: None,
             measured: None,
             usage: CompactionUsage::default(),
@@ -458,6 +477,8 @@ impl Compression {
         self.state = CompactionState::default();
         self.failed_this_turn = false;
         self.request_extra_tokens = 0;
+        self.request_prompt_fingerprint = 0;
+        self.request_system = None;
         self.measured = None;
         self.usage = CompactionUsage::default();
     }
@@ -482,6 +503,17 @@ impl Compression {
         self.request_tools = tools.to_vec();
         self.request_tools_hash = tools_hash;
         self.request_model_ptr = model_ptr;
+    }
+
+    pub fn set_prompt_context(&mut self, system: Option<&Message>) {
+        let fingerprint = system.map_or(0, |message| {
+            hash_bytes(&serde_json::to_vec(message).unwrap_or_default())
+        });
+        if fingerprint != self.request_prompt_fingerprint {
+            self.measured = None;
+        }
+        self.request_prompt_fingerprint = fingerprint;
+        self.request_system = system.cloned();
     }
 
     pub fn view(&self, messages: &[Message]) -> Vec<Message> {
@@ -659,6 +691,7 @@ impl Compression {
         self.measured = Some(MeasuredRequest {
             sent: sent.to_vec(),
             raw_system,
+            prompt_fingerprint: self.request_prompt_fingerprint,
             message_count,
             state_revision: self.state.revision,
             covered_until: self.state.covered_until,
@@ -682,6 +715,7 @@ impl Compression {
             && measured.summaries == summaries_fingerprint(&self.state.summaries)
             && measured.tools == self.request_tools_hash
             && measured.model == self.request_model_ptr
+            && measured.prompt_fingerprint == self.request_prompt_fingerprint
     }
 
     fn measurement_compatible(&self, measured: &MeasuredRequest, messages: &[Message]) -> bool {
@@ -699,6 +733,9 @@ impl Compression {
         extra_tokens: usize,
     ) -> bool {
         if measured.extra_tokens != extra_tokens || measured.sent.len() > view.len() {
+            return false;
+        }
+        if measured.prompt_fingerprint != self.request_prompt_fingerprint {
             return false;
         }
         // The stored projection starts with the prompt-composed system
@@ -752,6 +789,7 @@ impl Compression {
             && measured.summaries == summaries_fingerprint(&self.state.summaries)
             && measured.tools == self.request_tools_hash
             && measured.model == self.request_model_ptr
+            && measured.prompt_fingerprint == self.request_prompt_fingerprint
             && measured.extra_tokens == self.request_extra_tokens
             && messages
                 .first()
@@ -793,6 +831,20 @@ impl Compression {
         self.push_summary_messages(&mut view, state);
         view.extend(messages.iter().skip(state.covered_until).cloned());
         view
+    }
+
+    /// Bytes of the context prefix that a new checkpoint would replace in the
+    /// current projection. Later checkpoints replace both the previous summary
+    /// and the newly covered messages, not just the raw message slice.
+    fn replaced_context_bytes(&self, messages: &[Message], boundary: usize) -> usize {
+        let mut view = self.view(messages);
+        let end =
+            1 + self.state.summaries.len() + boundary.saturating_sub(self.state.covered_until);
+        if end > view.len() {
+            return 0;
+        }
+        view.truncate(end);
+        serde_json::to_vec(&view[1..]).unwrap_or_default().len()
     }
 
     fn push_summary_messages(&self, view: &mut Vec<Message>, state: &CompactionState) {
@@ -871,7 +923,11 @@ impl Compression {
         let mut boundary = boundary;
         loop {
             let mut view = self.summary_source_view(messages, &self.state);
-            if let Some(system) = self.cached_system(messages) {
+            if let Some(system) = self
+                .request_system
+                .clone()
+                .or_else(|| self.cached_system(messages))
+            {
                 if let Some(first) = view.first_mut() {
                     if first.role == "system" {
                         *first = system;
@@ -917,9 +973,7 @@ impl Compression {
         if boundary <= self.state.covered_until {
             return Ok(false);
         }
-        let source_bytes = serde_json::to_vec(&messages[self.state.covered_until..boundary])
-            .unwrap_or_default()
-            .len();
+        let source_bytes = self.replaced_context_bytes(messages, boundary);
         if source_bytes < MIN_CHECKPOINT_SOURCE_BYTES {
             crate::runtime_log!(
                 "[compact] checkpoint source is too small to reduce context; keeping it raw"
@@ -932,9 +986,7 @@ impl Compression {
             crate::runtime_log!("[compact] checkpoint source does not fit the model window");
             return Ok(false);
         };
-        let source_bytes = serde_json::to_vec(&messages[self.state.covered_until..boundary])
-            .unwrap_or_default()
-            .len();
+        let source_bytes = self.replaced_context_bytes(messages, boundary);
         if source_bytes < MIN_CHECKPOINT_SOURCE_BYTES {
             crate::runtime_log!(
                 "[compact] checkpoint source is too small to reduce context; keeping it raw"
@@ -973,9 +1025,7 @@ impl Compression {
                 "checkpoint summary is empty or obviously incomplete; original history preserved"
             );
         }
-        let source_bytes = serde_json::to_vec(&messages[self.state.covered_until..boundary])
-            .unwrap_or_default()
-            .len();
+        let source_bytes = self.replaced_context_bytes(messages, boundary);
         if text.len() >= source_bytes {
             self.failed_this_turn = true;
             bail!("checkpoint summary is not shorter than its source; original history preserved");
@@ -1139,6 +1189,10 @@ impl ContextPolicy for Compression {
         Compression::set_request_context(self, model, tools);
     }
 
+    fn set_prompt_context(&mut self, system: Option<&Message>) {
+        Compression::set_prompt_context(self, system);
+    }
+
     fn mark_consumed(&mut self, message_count: usize) {
         Compression::mark_consumed(self, message_count);
     }
@@ -1178,27 +1232,89 @@ impl ContextPolicy for Compression {
     }
 }
 
+fn checkpoint_heading(line: &str) -> Option<(&'static str, &str)> {
+    let stripped = line.trim_start();
+    let stripped = stripped.trim_start_matches(['#', '*', '_']).trim_start();
+    let stripped = stripped.trim_start_matches(|c: char| c.is_ascii_digit());
+    let stripped = stripped
+        .trim_start_matches(['.', ')', ':', '-', '*', '_'])
+        .trim_start();
+    let upper = stripped.to_ascii_uppercase();
+    for (heading, label) in CHECKPOINT_SECTIONS {
+        if upper.starts_with(heading) {
+            let remainder = &stripped[heading.len()..];
+            let body = remainder.trim_start_matches([':', '*', '_']).trim_start();
+            if remainder.is_empty()
+                || body.is_empty()
+                || remainder.starts_with(':')
+                || remainder.chars().next().is_some_and(char::is_whitespace)
+            {
+                return Some((label, body));
+            }
+        }
+    }
+    None
+}
+
+/// Deterministic structure check only. This rejects empty or obviously
+/// truncated model output; it cannot prove that every semantic fact survived.
+/// The task prompt, retained raw suffix, and history tools remain the safety
+/// net for facts the summary omits.
 fn valid_checkpoint(text: &str) -> bool {
     let trimmed = text.trim();
-    let chars = trimmed.chars().count();
-    if chars < MIN_CHECKPOINT_CHARS {
+    if trimmed.chars().count() < MIN_CHECKPOINT_CHARS {
         return false;
     }
-    if chars >= 800 {
-        return true;
+    let mut sections = std::collections::BTreeMap::new();
+    let mut current: Option<(&'static str, String)> = None;
+    for line in trimmed.lines() {
+        if let Some((label, inline)) = checkpoint_heading(line) {
+            if let Some((previous, body)) = current.take() {
+                sections
+                    .entry(previous)
+                    .or_insert_with(String::new)
+                    .push_str(&body);
+            }
+            current = Some((label, inline.to_owned()));
+        } else if let Some((_, body)) = current.as_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
     }
-    let uppercase = trimmed.to_uppercase();
-    [
-        "OBJECTIVE",
-        "CONSTRAINTS",
-        "PROGRESS",
-        "CODE STATE",
-        "UNRESOLVED",
-        "KEY DECISIONS",
-        "NEXT ACTION",
-    ]
-    .iter()
-    .any(|marker| uppercase.contains(marker))
+    if let Some((label, body)) = current {
+        sections
+            .entry(label)
+            .or_insert_with(String::new)
+            .push_str(&body);
+    }
+
+    let meaningful = |body: &str| {
+        body.chars()
+            .filter(|character| !character.is_whitespace())
+            .count()
+    };
+    let substantive = sections
+        .values()
+        .filter(|body| meaningful(body) >= 4)
+        .count();
+    if substantive < 5 {
+        return false;
+    }
+    let total: usize = sections.values().map(|body| meaningful(body)).sum();
+    if total < 100 {
+        return false;
+    }
+    for label in ["OBJECTIVE", "CONSTRAINTS", "UNRESOLVED", "NEXT ACTION"] {
+        if sections.get(label).is_none_or(|body| meaningful(body) < 4) {
+            return false;
+        }
+    }
+    sections
+        .get("PROGRESS")
+        .is_some_and(|body| meaningful(body) >= 4)
+        || sections
+            .get("CODE STATE")
+            .is_some_and(|body| meaningful(body) >= 4)
 }
 
 fn preview(text: &str) -> String {
@@ -1291,6 +1407,41 @@ mod tests {
 6. KEY DECISIONS\nRejected changing the tokenizer because it would break callers and hide the real defect.\n\
 7. NEXT ACTION\nRun cargo test parser_e17_repair, inspect the trailing-input path, then finish the task.";
 
+    fn structured_checkpoint(marker: &str, fill: char, filler: usize) -> String {
+        format!(
+            "1. OBJECTIVE\n{marker}: keep the task and constraints exact.\n\
+2. CONSTRAINTS\nNever delete raw WAL or original session messages.\n\
+3. PROGRESS\n{marker}: completed checkpoint work is retained.\n{}\n\
+4. CODE STATE\nNo source changes are made by this summary fixture.\n\
+5. UNRESOLVED ISSUES\n{marker}: history index consistency remains under review.\n\
+6. KEY DECISIONS\nKeep the single synchronous checkpoint design.\n\
+7. NEXT ACTION\nContinue from the retained facts and verify the next checkpoint.",
+            fill.to_string().repeat(filler)
+        )
+    }
+
+    const FACT_OBJECTIVE: &str = "OBJECTIVE_FACT: 修复 Kroma 历史检索";
+    const FACT_CONSTRAINT: &str = "CONSTRAINT_FACT: 不得删除原始 WAL";
+    const FACT_DECISION: &str = "DECISION_FACT: 保留单次同步 Checkpoint";
+    const FACT_UNRESOLVED: &str = "UNRESOLVED_FACT: 检查历史索引一致性";
+
+    fn fact_checkpoint(
+        objective: &str,
+        constraint: &str,
+        decision: &str,
+        unresolved: &str,
+    ) -> String {
+        format!(
+            "1. OBJECTIVE\n{objective}\n\
+2. CONSTRAINTS\n{constraint}\n\
+3. PROGRESS\nFirst/second/third checkpoint evidence was retained.\n\
+4. CODE STATE\nNo source changes were made by this test fixture.\n\
+5. UNRESOLVED ISSUES\n{unresolved}\n\
+6. KEY DECISIONS\n{decision}\n\
+7. NEXT ACTION\nContinue the task and verify the retained facts."
+        )
+    }
+
     #[derive(Clone)]
     struct CheckpointCall {
         source: Vec<Message>,
@@ -1365,6 +1516,82 @@ mod tests {
                     }),
                     Err(error) => bail!(error),
                 }
+            })
+        }
+    }
+
+    struct FactPreservingModel {
+        calls: Mutex<Vec<CheckpointCall>>,
+    }
+
+    impl FactPreservingModel {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<CheckpointCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ModelBackend for FactPreservingModel {
+        fn complete<'a>(
+            &'a self,
+            _: &'a [Message],
+            _: &'a [Value],
+            _: &'a mut (dyn FnMut(&str) + Send),
+        ) -> StreamFuture<'a, crate::model::Completion> {
+            Box::pin(async { bail!("normal completion is not expected in context tests") })
+        }
+
+        fn generate_text<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: usize,
+        ) -> ModelFuture<'a, TextResult> {
+            Box::pin(async { bail!("generic text generation is not expected") })
+        }
+
+        fn generate_checkpoint<'a>(
+            &'a self,
+            messages: &'a [Message],
+            tools: &'a [Value],
+            instruction: &'a str,
+            output_tokens: usize,
+        ) -> ModelFuture<'a, TextResult> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(CheckpointCall {
+                    source: messages.to_vec(),
+                    tools: tools.to_vec(),
+                    instruction: instruction.to_owned(),
+                    output_tokens,
+                });
+                let source = messages
+                    .iter()
+                    .filter_map(|message| message.content.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let pick = |fact: &'static str, fallback: &'static str| {
+                    if source.contains(fact) {
+                        fact
+                    } else {
+                        fallback
+                    }
+                };
+                Ok(TextResult {
+                    text: fact_checkpoint(
+                        pick(FACT_OBJECTIVE, "Preserve the current task."),
+                        pick(FACT_CONSTRAINT, "Preserve the stated constraints."),
+                        pick(FACT_DECISION, "Keep the current checkpoint design."),
+                        pick(FACT_UNRESOLVED, "No unresolved issue was stated."),
+                    ),
+                    usage: None,
+                    elapsed: Duration::ZERO,
+                    requests: 1,
+                })
             })
         }
     }
@@ -1467,6 +1694,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn checkpoint_validation_accepts_none_known_without_inventing_work() {
+        let text = "1. OBJECTIVE\nRepair the parser regression and preserve the public API.\n\
+2. CONSTRAINTS\nDo not delete raw WAL or change the accepted error text.\n\
+3. PROGRESS\nThe focused regression test passes and the requested verification is complete.\n\
+4. CODE STATE\nsrc/parser.rs handles empty input; tests/parser.rs covers the regression.\n\
+5. UNRESOLVED ISSUES\nNone known.\n\
+6. KEY DECISIONS\nKeep the existing parser entry point and error contract.\n\
+7. NEXT ACTION\nNone; the task is complete and no follow-up is required.";
+        assert!(
+            valid_checkpoint(text),
+            "a completed checkpoint must not be rejected for saying there is no remaining work"
+        );
+    }
+
     #[tokio::test]
     async fn below_soft_limit_never_requests_a_summary() {
         let model = Arc::new(TestModel::new([]));
@@ -1491,6 +1733,38 @@ mod tests {
         assert_eq!(commit.count(), 0);
         assert!(model.calls().is_empty());
         assert_eq!(view.len(), messages.len());
+    }
+
+    #[tokio::test]
+    async fn extra_prompt_and_tool_tokens_are_included_in_the_checkpoint_decision() {
+        let model = Arc::new(TestModel::new([Ok(GOOD_CHECKPOINT.to_owned())]));
+        let backend = model.clone() as Arc<dyn ModelBackend>;
+        let messages = grow_history(8_000, 700);
+        let mut context = compression();
+        context.mark_consumed(messages.len());
+        let commit = RecordingCommit::default();
+        let raw_tokens = rough_tokens(&context.view(&messages));
+        let extra = budget().soft_limit().saturating_sub(raw_tokens) + 1;
+        assert!(raw_tokens < budget().soft_limit());
+        assert!(raw_tokens + extra < budget().hard_limit());
+
+        context
+            .prepare_with_extra(&messages, &backend, &commit, 0)
+            .await
+            .unwrap();
+        assert!(model.calls().is_empty());
+        assert_eq!(commit.count(), 0);
+
+        context
+            .prepare_with_extra(&messages, &backend, &commit, extra)
+            .await
+            .unwrap();
+        assert_eq!(
+            model.calls().len(),
+            1,
+            "the prompt/tool allowance must count toward the trigger"
+        );
+        assert_eq!(commit.count(), 1);
     }
 
     #[tokio::test]
@@ -1553,6 +1827,125 @@ mod tests {
             .unwrap();
         assert_eq!(model.calls().len(), 1);
         assert_eq!(commit.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn later_checkpoints_count_the_previous_summary_in_the_replaced_context() -> Result<()> {
+        let first_summary = structured_checkpoint("FIRST_SUMMARY", 'A', 5_400);
+        let second_summary = structured_checkpoint("SECOND_SUMMARY", 'B', 7_400);
+        let third_summary = structured_checkpoint("THIRD_SUMMARY", 'C', 9_400);
+        let model = Arc::new(TestModel::new([
+            Ok(first_summary.clone()),
+            Ok(second_summary.clone()),
+            Ok(third_summary.clone()),
+        ]));
+        let backend = model.clone() as Arc<dyn ModelBackend>;
+        let mut messages = vec![
+            Message::new("system", "coding agent"),
+            Message::new("user", format!("FIRST_TASK {}", "u".repeat(8_000))),
+            Message::new("assistant", format!("FIRST_REPLY {}", "a".repeat(4_000))),
+        ];
+        let mut context = compression();
+        let commit = RecordingCommit::default();
+
+        // First checkpoint replaces the large first user message.
+        context.mark_consumed(messages.len());
+        assert!(context.compact_once(&messages, &backend, &commit).await?);
+        assert_eq!(context.state.covered_until, 2);
+        assert_eq!(context.state.summaries[0].text, first_summary);
+
+        // Second checkpoint replaces the old summary plus the assistant
+        // reply. The new summary is larger than the raw slice alone, but
+        // smaller than the complete replaced prefix.
+        messages.push(Message::new(
+            "user",
+            format!("SECOND_TASK {}", "v".repeat(6_000)),
+        ));
+        context.mark_consumed(messages.len());
+        assert!(context.compact_once(&messages, &backend, &commit).await?);
+        assert_eq!(context.state.covered_until, 3);
+        assert_eq!(context.state.summaries[0].text, second_summary);
+        assert!(model.calls()[1].source.iter().any(|message| message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains("FIRST_SUMMARY"))));
+
+        // Third checkpoint follows the same rule against the second summary.
+        messages.push(Message::new(
+            "user",
+            format!("THIRD_TASK {}", "w".repeat(6_000)),
+        ));
+        context.mark_consumed(messages.len());
+        assert!(context.compact_once(&messages, &backend, &commit).await?);
+        assert_eq!(context.state.covered_until, 4);
+        assert_eq!(context.state.summaries[0].text, third_summary);
+        assert!(model.calls()[2].source.iter().any(|message| message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains("SECOND_SUMMARY"))));
+        assert_eq!(commit.count(), 3);
+        assert_eq!(context.state.summaries.len(), 1);
+        assert!(messages[1]
+            .content
+            .as_deref()
+            .is_some_and(|text| text.starts_with("FIRST_TASK")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_facts_survive_first_second_and_third_compaction() -> Result<()> {
+        let model = Arc::new(FactPreservingModel::new());
+        let backend = model.clone() as Arc<dyn ModelBackend>;
+        let facts = format!(
+            "{}\n{}\n{}\n{}",
+            FACT_OBJECTIVE, FACT_CONSTRAINT, FACT_DECISION, FACT_UNRESOLVED
+        );
+        let mut messages = vec![
+            Message::new("system", "coding agent"),
+            Message::new("user", format!("{facts}\n{}", "u".repeat(8_000))),
+            Message::new("assistant", format!("FIRST_REPLY {}", "a".repeat(4_000))),
+        ];
+        let mut context = compression();
+        let commit = RecordingCommit::default();
+        for round in 0..3 {
+            if round > 0 {
+                messages.push(Message::new(
+                    "user",
+                    format!("ROUND_{round} {}", "v".repeat(6_000)),
+                ));
+            }
+            context.mark_consumed(messages.len());
+            assert!(context.compact_once(&messages, &backend, &commit).await?);
+            assert_eq!(context.state.covered_until, round + 2);
+            let summary = context.state.summaries[0].text.as_str();
+            for fact in [
+                FACT_OBJECTIVE,
+                FACT_CONSTRAINT,
+                FACT_DECISION,
+                FACT_UNRESOLVED,
+            ] {
+                assert!(
+                    summary.contains(fact),
+                    "checkpoint round {round} dropped {fact}"
+                );
+            }
+        }
+        let calls = model.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[1].source.iter().any(|message| message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains(FACT_OBJECTIVE))));
+        assert!(calls[2].source.iter().any(|message| message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains(FACT_DECISION))));
+        assert_eq!(commit.count(), 3);
+        assert!(messages[1]
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains(FACT_UNRESOLVED)));
+        Ok(())
     }
 
     #[tokio::test]
@@ -1620,6 +2013,53 @@ mod tests {
         );
         context.prepare(&messages, &backend, &commit).await.unwrap();
         assert_eq!(model.calls().len(), 1);
+        assert_eq!(commit.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn changed_prompt_content_invalidates_cache_and_reaches_checkpoint() {
+        let model = Arc::new(TestModel::new([Ok(GOOD_CHECKPOINT.to_owned())]));
+        let backend: Arc<dyn ModelBackend> = model.clone();
+        let messages = grow_history(budget().soft_limit() + 100, 700);
+        let mut context = compression();
+        context.mark_consumed(messages.len());
+        context.set_request_context(&backend, &[]);
+        context.current_raw_system = Some(messages[0].clone());
+
+        let old = Message::new("system", format!("OLD_PROMPT {}", "A".repeat(120)));
+        let new = Message::new("system", format!("NEW_PROMPT {}", "B".repeat(120)));
+        assert_eq!(
+            old.content.as_ref().unwrap().len(),
+            new.content.as_ref().unwrap().len()
+        );
+        context.set_prompt_context(Some(&old));
+        let view = context.view(&messages);
+        let bytes = serde_json::to_vec(&view).unwrap().len();
+        context.observe_with_bytes(
+            &view,
+            Some(bytes),
+            Some((budget().soft_limit() - 1) as u64),
+            None,
+        );
+
+        let commit = RecordingCommit::default();
+        context.prepare(&messages, &backend, &commit).await.unwrap();
+        assert!(
+            model.calls().is_empty(),
+            "an unchanged prompt may reuse the measured cache"
+        );
+
+        // Same byte length, different instructions: length and extra_tokens
+        // alone cannot distinguish these projections.
+        context.set_prompt_context(Some(&new));
+        context.prepare(&messages, &backend, &commit).await.unwrap();
+        let calls = model.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].source[0].content.as_deref(),
+            new.content.as_deref(),
+            "the checkpoint must receive the current prompt, not the cached old one"
+        );
         assert_eq!(commit.count(), 1);
     }
 
@@ -1875,8 +2315,14 @@ mod tests {
 
     #[tokio::test]
     async fn empty_or_obviously_incomplete_checkpoint_is_not_committed() {
-        for response in ["", "too short", "1. OBJECTIVE\nshort"] {
-            let model = Arc::new(TestModel::new([Ok(response.to_owned())]));
+        for response in [
+            "".to_owned(),
+            "too short".to_owned(),
+            "1. OBJECTIVE\nshort".to_owned(),
+            format!("OBJECTIVE\n{}", "x".repeat(2_000)),
+            "1. OBJECTIVE\n\n2. CONSTRAINTS\n\n3. PROGRESS\n\n4. CODE STATE\n\n5. UNRESOLVED ISSUES\n\n6. KEY DECISIONS\n\n7. NEXT ACTION\n".to_owned(),
+        ] {
+            let model = Arc::new(TestModel::new([Ok(response)]));
             let messages = grow_history(budget().soft_limit() + 100, 700);
             let original = serde_json::to_vec(&messages).unwrap();
             let mut context = compression();
@@ -1894,6 +2340,26 @@ mod tests {
             assert!(context.state.summaries.is_empty());
             assert_eq!(serde_json::to_vec(&messages).unwrap(), original);
         }
+    }
+
+    #[test]
+    fn checkpoint_validation_does_not_accept_length_as_structure() {
+        assert!(valid_checkpoint(GOOD_CHECKPOINT));
+        assert!(valid_checkpoint(&structured_checkpoint(
+            "VALID_SUMMARY",
+            'V',
+            100
+        )));
+        assert!(!valid_checkpoint(&"L".repeat(5_000)));
+        assert!(!valid_checkpoint(
+            "1. OBJECTIVE\nDo the task.\n2. CONSTRAINTS\nNo retries.\n3. PROGRESS\nStarted."
+        ));
+        assert!(!valid_checkpoint(
+            "1. OBJECTIVE\nDo the task.\n2. CONSTRAINTS\nNo retries.\n3. PROGRESS\nStarted.\n4. CODE STATE\nNone.\n5. UNRESOLVED ISSUES\nNone.\n6. KEY DECISIONS\nNone.\n7. NEXT ACTION\nFinish."
+        ));
+        assert!(!valid_checkpoint(
+            "1. OBJECTIVE\nInspect the parser and preserve the public API.\n2. CONSTRAINTS\nDo not delete the raw WAL; keep the exact error text.\n3. PROGRESS\nThe focused test passed and the full suite remains pending.\n4. CODE STATE\nsrc/parser.rs now handles empty input; tests cover the regression.\n5. UNRESOLVED ISSUES\n\n6. KEY DECISIONS\nKeep the tokenizer unchanged because callers depend on it.\n7. NEXT ACTION\nRun the focused regression test and report the result."
+        ));
     }
 
     #[tokio::test]

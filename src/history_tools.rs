@@ -1,7 +1,7 @@
 //! Read-only access to the durable session checkpoint. These tools let the
 //! model retrieve evidence omitted from the current compacted projection.
 use crate::{
-    protocol::ToolCall,
+    protocol::{Message, ToolCall},
     session::read_archive_messages,
     tools::{Tool, ToolContext, ToolFuture, ToolResult},
 };
@@ -40,6 +40,19 @@ fn excerpt(text: &str, query: &str) -> Option<String> {
         end += 1;
     }
     Some(text[start..end].replace('\n', " "))
+}
+
+fn searchable_text(message: &Message) -> String {
+    let mut text = message.content.clone().unwrap_or_default();
+    for call in message.tool_calls.iter().flatten() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&call.function.name);
+        text.push(' ');
+        text.push_str(&call.function.arguments);
+    }
+    text
 }
 
 pub struct HistorySearch;
@@ -91,10 +104,8 @@ impl Tool for HistorySearch {
                 if role != "all" && message.role != role {
                     continue;
                 }
-                let Some(content) = message.content.as_deref() else {
-                    continue;
-                };
-                let Some(snippet) = excerpt(content, &args.query) else {
+                let text = searchable_text(message);
+                let Some(snippet) = excerpt(&text, &args.query) else {
                     continue;
                 };
                 matches.push(json!({
@@ -111,7 +122,7 @@ impl Tool for HistorySearch {
                     "query":args.query,
                     "matches":matches,
                     "total_messages":messages.len(),
-                    "note":"Use history_read with a match index. The checkpoint may lag the newest WAL messages; current recent messages are already in the conversation."
+                    "note":"Use history_read with a match index. This transcript includes the durable checkpoint and valid journal messages; the complete raw history remains authoritative."
                 })
                 .to_string(),
             )
@@ -164,9 +175,28 @@ impl Tool for HistoryRead {
                         .to_string(),
                 );
             };
-            let full = message.content.clone().unwrap_or_else(|| {
-                serde_json::to_string(message).unwrap_or_else(|_| String::new())
-            });
+            let full = if let Some(calls) = message
+                .tool_calls
+                .as_deref()
+                .filter(|calls| !calls.is_empty())
+            {
+                let content = message.content.as_deref().unwrap_or_default();
+                if content.is_empty() {
+                    format!(
+                        "Tool calls:\n{}",
+                        serde_json::to_string(calls).unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "{content}\n\nTool calls:\n{}",
+                        serde_json::to_string(calls).unwrap_or_default()
+                    )
+                }
+            } else {
+                message.content.clone().unwrap_or_else(|| {
+                    serde_json::to_string(message).unwrap_or_else(|_| String::new())
+                })
+            };
             let total = full.chars().count();
             let start = args.start_char.unwrap_or(0).min(total);
             let max = args.max_chars.unwrap_or(8_000).clamp(1, 20_000);
@@ -207,5 +237,251 @@ mod tests {
                 .as_u64()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn search_and_read_include_newest_wal_and_tool_arguments() -> anyhow::Result<()> {
+        use crate::context_state::CompactionState;
+        use crate::provider::FunctionCall;
+        use crate::session::SessionStore;
+
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-history-wal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("session.json");
+        let store = SessionStore::open_at(path.clone(), &dir)?;
+        let state = CompactionState::default();
+        let mut messages = vec![
+            Message::new("system", "system"),
+            Message::new("user", "snapshot task"),
+        ];
+        store.save(&messages, &state)?;
+
+        messages.push(Message {
+            role: "assistant".into(),
+            content: None,
+            reasoning_content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "wal-call".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "shell".into(),
+                    arguments: r#"{"command":"cat /tmp/WAL_EVIDENCE.log"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            provider_items: None,
+        });
+        store.append(&messages, &state)?;
+        let assistant_index = messages.len() - 1;
+        messages.push(Message::tool(
+            "wal-call".into(),
+            "newest WAL tool output".into(),
+        ));
+        store.append(&messages, &state)?;
+        let tool_index = messages.len() - 1;
+
+        let search = ToolCall {
+            id: "search".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "history_search".into(),
+                arguments: json!({"query":"WAL_EVIDENCE","limit":8}).to_string(),
+            },
+        };
+        let result = HistorySearch
+            .execute(
+                &search,
+                ToolContext {
+                    workdir: &dir,
+                    archive: &path,
+                    on_output: None,
+                },
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        let found: Value = serde_json::from_str(&result.content)?;
+        assert_eq!(found["total_messages"], 4);
+        assert_eq!(found["matches"][0]["index"], assistant_index);
+        assert!(found["matches"][0]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("WAL_EVIDENCE.log"));
+
+        let read = ToolCall {
+            id: "read".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "history_read".into(),
+                arguments: json!({"index":assistant_index}).to_string(),
+            },
+        };
+        let result = HistoryRead
+            .execute(
+                &read,
+                ToolContext {
+                    workdir: &dir,
+                    archive: &path,
+                    on_output: None,
+                },
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        let read: Value = serde_json::from_str(&result.content)?;
+        assert!(read["content"]
+            .as_str()
+            .unwrap()
+            .contains("WAL_EVIDENCE.log"));
+
+        let read = ToolCall {
+            id: "read-tool".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "history_read".into(),
+                arguments: json!({"index":tool_index}).to_string(),
+            },
+        };
+        let result = HistoryRead
+            .execute(
+                &read,
+                ToolContext {
+                    workdir: &dir,
+                    archive: &path,
+                    on_output: None,
+                },
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        let read: Value = serde_json::from_str(&result.content)?;
+        assert_eq!(read["role"], "tool");
+        assert!(read["content"]
+            .as_str()
+            .unwrap()
+            .contains("newest WAL tool output"));
+
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn pending_parallel_calls_are_not_synthesized_into_history() -> anyhow::Result<()> {
+        use crate::context_state::CompactionState;
+        use crate::provider::FunctionCall;
+        use crate::session::SessionStore;
+
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-history-pending-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("session.json");
+        let store = SessionStore::open_at(path.clone(), &dir)?;
+        let state = CompactionState::default();
+        let mut messages = vec![
+            Message::new("system", "system"),
+            Message::new("user", "inspect history"),
+        ];
+        store.save(&messages, &state)?;
+        messages.push(Message {
+            role: "assistant".into(),
+            content: Some("I will inspect both history and the working directory.".into()),
+            reasoning_content: None,
+            tool_calls: Some(vec![
+                ToolCall {
+                    id: "history-call".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "history_search".into(),
+                        arguments: json!({"query":"NEEDLE_ARG"}).to_string(),
+                    },
+                },
+                ToolCall {
+                    id: "shell-call".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "shell".into(),
+                        arguments: json!({"command":"pwd"}).to_string(),
+                    },
+                },
+            ]),
+            tool_call_id: None,
+            provider_items: None,
+        });
+        store.append(&messages, &state)?;
+
+        let search = ToolCall {
+            id: "search".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "history_search".into(),
+                arguments: json!({"query":"NEEDLE_ARG"}).to_string(),
+            },
+        };
+        let result = HistorySearch
+            .execute(
+                &search,
+                ToolContext {
+                    workdir: &dir,
+                    archive: &path,
+                    on_output: None,
+                },
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        let found: Value = serde_json::from_str(&result.content)?;
+        assert_eq!(
+            found["total_messages"], 3,
+            "history reading must not synthesize pending tool results"
+        );
+        assert_eq!(found["matches"][0]["index"], 2);
+
+        let read = ToolCall {
+            id: "read".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "history_read".into(),
+                arguments: json!({"index":2}).to_string(),
+            },
+        };
+        let result = HistoryRead
+            .execute(
+                &read,
+                ToolContext {
+                    workdir: &dir,
+                    archive: &path,
+                    on_output: None,
+                },
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        let read: Value = serde_json::from_str(&result.content)?;
+        let content = read["content"].as_str().unwrap();
+        assert!(content.contains("inspect both history and the working directory"));
+        assert!(content.contains("history_search"));
+        assert!(content.contains("NEEDLE_ARG"));
+        assert!(content.contains("shell"));
+        assert!(content.contains("pwd"));
+        assert!(!content.contains("Session interrupted"));
+        assert!(!content.contains("Tool result is unknown"));
+
+        // Real recovery is a separate operation: loading the same session
+        // after a crash may synthesize unknown results for the two pending
+        // calls, while read-only history access must not.
+        let durable = read_archive_messages(&path)?;
+        assert_eq!(durable.len(), 3);
+        let recovered = store.load()?.unwrap().messages;
+        assert_eq!(recovered.len(), 5);
+
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 }

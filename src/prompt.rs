@@ -234,20 +234,19 @@ impl PromptComposer {
         }
     }
 
-    /// Extra projection budget relative to the *old* built-in guidance,
-    /// which was already omitted from the legacy TRC/APEC estimate.
-    /// Only extensions or changed base prompts affect the planning heuristic.
+    /// Token estimate for the complete system prompt relative to the
+    /// persisted system message. The persisted message is the raw baseline;
+    /// comparing against a default-composed baseline would hide the built-in
+    /// guidance that is appended only in the request projection.
     pub fn extra_estimated_tokens(&self, stored_system: &Message) -> usize {
         let Some(content) = stored_system.content.as_deref() else {
             return 0;
         };
+        let stored_bytes = content.len();
         let mut active = vec![Message::new("system", content)];
-        let mut baseline = active.clone();
-        PromptComposer::default().apply(&mut baseline);
         self.apply(&mut active);
         let actual_bytes = active[0].content.as_ref().map_or(0, String::len);
-        let baseline_bytes = baseline[0].content.as_ref().map_or(0, String::len);
-        actual_bytes.saturating_sub(baseline_bytes).div_ceil(3)
+        actual_bytes.saturating_sub(stored_bytes).div_ceil(3)
     }
 }
 
@@ -267,6 +266,43 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn same_length_instruction_changes_are_visible_and_budgeted() -> Result<()> {
+        let root = env::temp_dir().join(format!(
+            "kroma-same-length-instructions-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+        ));
+        fs::create_dir_all(&root)?;
+        let project = root.join("AGENTS.md");
+        let missing = root.join("missing/AGENTS.md");
+        fs::write(&project, "ALPHA")?;
+        let mut composer = PromptComposer::default();
+        composer.load_instruction_paths(Some(&missing), &project)?;
+        let raw = composer.initial_history(&root);
+        let mut first = raw.clone();
+        composer.apply(&mut first);
+        let first_text = first[0].content.clone().unwrap();
+        let first_extra = composer.extra_estimated_tokens(&raw[0]);
+
+        fs::write(&project, "BRAVO")?;
+        composer.load_instruction_paths(Some(&missing), &project)?;
+        let mut second = raw.clone();
+        composer.apply(&mut second);
+        let second_text = second[0].content.clone().unwrap();
+        assert_ne!(first_text, second_text);
+        assert_eq!(first_text.len(), second_text.len());
+        assert_eq!(first_extra, composer.extra_estimated_tokens(&raw[0]));
+
+        fs::write(&project, "BRAVO_LONGER")?;
+        composer.load_instruction_paths(Some(&missing), &project)?;
+        let mut longer = raw.clone();
+        composer.apply(&mut longer);
+        assert!(composer.extra_estimated_tokens(&raw[0]) > first_extra);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn v7_is_projected_once_without_mutating_persisted_history() {
         let composer = PromptComposer::default();
         let original = composer.initial_history(Path::new("/tmp/kroma-v7-test"));
@@ -280,9 +316,36 @@ mod tests {
         let projected = outbound[0].content.as_deref().unwrap().to_owned();
         assert!(projected.contains(EXECUTION_GUIDANCE));
         assert!(projected.ends_with(V7_GUIDANCE));
-        composer.apply(&mut outbound);
         assert_eq!(outbound[0].content.as_deref(), Some(projected.as_str()));
-        assert_eq!(composer.extra_estimated_tokens(&original[0]), 0);
+        let expected = projected.len() - original[0].content.as_deref().unwrap().len();
+        assert_eq!(
+            composer.extra_estimated_tokens(&original[0]),
+            expected.div_ceil(3),
+            "built-in guidance must be included in the compaction budget"
+        );
+        assert!(composer.extra_estimated_tokens(&original[0]) > 0);
+        composer.apply(&mut outbound);
+        assert_eq!(
+            outbound[0].content.as_deref(),
+            Some(projected.as_str()),
+            "repeated projections must not duplicate guidance"
+        );
+    }
+
+    #[test]
+    fn default_guidance_is_counted_once_in_the_projection_budget() {
+        let composer = PromptComposer::default();
+        let stored = composer.initial_history(Path::new("/tmp/kroma-budget-test"));
+        let mut projected = stored.clone();
+        composer.apply(&mut projected);
+        let added = projected[0].content.as_deref().unwrap().len()
+            - stored[0].content.as_deref().unwrap().len();
+        assert!(added > 0);
+        assert_eq!(
+            composer.extra_estimated_tokens(&stored[0]),
+            added.div_ceil(3)
+        );
+        assert!(!V7_GUIDANCE.is_empty());
     }
 
     #[test]

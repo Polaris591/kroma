@@ -240,7 +240,9 @@ async fn checkpoint_failure_below_hard_limit_does_not_abort_the_task() -> Result
     let dir = isolated_dir()?;
     let model = Arc::new(ScriptedModel::with_checkpoint_failure());
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(HugeOutput { bytes: 48_000 }))?;
+    // Keep this fixture genuinely below the hard limit with the full built-in
+    // V7 prompt included; 48k crosses the current 32k-window hard limit.
+    tools.register(Arc::new(HugeOutput { bytes: 47_000 }))?;
     let budget = ContextConfig::with_output_reserve(32_768, 4_096)?;
     let mut agent = Agent::with_runtime_budget(
         model.clone(),
@@ -279,7 +281,7 @@ async fn checkpoint_failure_below_hard_limit_does_not_abort_the_task() -> Result
             && message
                 .content
                 .as_deref()
-                .is_some_and(|text| text.len() == 48_000)),
+                .is_some_and(|text| text.len() == 47_000)),
         "the full tool evidence must remain available for the current task"
     );
 
@@ -292,7 +294,7 @@ async fn checkpoint_failure_below_hard_limit_does_not_abort_the_task() -> Result
         && message
             .content
             .as_deref()
-            .is_some_and(|text| text.len() == 48_000)));
+            .is_some_and(|text| text.len() == 47_000)));
     let wal = std::fs::read_to_string(format!("{}.wal", agent.archive_path().display()))?;
     assert!(wal.contains("ORIGINAL_TASK"));
     drop(agent);

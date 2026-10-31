@@ -283,6 +283,7 @@ async fn save_profile(
                 context_window: profile.context_window,
                 max_output_tokens: profile.max_output_tokens,
                 thinking_levels: old.thinking_levels,
+                catalog_model: old.catalog_model,
             },
         );
         profiles.active = Some(profile.name);

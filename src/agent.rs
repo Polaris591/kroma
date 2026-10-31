@@ -33,7 +33,7 @@ fn transient_session_path() -> PathBuf {
 }
 
 #[cfg(test)]
-use crate::prompt::EXECUTION_GUIDANCE;
+use crate::prompt::{EXECUTION_GUIDANCE, V7_GUIDANCE};
 
 #[cfg(test)]
 fn initial_history(workdir: &std::path::Path) -> Vec<Message> {
@@ -935,6 +935,12 @@ impl Agent {
         // lines when either side changes.
         self.compression
             .set_request_context(&self.model, &tool_definitions);
+        // Cache validity and checkpoint requests must use the exact dynamic
+        // prompt projection (including AGENTS.md), not just its token count.
+        let mut projected_system = vec![self.messages[0].clone()];
+        self.prompt.apply(&mut projected_system);
+        self.compression
+            .set_prompt_context(projected_system.first());
         let base_extra_tokens = self
             .prompt
             .extra_estimated_tokens(&self.messages[0])
@@ -1793,23 +1799,26 @@ mod tests {
             let mut projected = original.clone();
             add_batch_guidance(&mut projected);
             assert_eq!(projected.len(), original.len());
-            assert!(projected[0]
-                .content
-                .as_ref()
-                .unwrap()
-                .ends_with(EXECUTION_GUIDANCE));
-            assert_eq!(
-                projected[0]
-                    .content
-                    .as_ref()
-                    .unwrap()
-                    .matches(EXECUTION_GUIDANCE)
-                    .count(),
-                1
+            let system = projected[0].content.as_ref().unwrap();
+            assert!(system.ends_with(V7_GUIDANCE));
+            assert_eq!(system.matches(EXECUTION_GUIDANCE).count(), 1);
+            assert_eq!(system.matches(V7_GUIDANCE).count(), 1);
+            assert!(
+                system.find(EXECUTION_GUIDANCE).unwrap() < system.find(V7_GUIDANCE).unwrap(),
+                "built-in guidance must retain its tested order"
             );
             assert_eq!(projected[1].content, original[1].content);
             assert_eq!(original[0].content, untouched);
         }
+
+        let mut resumed = original.clone();
+        add_batch_guidance(&mut resumed);
+        let mut fresh = initial_history(std::path::Path::new("/tmp/kroma-project"));
+        add_batch_guidance(&mut fresh);
+        assert_eq!(
+            fresh[0].content, resumed[0].content,
+            "new and resumed sessions must project the same built-in guidance"
+        );
     }
 
     #[test]

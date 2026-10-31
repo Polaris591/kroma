@@ -36,22 +36,118 @@ pub struct LoadedSession {
     pub context: PersistedContext,
 }
 
-/// Read the checkpoint portion of the durable transcript without taking the
+/// Read the checkpoint plus valid journal entries without taking the
 /// session lock. The agent already holds that lock for the live session.
 pub(crate) fn read_archive_messages(path: &Path) -> Result<Vec<Message>> {
     let data = match fs::read(path) {
         Ok(data) => data,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let journal = journal_name(path);
+            if journal.exists() && fs::metadata(&journal)?.len() > 0 {
+                bail!("session snapshot missing while a journal still exists; refusing to discard history");
+            }
+            return Ok(Vec::new());
+        }
         Err(error) => {
             return Err(error).with_context(|| format!("reading session {}", path.display()))
         }
     };
-    let session: SavedSession = serde_json::from_slice(&data)
+    let mut session: SavedSession = serde_json::from_slice(&data)
         .with_context(|| format!("invalid session {}", path.display()))?;
     if !matches!(session.version, 1..=3) {
         bail!("unsupported session format version {}", session.version);
     }
+    replay_journal(
+        &journal_name(path),
+        session.generation,
+        &mut session.messages,
+        &mut session.compression,
+    )?;
+    if session
+        .messages
+        .first()
+        .is_none_or(|msg| msg.role != "system")
+    {
+        bail!("saved session has no system message");
+    }
+    // This is a read-only projection of durable history. Session recovery is
+    // separate: only SessionStore::load may synthesize unknown results for an
+    // interrupted tool call.
     Ok(session.messages)
+}
+
+struct JournalReplay {
+    entries: usize,
+    complete_bytes: usize,
+    total_bytes: usize,
+}
+
+/// Parse and validate complete journal records. An interrupted final record is
+/// counted as unreadable but is not an error; `SessionStore::load` decides
+/// whether to truncate it. Generation mismatches and records already present
+/// in the snapshot are skipped, exactly as in normal session recovery.
+fn replay_journal(
+    journal_path: &Path,
+    generation: u64,
+    messages: &mut Vec<Message>,
+    compression: &mut PersistedContext,
+) -> Result<JournalReplay> {
+    let contents = match fs::read(journal_path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let total_bytes = contents.len();
+    let mut complete_bytes = 0usize;
+    let mut entries = 0usize;
+    for (i, byte) in contents.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let line = &contents[complete_bytes..i];
+        complete_bytes = i + 1;
+        let split = line
+            .iter()
+            .rposition(|b| *b == b'\t')
+            .context("corrupt session journal: missing checksum")?;
+        let (payload, trailer) = line.split_at(split);
+        let saved_checksum = std::str::from_utf8(&trailer[1..])
+            .ok()
+            .and_then(|value| u64::from_str_radix(value, 16).ok())
+            .context("corrupt session journal checksum")?;
+        if checksum(payload) != saved_checksum {
+            bail!("corrupt session journal: checksum mismatch");
+        }
+        let event: JournalAppend =
+            serde_json::from_slice(payload).context("invalid session journal event")?;
+        if event.generation != generation {
+            // A checkpoint from /clear can commit before the old journal is
+            // truncated. Never replay another generation.
+            continue;
+        }
+        entries += 1;
+        match event.index.cmp(&messages.len()) {
+            std::cmp::Ordering::Less => {
+                if serde_json::to_value(&messages[event.index])?
+                    != serde_json::to_value(&event.message)?
+                {
+                    bail!("session journal disagrees with durable checkpoint");
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                messages.push(event.message);
+                *compression = event.compression;
+            }
+            std::cmp::Ordering::Greater => {
+                bail!("session journal has a missing message index");
+            }
+        }
+    }
+    Ok(JournalReplay {
+        entries,
+        complete_bytes,
+        total_bytes,
+    })
 }
 
 pub struct SessionStore {
@@ -280,66 +376,23 @@ impl SessionStore {
                 cursor.generation = session.generation;
             }
             cursor.message_count = session.messages.len();
-            let contents = match fs::read(&self.journal_path) {
-                Ok(data) => data,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                Err(err) => return Err(err.into()),
-            };
-            let mut complete = 0usize;
-            cursor.entries = 0;
-            for (i, byte) in contents.iter().enumerate() {
-                if *byte != b'\n' {
-                    continue;
-                }
-                let line = &contents[complete..i];
-                complete = i + 1;
-                let split = line
-                    .iter()
-                    .rposition(|b| *b == b'\t')
-                    .context("corrupt session journal: missing checksum")?;
-                let (payload, trailer) = line.split_at(split);
-                let saved_checksum = std::str::from_utf8(&trailer[1..])
-                    .ok()
-                    .and_then(|value| u64::from_str_radix(value, 16).ok())
-                    .context("corrupt session journal checksum")?;
-                if checksum(payload) != saved_checksum {
-                    bail!("corrupt session journal: checksum mismatch");
-                }
-                let event: JournalAppend =
-                    serde_json::from_slice(payload).context("invalid session journal event")?;
-                if event.generation != session.generation {
-                    // A checkpoint from /clear can commit before the old
-                    // journal is truncated. Never replay another generation.
-                    continue;
-                }
-                cursor.entries += 1;
-                match event.index.cmp(&session.messages.len()) {
-                    std::cmp::Ordering::Less => {
-                        if serde_json::to_value(&session.messages[event.index])?
-                            != serde_json::to_value(&event.message)?
-                        {
-                            bail!("session journal disagrees with durable checkpoint");
-                        }
-                    }
-                    std::cmp::Ordering::Equal => {
-                        session.messages.push(event.message);
-                        session.compression = event.compression;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        bail!("session journal has a missing message index");
-                    }
-                }
-            }
+            let replay = replay_journal(
+                &self.journal_path,
+                session.generation,
+                &mut session.messages,
+                &mut session.compression,
+            )?;
             cursor.message_count = session.messages.len();
-            cursor.bytes = complete as u64;
-            if complete < contents.len() {
+            cursor.entries = replay.entries;
+            cursor.bytes = replay.complete_bytes as u64;
+            if replay.complete_bytes < replay.total_bytes {
                 // The final write was interrupted before its newline. Its
                 // command outcome is unknown; recover_pending_calls handles
                 // that conservatively, without replaying shell commands.
                 let file = fs::OpenOptions::new()
                     .write(true)
                     .open(&self.journal_path)?;
-                file.set_len(complete as u64)?;
+                file.set_len(replay.complete_bytes as u64)?;
                 file.sync_all()?;
             }
         }
@@ -720,6 +773,109 @@ mod tests {
         assert_eq!(restored[2].reasoning_content, messages[2].reasoning_content);
         assert_eq!(restored[2].tool_calls.as_ref().unwrap()[0].id, "call-1");
         assert_eq!(restored[3].tool_call_id.as_deref(), Some("call-1"));
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_reader_merges_snapshot_and_new_journal_like_session_load() {
+        let dir = env::temp_dir().join(format!("kroma-archive-wal-{}", new_generation()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        let store = SessionStore::open_at(path.clone(), &dir).unwrap();
+        let state = CompactionState::default();
+        let mut messages = vec![
+            Message::new("system", "system"),
+            Message::new("user", "snapshot task"),
+        ];
+        store.save(&messages, &state).unwrap();
+        messages.push(Message {
+            role: "assistant".into(),
+            content: Some("collecting latest evidence".into()),
+            reasoning_content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "latest-call".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "shell".into(),
+                    arguments: r#"{"command":"cat latest.log"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            provider_items: None,
+        });
+        store.append(&messages, &state).unwrap();
+        messages.push(Message::tool(
+            "latest-call".into(),
+            "latest evidence from WAL".into(),
+        ));
+        store.append(&messages, &state).unwrap();
+
+        let archived = read_archive_messages(&path).unwrap();
+        assert_eq!(archived.len(), messages.len());
+        assert_eq!(
+            archived[2].tool_calls.as_ref().unwrap()[0].id,
+            "latest-call"
+        );
+        assert_eq!(
+            archived[3].content.as_deref(),
+            Some("latest evidence from WAL")
+        );
+
+        let loaded = store.load().unwrap().unwrap().messages;
+        assert_eq!(
+            serde_json::to_vec(&archived).unwrap(),
+            serde_json::to_vec(&loaded).unwrap(),
+            "history reading must expose the same durable messages as a completed session load"
+        );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_reader_handles_empty_duplicate_and_old_generation_journals() {
+        let dir = env::temp_dir().join(format!("kroma-archive-generation-{}", new_generation()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        let store = SessionStore::open_at(path.clone(), &dir).unwrap();
+        let state = CompactionState::default();
+        let mut messages = vec![
+            Message::new("system", "system"),
+            Message::new("user", "snapshot only"),
+        ];
+        store.save(&messages, &state).unwrap();
+        assert_eq!(read_archive_messages(&path).unwrap().len(), 2);
+
+        // A record already included in the snapshot is validated but not
+        // appended a second time.
+        messages.push(Message::new("user", "already checkpointed"));
+        store.append(&messages, &state).unwrap();
+        let generation = store.journal.lock().unwrap().generation;
+        let persisted: PersistedContext = state.clone().into();
+        store
+            .write_snapshot(&messages, &persisted, generation)
+            .unwrap();
+        let archived = read_archive_messages(&path).unwrap();
+        assert_eq!(archived.len(), 3);
+        assert_eq!(archived[2].content.as_deref(), Some("already checkpointed"));
+
+        // A stale journal from before a reset belongs to another generation.
+        let stale = fs::read(journal_name(&path)).unwrap();
+        store.save(&messages, &state).unwrap();
+        assert_eq!(read_archive_messages(&path).unwrap().len(), messages.len());
+        assert_eq!(fs::metadata(journal_name(&path)).unwrap().len(), 0);
+        store.reset(&messages, &state).unwrap();
+        fs::write(journal_name(&path), stale).unwrap();
+        let archived = read_archive_messages(&path).unwrap();
+        assert_eq!(archived.len(), messages.len());
+        assert_eq!(
+            archived
+                .iter()
+                .filter(|message| message.content.as_deref() == Some("already checkpointed"))
+                .count(),
+            1,
+            "a stale-generation record must not be replayed"
+        );
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
