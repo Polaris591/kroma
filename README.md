@@ -20,7 +20,11 @@ framework, a second agent loop, or a mandatory plugin dependency.
   **Tab** for path completion; `@src/agent.rs` keeps the path available for
   the agent's Shell tool rather than eagerly putting the entire file into
   model context. Multiple matches are listed. Paths containing whitespace
-  currently require another form of reference.
+  currently require another form of reference. File completion reads the
+  current path prefix (including a directory you enter); it does not
+  recursively index the project, hides dot-prefixed entries, and shows at
+  most 16 candidates. The picker's fuzzy filter applies only to those
+  already-generated path candidates.
 - **`!command`** executes a command directly with the built-in Shell
   executor, without a model call. Output is shown locally, not inserted
   into the model transcript.

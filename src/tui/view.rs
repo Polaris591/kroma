@@ -41,6 +41,15 @@ fn hanging_indent(line: &Line<'_>, width: usize) -> usize {
             return (marker + 2).min(width.saturating_sub(1));
         }
     }
+    let leading = chars.iter().take_while(|ch| **ch == ' ').count();
+    let digits = chars[leading..]
+        .iter()
+        .take_while(|ch| ch.is_ascii_digit())
+        .count();
+    let dot = leading + digits;
+    if digits > 0 && chars.get(dot) == Some(&'.') && chars.get(dot + 1) == Some(&' ') {
+        return (dot + 2).min(width.saturating_sub(1));
+    }
     chars
         .iter()
         .take_while(|ch| **ch == ' ')
@@ -63,12 +72,24 @@ fn wrap_history(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize>
 }
 
 fn wrap_document(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize>) {
+    wrap_document_with_preformatted(text, width, &[])
+}
+
+/// `preformatted` contains source-row indexes whose interior whitespace is
+/// content (code blocks and tool output), not prose layout. Keeping this as
+/// explicit metadata avoids inferring code from theme colours.
+fn wrap_document_with_preformatted(
+    text: Text<'static>,
+    width: usize,
+    preformatted: &[usize],
+) -> (Text<'static>, Vec<usize>) {
     let width = width.max(1);
     let mut rows = Vec::new();
     // Keep a stable source-line identity for every visual row. The absolute
     // visual row index changes when the terminal width changes.
     let mut source_lines = Vec::new();
     for (source_index, line) in text.lines.into_iter().enumerate() {
+        let keep_leading_whitespace = preformatted.binary_search(&source_index).is_ok();
         let mut spans = Vec::new();
         let mut columns = 0usize;
         let hanging_indent = hanging_indent(&line, width);
@@ -109,7 +130,7 @@ fn wrap_document(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize
                             spans.push(Span::raw(" ".repeat(hanging_indent)));
                         }
                     }
-                    if ch == ' ' && columns == hanging_indent {
+                    if ch == ' ' && columns == hanging_indent && !keep_leading_whitespace {
                         continue;
                     }
                     segment.push(ch);
@@ -157,7 +178,7 @@ fn wrap_document(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize
                             spans.push(Span::raw(" ".repeat(hanging_indent)));
                         }
                     }
-                    if grapheme == " " && columns == hanging_indent {
+                    if grapheme == " " && columns == hanging_indent && !keep_leading_whitespace {
                         continue;
                     }
                     segment.push_str(grapheme);
@@ -282,11 +303,14 @@ struct VisibleLink {
     target: String,
 }
 
-/// Styled transcript, markdown link targets and per-call disclosure rows.
+/// Styled transcript, markdown link targets, per-call disclosure rows, prose
+/// rows eligible for implicit links, and source rows whose whitespace is
+/// preformatted content.
 type HistoryDocument = (
     Text<'static>,
     Vec<(String, String)>,
     Vec<(usize, String)>,
+    Vec<usize>,
     Vec<usize>,
 );
 
@@ -2363,12 +2387,19 @@ impl UiState {
 
     fn history_document(&self, theme: Theme, width: usize) -> HistoryDocument {
         if self.home {
-            return (Text::default(), Vec::new(), Vec::new(), Vec::new());
+            return (
+                Text::default(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
         }
         let mut lines = Vec::new();
         let mut markdown_targets = Vec::new();
         let mut tool_rows = Vec::new();
         let mut plain_link_rows = Vec::new();
+        let mut preformatted_rows = Vec::new();
         // One collapsed reasoning entry per user turn, even if the model
         // alternates reasoning/tool calls several times. Ctrl+R still renders
         // every reasoning segment in its original chronological position.
@@ -2386,6 +2417,7 @@ impl UiState {
                 markdown_targets,
                 tool_rows,
                 plain_link_rows,
+                preformatted_rows,
             );
         }
         // Large investigations may run dozens of short successful grep/sed
@@ -2463,7 +2495,7 @@ impl UiState {
                         } else {
                             super::tool_display::prose_width(prose)
                         };
-                        let (mut rendered, tags) =
+                        let (mut rendered, tags, code_rows) =
                             markdown::render_with_links(&entry.body, theme, prose);
                         for tag in tags {
                             if let Some(span) = rendered
@@ -2473,6 +2505,8 @@ impl UiState {
                                 markdown_targets.push((span.content.to_string(), tag.target));
                             }
                         }
+                        let base = lines.len();
+                        preformatted_rows.extend(code_rows.into_iter().map(|row| base + row));
                         if self.running
                             && self.phase == "streaming"
                             && self.active_assistant == Some(self.entries.len() - 1)
@@ -2606,6 +2640,9 @@ impl UiState {
                             Style::default().fg(theme.muted),
                         ));
                         for command in entry.body.lines() {
+                            let mut tab_column = 0;
+                            let command = markdown::expand_tabs(command, &mut tab_column);
+                            preformatted_rows.push(lines.len());
                             lines.push(body_line(Line::from(vec![
                                 Span::styled("│ ", Style::default().fg(theme.border)),
                                 Span::styled(
@@ -2650,9 +2687,12 @@ impl UiState {
                             } else {
                                 theme.code
                             };
+                            let mut tab_column = 0;
+                            let output = markdown::expand_tabs(output, &mut tab_column);
+                            preformatted_rows.push(lines.len());
                             lines.push(body_line(Line::from(vec![
                                 Span::styled("│ ", Style::default().fg(theme.border)),
-                                Span::styled(output.to_owned(), Style::default().fg(ink)),
+                                Span::styled(output, Style::default().fg(ink)),
                             ])));
                         }
                     }
@@ -2691,7 +2731,7 @@ impl UiState {
                         } else {
                             super::tool_display::prose_width(prose)
                         };
-                        let (rendered, tags) =
+                        let (rendered, tags, code_rows) =
                             markdown::render_with_links(&entry.body, theme, prose);
                         for tag in tags {
                             if let Some(span) = rendered
@@ -2701,6 +2741,8 @@ impl UiState {
                                 markdown_targets.push((span.content.to_string(), tag.target));
                             }
                         }
+                        let base = lines.len();
+                        preformatted_rows.extend(code_rows.into_iter().map(|row| base + row));
                         for line in rendered {
                             let mut spans =
                                 vec![Span::styled("│  ", Style::default().fg(theme.border))];
@@ -2769,6 +2811,7 @@ impl UiState {
             markdown_targets,
             tool_rows,
             plain_link_rows,
+            preformatted_rows,
         )
     }
 
@@ -2887,9 +2930,13 @@ impl UiState {
                 ))
             });
         if !cached {
-            let (raw, targets, raw_tool_rows, plain_rows) =
+            let (raw, targets, raw_tool_rows, plain_rows, preformatted_rows) =
                 self.history_document(colors, usize::from(history_slot.width));
-            let (text, source_lines) = wrap_document(raw, usize::from(history_slot.width));
+            let (text, source_lines) = wrap_document_with_preformatted(
+                raw,
+                usize::from(history_slot.width),
+                &preformatted_rows,
+            );
             let mut link_regions = markdown_link_regions(&text, &targets);
             let mut valid_paths = HashMap::<String, bool>::new();
             let mut is_available = |target: &str| {
@@ -4770,6 +4817,308 @@ mod tests {
     }
 
     #[test]
+    fn markdown_code_keeps_semantic_indentation_across_themes() {
+        let source = "```python\nif ready:\n    run()\n    if nested:\n        finish()\n```\n\n```yaml\nroot:\n  child:\n    leaf: 中文\n```\n\n    alpha\n            beta";
+        for preset in ["dark", "light", "mono"] {
+            let mut store = ThemeStore::load_at(None).unwrap();
+            store.select(preset).unwrap();
+            let mut state = UiState::new(
+                "mock".into(),
+                "review".into(),
+                store,
+                &[Message::new("assistant", source)],
+            );
+            let _ = rendered_text(&mut state, 100, 32);
+            let rows = state.selection_rows.clone();
+            let row = |needle: &str| {
+                rows.iter()
+                    .position(|line| line.contains(needle))
+                    .unwrap_or_else(|| {
+                        panic!("missing {needle:?} in {preset} transcript: {rows:#?}")
+                    })
+            };
+            assert_eq!(rows[row("if ready:")], "    │ if ready:");
+            assert_eq!(rows[row("run()")], "    │     run()");
+            assert_eq!(rows[row("if nested:")], "    │     if nested:");
+            assert_eq!(rows[row("finish()")], "    │         finish()");
+            assert_eq!(rows[row("leaf: 中文")], "    │     leaf: 中文");
+            assert_eq!(rows[row("alpha")], "    │ alpha");
+            assert_eq!(rows[row("beta")], "    │         beta");
+        }
+    }
+
+    #[test]
+    fn long_table_cells_fall_back_and_wrap_without_overrunning_the_terminal() {
+        let long = "x".repeat(120);
+        let source = format!(
+            "| 名称 | 状态 | 数量 | 备注 | 负责人 |\n|---|---|---|---|---|\n| 构建 | 通过 |  | {long} | 张三 |"
+        );
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("assistant", source)],
+        );
+        let _ = rendered_text(&mut state, 60, 24);
+        let rows = state.selection_rows.clone();
+        let text = rows.join("\n");
+        assert!(text.contains("备注:"), "long table falls back: {rows:#?}");
+        assert!(
+            text.contains("xxxxxxxxxx"),
+            "long cell stays visible: {rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|line| UnicodeWidthStr::width(line.as_str())
+                    <= state.selection_area.width as usize),
+            "wrapped rows must not overrun the terminal: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn test_backend_buffer_shows_code_indentation_list_numbers_and_wide_tables() {
+        let source = "```python\nif ready:\n    run()\n```\n\n3. Third\n4. Fourth\n\n| A | B | C | D | E |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |";
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("assistant", source)],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("    │     run()"), "{screen}");
+        assert!(screen.contains("3. Third"), "{screen}");
+        assert!(screen.contains("4. Fourth"), "{screen}");
+        assert!(screen.contains("A │ B │ C │ D │ E"), "{screen}");
+    }
+
+    #[test]
+    fn code_whitespace_emoji_and_tabs_survive_the_render_pipeline() {
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new(
+                "assistant",
+                "```python\ndef greet():\n    \n    print(\"你好 👋\")\n```",
+            )],
+        );
+        let _ = rendered_text(&mut state, 80, 24);
+        let rows = state.selection_rows.clone();
+        let blank = rows
+            .iter()
+            .position(|line| line == "    │     ")
+            .expect("a whitespace-only code row keeps its four content spaces");
+        assert!(
+            rows[blank + 1].contains("│     print(\"你好 👋\")"),
+            "unicode code indentation: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn code_block_blank_lines_are_not_merged_or_trimmed() {
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new(
+                "assistant",
+                "```text\n\nfirst\n\n\nlast\n\n\n```",
+            )],
+        );
+        let _ = rendered_text(&mut state, 80, 24);
+        let code_rows = state
+            .selection_rows
+            .iter()
+            .filter(|line| line.starts_with("    │"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            code_rows,
+            vec![
+                "    │ ",
+                "    │ first",
+                "    │ ",
+                "    │ ",
+                "    │ last",
+                "    │ ",
+                "    │ ",
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_code_wrap_preserves_indent_and_continuation_gutter() {
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new(
+                "assistant",
+                "```python\n        ALPHA_BETA_GAMMA_DELTA = \"0123456789abcdefghijklmnop\"\n```",
+            )],
+        );
+        let _ = rendered_text(&mut state, 40, 30);
+        let rows = state.selection_rows.clone();
+        let first = rows
+            .iter()
+            .position(|line| line.contains("ALPHA_BETA_GAMMA_DELTA"))
+            .expect("wrapped code row");
+        assert!(
+            rows[first].starts_with("    │         ALPHA_BETA_GAMMA_DELTA"),
+            "source indentation must survive a narrow first row: {rows:#?}"
+        );
+        assert!(
+            rows[first + 1].starts_with("       \""),
+            "continuation aligns six cells under the code gutter, with the source space preserved: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn expanded_tool_output_keeps_leading_indentation() {
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        state.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "indent".into(),
+            args: "cat fixture.txt".into(),
+        });
+        state.event(UiEvent::ToolFinished {
+            id: "indent".into(),
+            result: "exit: 0\n    indented output\n        deeper output\n中文 👩‍💻\n    \n\ttabbed output".into(),
+            failed: false,
+        });
+        state.tools_expanded = true;
+        let _ = rendered_text(&mut state, 100, 32);
+        let rows = state.selection_rows.clone();
+        assert!(
+            rows.iter().any(|line| line == "    │     indented output"),
+            "expanded tool stdout indentation: {rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|line| line == "    │         deeper output"),
+            "nested tool stdout indentation: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|line| line.contains("中文 👩‍💻")),
+            "unicode tool output remains visible: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|line| line == "    │     "),
+            "whitespace-only tool output row remains distinguishable: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|line| line == "    │     tabbed output"),
+            "tool-output tabs use deterministic four-cell stops: {rows:#?}"
+        );
+        assert!(rows.iter().all(|line| !line.contains('\t')));
+    }
+
+    #[test]
+    fn copied_code_selection_keeps_leading_indentation() {
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new(
+                "assistant",
+                "```python\nif ready:\n    run()\n```",
+            )],
+        );
+        let _ = rendered_text(&mut state, 80, 24);
+        let rows = state.selection_rows.clone();
+        let row = rows
+            .iter()
+            .position(|line| line.contains("run()"))
+            .expect("code row");
+        let content_start = rows[row].find("    run()").unwrap();
+        let x = state.selection_area.x + UnicodeWidthStr::width(&rows[row][..content_start]) as u16;
+        let y = state.selection_area.y + row as u16;
+        state.select_start(x, y);
+        state.select_drag(state.selection_area.right() - 1, y);
+        state.mouse_release();
+        assert_eq!(state.selected_text().as_deref(), Some("    run()"));
+    }
+
+    #[test]
+    fn ordered_list_marker_and_soft_wrap_alignment_survive_the_render_pipeline() {
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new(
+                "assistant",
+                "9. 第九项包含较长的中文说明，需要软换行并保持编号和正文对齐。\n10. 第十项包含较长的中文说明，需要软换行并保持编号和正文对齐。",
+            )],
+        );
+        let _ = rendered_text(&mut state, 38, 24);
+        let rows = state.selection_rows.clone();
+        let first = rows
+            .iter()
+            .position(|line| line.contains("9. 第九项"))
+            .expect("single-digit ordered item marker");
+        assert!(
+            rows[first + 1].starts_with("       "),
+            "single-digit continuation aligns under the item text: {rows:#?}"
+        );
+        let tenth = rows
+            .iter()
+            .position(|line| line.contains("10. 第十项"))
+            .expect("multi-digit ordered item marker");
+        assert!(
+            rows[tenth + 1].starts_with("        "),
+            "two-digit continuation shifts by one cell with the marker: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn five_column_table_stays_aligned_until_the_terminal_is_narrow() {
+        let source = "| 名称 | 状态 | 数量 | 备注 | 负责人 |\n|---|---|---|---|---|\n| 构建 | 通过 |  | 空 | 张三 |";
+        let mut state = UiState::new(
+            "mock".into(),
+            "review".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("assistant", source)],
+        );
+        let _ = rendered_text(&mut state, 100, 24);
+        let wide = state.selection_rows.clone();
+        assert!(
+            wide.iter()
+                .any(|line| line.contains("名称") && line.contains("负责人")),
+            "five columns fit: {wide:#?}"
+        );
+        assert!(
+            wide.iter()
+                .any(|line| line.contains("构建") && line.contains("张三")),
+            "five-column data stays on one row: {wide:#?}"
+        );
+        let _ = rendered_text(&mut state, 30, 24);
+        let narrow = state.selection_rows.clone();
+        assert!(
+            !narrow
+                .iter()
+                .any(|line| line.contains("名称") && line.contains("负责人")),
+            "narrow fallback avoids an overflowing table: {narrow:#?}"
+        );
+        assert!(
+            narrow.iter().any(|line| line.contains("负责人: 张三")),
+            "narrow fallback keeps labeled values readable: {narrow:#?}"
+        );
+    }
+
+    #[test]
     fn wrapping_keeps_short_english_identifiers_intact_under_bullets() {
         let text = Text::from(vec![Line::from(vec![
             Span::raw("   "),
@@ -5203,6 +5552,12 @@ mod tests {
     #[ignore = "TUI draw microbenchmark; run manually for frame timings"]
     fn bench_streaming_frame_latency_three_hundred_and_three_thousand_messages() {
         use std::time::Instant;
+
+        fn percentile(samples: &[u128], percent: usize) -> u128 {
+            let index = (samples.len() * percent / 100).min(samples.len() - 1);
+            samples[index]
+        }
+
         for count in [300, 3000] {
             let messages = (0..count).map(|i| Message::new("assistant",
                 format!("### Task {i}\n\nA short description, a path `src/provider.rs` and a result.\n\n- note one\n- note two")))
@@ -5224,10 +5579,111 @@ mod tests {
             }
             samples.sort_unstable();
             eprintln!(
-                "TUI frames messages={count} median={}us p95={}us",
-                samples[30], samples[56]
+                "TUI scenario=streaming-window messages={count} terminal=80x24 frames=60 median={}us p95={}us",
+                percentile(&samples, 50),
+                percentile(&samples, 95)
             );
         }
+
+        let messages = (0..3000)
+            .map(|i| {
+                Message::new(
+                    "assistant",
+                    format!("### Task {i}\n\nA short description and `src/provider.rs`.\n\n- note one\n- note two"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &messages,
+        );
+        state.history_visible = messages.len();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut samples = Vec::new();
+        for _ in 0..8 {
+            state.history_cache = None;
+            let start = Instant::now();
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+            samples.push(start.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        eprintln!(
+            "TUI scenario=all-history messages=3000 terminal=100x30 forced-cache-rebuilds=8 median={}us p95={}us",
+            percentile(&samples, 50),
+            percentile(&samples, 95)
+        );
+
+        let details = (0..2400)
+            .map(|i| format!("    indented output {i} 中文 👩‍💻\n        deeper {i}\n"))
+            .collect::<String>();
+        let detail_line_count = details.lines().count();
+        assert_eq!(detail_line_count, 4800);
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        state.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "bench-output".into(),
+            args: "cat large.log".into(),
+        });
+        state.event(UiEvent::ToolFinished {
+            id: "bench-output".into(),
+            result: details,
+            failed: false,
+        });
+        state.tools_expanded = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut samples = Vec::new();
+        for _ in 0..12 {
+            state.history_cache = None;
+            let start = Instant::now();
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+            samples.push(start.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        eprintln!(
+            "TUI scenario=expanded-tool-output lines={detail_line_count} terminal=100x30 forced-cache-rebuilds=12 median={}us p95={}us",
+            percentile(&samples, 50),
+            percentile(&samples, 95)
+        );
+
+        let code = (0..900)
+            .map(|i| {
+                if i % 3 == 0 {
+                    format!("    let value_{i} = \"中文 👩‍💻\";")
+                } else if i % 3 == 1 {
+                    format!("        nested_call_{i}();")
+                } else {
+                    format!("// line {i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = UiState::new(
+            "model".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("assistant", format!("```rust\n{code}\n```"))],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut samples = Vec::new();
+        for _ in 0..12 {
+            state.history_cache = None;
+            let start = Instant::now();
+            terminal.draw(|frame| state.draw(frame)).unwrap();
+            samples.push(start.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        eprintln!(
+            "TUI scenario=long-code-block lines=900 terminal=100x30 forced-cache-rebuilds=12 median={}us p95={}us",
+            percentile(&samples, 50),
+            percentile(&samples, 95)
+        );
     }
 
     #[test]

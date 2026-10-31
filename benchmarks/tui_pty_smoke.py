@@ -4,18 +4,15 @@
 Run: cargo build --release --locked && python3 benchmarks/tui_pty_smoke.py
 Uses a temporary HOME/workdir and a local mock HTTP server. No real API keys.
 """
-import fcntl
 import base64
 import json
 import re
 import os
 from pathlib import Path
-import pty
 import select
 import struct
 import subprocess
 import tempfile
-import termios
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -67,6 +64,12 @@ def main():
     if os.name != "posix":
         print("TUI_PTY_SKIPPED (POSIX-only smoke test)")
         return
+    # Import POSIX-only modules after the platform check so this script can
+    # at least be imported and skipped cleanly on Windows.
+    import fcntl
+    import pty
+    import termios
+
     assert BINARY.is_file(), "cargo build --locked first"
     server = ThreadingHTTPServer(("127.0.0.1", 0), Mock)
     threading.Thread(target=server.serve_forever, daemon=True).start()

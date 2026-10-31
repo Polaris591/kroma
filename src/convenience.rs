@@ -50,14 +50,29 @@ pub fn file_reference(text: &str, workdir: &Path) -> Result<String> {
 pub fn suggestions(workdir: &Path, prefix: &str) -> Result<Vec<String>> {
     let partial = prefix.strip_prefix('@').unwrap_or(prefix);
     let path = Path::new(partial);
-    let folder = workdir.join(path.parent().unwrap_or(Path::new("")));
-    let needle = path.file_name().unwrap_or_default().to_string_lossy();
+    // A trailing separator means "enter this directory", not "prefix-match
+    // its name". Path::parent() would otherwise select the parent and use the
+    // directory itself as the needle.
+    let entering_directory = partial.ends_with('/') || partial.ends_with('\\');
+    let folder = if entering_directory {
+        workdir.join(path)
+    } else {
+        workdir.join(path.parent().unwrap_or(Path::new("")))
+    };
+    let needle = if entering_directory {
+        String::new()
+    } else {
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
     let mut found = Vec::new();
     if folder.is_dir() {
         for entry in fs::read_dir(&folder)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(needle.as_ref()) && !name.starts_with('.') {
+            if name.starts_with(needle.as_str()) && !name.starts_with('.') {
                 let suffix = if entry.file_type()?.is_dir() { "/" } else { "" };
                 let relative = entry
                     .path()
@@ -168,6 +183,32 @@ mod tests {
         fs::remove_dir_all(root)?;
         Ok(())
     }
+    #[test]
+    fn suggestions_enter_directories_and_filter_hidden_or_excess_candidates() -> Result<()> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kroma-suggestions-{nonce}"));
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/agent.rs"), "// code")?;
+        fs::write(root.join("srcfile.txt"), "sibling")?;
+        fs::write(root.join(".hidden"), "hidden")?;
+        for i in 0..18 {
+            fs::write(root.join(format!("bulk-{i:02}.txt")), "fixture")?;
+        }
+        let entered = suggestions(&root, "@src/")?;
+        assert_eq!(entered.len(), 1, "only files inside src: {entered:?}");
+        assert_eq!(entered[0].replace('\\', "/"), "@src/agent.rs");
+        let all = suggestions(&root, "@")?;
+        assert_eq!(all.len(), 16, "suggestions remain capped: {all:?}");
+        assert!(
+            all.iter().all(|item| !item.contains(".hidden")),
+            "hidden entries stay filtered: {all:?}"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn export_refuses_overwrite_and_writes_chat_without_tools() -> Result<()> {
         let root = std::env::temp_dir().join(format!("kroma-export-{}", std::process::id()));

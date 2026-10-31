@@ -6,6 +6,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 fn blank_after(lines: &mut Vec<Line<'static>>) {
@@ -14,12 +15,42 @@ fn blank_after(lines: &mut Vec<Line<'static>>) {
     }
 }
 
+/// Tabs are layout, not content: expand them at stable four-cell stops before
+/// they reach Ratatui so terminal tab settings cannot change preformatted
+/// code or tool-output alignment.
+pub(super) fn expand_tabs(value: &str, column: &mut usize) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    for grapheme in value.graphemes(true) {
+        match grapheme {
+            "\n" => {
+                expanded.push('\n');
+                *column = 0;
+            }
+            "\t" => {
+                let spaces = 4 - (*column % 4);
+                expanded.push_str(&" ".repeat(spaces));
+                *column = column.saturating_add(spaces);
+            }
+            _ => {
+                expanded.push_str(grapheme);
+                *column = column.saturating_add(UnicodeWidthStr::width(grapheme));
+            }
+        }
+    }
+    expanded
+}
+
 #[derive(Default)]
 struct TableContent {
     header: Vec<String>,
     rows: Vec<Vec<String>>,
     current: Vec<String>,
     cell: String,
+}
+
+struct ListState {
+    ordered: bool,
+    next: u64,
 }
 
 fn padded_cell(cell: &str, width: usize) -> String {
@@ -52,8 +83,12 @@ fn render_table(lines: &mut Vec<Line<'static>>, table: TableContent, theme: Them
                 .unwrap_or(0)
         })
         .collect();
-    let fit =
-        columns <= 4 && widths.iter().sum::<usize>() + 3 * columns.saturating_sub(1) + 2 <= width;
+    let table_width = widths
+        .iter()
+        .copied()
+        .sum::<usize>()
+        .saturating_add(3usize.saturating_mul(columns.saturating_sub(1)));
+    let fit = table_width.saturating_add(2) <= width;
     if fit {
         for (index, row) in std::iter::once(&table.header)
             .chain(table.rows.iter())
@@ -77,10 +112,7 @@ fn render_table(lines: &mut Vec<Line<'static>>, table: TableContent, theme: Them
             lines.push(Line::from(spans));
             if index == 0 {
                 lines.push(Line::from(Span::styled(
-                    format!(
-                        "  {}",
-                        "─".repeat(widths.iter().sum::<usize>() + 3 * columns.saturating_sub(1))
-                    ),
+                    format!("  {}", "─".repeat(table_width)),
                     Style::default().fg(theme.border),
                 )));
             }
@@ -129,25 +161,29 @@ pub fn render_with_links(
     source: &str,
     theme: Theme,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
+) -> (Vec<Line<'static>>, Vec<LinkSpan>, Vec<usize>) {
     let mut lines = Vec::new();
     let mut link_spans = Vec::new();
+    let mut preformatted_rows = Vec::new();
     let mut current_link: Option<String> = None;
     let mut spans = Vec::new();
     let mut styles = vec![Style::default().fg(theme.text)];
-    let mut list_depth = 0usize;
+    let mut lists: Vec<ListState> = Vec::new();
     let mut in_code = false;
     let mut code_language: Option<String> = None;
+    let mut code_column = 0usize;
     let mut last_blank = false;
     let mut table: Option<TableContent> = None;
 
     let emit_line =
         |lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, last_blank: &mut bool| {
             let blank = spans.is_empty();
-            if !blank || !*last_blank {
+            let pushed = !blank || !*last_blank;
+            if pushed {
                 lines.push(Line::from(std::mem::take(spans)));
             }
             *last_blank = blank;
+            pushed
         };
     for event in Parser::new_ext(
         source,
@@ -236,21 +272,32 @@ pub fn render_with_links(
                     }
                     styles.push(Style::default().fg(theme.code));
                 }
-                Tag::List(_) => {
-                    if list_depth == 0 && !spans.is_empty() {
+                Tag::List(start) => {
+                    if lists.is_empty() && !spans.is_empty() {
                         emit_line(&mut lines, &mut spans, &mut last_blank);
                     }
-                    list_depth += 1;
+                    lists.push(ListState {
+                        ordered: start.is_some(),
+                        next: start.unwrap_or(1),
+                    });
                 }
                 Tag::Item => {
                     if !spans.is_empty() {
                         emit_line(&mut lines, &mut spans, &mut last_blank);
                     }
-                    let indent = "  ".repeat(list_depth.saturating_sub(1).min(8));
-                    let marker = match list_depth {
-                        1 => "•",
-                        2 => "◦",
-                        _ => "▪",
+                    let depth = lists.len();
+                    let indent = "  ".repeat(depth.saturating_sub(1).min(8));
+                    let marker = match lists.last_mut() {
+                        Some(list) if list.ordered => {
+                            let number = list.next;
+                            list.next = list.next.saturating_add(1);
+                            format!("{number}.")
+                        }
+                        _ => match depth {
+                            1 => "•".to_owned(),
+                            2 => "◦".to_owned(),
+                            _ => "▪".to_owned(),
+                        },
                     };
                     spans.push(Span::styled(
                         format!("{indent}{marker} "),
@@ -281,12 +328,15 @@ pub fn render_with_links(
                     blank_after(&mut lines);
                 }
                 TagEnd::CodeBlock => {
-                    in_code = false;
                     code_language = None;
                     styles.pop();
                     if !spans.is_empty() {
-                        emit_line(&mut lines, &mut spans, &mut last_blank);
+                        lines.push(Line::from(std::mem::take(&mut spans)));
+                        preformatted_rows.push(lines.len() - 1);
+                        last_blank = false;
                     }
+                    in_code = false;
+                    code_column = 0;
                     blank_after(&mut lines);
                 }
                 TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
@@ -300,13 +350,13 @@ pub fn render_with_links(
                     if !spans.is_empty() {
                         emit_line(&mut lines, &mut spans, &mut last_blank);
                     }
-                    if matches!(tag, TagEnd::Paragraph) && list_depth == 0 {
+                    if matches!(tag, TagEnd::Paragraph) && lists.is_empty() {
                         blank_after(&mut lines);
                     }
                 }
                 TagEnd::List(_) => {
-                    list_depth = list_depth.saturating_sub(1);
-                    if list_depth == 0 {
+                    lists.pop();
+                    if lists.is_empty() {
                         blank_after(&mut lines);
                     }
                 }
@@ -314,9 +364,28 @@ pub fn render_with_links(
             },
             Event::Text(value) | Event::Html(value) | Event::InlineHtml(value) => {
                 let style = *styles.last().unwrap();
+                let expanded;
+                let value = if in_code {
+                    expanded = expand_tabs(&value, &mut code_column);
+                    expanded.as_str()
+                } else {
+                    value.as_ref()
+                };
                 for (i, chunk) in value.split('\n').enumerate() {
                     if i > 0 {
-                        emit_line(&mut lines, &mut spans, &mut last_blank);
+                        if in_code {
+                            // A source blank line is still a code row. Give it
+                            // the gutter so consecutive/edge blanks cannot be
+                            // collapsed by prose paragraph separation.
+                            if spans.is_empty() {
+                                spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
+                            }
+                            lines.push(Line::from(std::mem::take(&mut spans)));
+                            preformatted_rows.push(lines.len() - 1);
+                            last_blank = false;
+                        } else {
+                            emit_line(&mut lines, &mut spans, &mut last_blank);
+                        }
                     }
                     if !chunk.is_empty() {
                         if in_code && spans.is_empty() {
@@ -367,7 +436,9 @@ pub fn render_with_links(
                 spans.push(Span::styled(value.into_string(), style));
             }
             Event::SoftBreak => spans.push(Span::raw(" ")),
-            Event::HardBreak => emit_line(&mut lines, &mut spans, &mut last_blank),
+            Event::HardBreak => {
+                emit_line(&mut lines, &mut spans, &mut last_blank);
+            }
             Event::Rule => {
                 emit_line(&mut lines, &mut spans, &mut last_blank);
                 lines.push(Line::from(Span::styled(
@@ -391,13 +462,28 @@ pub fn render_with_links(
     if lines.is_empty() {
         lines.push(Line::default());
     }
-    (lines, link_spans)
+    preformatted_rows.retain(|row| *row < lines.len());
+    preformatted_rows.sort_unstable();
+    preformatted_rows.dedup();
+    (lines, link_spans, preformatted_rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::theme::{ThemeSettings, ThemeStore};
     use super::*;
+
+    fn plain_lines(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
 
     #[test]
     fn headings_paragraphs_nested_lists_and_tables_have_distinct_rows() {
@@ -451,7 +537,7 @@ mod tests {
     #[test]
     fn named_markdown_links_keep_their_targets_when_display_text_differs() {
         let theme = ThemeStore::load_at(None).unwrap().colors;
-        let (rows, tags) = render_with_links(
+        let (rows, tags, _) = render_with_links(
             "Read [审查报告 SR-001](https://example.org/reviews/SR-001) and [复现测试](./reviews/tests.md).",
             theme, 100,
         );
@@ -498,6 +584,167 @@ mod tests {
             .unwrap();
         assert_eq!(added.style.fg, Some(theme.user));
         assert_eq!(removed.style.fg, Some(theme.error));
+    }
+
+    #[test]
+    fn ordered_lists_keep_source_start_and_increment_per_level() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let lines = render_with_width("3. First\n4. Second\n5. Third", theme, 80);
+        assert_eq!(
+            plain_lines(&lines),
+            vec!["3. First", "4. Second", "5. Third"]
+        );
+
+        let lines = render_with_width(
+            "1. Outer\n    1. nested\n       - mixed child\n    2. nested two\n2. Outer two",
+            theme,
+            80,
+        );
+        assert_eq!(
+            plain_lines(&lines),
+            vec![
+                "1. Outer",
+                "  1. nested",
+                "    ▪ mixed child",
+                "  2. nested two",
+                "2. Outer two",
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_list_number_width_and_independent_lists_are_stable() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let lines = render_with_width("9. Nine\n10. Ten", theme, 80);
+        assert_eq!(plain_lines(&lines), vec!["9. Nine", "10. Ten"]);
+
+        let lines = render_with_width(
+            "1. One\n2. Two\n\nParagraph.\n\n1. Again\n2. Next",
+            theme,
+            80,
+        );
+        let text = plain_lines(&lines);
+        assert!(text.iter().any(|line| line == "1. One"));
+        assert!(text.iter().any(|line| line == "2. Two"));
+        assert!(text.iter().any(|line| line == "1. Again"));
+        assert!(text.iter().any(|line| line == "2. Next"));
+        assert!(!text.iter().any(|line| line == "3. Next"));
+    }
+
+    #[test]
+    fn list_code_blocks_keep_numbering_and_code_rows() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let source = "1. First step\n\n   ```sh\n   echo ok\n   ```\n\n2. Second step";
+        let text = plain_lines(&render_with_width(source, theme, 80));
+        assert!(text.iter().any(|line| line == "1. First step"), "{text:?}");
+        assert!(text.iter().any(|line| line.contains("echo ok")), "{text:?}");
+        assert!(text.iter().any(|line| line == "2. Second step"), "{text:?}");
+    }
+
+    #[test]
+    fn multi_paragraph_list_items_keep_their_numbering() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let source = "3. First paragraph.\n\n   Continued paragraph.\n\n4. Next item.";
+        let text = plain_lines(&render_with_width(source, theme, 80));
+        assert!(
+            text.iter().any(|line| line == "3. First paragraph."),
+            "{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Continued paragraph.")),
+            "{text:?}"
+        );
+        assert!(text.iter().any(|line| line == "4. Next item."), "{text:?}");
+    }
+
+    #[test]
+    fn wide_tables_keep_all_columns_even_beyond_four() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let source =
+            "| A | B | C | D | E | F |\n|---|---|---|---|---|---|\n| 1 |  | 3 | 4 | 5 | 6 |";
+        let text = plain_lines(&render_with_width(source, theme, 100));
+        let header = text
+            .iter()
+            .find(|line| line.contains('A') && line.contains('F'))
+            .expect("six-column header should stay on one row");
+        assert!(header.contains("A") && header.contains("F"), "{text:?}");
+        assert!(text.iter().any(|line| line.contains('─')));
+        let row = text
+            .iter()
+            .find(|line| line.starts_with("  1"))
+            .expect("six-column data row");
+        assert!(row.contains('6'), "{text:?}");
+    }
+
+    #[test]
+    fn wide_table_keeps_layout_while_narrow_table_falls_back() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let source = "| 名称 | 状态 | 数量 | 备注 | 负责人 |\n|---|---|---|---|---|\n| 构建 | 通过 | 12 | 空 | 张三 |";
+        let wide = plain_lines(&render_with_width(source, theme, 80));
+        assert!(
+            wide.iter()
+                .any(|line| line.contains("名称") && line.contains("负责人")),
+            "five columns fit in a wide terminal: {wide:?}"
+        );
+        assert!(
+            wide.iter()
+                .any(|line| line.contains("构建") && line.contains("张三")),
+            "data should remain one row: {wide:?}"
+        );
+
+        let narrow = plain_lines(&render_with_width(source, theme, 18));
+        assert!(
+            !narrow
+                .iter()
+                .any(|line| line.contains("名称") && line.contains("负责人")),
+            "narrow tables still degrade instead of overflowing: {narrow:?}"
+        );
+        assert!(
+            narrow.iter().any(|line| line.contains("负责人: 张三")),
+            "fallback labels the first column and following values: {narrow:?}"
+        );
+    }
+
+    #[test]
+    fn code_blocks_preserve_consecutive_and_edge_blank_lines() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let text = plain_lines(&render_with_width(
+            "```text\n\nfirst\n\n\nlast\n\n\n```",
+            theme,
+            80,
+        ));
+        assert_eq!(
+            text,
+            vec!["  text", "│ ", "│ first", "│ ", "│ ", "│ last", "│ ", "│ ",]
+        );
+    }
+
+    #[test]
+    fn tab_stops_measure_grapheme_clusters_not_scalar_widths() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let text = plain_lines(&render_with_width("```text\n👩‍💻\tx\n```", theme, 80));
+        assert_eq!(text, vec!["  text", "│ 👩‍💻  x"]);
+    }
+
+    #[test]
+    fn code_tabs_use_deterministic_four_column_stops() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let text = plain_lines(&render_with_width(
+            "```text\n\tif ready:\n  \trun()\na\tb\n```",
+            theme,
+            80,
+        ));
+        assert!(
+            text.iter().any(|line| line == "│     if ready:"),
+            "{text:?}"
+        );
+        assert!(text.iter().any(|line| line == "│     run()"), "{text:?}");
+        assert!(text.iter().any(|line| line == "│ a   b"), "{text:?}");
+        assert!(
+            text.iter().all(|line| !line.contains('\t')),
+            "tabs must be expanded before Ratatui buffers: {text:?}"
+        );
     }
 
     #[test]

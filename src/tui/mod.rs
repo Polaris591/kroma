@@ -911,10 +911,10 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
     }
     if input == "/help" {
         state.info(state.preferences.language.text("HELP", "帮助"), state.preferences.language.text("Enter to send; Shift+Enter or Ctrl+J to add a line.\nPgUp/PgDn or mouse wheel scroll; Ctrl+End returns to latest output.\nType / or /commands for the command index; Tab completes without executing.
-Ctrl+P searches commands; Tab switches model/session/file categories.\nF2 changes theme; Shift+Tab cycles thinking (or /think high).\nContext shows window use (~ estimated); /usage shows full measurements.
+Ctrl+P searches commands; Tab switches model/session/file categories.\nFile choices complete paths from the current directory, not a project-wide search.\nF2 changes theme; Shift+Tab cycles thinking (or /think high).\nContext shows window use (~ estimated); /usage shows full measurements.
 /language [en|zh] changes UI language; /layout [comfortable|wide] changes reading width.\nCtrl+O expands tool output; Ctrl+R shows reasoning.\nCtrl+Left/Right moves by word; Ctrl+W or Alt+Backspace deletes a word.\nWith selected text Ctrl+C copies first; otherwise it clears/cancels/quits.\n/history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo\n/theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]\n/queue task · /skills · /tools\nWhile running: write steering text, or /queue task; Ctrl+C cancels.\nCtrl+Q quits when idle.", "Enter 发送；Shift+Enter 或 Ctrl+J 换行。
 输入 / 或 /commands 查看命令索引；↑↓选择，Tab 补全，不会直接执行。
-Ctrl+P 搜索命令；搜索面板内 Tab 切换模型、会话、文件。
+Ctrl+P 搜索命令；搜索面板内 Tab 切换模型、会话、文件。\n文件候选补全当前目录下的路径，不是全项目搜索。
 PgUp/PgDn 或鼠标滚轮翻页；Ctrl+End 返回最新。
 Ctrl+O 展开原始工具命令与输出；Ctrl+R 展开推理摘要。\nCtrl+左右方向键按词移动；Ctrl+W 或 Alt+Backspace 删除前一个词。\n有文字选区时 Ctrl+C 优先复制，否则取消任务、清空草稿或退出。
 /language [zh|en] 切换界面语言，不更改模型回复语言。
