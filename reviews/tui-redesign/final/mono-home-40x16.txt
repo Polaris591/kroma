@@ -1,0 +1,16 @@
+◆ Kroma  new conversation        ✓ Ready
+                                        
+                                        
+                                        
+                K R O M A               
+                                        
+         Enter · /help · /resume        
+                                        
+                                        
+                                        
+     test-model · D:/fixture/project    
+                                        
+╭──────────────────────────────────────╮
+│ › Ask anything, or describe a coding │
+╰──────────────────────────────────────╯
+  test-model │ Think high │ Context —   

@@ -183,7 +183,7 @@ async fn one_checkpoint_then_tool_work_continues_and_raw_wal_survives() -> Resul
     )?;
     let task = format!(
         "Keep ORIGINAL_TASK and continue after evidence-1. {}",
-        "context ".repeat(4_000)
+        "context ".repeat(3_800)
     );
     let answer = agent.run(&task, &mut |_| {}).await?;
     assert_eq!(answer, "finished after compaction");
@@ -253,10 +253,12 @@ async fn checkpoint_failure_below_hard_limit_does_not_abort_the_task() -> Result
         dir.clone(),
         budget,
     )?;
-    // Large enough to cross the 90%-of-window trigger but still below the hard limit.
+    // Large enough to cross the 90%-of-window trigger but still below the hard
+    // limit. The built-in V7 guidance adds ~200 tokens, so keep ~400 tokens of
+    // headroom instead of sitting one prompt addition away from the limit.
     let task = format!(
         "Keep ORIGINAL_TASK and continue after evidence-1. {}",
-        "context ".repeat(4_000)
+        "context ".repeat(3_800)
     );
     let answer = agent.run(&task, &mut |_| {}).await?;
     assert_eq!(answer, "finished after compaction");
@@ -320,7 +322,7 @@ async fn checkpoint_failure_at_hard_limit_uses_preview_and_continues() -> Result
     )?;
     let task = format!(
         "Keep ORIGINAL_TASK and continue after evidence-1. {}",
-        "context ".repeat(4_000)
+        "context ".repeat(3_800)
     );
     let answer = agent.run(&task, &mut |_| {}).await?;
     assert_eq!(answer, "finished after compaction");

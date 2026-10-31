@@ -1,0 +1,30 @@
+  ◆ Kroma  untitled session                                                       project  ✓ Ready  
+                                                                                                    
+    ▎                                                                                               
+    ▎  Review the change. 请 检 查 代 码 。                                                               
+    ▎  Preserve Unicode and indentation.                                                            
+    ▎                                                                                               
+                                                                                                    
+     ◇  Reasoning · Ctrl+R to collapse · 0.0s                                                       
+                                                                                                    
+       │ Inspect the existing API, then verify the change.                                          
+       │                                                                                            
+       │ Keep failures visible.                                                                     
+                                                                                                    
+     ✓  Completed · 35.3s                                                                           
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮  
+  │ › Ask anything, or describe a coding task…                                                   │  
+  ╰──────────────────────────────────────────────────────────── Enter send · Shift+Enter newline ╯  
+    test-model │ Think high │ Context —                                                             

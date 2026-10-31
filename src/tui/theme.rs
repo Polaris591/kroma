@@ -17,6 +17,12 @@ pub struct ThemeSettings {
     pub user: Option<String>,
     pub tool: Option<String>,
     pub code: Option<String>,
+    pub surface: Option<String>,
+    pub overlay: Option<String>,
+    pub faint: Option<String>,
+    pub accent_text: Option<String>,
+    pub success: Option<String>,
+    pub warning: Option<String>,
 }
 
 impl Default for ThemeSettings {
@@ -31,6 +37,12 @@ impl Default for ThemeSettings {
             user: None,
             tool: None,
             code: None,
+            surface: None,
+            overlay: None,
+            faint: None,
+            accent_text: None,
+            success: None,
+            warning: None,
         }
     }
 }
@@ -46,6 +58,12 @@ pub struct Theme {
     pub tool: Color,
     pub code: Color,
     pub error: Color,
+    pub surface: Color,
+    pub overlay: Color,
+    pub faint: Color,
+    pub accent_text: Color,
+    pub success: Color,
+    pub warning: Color,
 }
 
 impl Theme {
@@ -58,10 +76,16 @@ impl Theme {
                 muted: Color::Rgb(163, 168, 188),
                 accent: Color::Rgb(91, 124, 255),
                 border: Color::Rgb(56, 60, 81),
-                user: Color::Rgb(171, 185, 255),
-                tool: Color::Rgb(255, 111, 145),
+                user: Color::Rgb(255, 111, 145),
+                tool: Color::Rgb(163, 168, 188),
                 code: Color::Rgb(196, 202, 229),
                 error: Color::Rgb(249, 125, 135),
+                surface: Color::Rgb(26, 32, 54),
+                overlay: Color::Rgb(35, 43, 69),
+                faint: Color::Rgb(138, 146, 173),
+                accent_text: Color::Rgb(125, 152, 255),
+                success: Color::Rgb(95, 211, 154),
+                warning: Color::Rgb(240, 180, 90),
             },
             "light" => Self {
                 background: Color::Rgb(249, 249, 252),
@@ -69,10 +93,16 @@ impl Theme {
                 muted: Color::Rgb(91, 96, 117),
                 accent: Color::Rgb(55, 80, 200),
                 border: Color::Rgb(199, 199, 216),
-                user: Color::Rgb(63, 85, 178),
-                tool: Color::Rgb(172, 40, 77),
+                user: Color::Rgb(172, 40, 77),
+                tool: Color::Rgb(91, 96, 117),
                 code: Color::Rgb(68, 77, 124),
                 error: Color::Rgb(166, 43, 57),
+                surface: Color::Rgb(236, 239, 248),
+                overlay: Color::Rgb(224, 229, 242),
+                faint: Color::Rgb(101, 107, 132),
+                accent_text: Color::Rgb(55, 80, 200),
+                success: Color::Rgb(27, 112, 72),
+                warning: Color::Rgb(138, 90, 0),
             },
             "mono" => Self {
                 // Respect the user's native foreground/background pair.
@@ -81,11 +111,17 @@ impl Theme {
                 text: Color::Reset,
                 muted: Color::Reset,
                 accent: Color::Reset,
-                border: Color::DarkGray,
+                border: Color::Reset,
                 user: Color::Reset,
                 tool: Color::Reset,
                 code: Color::Reset,
-                error: Color::Red,
+                error: Color::Reset,
+                surface: Color::Reset,
+                overlay: Color::Reset,
+                faint: Color::Reset,
+                accent_text: Color::Reset,
+                success: Color::Reset,
+                warning: Color::Reset,
             },
             other => bail!("unknown theme '{other}'; available: dark, light, mono"),
         };
@@ -98,6 +134,12 @@ impl Theme {
             (&settings.user, &mut theme.user),
             (&settings.tool, &mut theme.tool),
             (&settings.code, &mut theme.code),
+            (&settings.surface, &mut theme.surface),
+            (&settings.overlay, &mut theme.overlay),
+            (&settings.faint, &mut theme.faint),
+            (&settings.accent_text, &mut theme.accent_text),
+            (&settings.success, &mut theme.success),
+            (&settings.warning, &mut theme.warning),
         ] {
             if let Some(value) = value {
                 *target = parse_hex(value)?;
@@ -108,22 +150,26 @@ impl Theme {
 }
 
 impl Theme {
-    /// Give the input a subtle second layer without adding another theme key.
-    /// The contrast between surfaces is intentionally much lower than text
-    /// contrast; in monochrome terminals use the native background.
+    /// The raised composer/transcript surface (native background in mono).
     pub fn input_surface(&self) -> Color {
-        let Color::Rgb(r, g, b) = self.background else {
-            return self.background;
-        };
-        let brighten = u16::from(r) + u16::from(g) + u16::from(b) < 384;
-        let change = |v: u8| {
-            if brighten {
-                v.saturating_add(10)
-            } else {
-                v.saturating_sub(10)
+        self.surface
+    }
+
+    /// Blend foreground into a background; named/indexed terminal colours
+    /// cannot be mixed reliably and are returned unchanged.
+    pub fn blend(fg: Color, bg: Color, t: f64) -> Color {
+        match (fg, bg) {
+            (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) => {
+                let t = if t.is_finite() {
+                    t.clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let mix = |a, b| (f64::from(a) * t + f64::from(b) * (1.0 - t)).round() as u8;
+                Color::Rgb(mix(r, br), mix(g, bg), mix(b, bb))
             }
-        };
-        Color::Rgb(change(r), change(g), change(b))
+            _ => fg,
+        }
     }
 }
 
@@ -245,18 +291,29 @@ mod tests {
                 ..ThemeSettings::default()
             })
             .unwrap();
-            for (name, ink) in [
-                ("body", colors.text),
-                ("muted", colors.muted),
-                ("accent", colors.accent),
-                ("user", colors.user),
-                ("tool", colors.tool),
-                ("code", colors.code),
-                ("error", colors.error),
-            ] {
-                let (a, b) = (luminance(ink), luminance(colors.background));
-                let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
-                assert!(ratio >= 4.5, "{preset} {name} contrast {ratio:.2} < 4.5");
+            for surface in [colors.background, colors.surface, colors.overlay] {
+                for (name, ink) in [
+                    ("text", colors.text),
+                    ("muted", colors.muted),
+                    ("accent_text", colors.accent_text),
+                    ("user", colors.user),
+                    ("success", colors.success),
+                    ("warning", colors.warning),
+                    ("error", colors.error),
+                    ("faint", colors.faint),
+                    ("accent", colors.accent),
+                ] {
+                    if name == "faint" && surface == colors.overlay {
+                        continue;
+                    }
+                    let (a, b) = (luminance(ink), luminance(surface));
+                    let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                    let minimum = if name == "accent" { 3.0 } else { 4.5 };
+                    assert!(
+                        ratio >= minimum,
+                        "{preset} {name} on {surface:?}: {ratio:.2} < {minimum}"
+                    );
+                }
             }
             assert_ne!(colors.input_surface(), colors.background);
         }

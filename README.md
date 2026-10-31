@@ -145,13 +145,18 @@ Kroma uses a borderless, terminal-width workspace with only small side
 margins on wide screens. Tables, paths, commands, code and diffs use the
 available width rather than being capped at 100 columns. A quiet brand/context header,
 editor surface and compact footer replace the old full-screen conversation
-box. User prompts and assistant prose have distinct heading treatments;
-tools appear as compact activity lines, with Ctrl+O expanding output and
-Ctrl+R expanding reasoning. Colors are restrained and all built-in dark/light
-text and status colors are tested for at least 4.5:1 contrast against the
-page background. Mono uses the terminal's default foreground/background,
+box. Calm Transcript 2.0 uses rose-gutter raised user blocks and a blue
+Kroma mark beside white answer text, without repeated role-label rows.
+Adjacent tool calls form raised step cards (reasoning does not split a card).
+Ctrl+O expands tool details and Ctrl+R expands muted, italic reasoning.
+Dark/light text tokens meet 4.5:1 contrast on their supported surfaces;
+the non-text accent meets 3:1. Faint text is not used on overlays. Mono uses the terminal's default foreground/background,
 including light terminal themes; fenced code includes a language label and
-Diff additions/deletions use distinct semantic colors. Custom TOML theme keys and keyboard shortcuts remain
+Diff additions/deletions use green/red text and subtle tints. A dependency-free,
+lossless lexer highlights Rust, Python, JS/TS/JSX/TSX, JSON, TOML, YAML, Bash,
+PowerShell and diffs; unknown languages and lines over 2000 characters fall back.
+The code label has an **⧉ Copy** action that copies original code, not gutters,
+soft wraps or expanded tabs. Custom TOML theme keys and keyboard shortcuts remain
 compatible with V1. No UI plugin framework, layout config or additional
 renderer dependency was introduced.
 
@@ -172,7 +177,9 @@ sessions and the existing slash commands. Shortcuts:
   Bracketed multi-line paste is supported; Up/Down navigate input and history.
 - **PgUp/PgDn** or mouse wheel scroll conversation; scrolling up pins the
   reading position even as the model streams, and **Ctrl+End** returns to the
-  latest output. **Ctrl+O** expands tool outputs; **Ctrl+R** shows reasoning.
+  latest output. **Alt+↑ / Alt+↓** jumps between user turns, including after
+  resizing; the history hint reports the selected turn. **Ctrl+O** expands
+  tool outputs; **Ctrl+R** shows reasoning.
 - **Scroll bar:** drag the thin thumb at the right edge of the conversation
   to move directly through history. Its track is proportional to the transcript
   and loads older history when necessary. Ordinary text dragging keeps
@@ -180,7 +187,16 @@ sessions and the existing slash commands. Shortcuts:
 - **Command index:** type `/` or run `/commands` to see commands with descriptions and argument hints. Up/Down selects; **Tab** (or Enter in this completion list) inserts the command without executing it. Type arguments, then Enter to run; Esc closes the list without clearing the draft.
 - **Interface language:** `/language zh` switches UI chrome, hints, help and command descriptions to Chinese; `/language en` switches to English; `/language` toggles. Model answers, tool output and upstream diagnostics are not translated. The default is English.
 - **Reading layout:** Kroma uses the terminal width for its header, tool timeline, history and composer, even in a maximized window. `/layout comfortable` (default) keeps Markdown tables and structured blocks within a more readable width; `/layout wide` relaxes their width limit. Conversation text begins under the header, with the composer fixed at the bottom. Language and layout are saved in `~/.kroma/ui.toml`.
-- **Tool records:** common Rust, Git, Node, Python, PowerShell, file and search commands have concise labels; unknown commands show their real first line. Older successes in long consecutive runs fold into one summary, while recent, failed, warning and active calls stay visible. Click a tool's `▸` to expand only that call; **Ctrl+O** expands all. Expanded calls separate **Command** and **Output** with indented gutters; reasoning segments have a distinct gutter under **Ctrl+R**. Model task failures use an error-colored heading and details. Git diffs retain addition/deletion colors.
+- **Tool records:** adjacent calls share a step card keyed by its first call.
+  All-success groups collapse to one summary. Active calls expand with a live
+  tail; failures and warning/unknown results are always explained without
+  interaction. Click a group header to toggle steps, then a step's chevron to
+  disclose Command/Output; **Ctrl+O** discloses details globally. Groups longer
+  than 12 show the latest 8 steps plus a hidden-step hint, while retaining
+  failures and warnings. Reasoning remains one folded notice per turn and does
+  not split groups. Recovered interrupted tools use a yellow ⊘, not a red ✕.
+  Cancellation appears once in the completion row; saved model-facing notices
+  are localized for display without changing the WAL.
 - **Task status:** a subtle branded indicator follows the latest transcript entry while Kroma is thinking, using tools or streaming output. Completion/cancellation and elapsed time appear at the end of that turn, not in a floating status bar. When browsing older history, a separate navigation hint gives the return-to-latest shortcut and unseen update count without moving the reader.
 - **Ctrl+P** opens the searchable picker; **Tab** changes its category among
   commands, model profiles, sessions, and files. Type to filter, Up/Down to
@@ -197,8 +213,10 @@ sessions and the existing slash commands. Shortcuts:
   `/theme mono` select a theme immediately, and `/theme reload` rereads the
   on-disk theme. `/help` shows the TUI command summary.
 - The single compact footer prioritizes the current **model**, **thinking level**,
-  **Context** and latest **coding-model** cache statistics, adding input/output
-  counts when width permits. **Context** uses the total model context window.
+  **Context** and latest **coding-model** cache statistics. Wide layouts show
+  an eight-cell context bar, percentage and used/total tokens; 70–89% is warning
+  yellow and ≥90% is error red. Cache stays faint. API input/output counts live
+  in /usage rather than competing with context. **Context** uses the total model context window.
   During a request `~` denotes a conservative estimate including tool schemas;
   after completion, upstream input-token usage replaces that estimate when
   supplied. `—` means no measurement, not zero usage. Background automatic
@@ -211,8 +229,8 @@ sessions and the existing slash commands. Shortcuts:
 - Model output streams as it arrives, with a subtle cursor and a branded
   activity indicator at the end of the transcript while the model is working.
   Reasoning stays collapsed with one summary per user turn rather than one
-  repeated banner after every tool call; Ctrl+R shows every reasoning segment
-  in chronological order. Completion reconciles the entry without duplication.
+  repeated banner after every tool call; Ctrl+R shows every reasoning segment.
+  Reasoning interleaved with a tool group is collected immediately before its card. Completion reconciles the entry without duplication.
   Providers exposing only final reasoning show it after completion.
   Encrypted or otherwise unavailable private reasoning is never displayed.
 - **Esc** dismisses the file-path prompt or transient feedback; it never
@@ -223,6 +241,20 @@ sessions and the existing slash commands. Shortcuts:
   While a task runs, submitted text steers it,
   `/steer text` explicitly steers, and `/queue task` adds a follow-up.
   **Ctrl+Q** quits when idle; `/exit` is also supported.
+- **Session chrome:** the two-row heading keeps session identity on the left
+  and project/branch/dirty state on the right; status survives narrow layouts.
+  The rounded composer preserves the editor/IME geometry. Home keeps the logo,
+  full working directory and up to three recent sessions when height permits.
+  Command pickers and plugin panels use a distinct overlay surface.
+- **Git observations:** branch/dirty status and successful per-turn change
+  summaries run asynchronously outside rendering, with 1.5-second command
+  deadlines. A missing baseline, timeout or non-repository means no summary,
+  not fabricated zeroes. Summaries compare numstat counts and newly untracked
+  names, not a semantic attribution of external edits; they are not persisted.
+- **明确不做 / Non-goals:** no approval UI, sidebars, default dual-pane IDE,
+  full-screen card wall, complex animation framework, extra UI runtime or
+  automatic file rollback. Existing /fork and /rewind change conversations,
+  not project files.
 - **Alt+V** pastes a desktop clipboard image or text. When the clipboard is
   unavailable, a separate path prompt accepts a file accessible to Kroma
   without destroying the unfinished message. Alt+V explicitly folds pasted

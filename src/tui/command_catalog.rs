@@ -24,8 +24,8 @@ commands![
     (
         "/help",
         "",
-        "Keyboard shortcuts and help",
-        "快捷键与使用帮助"
+        "Shortcuts, turn navigation and code copying",
+        "快捷键、轮次跳转与代码复制"
     ),
     (
         "/commands",
@@ -229,6 +229,7 @@ mod tests {
         for cmd in COMMANDS {
             assert!(names.insert(cmd.name), "duplicate {}", cmd.name);
             assert!(!cmd.description(Language::En).is_empty());
+            assert!(!cmd.description(Language::Zh).is_empty());
             assert_ne!(cmd.description(Language::En), cmd.description(Language::Zh));
         }
         assert!(items(Language::Zh)

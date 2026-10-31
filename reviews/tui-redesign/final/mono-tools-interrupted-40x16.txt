@@ -1,0 +1,16 @@
+◆ Kroma  untitled session        ✓ Ready
+                                        
+  ▎                                    │
+                                       │
+   ▸ ⊘ Run · echo ste… · 3 steps · 3.6s│
+   ▸ ⊘ Run Rust tests · 1.2s           ┃
+     ⊘ Interrupted · result unknown (  ┃
+     will not rerun automatically)     ┃
+     … Another 2 successful steps      ┃
+                                       ┃
+   ✓  Completed · 35.3s                ┃
+                                       ┃
+╭──────────────────────────────────────╮
+│ › Ask anything, or describe a coding │
+╰──────────────────────────────────────╯
+  test-model │ Think high │ Context —   

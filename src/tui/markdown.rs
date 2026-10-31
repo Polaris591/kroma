@@ -102,7 +102,7 @@ fn render_table(lines: &mut Vec<Line<'static>>, table: TableContent, theme: Them
                 let cell = row.get(column).map(String::as_str).unwrap_or("");
                 let style = if index == 0 {
                     Style::default()
-                        .fg(theme.accent)
+                        .fg(theme.accent_text)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.text)
@@ -162,13 +162,39 @@ pub fn render_with_links(
     theme: Theme,
     width: usize,
 ) -> (Vec<Line<'static>>, Vec<LinkSpan>, Vec<usize>) {
+    let document = render_document(source, theme, width);
+    (document.lines, document.links, document.preformatted)
+}
+
+#[derive(Clone)]
+pub(super) struct CodeBlock {
+    pub row: usize,
+    pub end: usize,
+    pub language: String,
+    pub raw: String,
+}
+
+pub(super) struct Document {
+    pub lines: Vec<Line<'static>>,
+    pub links: Vec<LinkSpan>,
+    pub preformatted: Vec<usize>,
+    pub prose: Vec<usize>,
+    pub blocks: Vec<CodeBlock>,
+}
+
+pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Document {
     let mut lines = Vec::new();
     let mut link_spans = Vec::new();
     let mut preformatted_rows = Vec::new();
+    let mut prose_rows = Vec::new();
+    let mut inline_rows = Vec::new();
     let mut current_link: Option<String> = None;
     let mut spans = Vec::new();
     let mut styles = vec![Style::default().fg(theme.text)];
     let mut lists: Vec<ListState> = Vec::new();
+    let mut lexer = super::highlight::Lexer::default();
+    let mut blocks = Vec::new();
+    let mut active_block: Option<CodeBlock> = None;
     let mut in_code = false;
     let mut code_language: Option<String> = None;
     let mut code_column = 0usize;
@@ -264,12 +290,14 @@ pub fn render_with_links(
                             .map(str::to_ascii_lowercase),
                         CodeBlockKind::Indented => None,
                     };
-                    if let Some(language) = code_language.as_deref() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {language}"),
-                            Style::default().fg(theme.muted),
-                        )));
-                    }
+                    lexer = super::highlight::Lexer::default();
+                    active_block = Some(CodeBlock {
+                        row: lines.len(),
+                        end: lines.len(),
+                        language: code_language.clone().unwrap_or_default(),
+                        raw: String::new(),
+                    });
+                    lines.push(Line::default());
                     styles.push(Style::default().fg(theme.code));
                 }
                 Tag::List(start) => {
@@ -335,6 +363,10 @@ pub fn render_with_links(
                         preformatted_rows.push(lines.len() - 1);
                         last_blank = false;
                     }
+                    if let Some(mut block) = active_block.take() {
+                        block.end = lines.len();
+                        blocks.push(block);
+                    }
                     in_code = false;
                     code_column = 0;
                     blank_after(&mut lines);
@@ -363,6 +395,9 @@ pub fn render_with_links(
                 _ => {}
             },
             Event::Text(value) | Event::Html(value) | Event::InlineHtml(value) => {
+                if let Some(block) = &mut active_block {
+                    block.raw.push_str(&value);
+                }
                 let style = *styles.last().unwrap();
                 let expanded;
                 let value = if in_code {
@@ -388,24 +423,12 @@ pub fn render_with_links(
                         }
                     }
                     if !chunk.is_empty() {
+                        if !in_code {
+                            prose_rows.push(lines.len());
+                        }
                         if in_code && spans.is_empty() {
                             spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
                         }
-                        let code_style = if in_code && code_language.as_deref() == Some("diff") {
-                            match chunk.chars().next() {
-                                Some('+') => Style::default().fg(theme.user),
-                                Some('-') => Style::default().fg(theme.error),
-                                Some('@') => Style::default().fg(theme.accent),
-                                _ => style,
-                            }
-                        } else if in_code
-                            && (chunk.trim_start().starts_with("//")
-                                || chunk.trim_start().starts_with('#'))
-                        {
-                            Style::default().fg(theme.muted)
-                        } else {
-                            style
-                        };
                         if let Some(target) = &current_link {
                             link_spans.push(LinkSpan {
                                 row: lines.len(),
@@ -413,12 +436,21 @@ pub fn render_with_links(
                                 target: target.clone(),
                             });
                         }
-                        spans.push(Span::styled(chunk.to_owned(), code_style));
+                        if in_code {
+                            spans.extend(lexer.line(
+                                chunk,
+                                code_language.as_deref().unwrap_or(""),
+                                theme,
+                            ));
+                        } else {
+                            spans.push(Span::styled(chunk.to_owned(), style));
+                        }
                         last_blank = false;
                     }
                 }
             }
             Event::Code(value) => {
+                inline_rows.push(lines.len());
                 if let Some(target) = &current_link {
                     link_spans.push(LinkSpan {
                         row: lines.len(),
@@ -462,10 +494,23 @@ pub fn render_with_links(
     if lines.is_empty() {
         lines.push(Line::default());
     }
+    if let Some(mut block) = active_block {
+        block.end = lines.len();
+        blocks.push(block);
+    }
     preformatted_rows.retain(|row| *row < lines.len());
     preformatted_rows.sort_unstable();
     preformatted_rows.dedup();
-    (lines, link_spans, preformatted_rows)
+    prose_rows.retain(|row| *row < lines.len() && !inline_rows.contains(row));
+    prose_rows.sort_unstable();
+    prose_rows.dedup();
+    Document {
+        lines,
+        links: link_spans,
+        preformatted: preformatted_rows,
+        prose: prose_rows,
+        blocks,
+    }
 }
 
 #[cfg(test)]
@@ -568,8 +613,18 @@ mod tests {
                     .collect::<String>()
             })
             .collect::<Vec<_>>();
-        assert!(lines.iter().any(|line| line.trim() == "rust"));
-        assert!(lines.iter().any(|line| line.trim() == "diff"));
+        let document = render_document(markdown, theme, 80);
+        assert_eq!(
+            document
+                .blocks
+                .iter()
+                .map(|b| b.language.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rust", "diff"]
+        );
+        assert!(!lines
+            .iter()
+            .any(|line| line.trim() == "rust" || line.trim() == "diff"));
         assert!(lines.iter().any(|line| line.contains("│ fn greet()")));
         assert!(lines.iter().any(|line| line.contains("│ + new")));
         let added = rendered
@@ -582,7 +637,7 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .find(|span| span.content.contains("- old"))
             .unwrap();
-        assert_eq!(added.style.fg, Some(theme.user));
+        assert_eq!(added.style.fg, Some(theme.success));
         assert_eq!(removed.style.fg, Some(theme.error));
     }
 
@@ -716,7 +771,7 @@ mod tests {
         ));
         assert_eq!(
             text,
-            vec!["  text", "│ ", "│ first", "│ ", "│ ", "│ last", "│ ", "│ ",]
+            vec!["", "│ ", "│ first", "│ ", "│ ", "│ last", "│ ", "│ ",]
         );
     }
 
@@ -724,7 +779,7 @@ mod tests {
     fn tab_stops_measure_grapheme_clusters_not_scalar_widths() {
         let theme = ThemeStore::load_at(None).unwrap().colors;
         let text = plain_lines(&render_with_width("```text\n👩‍💻\tx\n```", theme, 80));
-        assert_eq!(text, vec!["  text", "│ 👩‍💻  x"]);
+        assert_eq!(text, vec!["", "│ 👩‍💻  x"]);
     }
 
     #[test]
@@ -782,6 +837,7 @@ mod tests {
             tool: ratatui::style::Color::Yellow,
             code: ratatui::style::Color::Blue,
             error: ratatui::style::Color::Red,
+            ..ThemeStore::load_at(None).unwrap().colors
         };
         let lines = render_with_width(
             "# 标题\n\n- **你好**\n- `code`\n\n```rust\nlet a=1;\n```",
@@ -808,6 +864,7 @@ mod tests {
             tool: ratatui::style::Color::Yellow,
             code: ratatui::style::Color::Blue,
             error: ratatui::style::Color::Red,
+            ..ThemeStore::load_at(None).unwrap().colors
         };
         let lines = render_with_width("Before\n\n```sh\necho ok\n```\n\nAfter", theme, 80);
         let last = lines

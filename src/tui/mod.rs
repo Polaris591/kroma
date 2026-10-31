@@ -3,11 +3,15 @@
 mod attachments;
 mod command_catalog;
 mod editor;
+mod gitinfo;
+mod help;
+mod highlight;
 mod links;
 mod logo;
 mod markdown;
 mod picker;
 mod preferences;
+mod terminal_feedback;
 mod theme;
 mod title;
 mod tool_display;
@@ -45,7 +49,7 @@ use view::{UiEvent, UiSink, UiState};
 
 struct TerminalScreen {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
-    title: String,
+    feedback: terminal_feedback::Feedback,
 }
 
 impl TerminalScreen {
@@ -64,7 +68,7 @@ impl TerminalScreen {
         match Terminal::new(CrosstermBackend::new(io::stdout())) {
             Ok(terminal) => Ok(Self {
                 terminal,
-                title: "Kroma".into(),
+                feedback: terminal_feedback::Feedback::from_environment(),
             }),
             Err(error) => {
                 let _ = disable_raw_mode();
@@ -80,15 +84,13 @@ impl TerminalScreen {
     }
 
     fn draw(&mut self, state: &mut UiState) -> Result<()> {
-        // Update the terminal tab/window title only when the visible session
-        // changes. Re-emitting OSC 0 on every animation tick would spam the
-        // host terminal and can make some multiplexers repaint constantly.
-        let title = state.terminal_title();
-        if self.title != title {
-            execute!(io::stdout(), SetTitle(title.as_str()))?;
-            self.title = title;
-        }
-        self.terminal.draw(|frame| state.draw(frame))?;
+        state.taskbar_enabled = self.feedback.windows_terminal;
+        self.feedback
+            .update(&mut io::stdout(), &state.terminal_title(), state.running)?;
+        self.terminal.draw(|frame| {
+            state.draw(frame);
+            self.feedback.reduce_palette(frame.buffer_mut());
+        })?;
         Ok(())
     }
 
@@ -143,6 +145,7 @@ impl TerminalScreen {
 
 impl Drop for TerminalScreen {
     fn drop(&mut self) {
+        self.feedback.clear(&mut io::stdout());
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -182,13 +185,16 @@ fn attach_text(state: &mut UiState, text: &str, workdir: &std::path::Path, expli
                         "{} 【{label}】 · {detail}",
                         state.preferences.language.text("Pasted", "已粘贴")
                     )),
-                    Err(error) => state.note(error),
+                    Err(error) => state.note_with_level(view::NoticeLevel::Error, error),
                 }
             }
-            Err(error) => state.note(format!(
-                "{}: {error:#}",
-                state.preferences.language.text("Paste failed", "粘贴失败")
-            )),
+            Err(error) => state.note_with_level(
+                view::NoticeLevel::Error,
+                format!(
+                    "{}: {error:#}",
+                    state.preferences.language.text("Paste failed", "粘贴失败")
+                ),
+            ),
         }
     } else {
         state.editor.paste(text);
@@ -215,16 +221,19 @@ fn import_path(state: &mut UiState, text: &str, workdir: &std::path::Path) {
                     "{} 【{label}】 · {detail}",
                     state.preferences.language.text("Attached", "已添加")
                 )),
-                Err(error) => state.note(error),
+                Err(error) => state.note_with_level(view::NoticeLevel::Error, error),
             }
         }
-        Err(error) => state.note(format!(
-            "{}: {error:#}",
-            state
-                .preferences
-                .language
-                .text("Attachment error", "附件错误")
-        )),
+        Err(error) => state.note_with_level(
+            view::NoticeLevel::Error,
+            format!(
+                "{}: {error:#}",
+                state
+                    .preferences
+                    .language
+                    .text("Attachment error", "附件错误")
+            ),
+        ),
     }
 }
 
@@ -260,13 +269,16 @@ fn change_thinking(state: &mut UiState, model: &dyn ModelBackend, level: &str) {
                     .text("applies to the next model request", "下次模型请求生效")
             ));
         }
-        Err(error) => state.note(format!(
-            "{}: {error:#}",
-            state
-                .preferences
-                .language
-                .text("Thinking unchanged", "推理设置未更改")
-        )),
+        Err(error) => state.note_with_level(
+            view::NoticeLevel::Error,
+            format!(
+                "{}: {error:#}",
+                state
+                    .preferences
+                    .language
+                    .text("Thinking unchanged", "推理设置未更改")
+            ),
+        ),
     }
 }
 
@@ -344,7 +356,10 @@ fn picker_items(
 fn open_picker(state: &mut UiState, kind: PickerKind, query: &str, workdir: &std::path::Path) {
     match picker_items(state, kind, query, workdir) {
         Ok(items) => state.picker = Some(Picker::new(kind, items, query)),
-        Err(error) => state.note(format!("{}: {error:#}", kind.title())),
+        Err(error) => state.note_with_level(
+            view::NoticeLevel::Error,
+            format!("{}: {error:#}", kind.title()),
+        ),
     }
 }
 
@@ -467,14 +482,21 @@ fn key_action(
                     state.themes.preset(),
                     state.preferences.language.text("saved to", "已保存到")
                 )),
-                Err(error) => state.note(format!(
-                    "{}: {error:#}",
-                    state
-                        .preferences
-                        .language
-                        .text("Theme change failed", "主题切换失败")
-                )),
+                Err(error) => state.note_with_level(
+                    view::NoticeLevel::Error,
+                    format!(
+                        "{}: {error:#}",
+                        state
+                            .preferences
+                            .language
+                            .text("Theme change failed", "主题切换失败")
+                    ),
+                ),
             }
+            return InputAction::None;
+        }
+        KeyCode::Char('t') if ctrl => {
+            state.open_full_transcript();
             return InputAction::None;
         }
         KeyCode::Char('o') if ctrl => {
@@ -483,6 +505,10 @@ fn key_action(
         }
         KeyCode::Char('r') if ctrl => {
             state.reasoning_expanded = !state.reasoning_expanded;
+            return InputAction::None;
+        }
+        KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+            state.jump_turn(key.code == KeyCode::Up);
             return InputAction::None;
         }
         KeyCode::PageUp => {
@@ -566,6 +592,11 @@ fn input_event(
     // The on-demand plugin panel owns navigation until Esc closes it.
     // No key may leak through to the draft editor while this overlay is up.
     if state.has_plugin_panel() {
+        if let Event::Key(key) = &event {
+            if key.kind != KeyEventKind::Release && state.panel_search_key(*key) {
+                return InputAction::None;
+            }
+        }
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
                 KeyCode::Esc => state.close_plugin_panel(),
@@ -665,7 +696,9 @@ fn input_event(
                                     "{} 【{label}】",
                                     state.preferences.language.text("Attached", "已添加")
                                 )),
-                                Err(error) => state.note(error),
+                                Err(error) => {
+                                    state.note_with_level(view::NoticeLevel::Error, error)
+                                }
                             }
                         }
                     }
@@ -707,13 +740,16 @@ fn input_event(
                             .language
                             .text("No matching file", "没有匹配的文件"),
                     ),
-                    Err(error) => state.note(format!(
-                        "{}: {error:#}",
-                        state
-                            .preferences
-                            .language
-                            .text("File completion", "文件补全")
-                    )),
+                    Err(error) => state.note_with_level(
+                        view::NoticeLevel::Error,
+                        format!(
+                            "{}: {error:#}",
+                            state
+                                .preferences
+                                .language
+                                .text("File completion", "文件补全")
+                        ),
+                    ),
                 }
                 return InputAction::None;
             }
@@ -799,11 +835,34 @@ fn input_event(
                                 "{}: {target}",
                                 state.preferences.language.text("Opened", "已打开")
                             )),
-                            Err(error) => state.note(format!(
-                                "{}: {error:#}",
-                                state.preferences.language.text("Open link", "打开链接")
-                            )),
+                            Err(error) => state.note_with_level(
+                                view::NoticeLevel::Error,
+                                format!(
+                                    "{}: {error:#}",
+                                    state.preferences.language.text("Open link", "打开链接")
+                                ),
+                            ),
                         }
+                    }
+                } else if let Some(code) = state.code_at(mouse.column, mouse.row).map(str::to_owned)
+                {
+                    match copy_selection(&code) {
+                        Ok(_) => state.note(format!(
+                            "{} · {} {}",
+                            state
+                                .preferences
+                                .language
+                                .text("Code block copied", "已复制代码块"),
+                            code.lines().count(),
+                            state.preferences.language.text("lines", "行")
+                        )),
+                        Err(error) => state.note_with_level(
+                            view::NoticeLevel::Error,
+                            format!(
+                                "{}: {error}",
+                                state.preferences.language.text("Copy failed", "复制失败")
+                            ),
+                        ),
                     }
                 } else if state.toggle_tool_at(mouse.column, mouse.row) {
                     // The disclosure chevron owns this click.
@@ -844,10 +903,13 @@ fn copy_selection_feedback(state: &mut UiState, selected: &str) {
             "OSC 52 copy sent · terminal support required",
             "已发送 OSC 52 复制请求 · 需要终端支持",
         )),
-        Err(error) => state.note(format!(
-            "{}: {error}",
-            state.preferences.language.text("Copy failed", "复制失败")
-        )),
+        Err(error) => state.note_with_level(
+            view::NoticeLevel::Error,
+            format!(
+                "{}: {error}",
+                state.preferences.language.text("Copy failed", "复制失败")
+            ),
+        ),
     }
 }
 
@@ -915,31 +977,21 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
                 state.apply_preferences(next);
                 state.note(next.language.text("UI preferences saved", "界面设置已保存"));
             }
-            Err(error) => state.note(format!(
-                "{}: {error:#}",
-                state
-                    .preferences
-                    .language
-                    .text("Settings unchanged", "设置未更改")
-            )),
+            Err(error) => state.note_with_level(
+                view::NoticeLevel::Error,
+                format!(
+                    "{}: {error:#}",
+                    state
+                        .preferences
+                        .language
+                        .text("Settings unchanged", "设置未更改")
+                ),
+            ),
         }
         return true;
     }
     if input == "/help" {
-        state.info(state.preferences.language.text("HELP", "帮助"), state.preferences.language.text("Enter to send; Shift+Enter or Ctrl+J to add a line.\nPgUp/PgDn or mouse wheel scroll; Ctrl+End returns to latest output.\nType / or /commands for the command index; Tab completes without executing.
-Ctrl+P searches commands; Tab switches model/session/file categories.\nFile choices complete paths from the current directory, not a project-wide search.\nF2 changes theme; Shift+Tab cycles thinking (or /think high).\nContext shows window use (~ estimated); /usage shows full measurements.
-/language [en|zh] changes UI language; /layout [comfortable|wide] changes reading width.\nCtrl+O expands tool output; Ctrl+R shows reasoning.\nCtrl+Left/Right moves by word; Ctrl+W or Alt+Backspace deletes a word.\nWith selected text Ctrl+C copies first; otherwise it clears/cancels/quits.\n/history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo\n/theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]\n/queue task · /skills · /tools\nWhile running: write steering text, or /queue task; Ctrl+C cancels.\nCtrl+Q quits when idle.", "Enter 发送；Shift+Enter 或 Ctrl+J 换行。
-输入 / 或 /commands 查看命令索引；↑↓选择，Tab 补全，不会直接执行。
-Ctrl+P 搜索命令；搜索面板内 Tab 切换模型、会话、文件。\n文件候选补全当前目录下的路径，不是全项目搜索。
-PgUp/PgDn 或鼠标滚轮翻页；Ctrl+End 返回最新。
-Ctrl+O 展开原始工具命令与输出；Ctrl+R 展开推理摘要。\nCtrl+左右方向键按词移动；Ctrl+W 或 Alt+Backspace 删除前一个词。\n有文字选区时 Ctrl+C 优先复制，否则取消任务、清空草稿或退出。
-/language [zh|en] 切换界面语言，不更改模型回复语言。
-/layout [comfortable|wide] 切换舒适阅读或全宽；设置会保存。
-F2 切换主题；Shift+Tab 切换推理强度。
-上下文百分比带 ~ 表示估算；未报告不等于 0；/usage 查看详情。
-任务运行中可输入引导指令，或 /queue 添加后续任务；Ctrl+C 取消。
-空闲时 Ctrl+Q 退出。
-"));
+        state.show_help();
         return true;
     }
     if input == "/usage" {
@@ -991,10 +1043,13 @@ F2 切换主题；Shift+Tab 切换推理强度。
                 state.preferences.language.text("Theme:", "主题："),
                 state.themes.preset()
             )),
-            Err(error) => state.note(format!(
-                "{}: {error:#}",
-                state.preferences.language.text("Theme error", "主题错误")
-            )),
+            Err(error) => state.note_with_level(
+                view::NoticeLevel::Error,
+                format!(
+                    "{}: {error:#}",
+                    state.preferences.language.text("Theme error", "主题错误")
+                ),
+            ),
         }
         return true;
     }
@@ -1015,10 +1070,13 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
     } else if let Some(queued) = input.strip_prefix("/queue ") {
         match task.queue_followup(queued) {
             Ok(position) => state.note(format!("Follow-up task queued at #{position}")),
-            Err(error) => state.note(format!(
-                "{}: {error:#}",
-                state.preferences.language.text("Queue error", "队列错误")
-            )),
+            Err(error) => state.note_with_level(
+                view::NoticeLevel::Error,
+                format!(
+                    "{}: {error:#}",
+                    state.preferences.language.text("Queue error", "队列错误")
+                ),
+            ),
         }
     } else if input.starts_with('/') && !input.starts_with("/steer ") {
         state.note(state.preferences.language.text(
@@ -1032,13 +1090,16 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
                 "Steering accepted; applies at next model boundary",
                 "已接受引导指令，将在下次模型请求时生效",
             )),
-            Err(error) => state.note(format!(
-                "{}: {error:#}",
-                state
-                    .preferences
-                    .language
-                    .text("Steering error", "引导指令错误")
-            )),
+            Err(error) => state.note_with_level(
+                view::NoticeLevel::Error,
+                format!(
+                    "{}: {error:#}",
+                    state
+                        .preferences
+                        .language
+                        .text("Steering error", "引导指令错误")
+                ),
+            ),
         }
     }
 }
@@ -1095,6 +1156,7 @@ async fn execute_task(
 ) -> Result<bool> {
     state.attachments = attachments.clone();
     state.add_user(prompt);
+    let git_baseline = state.begin_git_turn();
     state.finish_attachment_send();
     screen.draw(state)?;
     let task_input = agent.task_input();
@@ -1147,7 +1209,7 @@ async fn execute_task(
                 "{}: {error:#}",
                 state.preferences.language.text("Task failed", "任务失败")
             );
-            state.note(&message);
+            state.note_with_level(view::NoticeLevel::Error, &message);
             task_notice = Some(("ERROR", message));
             false
         }
@@ -1157,7 +1219,6 @@ async fn execute_task(
                 "Task cancelled; unconfirmed commands are not replayed",
                 "任务已取消；结果未确认的命令不会自动重跑",
             );
-            state.note(message);
             task_notice = Some(("CANCELLED", message.to_owned()));
             false
         }
@@ -1186,11 +1247,12 @@ async fn execute_task(
     if let Err(error) = state.save_usage() {
         state.note(format!("Unable to save session usage: {error:#}"));
     }
-    if let Some((label, message)) = task_notice {
+    if let Some((label, message)) = task_notice.filter(|(label, _)| *label != "CANCELLED") {
         // The footer notification is transient; its failure explanation is
         // still reachable by scrolling after the footer is dismissed.
         state.info(label, message);
     }
+    state.finish_git_turn(git_baseline);
     state.restore_reading_position(reading_position);
     screen.draw(state)?;
     Ok(completed)
@@ -1222,8 +1284,8 @@ async fn execute_local_shell(
     archive: &std::path::Path,
 ) -> Result<()> {
     state.note(state.preferences.language.text(
-        "Shell running · Ctrl+C / Esc cancels",
-        "正在执行 Shell · Ctrl+C / Esc 取消",
+        "Shell running · Ctrl+C cancels",
+        "正在执行 Shell · Ctrl+C 取消",
     ));
     screen.draw(state)?;
     let result = {
@@ -1233,8 +1295,7 @@ async fn execute_local_shell(
                 result = &mut future => break Some(result),
                 event = input.next() => match event {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release &&
-                        (key.code == KeyCode::Esc ||
-                            (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))) => break None,
+                        (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) => break None,
                     Some(Ok(Event::Resize(_, _))) => screen.draw(state)?,
                     Some(Err(error)) => return Err(error.into()),
                     None => break None,
@@ -1364,6 +1425,8 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         agent.messages(),
     );
     state.set_link_workdir(&workdir);
+    state.ui_sender = Some(tx.clone());
+    state.refresh_git();
     state.plugin_commands = runtime.plugins.command_descriptions();
     state.plugin_statuses = runtime.plugins.ui_statuses();
     let activity_frames = runtime
@@ -1396,10 +1459,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     state.preferences_path = preferences::Preferences::path();
     match preferences::Preferences::load_at(state.preferences_path.as_deref()) {
         Ok(prefs) => state.apply_preferences(prefs),
-        Err(error) => state.note(format!(
-            "{}: {error:#}",
-            state.preferences.language.text("UI settings", "界面设置")
-        )),
+        Err(error) => state.note_with_level(
+            view::NoticeLevel::Error,
+            format!(
+                "{}: {error:#}",
+                state.preferences.language.text("UI settings", "界面设置")
+            ),
+        ),
     }
     state.model_catalog = Some(catalog);
     if !show_home {
@@ -1413,7 +1479,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     }
     save_model_choice(&mut state, model.as_ref());
     if let Some(warning) = restore_warning {
-        state.note(warning);
+        state.note_with_level(view::NoticeLevel::Warning, warning);
     }
     if let Some(warning) = theme_warning {
         state.note(warning);
@@ -1565,7 +1631,10 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             );
                             state.note("Plugins reloaded (tools, Prompt, commands, events, UI)");
                         }
-                        Err(error) => state.note(format!("Plugin reload: {error:#}")),
+                        Err(error) => state.note_with_level(
+                            view::NoticeLevel::Error,
+                            format!("Plugin reload: {error:#}"),
+                        ),
                     }
                     continue;
                 }
@@ -1638,20 +1707,29 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                     state
                                         .note(format!("Model: {} · profile {name}", profile.model));
                                 }
-                                Err(error) => state.note(format!(
+                                Err(error) => state.note_with_level(
+                                    view::NoticeLevel::Error,
+                                    format!(
+                                        "{}: {error:#}",
+                                        state.preferences.language.text("Model switch", "切换模型")
+                                    ),
+                                ),
+                            },
+                            Err(error) => state.note_with_level(
+                                view::NoticeLevel::Error,
+                                format!(
                                     "{}: {error:#}",
                                     state.preferences.language.text("Model switch", "切换模型")
-                                )),
-                            },
-                            Err(error) => state.note(format!(
-                                "{}: {error:#}",
-                                state.preferences.language.text("Model switch", "切换模型")
-                            )),
+                                ),
+                            ),
                         },
-                        Err(error) => state.note(format!(
-                            "{}: {error:#}",
-                            state.preferences.language.text("Model", "模型")
-                        )),
+                        Err(error) => state.note_with_level(
+                            view::NoticeLevel::Error,
+                            format!(
+                                "{}: {error:#}",
+                                state.preferences.language.text("Model", "模型")
+                            ),
+                        ),
                     }
                     continue;
                 }
@@ -1789,22 +1867,28 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                                         state.model_profile =
                                                             Some(choice.profile.clone());
                                                     }
-                                                    Err(error) => state.note(format!(
-                                                        "{}: {error:#}",
-                                                        state
-                                                            .preferences
-                                                            .language
-                                                            .text("Session model", "会话模型")
-                                                    )),
+                                                    Err(error) => state.note_with_level(
+                                                        view::NoticeLevel::Error,
+                                                        format!(
+                                                            "{}: {error:#}",
+                                                            state
+                                                                .preferences
+                                                                .language
+                                                                .text("Session model", "会话模型")
+                                                        ),
+                                                    ),
                                                 }
                                             }
-                                            Err(error) => state.note(format!(
-                                                "{}: {error:#}",
-                                                state
-                                                    .preferences
-                                                    .language
-                                                    .text("Session model", "会话模型")
-                                            )),
+                                            Err(error) => state.note_with_level(
+                                                view::NoticeLevel::Error,
+                                                format!(
+                                                    "{}: {error:#}",
+                                                    state
+                                                        .preferences
+                                                        .language
+                                                        .text("Session model", "会话模型")
+                                                ),
+                                            ),
                                         }
                                     } else {
                                         state.note(format!(
@@ -1932,10 +2016,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             }
                         }
                     }
-                    Err(error) => state.note(format!(
-                        "{}: {error:#}",
-                        state.preferences.language.text("Command error", "命令错误")
-                    )),
+                    Err(error) => state.note_with_level(
+                        view::NoticeLevel::Error,
+                        format!(
+                            "{}: {error:#}",
+                            state.preferences.language.text("Command error", "命令错误")
+                        ),
+                    ),
                 }
             }
             _ => {}

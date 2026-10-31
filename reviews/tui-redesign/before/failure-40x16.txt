@@ -1,0 +1,16 @@
+◆ Kroma  /  untitled session            
+                                        
+   ◆ Kroma                             │
+     Updated the implementation.       │
+                                       │
+       rust                            ┃
+     │ fn main() { println!("hello"); }┃
+                                       ┃
+   ✕  ERROR                            ┃
+     │ Build failed: E0599             ┃
+                                       ┃
+   ✕  Task failed · see error above ·  ┃
+────────────────────────────────────────
+  › Ask anything, or describe a coding  
+                                        
+  test-model · Think — · Context —      

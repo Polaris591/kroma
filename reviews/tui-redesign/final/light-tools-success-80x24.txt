@@ -1,0 +1,24 @@
+ ◆ Kroma  untitled session                                     project  ✓ Ready 
+                                                                                
+   ▎                                                                            
+   ▎  Review the change. 请 检 查 代 码 。                                            
+   ▎  Preserve Unicode and indentation.                                         
+   ▎                                                                            
+                                                                                
+    ▸ ✓ Run · echo step-2 · 3 steps · 3.6s                                      
+                                                                                
+    ✓  Completed · 35.3s                                                        
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ › Ask anything, or describe a coding task…                                 │ 
+ ╰────────────────────────────────────────── Enter send · Shift+Enter newline ╯ 
+   test-model │ Think high │ Context —                                          

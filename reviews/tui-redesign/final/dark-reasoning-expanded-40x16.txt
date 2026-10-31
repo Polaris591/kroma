@@ -1,0 +1,16 @@
+◆ Kroma  untitled session        ✓ Ready
+                                        
+   ◇  Reasoning · Ctrl+R to collapse · │
+   0.0s                                │
+                                       │
+     │ Inspect the existing API, then  │
+       verify the change.              ┃
+     │                                 ┃
+     │ Keep failures visible.          ┃
+                                       ┃
+   ✓  Completed · 35.3s                ┃
+                                       ┃
+╭──────────────────────────────────────╮
+│ › Ask anything, or describe a coding │
+╰──────────────────────────────────────╯
+  test-model │ Think high │ Context —   

@@ -1,0 +1,40 @@
+  ◆ Kroma  untitled session                                                                                                              project  ● Running 0s  
+                                                                                                                                                                
+    ▎                                                                                                                                                           
+    ▎  Review the change. 请 检 查 代 码 。                                                                                                                           
+    ▎  Preserve Unicode and indentation.                                                                                                                        
+    ▎                                                                                                                                                           
+                                                                                                                                                                
+    ◆  Updated the implementation.                                                                                                                              
+                                                                                                                                                                
+       • Preserved input and links                                                                                                                              
+       • Verified Unicode selection                                                                                                                             
+                                                                                                                                                                
+     ▲▲▲  Waiting for model · 0s                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+  ╭ Steer task · /queue to enqueue ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮  
+  │ › Steer this task, or /queue another…                                                                                                                    │  
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  
+    test-model │ Think high │ Context —                                                                                                      Ctrl+P Commands    

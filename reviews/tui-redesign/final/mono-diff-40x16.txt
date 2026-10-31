@@ -1,0 +1,16 @@
+◆ Kroma  untitled session        ✓ Ready
+                                        
+  ▎                                    │
+                                       │
+  ◆                      diff · ⧉ Copy │
+     │ diff --git a/main.rs b/main.rs  ┃
+     │ @@ -1 +1 @@                     ┃
+     │ -old_value                      ┃
+     │ +new_value                      ┃
+                                       ┃
+   ✓  Completed · 35.3s                ┃
+                                       ┃
+╭──────────────────────────────────────╮
+│ › Ask anything, or describe a coding │
+╰──────────────────────────────────────╯
+  test-model │ Think high │ Context —   

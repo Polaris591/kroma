@@ -1,3 +1,6 @@
+/// Prefix of the durable model-facing cancellation note, shared with TUI display.
+pub const TASK_CANCELLED_PREFIX: &str = "[Task cancelled by user.";
+
 use crate::{
     cache_trace::{CacheSnapshot, CacheTrace},
     context::{
@@ -828,7 +831,7 @@ impl Agent {
         }
         self.messages.push(Message::new(
             "assistant",
-            "[Task cancelled by user. Incomplete commands may have had side effects. The partial streamed response, if any, was not retained.]",
+            format!("{TASK_CANCELLED_PREFIX} Incomplete commands may have had side effects. The partial streamed response, if any, was not retained.]"),
         ));
         self.session
             .append(&self.messages, &self.compression.state())?;

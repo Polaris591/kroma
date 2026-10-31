@@ -1,0 +1,30 @@
+  ◆ Kroma  /  untitled session                                                                      
+                                                                                                    
+     ▎ You                                                                                          
+       Review this change. 检 查 代 码 。                                                                
+                                                                                                    
+     ◆ Kroma                                                                                        
+       Updated the implementation.                                                                  
+                                                                                                    
+         rust                                                                                       
+       │ fn main() { println!("hello"); }                                                           
+                                                                                                    
+     ✕  ERROR                                                                                       
+       │ Build failed: E0599                                                                        
+                                                                                                    
+     ✕  Task failed · see error above · 35.3s                                                       
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  ────────────────────────────────────────────────────────────────────────────────────────────────  
+    › Ask anything, or describe a coding task…                                                      
+                                                                                                    
+    test-model · Think — · Context —                                                                

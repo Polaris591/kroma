@@ -1,0 +1,16 @@
+◆ Kroma  untitled session        ✓ Ready
+ ╭ Review · Esc ──────────────────────╮ 
+ │A scrollable plugin panel.          ││
+ │The draft stays editable after      ││
+ │closing.                            │┃
+ │                                    │┃
+ │                                    │┃
+ │                                    │┃
+ │                                    │┃
+ │                                    │┃
+ │                                    │┃
+ │                                    │┃
+╭│                                    │╮
+││                                    ││
+╰╰────────────────────────────────────╯╯
+  test-model │ Think high │ Context —   

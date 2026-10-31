@@ -1,3 +1,7 @@
+#[cfg(windows)]
+#[path = "shell_redirect.rs"]
+mod redirect;
+
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::{
@@ -640,6 +644,10 @@ impl ShellChoice {
     }
 
     fn command_text(&self, command: &str) -> String {
+        #[cfg(windows)]
+        if self.dialect == Dialect::Bash {
+            return redirect::rewrite(command);
+        }
         if self.dialect == Dialect::PowerShell {
             // PowerShell 5.1 can report success after a native command exits
             // nonzero. Capture that code explicitly and use UTF-8 pipes for
@@ -831,7 +839,7 @@ fn windows_bash() -> Option<PathBuf> {
 pub fn tool_description() -> &'static str {
     match resolve_shell().dialect {
         Dialect::Bash => {
-            "Run a Bash command in the project working directory with pipefail enabled. Returns exit_code, stdout and stderr; oversized or line-heavy output is archived with a readable path and a preview, including notable errors when available. For validation, prefer the unfiltered command and its exit_code: piping test output to tail/grep can hide the named passing test even when exit_code is 0. Pipelines ending in head may report SIGPIPE (141) despite useful output. Combine independent inspections when useful; do not repeat successful checks without a change or missing evidence."
+            "Run a Bash command in the project working directory with pipefail enabled. Discard output with /dev/null, never nul. Returns exit_code, stdout and stderr; oversized or line-heavy output is archived with a readable path and a preview, including notable errors when available. For validation, prefer the unfiltered command and its exit_code: piping test output to tail/grep can hide the named passing test even when exit_code is 0. Pipelines ending in head may report SIGPIPE (141) despite useful output. Combine independent inspections when useful; do not repeat successful checks without a change or missing evidence."
         }
         Dialect::PosixSh => {
             "Execute a POSIX sh command in the project working directory. Returns exit_code, stdout and stderr. Avoid Bash-specific syntax. Keep checks relevant and verify required tests."
@@ -1347,6 +1355,28 @@ mod tests {
         let written = dir.join("workdir-probe.txt");
         assert!(written.exists(), "shell did not start in {}", dir.display());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_bash_nul_redirect_in_spaced_workdir_does_not_create_a_file() {
+        if resolve_shell().dialect != Dialect::Bash {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kroma shell spaced {}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let output = execute("echo hi 2>NUL", &dir).await.unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stdout.contains("hi"));
+        assert!(!fs::read_dir(&dir).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("nul")));
+        let quoted = execute("echo \"2>nul\"", &dir).await.unwrap();
+        assert_eq!(quoted.exit_code, Some(0));
+        assert!(quoted.stdout.contains("2>nul"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(windows)]

@@ -1,0 +1,16 @@
+◆ Kroma  untitled session        ✓ Ready
+                                        
+  ▎  Preserve Unicode and indentation. │
+  ▎                                    │
+                                       ┃
+  ◆  Updated the implementation.       ┃
+                                       ┃
+     • Preserved input and links       ┃
+     • Verified Unicode selection      ┃
+                                       ┃
+   ✓  Completed · 35.3s                ┃
+                                       ┃
+╭──────────────────────────────────────╮
+│ › Ask anything, or describe a coding │
+╰──────────────────────────────────────╯
+  test-model │ Think high │ Context —   

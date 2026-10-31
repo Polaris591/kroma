@@ -1,0 +1,24 @@
+ ◆ Kroma  untitled session                                     project  ✓ Ready 
+                                                                                
+   ▎                                                                            
+   ▎  Review the change. 请 检 查 代 码 。                                            
+   ▎  Preserve Unicode and indentation.                                         
+   ▎                                                                            
+                                                                                
+   ◆  Updated the implementation.                                               
+                                                                                
+    ╭ Commands · ↑↓ select · Tab complete · Esc close ─────────────────────╮    
+    │ › /                                                                  │    
+    │ › /clear  — Clear the current conversation                           │    
+    │   /commands  — Search all slash commands                             │    
+    │   /continue  — Resume the latest conversation                        │    
+    │   /diff  — Show workspace changes                                    │    
+    │   /editor  — Edit draft in external editor                           │    
+    │   /exit  — Exit Kroma                                                │    
+    │   /export <path>  — Export conversation to a file                    │    
+    │   /fork <checkpoint>  — Branch from a checkpoint                     │    
+    ╰──────────────────────────────────────────────────────────────────────╯    
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ › Ask anything, or describe a coding task…                                 │ 
+ ╰────────────────────────────────────────── Enter send · Shift+Enter newline ╯ 
+   test-model │ Think high │ Context —                                          

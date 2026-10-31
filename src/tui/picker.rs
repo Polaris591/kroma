@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -258,8 +258,10 @@ impl Picker {
                         language.text("Tab: switch · Esc: close", "Tab 切换 · Esc 关闭")
                     )
                 })
-                .border_style(Style::default().fg(theme.accent))
-                .style(Style::default().bg(theme.input_surface())),
+                .title_style(Style::default().fg(theme.accent_text))
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.border))
+                .style(Style::default().bg(theme.overlay)),
             area,
         );
         let inner = Rect::new(
@@ -305,20 +307,34 @@ impl Picker {
                     } else {
                         item.label.clone()
                     };
-                    let label = clip_cells(&format!("{name}  — {}", item.hint), max_label);
+                    let name = clip_cells(&name, max_label);
+                    let hint = clip_cells(
+                        &item.hint,
+                        max_label.saturating_sub(UnicodeWidthStr::width(name.as_str()) + 4),
+                    );
+                    let background = if active {
+                        Theme::blend(theme.accent, theme.overlay, 0.35)
+                    } else {
+                        theme.overlay
+                    };
+                    let weight = if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    };
                     Line::from(vec![
-                        Span::styled(marker, Style::default().fg(theme.accent)),
+                        Span::styled(marker, Style::default().fg(theme.accent_text)),
+                        Span::styled(name, Style::default().fg(theme.text).add_modifier(weight)),
                         Span::styled(
-                            label,
-                            Style::default()
-                                .fg(if active { theme.accent } else { theme.text })
-                                .add_modifier(if active {
-                                    Modifier::BOLD
-                                } else {
-                                    Modifier::empty()
-                                }),
+                            if hint.is_empty() {
+                                String::new()
+                            } else {
+                                format!("  — {hint}")
+                            },
+                            Style::default().fg(theme.muted),
                         ),
                     ])
+                    .style(Style::default().bg(background))
                 })
                 .collect()
         };

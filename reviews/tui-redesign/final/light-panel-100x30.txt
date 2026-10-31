@@ -1,0 +1,30 @@
+  ◆ Kroma  untitled session                                                       project  ✓ Ready  
+                                                                                                    
+ ╭ Review · ↑↓/PgUp/PgDn · Esc Close ─────────────────────────────────────────────────────────────╮ 
+ │A scrollable plugin panel.                                                                      │ 
+ │The draft stays editable after closing.                                                         │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+  ╰──────────────────────────────────────────────────────────── Enter send · Shift+Enter newline ╯  
+    test-model │ Think high │ Context —                                                             

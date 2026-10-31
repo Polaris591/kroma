@@ -1,0 +1,40 @@
+  ◆ Kroma  untitled session                                                                                                                   project  ✓ Ready  
+                                                                                                                                                                
+    ▎                                                                                                                                                           
+    ▎  Review the change. 请 检 查 代 码 。                                                                                                                           
+    ▎  Preserve Unicode and indentation.                                                                                                                        
+    ▎                                                                                                                                                           
+                                                                                                                                                                
+    ◆                                                                                                                                          rust · ⧉ Copy    
+       │ // preserve source text                                                                                                                                
+       │ fn greet(name: &str) {                                                                                                                                 
+       │     println!("Hello {name}");                                                                                                                          
+       │     let count: usize = 42;                                                                                                                             
+       │ }                                                                                                                                                      
+                                                                                                                                                                
+     ✓  Completed · 35.3s                                                                                                                                       
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮  
+  │ › Ask anything, or describe a coding task…                                                                                                               │  
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Enter send · Shift+Enter newline ╯  
+    test-model │ Think high │ Context —                                                                                                      Ctrl+P Commands    
