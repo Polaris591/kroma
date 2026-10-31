@@ -520,6 +520,42 @@ fn ellipsize_cells(value: &str, width: usize) -> String {
     output
 }
 
+/// Keep the meaningful tail of a long path in the header. Truncating from
+/// the right would leave only the drive/root and hide the project name.
+fn ellipsize_path_left(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+    let mut tail = Vec::new();
+    let mut used = 1; // reserve one cell for the leading ellipsis
+    for ch in value.chars().rev() {
+        let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cells > width {
+            break;
+        }
+        tail.push(ch);
+        used += cells;
+    }
+    let mut output = String::from("…");
+    output.extend(tail.into_iter().rev());
+    output
+}
+
+/// Windows canonicalization returns a verbatim `\\?\` path. That prefix is
+/// useful to the filesystem but meaningless and noisy in a status header.
+fn strip_verbatim_path(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
 fn compact_line(value: &str, width: usize) -> String {
     ellipsize_cells(
         &value.split_whitespace().collect::<Vec<_>>().join(" "),
@@ -1357,6 +1393,40 @@ impl UiState {
         self.context_estimated = true;
     }
 
+    /// The window/tab title follows the visible session label without writing
+    /// a terminal escape sequence on every animation frame.
+    pub fn terminal_title(&self) -> String {
+        let label = self
+            .session_label()
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(80)
+            .collect::<String>();
+        if label.is_empty() {
+            "Kroma".into()
+        } else {
+            format!("Kroma — {label}")
+        }
+    }
+
+    fn workdir_label(&self) -> String {
+        let display = strip_verbatim_path(&self.link_workdir.display().to_string());
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .map(|path| strip_verbatim_path(&path.display().to_string()));
+        if let Some(home) = home {
+            let separator = std::path::MAIN_SEPARATOR;
+            if display == home {
+                return "~".into();
+            }
+            if let Some(rest) = display.strip_prefix(&format!("{home}{separator}")) {
+                return format!("~{separator}{rest}");
+            }
+        }
+        display
+    }
+
     pub fn context_display(&self) -> String {
         use crate::usage::compact_tokens;
         let window = self.context_window as u64;
@@ -1373,7 +1443,9 @@ impl UiState {
                     compact_tokens(window)
                 )
             }
-            None => format!("Ctx — / {}", compact_tokens(window)),
+            // A fresh conversation has measured no request yet. Show a real
+            // zero against the configured window instead of an ambiguous dash.
+            None => format!("Ctx 0 / {}", compact_tokens(window)),
         }
     }
 
@@ -1396,6 +1468,9 @@ impl UiState {
                     "Ctx {}{percent}%",
                     if self.context_estimated { "~" } else { "" }
                 )
+            }
+            (None, window) if window > 0 => {
+                format!("Ctx 0 / {}", crate::usage::compact_tokens(window as u64))
             }
             _ => "Ctx —".into(),
         }
@@ -2891,6 +2966,27 @@ impl UiState {
             ])),
             Rect::new(header_line.x, header_line.y, header_line.width, 1),
         );
+        // Keep the project directory visible on every screen, not only in
+        // the configuration page. Long paths retain their useful tail.
+        if header_rows >= 2 {
+            let prefix = format!("  {}  ", self.preferences.language.text("cwd", "目录"));
+            let path_width = header_line
+                .width
+                .saturating_sub(UnicodeWidthStr::width(prefix.as_str()) as u16);
+            let path = ellipsize_path_left(&self.workdir_label(), path_width as usize);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(colors.muted)),
+                    Span::styled(path, Style::default().fg(colors.muted)),
+                ])),
+                Rect::new(
+                    header_line.x,
+                    header_line.y.saturating_add(1),
+                    header_line.width,
+                    1,
+                ),
+            );
+        }
         let history_slot = Rect::new(
             layout[1].x.saturating_add(1),
             layout[1].y,
@@ -3706,6 +3802,15 @@ mod tests {
     }
 
     #[test]
+    fn verbatim_windows_paths_are_readable_in_the_header() {
+        assert_eq!(strip_verbatim_path(r"\\?\D:\Kroma"), r"D:\Kroma");
+        assert_eq!(
+            strip_verbatim_path(r"\\?\UNC\server\share\project"),
+            r"\\server\share\project"
+        );
+    }
+
+    #[test]
     fn header_separation_and_role_body_columns_are_consistent() {
         let history = vec![
             Message::new("user", "example user line"),
@@ -3719,8 +3824,8 @@ mod tests {
         );
         let rows = rendered_text(&mut ui, 110, 30);
         assert!(
-            rows[1].trim().is_empty(),
-            "title needs an independent blank row"
+            rows[1].contains("cwd"),
+            "the workdir row must remain visible between title and history"
         );
         assert_eq!(ui.selection_area.y, 2);
         let user_role = rows.iter().position(|row| row.contains("You")).unwrap();
@@ -4263,7 +4368,8 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("K R O M A"));
-        assert!(text.contains("/resume for history"));
+        assert!(text.contains("Shift+Enter newline"));
+        assert!(text.contains("/resume history"));
         assert!(!text.contains("Previous conversation"));
         assert!(contents
             .iter()
@@ -4281,8 +4387,59 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(!text.contains("/resume for history"));
+        assert!(!text.contains("/resume history"));
         assert!(text.contains("Fix the tests"));
+    }
+
+    #[test]
+    fn home_header_shows_workdir_title_and_zero_context() {
+        let mut state = UiState::new(
+            "deepseek-v4.1-flash".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        state.set_link_workdir(Path::new("workspace-demo"));
+        state.configure_status(500_000, Some("high".into()));
+        state.enter_home();
+        assert_eq!(state.terminal_title(), "Kroma — new conversation");
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("cwd  workspace-demo"));
+        assert!(text.contains("Context 0 / 500k"));
+        assert!(text.contains("Enter send"));
+        state.add_user("Fix the tests");
+        assert_eq!(state.terminal_title(), "Kroma — default");
+    }
+
+    #[test]
+    fn welcome_hints_shrink_before_the_work_area_does() {
+        let mut state = UiState::new(
+            "deepseek".into(),
+            "default".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        state.enter_home();
+        let mut terminal = Terminal::new(TestBackend::new(30, 16)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("K R O M A"));
+        assert!(text.contains("Enter · /help · /resume"));
+        assert!(!text.contains("Shift+Enter newline"));
     }
 
     #[test]
@@ -5948,7 +6105,7 @@ mod tests {
         let mut state = UiState::new("mock".into(), "default".into(), theme, &[]);
         assert_eq!(state.context_display(), "Ctx —");
         state.configure_status(500_000, Some("high".into()));
-        assert_eq!(state.context_display(), "Ctx — / 500k");
+        assert_eq!(state.context_display(), "Ctx 0 / 500k");
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = UiSink(tx);
@@ -5989,11 +6146,11 @@ mod tests {
         state.event(UiEvent::ActualInput(150_000));
         assert_eq!(state.context_display(), "Ctx 150k / 500k · 30%");
         state.reset_context();
-        assert_eq!(state.context_display(), "Ctx — / 500k");
+        assert_eq!(state.context_display(), "Ctx 0 / 500k");
 
         // A model/session switch updates the total window without inventing usage.
         state.configure_status(200_000, None);
-        assert_eq!(state.context_display(), "Ctx — / 200k");
+        assert_eq!(state.context_display(), "Ctx 0 / 200k");
         sink.on_event(RuntimeEvent::ContextPrepared {
             messages: 2,
             estimated_input_tokens: 50_000,
@@ -6112,10 +6269,11 @@ mod tests {
         ui.picker = None;
         ui.enter_home();
         let output = rendered_rows(&mut ui, 100, 30).join("\n");
-        assert!(output.contains("开始新会话"));
+        assert!(output.contains("Enter发送"));
+        assert!(output.contains("/resume历史"));
         ui.apply_preferences(super::super::preferences::Preferences::default());
         let output = rendered_rows(&mut ui, 100, 30).join("\n");
-        assert!(output.contains("Startaconversation"));
+        assert!(output.contains("Entersend"));
     }
 
     #[test]

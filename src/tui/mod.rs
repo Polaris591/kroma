@@ -30,7 +30,9 @@ use crossterm::{
         Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    },
 };
 use editor::EditAction;
 use futures_util::StreamExt;
@@ -43,6 +45,7 @@ use view::{UiEvent, UiSink, UiState};
 
 struct TerminalScreen {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    title: String,
 }
 
 impl TerminalScreen {
@@ -51,6 +54,7 @@ impl TerminalScreen {
         if let Err(error) = execute!(
             io::stdout(),
             EnterAlternateScreen,
+            SetTitle("Kroma"),
             EnableBracketedPaste,
             EnableMouseCapture
         ) {
@@ -58,7 +62,10 @@ impl TerminalScreen {
             return Err(error.into());
         }
         match Terminal::new(CrosstermBackend::new(io::stdout())) {
-            Ok(terminal) => Ok(Self { terminal }),
+            Ok(terminal) => Ok(Self {
+                terminal,
+                title: "Kroma".into(),
+            }),
             Err(error) => {
                 let _ = disable_raw_mode();
                 let _ = execute!(
@@ -73,6 +80,14 @@ impl TerminalScreen {
     }
 
     fn draw(&mut self, state: &mut UiState) -> Result<()> {
+        // Update the terminal tab/window title only when the visible session
+        // changes. Re-emitting OSC 0 on every animation tick would spam the
+        // host terminal and can make some multiplexers repaint constantly.
+        let title = state.terminal_title();
+        if self.title != title {
+            execute!(io::stdout(), SetTitle(title.as_str()))?;
+            self.title = title;
+        }
         self.terminal.draw(|frame| state.draw(frame))?;
         Ok(())
     }
@@ -133,7 +148,8 @@ impl Drop for TerminalScreen {
             io::stdout(),
             DisableMouseCapture,
             DisableBracketedPaste,
-            LeaveAlternateScreen
+            LeaveAlternateScreen,
+            SetTitle("Kroma")
         );
     }
 }
