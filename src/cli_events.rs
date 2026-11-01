@@ -10,6 +10,7 @@ impl EventSink for JsonEvents {
     fn on_event(&self, event: RuntimeEvent<'_>) {
         let value = match event {
             RuntimeEvent::TaskStarted => json!({"type":"task_started"}),
+            RuntimeEvent::CompactionStarted => json!({"type":"compaction_started"}),
             RuntimeEvent::ContextPrepared {
                 estimated_input_tokens,
                 available_input_tokens,
@@ -34,6 +35,13 @@ impl EventSink for JsonEvents {
                     "output":output_tokens,"cached":cached_tokens,"reasoning_tokens":reasoning_tokens})
             }
             RuntimeEvent::ModelFailed => json!({"type":"model_failed"}),
+            RuntimeEvent::FailedRequestUsage {
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                reasoning_tokens,
+            } => json!({"type":"failed_request_usage", "input":input_tokens,
+                "output":output_tokens,"cached":cached_tokens,"reasoning_tokens":reasoning_tokens}),
             RuntimeEvent::CompactionUsage {
                 requests,
                 input_tokens,

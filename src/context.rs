@@ -85,7 +85,19 @@ Rules:
 pub use crate::context_state::{CompactionState, SummarySegment};
 pub use crate::ports::ContextCommit;
 
+/// Result of an explicit checkpoint. Counts are conservative estimates of
+/// the provider projection, not tokenizer measurements or billed usage.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionReport {
+    pub compacted: bool,
+    pub before_tokens: usize,
+    pub after_tokens: usize,
+    pub projected_messages: usize,
+}
+
 pub trait ContextPolicy: Send {
+    /// Optional transient progress notifications; never persisted in the WAL.
+    fn set_event_sink(&mut self, _events: Option<Arc<dyn crate::events::EventSink>>) {}
     fn state(&self) -> PersistedContext;
     fn abort(&mut self) {}
     /// Discard per-task transient state after an ordinary task failure.
@@ -127,6 +139,17 @@ pub trait ContextPolicy: Send {
         _store: &'a dyn ContextCommit,
     ) -> StreamFuture<'a, bool> {
         Box::pin(async { Ok(false) })
+    }
+    /// Explicit user request, independent of the automatic watermark.
+    /// External policies must opt in rather than silently doing nothing.
+    fn compact<'a>(
+        &'a mut self,
+        _messages: &'a [Message],
+        _model: &'a Arc<dyn ModelBackend>,
+        _store: &'a dyn ContextCommit,
+        _extra_tokens: usize,
+    ) -> StreamFuture<'a, CompactionReport> {
+        Box::pin(async { bail!("the active context policy does not support /compact") })
     }
     fn prepare<'a>(
         &'a mut self,
@@ -427,6 +450,8 @@ pub struct Compression {
     current_raw_system: Option<Message>,
     measured: Option<MeasuredRequest>,
     usage: CompactionUsage,
+    events: Option<Arc<dyn crate::events::EventSink>>,
+    checkpoint_timeout: std::time::Duration,
 }
 
 impl Compression {
@@ -466,6 +491,8 @@ impl Compression {
             current_raw_system: None,
             measured: None,
             usage: CompactionUsage::default(),
+            events: None,
+            checkpoint_timeout: std::time::Duration::from_secs(120),
         }
     }
 
@@ -816,6 +843,37 @@ impl Compression {
             if state.cleared_tools.contains(&index) {
                 item.content = Some(self.tool_preview(msg, index));
             }
+            // Anthropic signed thinking binds to the exact preceding wire
+            // prefix. A checkpoint or TRC edit invalidates signatures from
+            // earlier revisions without changing the durable raw transcript.
+            if item.role == "assistant" && state.revision > 0 {
+                if let Some(parts) = &mut item.provider_items {
+                    let signed_revision = parts
+                        .iter()
+                        .find(|part| part["type"] == "kroma_context_revision")
+                        .and_then(|part| part["revision"].as_u64());
+                    if signed_revision != Some(state.revision) {
+                        for part in parts.iter_mut() {
+                            if part["type"] == "kroma_anthropic_content_blocks" {
+                                if let Some(blocks) = part["blocks"].as_array_mut() {
+                                    blocks.retain(|block| {
+                                        !matches!(
+                                            block["type"].as_str(),
+                                            Some("thinking" | "redacted_thinking")
+                                        )
+                                    });
+                                }
+                            }
+                        }
+                        parts.retain(|part| {
+                            !matches!(
+                                part["type"].as_str(),
+                                Some("thinking" | "redacted_thinking")
+                            )
+                        });
+                    }
+                }
+            }
             view.push(item);
         }
         view
@@ -1001,15 +1059,31 @@ impl Compression {
             source_tokens,
             output_tokens
         );
-        let result = match model
-            .generate_checkpoint(
+        if let Some(events) = &self.events {
+            events.on_event(crate::events::RuntimeEvent::CompactionStarted);
+        }
+        // Bound the entire checkpoint, including provider retries. Otherwise
+        // repeated 120s timeouts/truncations can stall a foreground task for
+        // many minutes with no model deltas. Dropping generation is safe:
+        // context is committed only after a complete, validated summary.
+        let result = tokio::time::timeout(
+            self.checkpoint_timeout,
+            model.generate_checkpoint(
                 &source,
                 &self.request_tools,
                 CHECKPOINT_PROMPT,
                 output_tokens,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "context checkpoint exceeded {} seconds; original history preserved",
+                self.checkpoint_timeout.as_secs()
             )
-            .await
-        {
+        })
+        .and_then(|result| result);
+        let result = match result {
             Ok(result) => result,
             Err(error) => {
                 self.failed_this_turn = true;
@@ -1093,7 +1167,13 @@ impl Compression {
         model.project_for_budget(&mut planning_view);
         let mut watermark = self.watermark(messages, &planning_view, extra_tokens);
 
-        if watermark >= self.budget.soft && !self.failed_this_turn {
+        // The final request uses a conservative JSON estimate. Do not let a
+        // cheaper provider-measured watermark suppress a necessary checkpoint
+        // when that final admission check would reject the same projection.
+        let conservative = self.tokens(&planning_view);
+        if (watermark >= self.budget.soft || conservative >= self.budget.hard)
+            && !self.failed_this_turn
+        {
             match self.compact_once(messages, model, store).await {
                 Ok(true) => {
                     // A checkpoint was committed. Re-plan once and never run
@@ -1169,6 +1249,41 @@ impl Compression {
 }
 
 impl ContextPolicy for Compression {
+    fn compact<'a>(
+        &'a mut self,
+        messages: &'a [Message],
+        model: &'a Arc<dyn ModelBackend>,
+        store: &'a dyn ContextCommit,
+        extra_tokens: usize,
+    ) -> StreamFuture<'a, CompactionReport> {
+        Box::pin(async move {
+            self.request_extra_tokens = extra_tokens;
+            self.current_raw_system = messages.first().cloned();
+            // A deliberate /compact may retry a previously failed automatic
+            // checkpoint, but keeps the same completed-turn boundaries and
+            // recent-history retention. Never mark new evidence consumed.
+            self.failed_this_turn = false;
+            let mut before = self.view(messages);
+            crate::attachments::project_history(&mut before, model.accepts_images());
+            model.project_for_budget(&mut before);
+            let before_tokens = self.tokens(&before);
+            let compacted = self.compact_once(messages, model, store).await?;
+            let mut after = self.view(messages);
+            crate::attachments::project_history(&mut after, model.accepts_images());
+            model.project_for_budget(&mut after);
+            Ok(CompactionReport {
+                compacted,
+                before_tokens,
+                after_tokens: self.tokens(&after),
+                projected_messages: after.len(),
+            })
+        })
+    }
+
+    fn set_event_sink(&mut self, events: Option<Arc<dyn crate::events::EventSink>>) {
+        self.events = events;
+    }
+
     fn recover_overflow<'a>(
         &'a mut self,
         messages: &'a [Message],
@@ -1453,6 +1568,7 @@ mod tests {
     struct TestModel {
         responses: Mutex<VecDeque<Result<String, String>>>,
         calls: Mutex<Vec<CheckpointCall>>,
+        delay: Duration,
     }
 
     impl TestModel {
@@ -1460,6 +1576,7 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 calls: Mutex::new(Vec::new()),
+                delay: Duration::ZERO,
             }
         }
 
@@ -1501,6 +1618,9 @@ mod tests {
                     instruction: instruction.to_owned(),
                     output_tokens,
                 });
+                if !self.delay.is_zero() {
+                    tokio::time::sleep(self.delay).await;
+                }
                 let response = self
                     .responses
                     .lock()
@@ -1709,6 +1829,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compacted_prefix_invalidates_old_signed_thinking_without_rewriting_raw_history() {
+        let mut message = Message::new("assistant", "text");
+        message.provider_items = Some(vec![
+            json!({"type":"kroma_anthropic_content_blocks","blocks":[
+                {"type":"thinking","thinking":"private","signature":"sig"},
+                {"type":"text","text":"text"}]}),
+            json!({"type":"thinking","thinking":"private","signature":"sig"}),
+            json!({"type":"kroma_context_revision","revision":0}),
+        ]);
+        let raw = vec![Message::new("system", "system"), message];
+        let state = CompactionState {
+            revision: 1,
+            ..CompactionState::default()
+        };
+        let context = Compression::new(state, budget(), Path::new("/tmp/test.json"));
+        let view = context.view(&raw);
+        assert_eq!(
+            view[1].provider_items.as_ref().unwrap()[0]["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            view[1].provider_items.as_ref().unwrap()[0]["blocks"][0]["type"],
+            "text"
+        );
+        assert_eq!(
+            raw[1].provider_items.as_ref().unwrap()[0]["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[tokio::test]
     async fn below_soft_limit_never_requests_a_summary() {
         let model = Arc::new(TestModel::new([]));
@@ -1765,6 +1922,56 @@ mod tests {
             "the prompt/tool allowance must count toward the trigger"
         );
         assert_eq!(commit.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_timeout_preserves_history_and_does_not_retry_this_turn() {
+        struct Progress(Mutex<usize>);
+        impl crate::events::EventSink for Progress {
+            fn on_event(&self, event: crate::events::RuntimeEvent<'_>) {
+                if matches!(event, crate::events::RuntimeEvent::CompactionStarted) {
+                    *self.0.lock().unwrap() += 1;
+                }
+            }
+        }
+        let mut slow = TestModel::new([]);
+        slow.delay = Duration::from_secs(60);
+        let model = Arc::new(slow);
+        let backend = model.clone() as Arc<dyn ModelBackend>;
+        let messages = grow_history(budget().soft_limit() + 100, 900);
+        let original = serde_json::to_vec(&messages).unwrap();
+        let mut context = compression();
+        context.checkpoint_timeout = Duration::from_millis(10);
+        context.mark_consumed(messages.len());
+        let progress = Arc::new(Progress(Mutex::new(0)));
+        context.set_event_sink(Some(progress.clone()));
+        let commit = RecordingCommit::default();
+
+        // The outer deadline also proves the generation future was dropped,
+        // rather than waiting for the mock's 60 second response.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let error = context
+                .compact_once(&messages, &backend, &commit)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("original history preserved"));
+            assert!(context.failed_this_turn);
+            assert!(!context
+                .recover_provider_overflow(&messages, &backend, &commit)
+                .await
+                .unwrap());
+            // Below the hard limit, continue with original history instead
+            // of waiting on the same failing checkpoint on every tool round.
+            context.prepare(&messages, &backend, &commit).await.unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(model.calls().len(), 1);
+        assert_eq!(*progress.0.lock().unwrap(), 1);
+        assert_eq!(commit.count(), 0);
+        assert_eq!(context.state.covered_until, 1);
+        assert!(context.state.summaries.is_empty());
+        assert_eq!(serde_json::to_vec(&messages).unwrap(), original);
     }
 
     #[tokio::test]
@@ -1978,6 +2185,33 @@ mod tests {
         assert_eq!(model.calls().len(), 1);
         assert_eq!(commit.count(), 1);
         assert_eq!(context.state.covered_until, 3);
+    }
+
+    #[tokio::test]
+    async fn conservative_hard_limit_triggers_checkpoint_despite_low_measured_watermark() {
+        let model = Arc::new(TestModel::new([Ok(GOOD_CHECKPOINT.to_owned())]));
+        let backend: Arc<dyn ModelBackend> = model.clone();
+        let messages = grow_history(budget().hard_limit() + 400, 700);
+        let mut context = compression();
+        context.mark_consumed(messages.len());
+        context.set_request_context(&backend, &[]);
+        context.current_raw_system = Some(messages[0].clone());
+        let view = context.view(&messages);
+        assert!(context.tokens(&view) >= budget().hard_limit());
+        context.observe_with_bytes(
+            &view,
+            Some(serde_json::to_vec(&view).unwrap().len()),
+            Some((budget().soft_limit() / 2) as u64),
+            None,
+        );
+        let commit = RecordingCommit::default();
+        context.prepare(&messages, &backend, &commit).await.unwrap();
+        assert_eq!(
+            model.calls().len(),
+            1,
+            "a measurable prefix must not suppress a needed checkpoint"
+        );
+        assert_eq!(commit.count(), 1);
     }
 
     #[tokio::test]

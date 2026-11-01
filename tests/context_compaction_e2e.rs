@@ -52,6 +52,7 @@ struct ScriptedModel {
     completions: AtomicUsize,
     checkpoints: AtomicUsize,
     fail_checkpoints: bool,
+    checkpoint_delay: Duration,
     seen: Mutex<Vec<Vec<Message>>>,
 }
 
@@ -61,6 +62,7 @@ impl ScriptedModel {
             completions: AtomicUsize::new(0),
             checkpoints: AtomicUsize::new(0),
             fail_checkpoints: false,
+            checkpoint_delay: Duration::ZERO,
             seen: Mutex::new(Vec::new()),
         }
     }
@@ -130,6 +132,9 @@ impl ModelBackend for ScriptedModel {
     ) -> ModelFuture<'a, TextResult> {
         Box::pin(async move {
             self.checkpoints.fetch_add(1, Ordering::SeqCst);
+            if !self.checkpoint_delay.is_zero() {
+                tokio::time::sleep(self.checkpoint_delay).await;
+            }
             if self.fail_checkpoints {
                 anyhow::bail!("checkpoint provider unavailable");
             }
@@ -163,6 +168,160 @@ fn remove_session(dir: &Path) {
         let _ = std::fs::remove_file(format!("{}.lock", snapshot.display()));
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+fn manual_agent(model: Arc<ScriptedModel>, dir: &Path) -> Result<Agent> {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(HugeOutput { bytes: 48_000 }))?;
+    Agent::with_runtime_budget(
+        model,
+        tools,
+        Arc::new(BuiltinContextFactory),
+        PromptComposer::default(),
+        None,
+        dir.to_path_buf(),
+        ContextConfig::with_output_reserve(500_000, 4_096)?,
+    )
+}
+
+async fn completed_manual_history(agent: &mut Agent) -> Result<()> {
+    agent
+        .run(
+            &format!("ORIGINAL_TASK {}", "context ".repeat(6_000)),
+            &mut |_| {},
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_command_bypasses_threshold_preserves_history_and_survives_restart() -> Result<()> {
+    let dir = isolated_dir()?;
+    let model = Arc::new(ScriptedModel::new());
+    let mut agent = manual_agent(model.clone(), &dir)?;
+    let commands = kroma::commands::CommandRegistry::builtin(Vec::new())?;
+    let input = agent.task_input();
+
+    let no_op = commands
+        .execute_async("/compact", &mut agent, &input)
+        .await?
+        .unwrap();
+    assert!(no_op.output.contains("Nothing to compact"));
+    assert!(commands
+        .execute_async("/compact unexpected", &mut agent, &input)
+        .await
+        .is_err());
+    assert_eq!(model.checkpoints.load(Ordering::SeqCst), 0);
+
+    completed_manual_history(&mut agent).await?;
+    let original = serde_json::to_vec(agent.messages())?;
+    assert_eq!(
+        model.checkpoints.load(Ordering::SeqCst),
+        0,
+        "history is below automatic threshold"
+    );
+    let reply = commands
+        .execute_async("/compact", &mut agent, &input)
+        .await?
+        .unwrap();
+    assert!(reply.output.contains("Context compacted:"));
+    assert!(reply.output.contains("estimated"));
+    let counts = reply
+        .output
+        .split_whitespace()
+        .filter_map(|word| word.trim_start_matches('~').parse::<usize>().ok())
+        .collect::<Vec<_>>();
+    assert_eq!(counts.len(), 2);
+    assert!(counts[0] < 450_000);
+    assert!(counts[1] < counts[0]);
+    assert_eq!(model.checkpoints.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        model.completions.load(Ordering::SeqCst),
+        2,
+        "manual compact must not run the coding model or tools"
+    );
+    assert_eq!(
+        serde_json::to_vec(agent.messages())?,
+        original,
+        "no /compact user turn or raw history edits"
+    );
+    let path = agent.archive_path().to_path_buf();
+    let snapshot: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    assert_eq!(
+        snapshot["compression"]["summaries"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    drop(agent);
+
+    let mut resumed = manual_agent(model.clone(), &dir)?;
+    assert_eq!(serde_json::to_vec(resumed.messages())?, original);
+    resumed
+        .run("continue after manual checkpoint", &mut |_| {})
+        .await?;
+    assert_eq!(
+        model.checkpoints.load(Ordering::SeqCst),
+        1,
+        "restart must reuse saved checkpoint"
+    );
+    assert!(model.seen.lock().unwrap().last().unwrap().iter().any(|m| m
+        .content
+        .as_deref()
+        .is_some_and(|s| s.contains("Compacted conversation checkpoint"))));
+    drop(resumed);
+    remove_session(&dir);
+    Ok(())
+}
+
+#[tokio::test]
+async fn manual_compact_failure_preserves_raw_history_and_context() -> Result<()> {
+    let dir = isolated_dir()?;
+    let model = Arc::new(ScriptedModel::with_checkpoint_failure());
+    let mut agent = manual_agent(model.clone(), &dir)?;
+    completed_manual_history(&mut agent).await?;
+    let original = serde_json::to_vec(agent.messages())?;
+    let error = agent.compact().await.unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("checkpoint provider unavailable"));
+    assert_eq!(serde_json::to_vec(agent.messages())?, original);
+    drop(agent);
+    let resumed = manual_agent(model.clone(), &dir)?;
+    assert_eq!(serde_json::to_vec(resumed.messages())?, original);
+    let wal = std::fs::read_to_string(format!("{}.wal", resumed.archive_path().display()))?;
+    assert!(!wal.contains("Compacted conversation checkpoint"));
+    assert_eq!(model.checkpoints.load(Ordering::SeqCst), 1);
+    drop(resumed);
+    remove_session(&dir);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_manual_compact_leaves_session_usable_without_replaying_tools() -> Result<()> {
+    let dir = isolated_dir()?;
+    let model = Arc::new(ScriptedModel {
+        checkpoint_delay: Duration::from_secs(60),
+        ..ScriptedModel::new()
+    });
+    let mut agent = manual_agent(model.clone(), &dir)?;
+    completed_manual_history(&mut agent).await?;
+    let original = serde_json::to_vec(agent.messages())?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), agent.compact())
+            .await
+            .is_err()
+    );
+    assert_eq!(model.checkpoints.load(Ordering::SeqCst), 1);
+    assert_eq!(serde_json::to_vec(agent.messages())?, original);
+    agent
+        .run("continue after cancellation", &mut |_| {})
+        .await?;
+    assert_eq!(model.completions.load(Ordering::SeqCst), 3);
+    assert_eq!(model.checkpoints.load(Ordering::SeqCst), 1);
+    drop(agent);
+    remove_session(&dir);
+    Ok(())
 }
 
 #[tokio::test]

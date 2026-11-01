@@ -79,26 +79,52 @@ pub(super) fn payload_with_cache_at(
                     msg.provider_items.as_deref().unwrap_or(&[]),"anthropic",image_cache)?}),
             ),
             "assistant" => {
-                let mut blocks = msg
+                let replay = super::replay_opaque_reasoning(msg, index, active_turn, origin);
+                let native = msg
                     .provider_items
-                    .clone()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|v| {
-                        matches!(
-                            v.get("type").and_then(Value::as_str),
-                            Some("thinking" | "redacted_thinking")
-                        ) && super::replay_opaque_reasoning(msg, index, active_turn, origin)
-                    })
-                    .collect::<Vec<_>>();
-                if let Some(text) = msg.content.as_deref().filter(|s| !s.is_empty()) {
-                    blocks.push(json!({"type":"text","text":text}));
-                }
-                for call in msg.tool_calls.as_deref().unwrap_or(&[]) {
-                    let input: Value = serde_json::from_str(&call.function.arguments)
-                        .context("invalid persisted tool arguments for Anthropic")?;
-                    blocks.push(json!({"type":"tool_use","id":call.id,"name":call.function.name,"input":input}));
-                }
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|item| item["type"] == "kroma_anthropic_content_blocks");
+                let blocks = if let Some(native) = native {
+                    // Signed content and tool blocks must retain their exact
+                    // original order, including interleaved thinking blocks.
+                    let mut original = native["blocks"]
+                        .as_array()
+                        .context("invalid saved Anthropic content blocks")?
+                        .clone();
+                    if !replay {
+                        original.retain(|b| {
+                            !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking"))
+                        });
+                    }
+                    original
+                } else {
+                    // Legacy sessions had separate opaque thinking and the
+                    // normalized text/tool projections. Preserve compatibility.
+                    let mut blocks = msg
+                        .provider_items
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|v| {
+                            replay
+                                && matches!(
+                                    v["type"].as_str(),
+                                    Some("thinking" | "redacted_thinking")
+                                )
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(text) = msg.content.as_deref().filter(|s| !s.is_empty()) {
+                        blocks.push(json!({"type":"text","text":text}));
+                    }
+                    for call in msg.tool_calls.as_deref().unwrap_or(&[]) {
+                        let input: Value = serde_json::from_str(&call.function.arguments)
+                            .context("invalid persisted tool arguments for Anthropic")?;
+                        blocks.push(json!({"type":"tool_use","id":call.id,"name":call.function.name,"input":input}));
+                    }
+                    blocks
+                };
                 if !blocks.is_empty() {
                     items.push(json!({"role":"assistant","content":blocks}));
                 }
@@ -362,6 +388,21 @@ impl Stream {
         Ok(())
     }
 
+    pub(super) fn reported_usage(&self) -> Option<Usage> {
+        let input = self.input.total();
+        let output = self.output;
+        if input.is_none() && output.is_none() {
+            return None;
+        }
+        Some(Usage {
+            input,
+            output,
+            total: input.and_then(|i| output.and_then(|o| i.checked_add(o))),
+            cached: self.input.read,
+            reasoning: None,
+        })
+    }
+
     pub fn finish(self) -> Result<(Message, Option<Usage>)> {
         match self.finish_reason.as_deref() {
             Some("end_turn" | "tool_use" | "stop_sequence") => {}
@@ -376,10 +417,14 @@ impl Stream {
         let mut reasoning = String::new();
         let mut calls = Vec::new();
         let mut opaque = Vec::new();
+        let mut native_blocks = Vec::new();
         let mut seen = HashSet::new();
         for block in self.blocks.into_values() {
             match block {
-                Block::Text(text) => content.push_str(&text),
+                Block::Text(text) => {
+                    content.push_str(&text);
+                    native_blocks.push(json!({"type":"text","text":text}));
+                }
                 Block::Tool {
                     id,
                     name,
@@ -396,6 +441,8 @@ impl Stream {
                             .context("incomplete Anthropic tool input")?;
                         value.to_string()
                     };
+                    native_blocks.push(json!({"type":"tool_use","id":id,"name":name,
+                        "input":serde_json::from_str::<Value>(&arguments)?}));
                     calls.push(ToolCall {
                         id,
                         kind: "function".into(),
@@ -407,11 +454,20 @@ impl Stream {
                         bail!("Anthropic thinking signature missing");
                     }
                     reasoning.push_str(&text);
-                    opaque.push(json!({"type":"thinking","thinking":text,"signature":signature}));
+                    let block = json!({"type":"thinking","thinking":text,"signature":signature});
+                    native_blocks.push(block.clone());
+                    opaque.push(block);
                 }
-                Block::Redacted(value) => opaque.push(value),
+                Block::Redacted(value) => {
+                    native_blocks.push(value.clone());
+                    opaque.push(value);
+                }
                 Block::Empty => {}
             }
+        }
+        if !opaque.is_empty() {
+            opaque.push(json!({"type":"kroma_anthropic_content_blocks",
+                "blocks":native_blocks}));
         }
         if content.trim().is_empty() && calls.is_empty() {
             bail!("Anthropic returned no text or tool calls");
@@ -633,6 +689,56 @@ mod tests {
         );
         assert_eq!(request["messages"][1]["content"][1]["type"], "tool_use");
         assert_eq!(request["messages"][2]["content"][0]["tool_use_id"], "tool1");
+    }
+
+    #[test]
+    fn signed_thinking_and_tools_preserve_original_interleaved_block_order() {
+        let mut stream = Stream::default();
+        let events = [
+            json!({"type":"message_start","message":{"usage":{"input_tokens":8}}}),
+            json!({"type":"content_block_start","index":0,
+                "content_block":{"type":"thinking","thinking":"first","signature":"sig1"}}),
+            json!({"type":"content_block_start","index":1,
+                "content_block":{"type":"tool_use","id":"a","name":"shell",
+                    "input":{"command":"pwd"}}}),
+            json!({"type":"content_block_start","index":2,
+                "content_block":{"type":"thinking","thinking":"second","signature":"sig2"}}),
+            json!({"type":"content_block_start","index":3,
+                "content_block":{"type":"tool_use","id":"b","name":"shell",
+                    "input":{"command":"ls"}}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},
+                "usage":{"output_tokens":9}}),
+            json!({"type":"message_stop"}),
+        ];
+        for event in events {
+            stream
+                .apply_with_reasoning(&event.to_string(), &mut |_| {}, &mut |_| {})
+                .unwrap();
+        }
+        let (message, _) = stream.finish().unwrap();
+        let request = payload(
+            "claude",
+            &[
+                Message::new("user", "check"),
+                message,
+                Message::tool("a".into(), "ok".into()),
+                Message::tool("b".into(), "ok".into()),
+            ],
+            &[],
+            4096,
+            "auto",
+            &ModelInfo::default(),
+            "origin",
+        )
+        .unwrap();
+        let blocks = request["messages"][1]["content"].as_array().unwrap();
+        let kinds = blocks
+            .iter()
+            .map(|block| block["type"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["thinking", "tool_use", "thinking", "tool_use"]);
+        assert_eq!(blocks[0]["signature"], "sig1");
+        assert_eq!(blocks[2]["signature"], "sig2");
     }
 
     #[test]

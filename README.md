@@ -783,6 +783,19 @@ committed per `prepare()`, and a failed attempt is retried only on a later
 user turn. If one tool result is too large at the hard limit, request-only
 previews point to the complete original on disk.
 
+Use **`/compact`** while idle to request a checkpoint immediately, without
+waiting for the automatic threshold. It takes no arguments, does not add a
+user turn or execute tools, and reports estimated context tokens before and
+after compaction. Completed-turn boundaries and recent-history retention
+still apply; an empty or too-small history returns “Nothing to compact”
+without a model request. The original transcript remains intact. The TUI
+shows compaction progress; **Esc/Ctrl+C** cancels it. The complete checkpoint
+operation, including provider retries, has a **120-second total limit**.
+Failures, timeouts and cancellations before commit leave the existing context
+unchanged. External context policies must explicitly implement manual
+compaction; unsupported policies return an error instead of silently clearing
+context.
+
 For the default policy the limits are:
 
 ```

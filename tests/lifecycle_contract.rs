@@ -251,12 +251,14 @@ impl EventSink for OrderEvents {
                 format!("compaction-usage-{requests}")
             }
             RuntimeEvent::TaskFinished { status } => format!("task-end-{status}"),
-            RuntimeEvent::TextDelta(_)
+            RuntimeEvent::CompactionStarted
+            | RuntimeEvent::TextDelta(_)
             | RuntimeEvent::ReasoningDelta(_)
             | RuntimeEvent::ToolStarted { .. }
             | RuntimeEvent::ToolOutput { .. }
             | RuntimeEvent::ToolFinished { .. }
             | RuntimeEvent::ModelFailed
+            | RuntimeEvent::FailedRequestUsage { .. }
             | RuntimeEvent::SessionCreated { .. }
             | RuntimeEvent::SessionSwitched { .. }
             | RuntimeEvent::SessionCleared { .. }
@@ -291,6 +293,47 @@ async fn compaction_usage_is_settled_before_foreground_task_finished() -> Result
             "compaction-usage-2",
             "task-end-completed",
         ]
+    );
+    drop(agent);
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_task_settles_completed_checkpoint_usage_immediately() -> Result<()> {
+    let dir = isolated_dir("cancelled-checkpoint")?;
+    let events = Arc::new(OrderEvents(Mutex::new(Vec::new())));
+    let (started, ready) = oneshot::channel();
+    let mut agent = Agent::with_runtime_budget(
+        Arc::new(BlockingBackend {
+            started: Mutex::new(Some(started)),
+        }),
+        ToolRegistry::builtin(),
+        Arc::new(UsageFactory),
+        Default::default(),
+        Some(events.clone()),
+        dir.clone(),
+        ContextConfig::with_output_reserve(8192, 1024)?,
+    )?;
+    let mut on_text = |_: &str| {};
+    let mut future = Box::pin(agent.run("cancel after checkpoint", &mut on_text));
+    tokio::select! {
+        result = ready => result?,
+        result = &mut future => panic!("unexpected early completion: {result:?}"),
+    }
+    drop(future);
+    agent.cancel()?;
+    let recorded = events.0.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        [
+            "task-started",
+            "context",
+            "model-start-1",
+            "compaction-usage-2",
+            "task-end-cancelled"
+        ],
+        "completed checkpoint usage must be charged to the cancelled task",
     );
     drop(agent);
     fs::remove_dir_all(dir)?;

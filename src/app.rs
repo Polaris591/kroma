@@ -174,13 +174,15 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
         &config.model,
         config.catalog_model.as_deref(),
     )?;
-    // A configured Chat context is enough to avoid the optional /models call.
-    // Other protocols can also skip it if every discoverable limit and
-    // thinking tier has been specified. Otherwise preserve capability
-    // discovery (including image support) rather than guessing.
-    let has_context = config.context_window.is_some();
-    let configured_fully = config.max_output_tokens.is_some() && !config.thinking_levels.is_empty();
-    let limits = if has_context && (config.api_protocol == "chat" || configured_fully) {
+    // Native protocols need capabilities beyond user-configured token limits
+    // (for example Anthropic thinking types). Never treat configured tiers as
+    // proof that a mode is supported by the endpoint.
+    let configured_native =
+        config.max_output_tokens.is_some() && !config.thinking_levels.is_empty();
+    let limits = if config.context_window.is_some()
+        && (config.api_protocol == "chat"
+            || (config.api_protocol == "responses" && configured_native))
+    {
         crate::runtime_log!("[model] using configured limits; skipping optional metadata lookup");
         None
     } else {
@@ -210,7 +212,7 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
             .thinking_levels_source
             .unwrap_or(FieldSource::Unknown),
     };
-    let resolved = model_catalog::resolve(
+    let mut resolved = model_catalog::resolve(
         &inputs,
         &upstream,
         metadata,
@@ -223,11 +225,27 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
         resolved.catalog_max_output_tokens,
         resolved.catalog_image_input,
     );
-    let budget =
-        ContextConfig::from_limits(resolved.context_window, resolved.effective_turn_output)?;
+    // Responses and Anthropic always send an explicit output limit. Even
+    // when /models has no hard maximum, their default wire value is 4096;
+    // reserve that same amount instead of an unrelated window/8 heuristic.
+    let effective_output = if config.api_protocol == "chat" {
+        resolved.effective_turn_output
+    } else {
+        let actual = model.effective_output_tokens().unwrap_or(4096);
+        resolved.report.effective_turn_output_tokens.value = Some(actual);
+        resolved.report.effective_turn_output_tokens.source = FieldSource::Computed;
+        resolved.report.effective_turn_output_tokens.note =
+            Some("actual native request max_output_tokens/max_tokens".into());
+        if config.max_output_tokens.is_none() {
+            resolved.report.requested_output_tokens.note =
+                Some("provider default; Kroma sends an explicit native output cap".into());
+        }
+        Some(actual)
+    };
+    let budget = ContextConfig::from_limits(resolved.context_window, effective_output)?;
     let reserve_source = if std::env::var_os("KROMA_OUTPUT_RESERVE_TOKENS").is_some() {
         FieldSource::Environment
-    } else if resolved.effective_turn_output.is_some() {
+    } else if effective_output.is_some() {
         FieldSource::Computed
     } else {
         FieldSource::Default
@@ -298,9 +316,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fully_specified_non_chat_profiles_skip_optional_metadata_lookup() {
+    async fn fully_specified_responses_profile_skips_optional_metadata_lookup() {
         use std::net::TcpListener;
-        for protocol in ["responses", "anthropic"] {
+        for protocol in ["responses"] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let profile = crate::profiles::ProviderProfile {
@@ -330,6 +348,29 @@ mod tests {
                 "{protocol} must not call /models when fully configured"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn unknown_native_model_reserves_the_exact_output_cap_sent_on_wire() -> Result<()> {
+        for protocol in ["responses", "anthropic"] {
+            let profile = crate::profiles::ProviderProfile {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "unknown".into(),
+                api_key: None,
+                deepseek_thinking: None,
+                api_protocol: Some(protocol.into()),
+                reasoning_effort: Some("auto".into()),
+                context_window: Some(8192),
+                max_output_tokens: None,
+                thinking_levels: None,
+                catalog_model: None,
+            };
+            let (_, budget, report) = model_from_profile(&profile).await?;
+            assert_eq!(budget.output_reserve(), 4096, "{protocol}");
+            assert_eq!(report.effective_turn_output_tokens.value, Some(4096));
+            assert_eq!(report.output_reserve.value, Some(4096));
+        }
+        Ok(())
     }
 
     #[tokio::test]

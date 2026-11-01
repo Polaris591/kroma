@@ -127,7 +127,16 @@ TASKS = (
 
 
 def parse_usage(log):
+    # Prefer combined foreground + checkpoint totals when available.
     # Missing provider usage is genuinely unknown, not zero.
+    for line in reversed(log.splitlines()):
+        if line.startswith("[usage] combined:"):
+            fields = re.findall(r"\b(input|output|cached):\s*(\d+|n/a)", line)
+            result = {key: int(value) if value != "n/a" else None for key, value in fields}
+            match = re.search(r"combined:\s*(\d+) model request", line)
+            if match and len(result) == 3:
+                result["requests"] = int(match.group(1))
+                return result
     for line in reversed(log.splitlines()):
         if line.startswith("[usage] task:"):
             fields = re.findall(r"\b(input|output|cached):\s*(\d+|n/a)", line)
@@ -138,8 +147,8 @@ def parse_usage(log):
 
 
 def parse_profile(log):
-    for line in log.splitlines():
-        if line.startswith("[profile] "):
+    for line in reversed(log.splitlines()):
+        if line.startswith("[profile] wall_ms="):
             pairs = re.findall(r"\b([a-z_]+)=([0-9.]+)", line)
             return {
                 key: float(value) if key.endswith("_ms") else int(value)
@@ -162,8 +171,17 @@ def verify(root, task_id, answer):
         positions = [answer.find(value) for value in ("AX91", "BR28", "CY37")]
         return all(n >= 0 for n in positions) and positions == sorted(positions)
     if task_id in {"fix_arithmetic", "implement_records", "cross_file_fix"}:
+        # Keep the acceptance oracle outside the agent-writable project.
+        # Agents may edit the provided example tests; those edits must not
+        # change the independent pass/fail decision.
+        import sys
+        checks = {
+            "fix_arithmetic": "from math_ops import average; assert average([1,2,4]) == 7/3; assert average([-4,-1]) == -2.5; assert average([]) == 0",
+            "implement_records": "from records import parse_records; assert parse_records(' # skip\\n a = 1=2\\n\\n b=two \\n') == {'a':'1=2','b':'two'}; assert parse_records('') == {}; assert parse_records('城市 = 北京') == {'城市':'北京'}",
+            "cross_file_fix": "from app import tag_key; from core import normalize_tag; assert tag_key(' Foo ') == 'foo'; assert tag_key(' Straße ') == 'strasse'; assert normalize_tag(' BAR ') == 'bar'",
+        }
         test = subprocess.run(
-            ["python3", "-m", "unittest", "-q"],
+            [sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); " + checks[task_id], str(root)],
             cwd=root, capture_output=True, text=True, timeout=15,
         )
         return test.returncode == 0
@@ -216,7 +234,8 @@ def self_test():
                        " | output: 22 | cached: 50") == expected
     assert parse_usage("[usage] task: 1 request(s) | input: n/a"
                        " | output: 4 | cached: n/a")["input"] is None
-    assert parse_profile("[profile] wall_ms=12.34 | tool_calls=3") == {
+    assert parse_usage("[usage] task: 1 request(s) | input: 220 | output: 20 | cached: 50\n[usage] combined: 2 model request(s) | input: 1220 | output: 40 | cached: 60") == {"requests": 2, "input": 1220, "output": 40, "cached": 60}
+    assert parse_profile("[profile] model_start request=1 elapsed_ms=1\n[profile] wall_ms=12.34 | tool_calls=3") == {
         "wall_ms": 12.34, "tool_calls": 3,
     }
     with tempfile.TemporaryDirectory() as directory:
@@ -230,7 +249,14 @@ def self_test():
                 assert not verify(root, task["id"], "")
             for name in task["files"]:
                 (root / name).unlink()
-    print(f"self-test OK: {len(TASKS)} task fixtures, parsers and baseline failure checks")
+    # Tampering with the example tests must not fool the independent oracle.
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        fixture = next(t for t in TASKS if t['id'] == 'fix_arithmetic')
+        create_fixture(root, fixture)
+        (root / 'test_math_ops.py').write_text('def test_nothing(): assert True\n', encoding='utf-8')
+        assert not verify(root, 'fix_arithmetic', ''), 'editable tests bypassed the oracle'
+    print(f"self-test OK: {len(TASKS)} task fixtures, parsers and independent acceptance")
 
 
 def main():

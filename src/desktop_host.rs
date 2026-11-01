@@ -94,6 +94,7 @@ impl EventSink for DesktopEvents {
     fn on_event(&self, event: RuntimeEvent<'_>) {
         match event {
             RuntimeEvent::TaskStarted => self.push(json!({"kind":"task_started"})),
+            RuntimeEvent::CompactionStarted => self.push(json!({"kind":"compaction_started"})),
             RuntimeEvent::ModelStarted { request } => {
                 self.push(json!({"kind":"model_started","request":request}))
             }
@@ -174,6 +175,27 @@ impl EventSink for DesktopEvents {
                     json!({"kind":"compaction_usage","requests":requests,"input":input_tokens,
                     "output":output_tokens,"cached":cached_tokens}),
                 );
+            }
+            RuntimeEvent::FailedRequestUsage {
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                reasoning_tokens,
+            } => {
+                self.pending
+                    .lock()
+                    .expect("desktop event lock")
+                    .usage
+                    .push(Usage {
+                        input: input_tokens,
+                        output: output_tokens,
+                        cached: cached_tokens,
+                        reasoning: reasoning_tokens,
+                        total: None,
+                    });
+                self.push(json!({"kind":"failed_request_usage","input":input_tokens,
+                    "output":output_tokens,"cached":cached_tokens,
+                    "reasoning_tokens":reasoning_tokens}));
             }
             RuntimeEvent::ModelFailed => self.push(json!({"kind":"model_failed"})),
             RuntimeEvent::TaskFinished { status } => {

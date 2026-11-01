@@ -542,6 +542,8 @@ struct Connection {
     invalid: Option<String>,
     cancelled: Arc<AtomicBool>,
     request_timeout: Duration,
+    // Reconnect only for the next call, never replay a cancelled request.
+    reconnect: Option<(ServerConfig, PathBuf)>,
 }
 
 impl Connection {
@@ -643,6 +645,7 @@ impl Connection {
             invalid: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             request_timeout: MCP_REQUEST_TIMEOUT,
+            reconnect: Some((config.clone(), workdir.to_path_buf())),
         };
         if connection.version != MODERN_VERSION {
             let result = connection
@@ -1140,6 +1143,16 @@ impl Tool for McpTool {
                     bail!("MCP tool arguments must be an object");
                 }
                 let mut connection = self.connection.lock().await;
+                if connection.is_invalid() {
+                    let (config, workdir) = connection
+                        .reconnect
+                        .clone()
+                        .context("MCP server cannot be reconnected")?;
+                    // Never replay the cancelled call: recover for this new call.
+                    *connection = Connection::connect(&config, &workdir)
+                        .await
+                        .context("MCP server reconnect failed")?;
+                }
                 // A waiter that is cancelled before this point has no guard and
                 // must not affect the call currently holding the shared lock.
                 #[cfg(any(unix, windows))]
@@ -1369,6 +1382,7 @@ mod tests {
             invalid: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             request_timeout: MCP_REQUEST_TIMEOUT,
+            reconnect: None,
         };
         let (_, request) = connection.message("tools/list", json!({}), true).unwrap();
         assert_eq!(
@@ -1484,8 +1498,8 @@ mod tests {
     fn mock_script_body(dir: &Path, mode: MockMode) -> String {
         match mode {
             MockMode::Normal => "read line\nprintf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":1}}'\nread line\nprintf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":2}}'".into(),
-            MockMode::NearLimit => "read line\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"'\nhead -c 8300000 /dev/zero | tr '\0' x\nprintf '\"}}\n'".into(),
-            MockMode::OverLimit => "read line\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"'\nhead -c 8400000 /dev/zero | tr '\0' x\nprintf '\"}}\n'".into(),
+            MockMode::NearLimit => "read line\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"'\nhead -c 8300000 /dev/zero | tr '\\0' x\nprintf '\"}}\n'".into(),
+            MockMode::OverLimit => "read line\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"'\nhead -c 8400000 /dev/zero | tr '\\0' x\nprintf '\"}}\n'".into(),
             MockMode::InvalidJson => "read line\nprintf '%s\n' 'not-json'".into(),
             MockMode::Eof => "read line\nexit 0".into(),
             MockMode::Timeout => "read line\nsleep 5".into(),
@@ -1843,6 +1857,47 @@ mod tests {
         drop(active);
         drop(tool);
         tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn new_mcp_call_recovers_an_invalid_connection_without_replaying_the_old_call(
+    ) -> Result<()> {
+        let dir = scratch("reconnect");
+        let mut connection = with_test_timeout(connect_mock(&dir, MockMode::Normal)).await?;
+        connection.invalidate("previous call was cancelled");
+        let tool = McpTool {
+            local_name: "mcp__test__first".into(),
+            remote_name: "first".into(),
+            description: "test".into(),
+            schema: json!({"type":"object"}),
+            connection: Arc::new(Mutex::new(connection)),
+        };
+        let call = ToolCall {
+            id: "new-call".into(),
+            kind: "function".into(),
+            function: crate::provider::FunctionCall {
+                name: "mcp__test__first".into(),
+                arguments: "{}".into(),
+            },
+        };
+        let output = with_test_timeout(async {
+            Ok(tool
+                .execute(
+                    &call,
+                    ToolContext {
+                        workdir: &dir,
+                        archive: &dir.join("session.json"),
+                        on_output: None,
+                    },
+                )
+                .await)
+        })
+        .await?;
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(serde_json::from_str::<Value>(&output.content)?["ok"], 1);
+        drop(tool);
         let _ = fs::remove_dir_all(dir);
         Ok(())
     }

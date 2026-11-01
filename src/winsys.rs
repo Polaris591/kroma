@@ -19,7 +19,11 @@ use windows_sys::Win32::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
         },
-        JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject},
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        },
         Threading::{OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME},
     },
 };
@@ -50,6 +54,22 @@ impl ChildTreeGuard {
         // SAFETY: CreateJobObjectW returned a fresh owned handle, wrapped once.
         let job = unsafe { OwnedHandle::from_raw_handle(raw) };
         let guard = Self { job, armed: true };
+        // If the owning Kroma process is force-killed (for example when its
+        // parent plugin is cancelled), dropping OS handles must also kill
+        // the contained PowerShell/descendants. Rust Drop won't run then.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set = unsafe {
+            SetInformationJobObject(
+                guard.job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if set == 0 {
+            return Err(io::Error::last_os_error());
+        }
         command.creation_flags(CREATE_SUSPENDED).kill_on_drop(true);
         let mut child = command.spawn()?;
         let setup = (|| {
@@ -286,6 +306,64 @@ mod tests {
         assert!(
             !dir.join("survived.txt").exists(),
             "descendant escaped the job"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn abrupt_owner_test_helper() {
+        let Ok(folder) = std::env::var("KROMA_JOB_OWNER_HELPER") else {
+            return;
+        };
+        let dir = PathBuf::from(folder);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let mut command = tokio::process::Command::new("cmd");
+            command
+                .arg("/c")
+                .raw_arg(format!("\"{}\"", dir.join("tree.bat").display()))
+                .current_dir(&dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let (_shell, _guard) = ChildTreeGuard::spawn(&mut command).unwrap();
+            std::fs::write(dir.join("owner-ready.txt"), "ready").unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+        });
+    }
+
+    #[tokio::test]
+    async fn force_killing_job_owner_terminates_its_shell_descendants() {
+        let dir = scratch("abrupt-owner");
+        let script = dir.join("tree.bat");
+        let lines = [
+            r#"start /b cmd /c "echo grandchild> grandchild.txt & ping -n 4 127.0.0.1 >nul & echo survived> survived.txt""#,
+            "ping -n 10 127.0.0.1 >nul",
+        ].join("\r\n") + "\r\n";
+        std::fs::write(&script, lines).unwrap();
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "winsys::tests::abrupt_owner_test_helper"])
+            .env("KROMA_JOB_OWNER_HELPER", &dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(dir.join("owner-ready.txt").is_file() && dir.join("grandchild.txt").is_file()) {
+            if std::time::Instant::now() >= deadline {
+                let _ = owner.kill();
+                panic!("job owner's child tree never became ready");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        owner.kill().unwrap();
+        let _ = owner.wait();
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(
+            !dir.join("survived.txt").exists(),
+            "force-killed job owner left its Shell descendant running"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

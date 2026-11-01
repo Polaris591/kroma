@@ -64,9 +64,19 @@ impl PromptComposer {
         let mut included = std::collections::BTreeSet::new();
         for token in task.split_whitespace() {
             let explicit = token.starts_with('@');
-            let token = token
-                .trim_start_matches('@')
-                .trim_matches(|c: char| matches!(c, ',' | ';' | ')' | '(' | '\'' | '"'));
+            let token = token.trim_start_matches('@').trim_matches(|c: char| {
+                matches!(c, ',' | ';' | ')' | '(' | '[' | ']' | '\'' | '"' | '`')
+            });
+            // Strip standard source-location suffixes (file.rs:12 or file.rs:12:4)
+            // without treating the colon in a Windows drive letter as a suffix.
+            let mut token = token;
+            for _ in 0..2 {
+                if let Some((file, line)) = token.rsplit_once(':') {
+                    if !file.is_empty() && line.parse::<usize>().is_ok() {
+                        token = file;
+                    }
+                }
+            }
             // Don't stat/canonicalize every prose word in a long prompt.
             // An ordinary "hello" is not an explicit reference to ./hello
             // even if a directory of that name happens to exist.
@@ -511,6 +521,17 @@ mod tests {
         assert!(prompt.contains("SRC_INSTRUCTION"));
         assert!(prompt.contains("NESTED_INSTRUCTION"));
         assert!(!prompt.contains("UNRELATED_INSTRUCTION"));
+        composer.refresh_for_task(&root, "See `src/nested/file.rs:13:2` for the error")?;
+        let mut view = composer.initial_history(&root);
+        composer.apply(&mut view);
+        assert!(
+            view[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("NESTED_INSTRUCTION"),
+            "backtick-and-line-number references must load nested instructions"
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }

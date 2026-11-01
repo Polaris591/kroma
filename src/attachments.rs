@@ -31,11 +31,15 @@ struct ActiveScope {
 
 impl ActiveScope {
     fn for_messages(messages: &[crate::protocol::Message], vision: Option<bool>) -> Self {
-        let mut users = messages
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, message)| message.role == "user");
+        let mut users = messages.iter().enumerate().rev().filter(|(_, message)| {
+            message.role == "user"
+                && !message
+                    .provider_items
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .any(|item| item["type"] == "kroma_steering")
+        });
         let current = users.next().map(|(index, _)| index);
         let previous = users.next().map(|(index, _)| index);
         let mut previous_images = HashSet::new();
@@ -175,7 +179,15 @@ fn inline_log_text(part: &Value, index: usize, total: usize) -> Result<String> {
 /// repeated inline markers and historical marker-less attachments. Older user
 /// turns are references and are not charged as inline logs.
 pub(crate) fn inline_log_extra_bytes(messages: &[crate::protocol::Message]) -> Result<usize> {
-    let Some(message) = messages.iter().rev().find(|message| message.role == "user") else {
+    let Some(message) = messages.iter().rev().find(|message| {
+        message.role == "user"
+            && !message
+                .provider_items
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .any(|item| item["type"] == "kroma_steering")
+    }) else {
         return Ok(0);
     };
     let attached = message
@@ -525,6 +537,33 @@ mod tests {
         assert!(legacy.as_array().unwrap().len() > 3);
         fs::remove_dir_all(folder)?;
         Ok(())
+    }
+
+    #[test]
+    fn steering_does_not_age_out_original_task_image() {
+        let mut task = Message::new("user", "inspect image");
+        task.provider_items = Some(vec![json!({"type":"kroma_attachment",
+            "kind":"image","name":"capture.png","bytes":12})]);
+        let mut history = vec![task];
+        for instruction in ["focus on error", "compare colors"] {
+            let mut steer = Message::new("user", instruction);
+            steer.provider_items = Some(vec![json!({"type":"kroma_steering"})]);
+            history.push(steer);
+        }
+        project_history(&mut history, Some(true));
+        assert!(inline_image(
+            &history[0].provider_items.as_ref().unwrap()[0]
+        ));
+        assert_eq!(
+            active_image_tokens(&history, Some(true)),
+            IMAGE_TOKEN_ALLOWANCE
+        );
+        history.push(Message::new("user", "unrelated next task"));
+        history.push(Message::new("user", "second later task"));
+        project_history(&mut history, Some(true));
+        assert!(!inline_image(
+            &history[0].provider_items.as_ref().unwrap()[0]
+        ));
     }
 
     #[test]

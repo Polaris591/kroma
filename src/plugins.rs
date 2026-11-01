@@ -1283,10 +1283,10 @@ impl PluginCatalog {
                 );
             }
             if same_worker {
+                // Keep unchanged workers warm, including their state. The
+                // definition fingerprint includes plugin-local imported JS,
+                // so a helper change invalidates reuse without node_modules.
                 plugin.worker = old.worker.clone();
-                // Event subscriptions have independent lifetimes per reload.
-                // Reusing the old event process would let the departing sink
-                // cancel a newly registered subscriber's active request.
             }
         }
         next.prepare_idle_reload(base_tools, base_prompt)
@@ -1991,7 +1991,9 @@ impl Tool for PluginToolAdapter {
                     },
                 };
             }
-            match worker.invoke_async(payload).await {
+            // Tool calls can legitimately exceed two minutes (e.g. a coding
+            // subagent). Cancellation still tears down the worker via guard.
+            match worker.invoke_async_tool(payload).await {
                 Ok(response) if !response.is_error => ToolResult::ok(response.content),
                 Ok(response) => ToolResult::error(response.content),
                 Err(error) => ToolResult::error(format!("plugin execution failed: {error:#}")),
@@ -2143,11 +2145,13 @@ impl EventSink for PluginEventSink {
 fn plugin_event_name(event: &RuntimeEvent<'_>) -> Option<&'static str> {
     Some(match event {
         RuntimeEvent::TaskStarted => "task_started",
+        RuntimeEvent::CompactionStarted => "compaction_started",
         RuntimeEvent::TaskFinished { .. } => "task_finished",
         RuntimeEvent::ContextPrepared { .. } => "context_prepared",
         RuntimeEvent::ModelStarted { .. } => "model_started",
         RuntimeEvent::ModelFinished { .. } => "model_finished",
         RuntimeEvent::ModelFailed => "model_failed",
+        RuntimeEvent::FailedRequestUsage { .. } => return None,
         RuntimeEvent::CompactionUsage { .. } => "compaction_usage",
         RuntimeEvent::ToolStarted { .. } => "tool_started",
         RuntimeEvent::ToolFinished { .. } => "tool_finished",
@@ -2164,7 +2168,10 @@ fn plugin_event_name(event: &RuntimeEvent<'_>) -> Option<&'static str> {
 
 fn plugin_event_fields(event: &RuntimeEvent<'_>) -> Value {
     match event {
-        RuntimeEvent::TaskStarted | RuntimeEvent::ModelFailed => json!({}),
+        RuntimeEvent::TaskStarted
+        | RuntimeEvent::CompactionStarted
+        | RuntimeEvent::ModelFailed
+        | RuntimeEvent::FailedRequestUsage { .. } => json!({}),
         RuntimeEvent::TaskFinished { status } => json!({"status":status}),
         RuntimeEvent::ContextPrepared {
             messages,
@@ -2242,8 +2249,8 @@ struct PluginWorker {
     command: Option<String>,
     args: Vec<String>,
     settings: Value,
-    // Track directly executed entrypoint files, not entire node_modules trees.
-    // A source edit can restart that worker while unrelated ones stay warm.
+    // Track owned script dependencies (including imported helpers), never
+    // recursively fingerprint external node_modules. Unchanged workers stay warm.
     entrypoints: Vec<(PathBuf, u64, Option<SystemTime>)>,
     process: Mutex<Option<PluginProcess>>,
     next_request: AtomicU64,
@@ -2273,23 +2280,61 @@ impl PluginWorker {
         settings: Value,
         data_dir: PathBuf,
     ) -> Self {
-        let entrypoints = manifest
-            .command
-            .iter()
-            .chain(&manifest.args)
-            .filter_map(|value| {
-                let candidate = Path::new(value);
-                let path = if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    dir.join(candidate)
-                };
-                fs::metadata(&path)
-                    .ok()
-                    .filter(|info| info.is_file())
-                    .map(|info| (path, info.len(), info.modified().ok()))
-            })
-            .collect();
+        let mut entrypoints = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(folder) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&folder) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if !matches!(
+                        entry.file_name().to_str(),
+                        Some("node_modules" | ".git" | "target")
+                    ) && pending.len() < 128
+                    {
+                        pending.push(path);
+                    }
+                    continue;
+                }
+                if !matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("js" | "cjs" | "mjs" | "json")
+                ) {
+                    continue;
+                }
+                if let Ok(info) = entry.metadata() {
+                    if info.len() <= 1024 * 1024 {
+                        // Detect edits even when mtime granularity is coarse
+                        // and a dependency is replaced with the same length.
+                        let bytes = fs::read(&path).unwrap_or_default();
+                        let fingerprint = bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+                            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                        });
+                        entrypoints.push((path, fingerprint, info.modified().ok()));
+                    }
+                }
+            }
+        }
+        // Also track executable script paths outside the plugin folder.
+        for value in manifest.command.iter().chain(&manifest.args) {
+            let candidate = Path::new(value);
+            let path = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                dir.join(candidate)
+            };
+            if entrypoints.iter().any(|(existing, _, _)| existing == &path) {
+                continue;
+            }
+            if let Ok(info) = fs::metadata(&path) {
+                if info.is_file() {
+                    entrypoints.push((path, info.len(), info.modified().ok()));
+                }
+            }
+        }
+        entrypoints.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Self {
             directory: dir.to_path_buf(),
             workdir: workdir.to_path_buf(),
@@ -2315,14 +2360,26 @@ impl PluginWorker {
     }
 
     async fn invoke_async(self: &Arc<Self>, message: Value) -> Result<PluginResponse> {
-        self.invoke_async_timeout(message, PLUGIN_CALL_TIMEOUT)
+        self.invoke_async_with_timeout(message, Some(PLUGIN_CALL_TIMEOUT))
             .await
+    }
+
+    async fn invoke_async_tool(self: &Arc<Self>, message: Value) -> Result<PluginResponse> {
+        self.invoke_async_with_timeout(message, None).await
     }
 
     async fn invoke_async_timeout(
         self: &Arc<Self>,
         message: Value,
         timeout: Duration,
+    ) -> Result<PluginResponse> {
+        self.invoke_async_with_timeout(message, Some(timeout)).await
+    }
+
+    async fn invoke_async_with_timeout(
+        self: &Arc<Self>,
+        message: Value,
+        timeout: Option<Duration>,
     ) -> Result<PluginResponse> {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2333,20 +2390,20 @@ impl PluginWorker {
             armed: true,
         };
         let worker = self.clone();
-        let outcome = tokio::time::timeout(
-            timeout,
-            tokio::task::spawn_blocking(move || {
-                worker.invoke_inner(message, Some((id, &cancelled)))
-            }),
-        )
-        .await;
-        if outcome.is_err() {
-            // Dropping the armed guard kills the plugin process tree so a
-            // timed-out call cannot keep running in the background.
-            anyhow::bail!("plugin call timed out after {}s", timeout.as_secs());
-        }
+        let task = tokio::task::spawn_blocking(move || {
+            worker.invoke_inner(message, Some((id, &cancelled)))
+        });
+        let outcome = match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| anyhow!("plugin call timed out after {}s", timeout.as_secs()))?,
+            None => task.await,
+        };
+        // On panic/cancellation keep the guard armed; killing the process
+        // prevents a stale JSONL response contaminating a later request.
+        let response = outcome??;
         guard.armed = false;
-        outcome??
+        Ok(response)
     }
 
     fn cancel_active_request(&self) {
@@ -2534,7 +2591,12 @@ fn terminate_plugin(pid: u32) {
     }
     #[cfg(unix)]
     unsafe {
-        // Workers have their own process group (see spawn below).
+        // A child Kroma shares the plugin worker's process group, but its
+        // Shell owns a separate group. Deliver SIGINT first so Kroma can
+        // drop its tool future and terminate that Shell group itself.
+        // Force-kill the plugin group after a bounded cleanup opportunity.
+        let _ = libc::kill(-(pid as i32), libc::SIGINT);
+        std::thread::sleep(Duration::from_millis(600));
         let _ = libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
@@ -2631,6 +2693,25 @@ impl Drop for PluginProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edited_imported_js_helper_invalidates_worker_reuse_without_touching_main() -> Result<()> {
+        let root = test_root("imported-helper");
+        fs::write(root.join("main.js"), "require('./helper')")?;
+        fs::write(root.join("helper.js"), "module.exports = 1;")?;
+        let manifest: PluginManifest =
+            toml::from_str("id='helper'\nname='Helper'\ncommand='node'\nargs=['main.js']\n")?;
+        let worker = || PluginWorker::new(&root, &root, &manifest, json!({}), root.join("data"));
+        let before = worker();
+        let unchanged = worker();
+        assert!(before.same_definition(&unchanged));
+        // Same byte count: this must work on filesystems with coarse mtimes.
+        fs::write(root.join("helper.js"), "module.exports = 2;")?;
+        let changed = worker();
+        assert!(!before.same_definition(&changed));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn validates_process_thinking_tiers_and_dynamic_panels() {

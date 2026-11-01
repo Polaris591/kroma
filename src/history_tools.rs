@@ -16,6 +16,12 @@ struct SearchArgs {
     limit: Option<usize>,
     #[serde(default)]
     role: Option<String>,
+    /// Exclusive cursor for reverse-chronological pagination.
+    #[serde(default)]
+    before_index: Option<usize>,
+    /// Exclusive lower bound; useful for searching only newly saved turns.
+    #[serde(default)]
+    after_index: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -69,7 +75,9 @@ impl Tool for HistorySearch {
             "parameters":{"type":"object","properties":{
                 "query":{"type":"string","description":"Case-insensitive text to find"},
                 "limit":{"type":"integer","minimum":1,"maximum":20,"description":"Maximum matches (default 8)"},
-                "role":{"type":"string","enum":["all","user","assistant","tool"],"description":"Optional role filter"}
+                "role":{"type":"string","enum":["all","user","assistant","tool"],"description":"Optional role filter"},
+                "before_index":{"type":"integer","minimum":0,"description":"Exclusive upper message-index cursor for older results"},
+                "after_index":{"type":"integer","minimum":0,"description":"Exclusive lower message-index bound"}
             },"required":["query"]}
         }})
     }
@@ -100,7 +108,12 @@ impl Tool for HistorySearch {
                 }
             };
             let mut matches = Vec::new();
-            for (index, message) in messages.iter().enumerate() {
+            for (index, message) in messages.iter().enumerate().rev() {
+                if args.before_index.is_some_and(|before| index >= before)
+                    || args.after_index.is_some_and(|after| index <= after)
+                {
+                    continue;
+                }
                 if role != "all" && message.role != role {
                     continue;
                 }
@@ -113,14 +126,25 @@ impl Tool for HistorySearch {
                     "role":message.role,
                     "excerpt":snippet,
                 }));
-                if matches.len() >= limit {
+                if matches.len() > limit {
                     break;
                 }
             }
+            let has_more = matches.len() > limit;
+            if has_more {
+                matches.pop();
+            }
+            let next_before_index = if has_more {
+                matches.last().and_then(|item| item["index"].as_u64())
+            } else {
+                None
+            };
             ToolResult::ok(
                 json!({
                     "query":args.query,
                     "matches":matches,
+                    "has_more":has_more,
+                    "next_before_index":next_before_index,
                     "total_messages":messages.len(),
                     "note":"Use history_read with a match index. This transcript includes the durable checkpoint and valid journal messages; the complete raw history remains authoritative."
                 })

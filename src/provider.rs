@@ -170,6 +170,27 @@ impl fmt::Display for ModelHttpError {
 
 impl std::error::Error for ModelHttpError {}
 
+/// Preserve already-reported provider usage even when the returned response
+/// is incomplete or invalid. Errors without usage remain explicitly unknown.
+#[derive(Debug)]
+struct ReportedModelFailure {
+    detail: String,
+    usage: Usage,
+}
+impl fmt::Display for ReportedModelFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+impl std::error::Error for ReportedModelFailure {}
+
+pub fn reported_error_usage(error: &anyhow::Error) -> Option<&Usage> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ReportedModelFailure>())
+        .map(|failure| &failure.usage)
+}
+
 fn image_capability_rejection(error: &anyhow::Error) -> bool {
     let Some(http) = error.downcast_ref::<ModelHttpError>() else {
         return false;
@@ -602,12 +623,28 @@ impl CompletionStream {
         }
     }
 
-    fn finish(self) -> Result<(Message, Option<Usage>)> {
+    fn reported_usage(&self) -> Option<Usage> {
         match self {
+            Self::Chat(s) => s.usage.clone(),
+            Self::Responses(s) => s.reported_usage(),
+            Self::Anthropic(s) => s.reported_usage(),
+        }
+    }
+
+    fn finish(self) -> Result<(Message, Option<Usage>)> {
+        let reported = self.reported_usage();
+        let result = match self {
             Self::Chat(s) => s.finish(),
             Self::Responses(s) => s.finish(),
             Self::Anthropic(s) => s.finish(),
-        }
+        };
+        result.map_err(|error| match reported {
+            Some(usage) => anyhow::Error::new(ReportedModelFailure {
+                detail: format!("{error:#}"),
+                usage,
+            }),
+            None => error,
+        })
     }
 }
 
@@ -1120,7 +1157,7 @@ impl ModelClient {
                 ApiProtocol::Responses => item["type"] == "reasoning",
                 ApiProtocol::Anthropic => matches!(
                     item["type"].as_str(),
-                    Some("thinking" | "redacted_thinking")
+                    Some("thinking" | "redacted_thinking" | "kroma_anthropic_content_blocks")
                 ),
                 ApiProtocol::Chat => false,
             });
@@ -1257,6 +1294,16 @@ impl ModelClient {
                     }
                 }
             }
+        }
+        // The ordinary Chat request and its checkpoint must agree on this
+        // non-DeepSeek reasoning setting for gateways that cache parameters.
+        if selected.is_none() && self.reasoning_effort != "auto" && self.deepseek_thinking.is_none()
+        {
+            payload["reasoning_effort"] = json!(if self.reasoning_effort == "off" {
+                "none"
+            } else {
+                &self.reasoning_effort
+            });
         }
         payload
     }
@@ -1680,9 +1727,8 @@ impl ModelClient {
                         }
                     }
                 }
-                // Never override reasoning_effort here: the provider cache is
-                // keyed on it, and a different value turns the checkpoint
-                // prefix into a full-price cache miss.
+                // Keep the same effective reasoning configuration as the
+                // foreground request so this checkpoint shares its cache key.
                 Ok(payload)
             }
             ApiProtocol::Responses => {
@@ -1698,6 +1744,16 @@ impl ModelClient {
                     Some(active_turn),
                 )?;
                 payload["stream"] = json!(false);
+                if self.reasoning_summary_rejected.load(Ordering::Relaxed) {
+                    if let Some(reasoning) =
+                        payload.get_mut("reasoning").and_then(Value::as_object_mut)
+                    {
+                        reasoning.remove("summary");
+                        if reasoning.is_empty() {
+                            payload.as_object_mut().unwrap().remove("reasoning");
+                        }
+                    }
+                }
                 Ok(payload)
             }
             ApiProtocol::Anthropic => {
@@ -1887,7 +1943,11 @@ impl ModelBackend for ModelClient {
                                         ApiProtocol::Responses => item["type"] == "reasoning",
                                         ApiProtocol::Anthropic => matches!(
                                             item["type"].as_str(),
-                                            Some("thinking" | "redacted_thinking")
+                                            Some(
+                                                "thinking"
+                                                    | "redacted_thinking"
+                                                    | "kroma_anthropic_content_blocks"
+                                            )
                                         ),
                                         ApiProtocol::Chat => false,
                                     }
@@ -2082,6 +2142,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn truncated_streams_keep_reported_usage_in_typed_error() {
+        let chat = StreamResult {
+            finish_reason: Some("length".into()),
+            usage: Some(Usage {
+                input: Some(123),
+                output: Some(40),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = CompletionStream::Chat(chat).finish().err().unwrap();
+        let usage = reported_error_usage(&error).unwrap();
+        assert_eq!(usage.input, Some(123));
+        assert_eq!(usage.output, Some(40));
+
+        let mut response = responses::Stream::default();
+        response
+            .apply(
+                &json!({"type":"response.incomplete","response":{
+            "status":"incomplete","usage":{"input_tokens":77,"output_tokens":4}}})
+                .to_string(),
+                &mut |_| {},
+            )
+            .unwrap();
+        let error = CompletionStream::Responses(response)
+            .finish()
+            .err()
+            .unwrap();
+        assert_eq!(reported_error_usage(&error).unwrap().input, Some(77));
+
+        let mut anthropic = anthropic::Stream::default();
+        for event in [
+            json!({"type":"message_start","message":{"usage":{"input_tokens":50}}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"},
+                "usage":{"output_tokens":19}}),
+            json!({"type":"message_stop"}),
+        ] {
+            anthropic
+                .apply_with_reasoning(&event.to_string(), &mut |_| {}, &mut |_| {})
+                .unwrap();
+        }
+        let error = CompletionStream::Anthropic(anthropic)
+            .finish()
+            .err()
+            .unwrap();
+        assert_eq!(reported_error_usage(&error).unwrap().output, Some(19));
+    }
+
+    #[test]
     fn capability_fallback_uses_actual_error_field_not_json_wrapper() {
         let error = |body: &str| {
             anyhow::Error::new(ModelHttpError {
@@ -2111,6 +2220,37 @@ mod tests {
         assert!(!summary_capability_rejection(&error(
             r#"{"error":{"type":"invalid_request_error","message":"reasoning.summary generated successfully"}}"#
         )));
+    }
+
+    #[test]
+    fn checkpoint_keeps_generic_chat_effort_and_responses_summary_fallback() -> Result<()> {
+        let messages = vec![
+            Message::new("system", "coding agent"),
+            Message::new("user", "inspect"),
+        ];
+        let mut checkpoint_messages = messages.clone();
+        checkpoint_messages.push(Message::new("user", "make checkpoint"));
+        let chat = ModelClient::new("http://127.0.0.1:9/v1", None, "test".into())?
+            .with_reasoning("max".into(), None);
+        let foreground = chat.payload(&messages, &[], None)?;
+        let checkpoint = chat.checkpoint_payload(&checkpoint_messages, &[], Some(4096), 2)?;
+        assert_eq!(foreground["reasoning_effort"], "max");
+        assert_eq!(
+            checkpoint["reasoning_effort"],
+            foreground["reasoning_effort"]
+        );
+
+        let responses = ModelClient::new("http://127.0.0.1:9/v1", None, "test".into())?
+            .with_protocol("responses")?
+            .with_reasoning("high".into(), None);
+        responses
+            .reasoning_summary_rejected
+            .store(true, Ordering::Relaxed);
+        let foreground = responses.payload(&messages, &[], None)?;
+        let checkpoint = responses.checkpoint_payload(&checkpoint_messages, &[], Some(4096), 2)?;
+        assert_eq!(foreground["reasoning"], checkpoint["reasoning"]);
+        assert!(checkpoint["reasoning"].get("summary").is_none());
+        Ok(())
     }
 
     #[test]

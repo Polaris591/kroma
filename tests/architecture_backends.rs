@@ -379,12 +379,14 @@ impl EventSink for RecordingEvents {
     fn on_event(&self, event: RuntimeEvent<'_>) {
         let name = match event {
             RuntimeEvent::TaskStarted => "task-started".to_owned(),
+            RuntimeEvent::CompactionStarted => "compaction-started".to_owned(),
             RuntimeEvent::ContextPrepared { .. } => "context".to_owned(),
             RuntimeEvent::ModelStarted { request } => format!("model-start-{request}"),
             RuntimeEvent::TextDelta(text) => format!("text:{text}"),
             RuntimeEvent::ReasoningDelta(text) => format!("reasoning:{text}"),
             RuntimeEvent::ModelFinished { request, .. } => format!("model-end-{request}"),
             RuntimeEvent::ModelFailed => "model-failed".to_owned(),
+            RuntimeEvent::FailedRequestUsage { .. } => "failed-request-usage".to_owned(),
             RuntimeEvent::CompactionUsage { requests, .. } => format!("apec-usage:{requests}"),
             RuntimeEvent::ToolStarted { name, .. } => format!("tool-start:{name}"),
             RuntimeEvent::ToolOutput { .. } => "tool-output".to_owned(),

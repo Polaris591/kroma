@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
     }
 
     println!(
-        "Kroma v0.4 | model: {} | session: {} | single-pass compaction | Ctrl+C cancels | /history | /fork | /rewind | /undo | /new | /resume | /sessions | /skills | /tools | /queue | /exit",
+        "Kroma v0.4 | model: {} | session: {} | single-pass compaction | Ctrl+C cancels | /compact | /history | /fork | /rewind | /undo | /new | /resume | /sessions | /skills | /tools | /queue | /exit",
         model_name,
         agent.session_id()
     );
@@ -325,7 +325,7 @@ async fn main() -> Result<()> {
                 result = &mut command_future => result,
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
-                    eprintln!("[plugin] Command cancelled");
+                    eprintln!("[command] Command cancelled");
                     continue;
                 }
             }

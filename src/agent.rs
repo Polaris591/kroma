@@ -409,6 +409,59 @@ impl Agent {
         self.compression.set_background_compaction(enabled);
     }
 
+    /// Manually checkpoint completed history without adding a user turn or
+    /// executing tools. The context policy owns validation and WAL commit.
+    pub async fn compact(&mut self) -> Result<crate::context::CompactionReport> {
+        let _active = self.task_input.start()?;
+        self.session.ensure_writable()?;
+        self.prompt.refresh_for_task(&self.workdir, "")?;
+        self.compression.set_event_sink(self.events.clone());
+        let tools = self.tools.definitions();
+        self.compression.set_request_context(&self.model, &tools);
+        let mut system = vec![self.messages[0].clone()];
+        self.prompt.apply(&mut system);
+        self.compression.set_prompt_context(system.first());
+        let extra_tokens = self
+            .prompt
+            .extra_estimated_tokens(&self.messages[0])
+            .saturating_add(serde_json::to_vec(&tools)?.len().div_ceil(3))
+            .saturating_add(crate::attachments::active_image_tokens(
+                &self.messages,
+                self.model.accepts_images(),
+            ))
+            .saturating_add(
+                crate::attachments::inline_log_extra_bytes(&self.messages)?.div_ceil(3),
+            );
+        let result = self
+            .compression
+            .compact(
+                &self.messages,
+                &self.model,
+                &self.session.context_committer(&self.messages),
+                extra_tokens,
+            )
+            .await;
+        let usage = self.compression.take_usage();
+        if let Some(events) = &self.events {
+            if usage.requests > 0 {
+                events.on_event(RuntimeEvent::CompactionUsage {
+                    requests: usage.requests,
+                    input_tokens: usage.input,
+                    output_tokens: usage.output,
+                    cached_tokens: usage.cached,
+                });
+            }
+            if let Ok(report) = &result {
+                events.on_event(RuntimeEvent::ContextPrepared {
+                    messages: report.projected_messages,
+                    estimated_input_tokens: report.after_tokens,
+                    available_input_tokens: self.context_budget.available_input(),
+                });
+            }
+        }
+        result
+    }
+
     pub fn workdir(&self) -> &std::path::Path {
         &self.workdir
     }
@@ -820,6 +873,27 @@ impl Agent {
     /// Never replay commands interrupted partway through execution.
     pub fn cancel(&mut self) -> Result<()> {
         self.compression.abort();
+        // An already completed checkpoint still cost tokens even when the
+        // subsequent foreground request is cancelled. Settle it here instead
+        // of carrying it into the next task or discarding it on session exit.
+        let checkpoint = self.compression.take_usage();
+        if checkpoint.requests > 0 {
+            crate::runtime_log!(
+                "[usage] cancelled task checkpoint: {} request(s) | input: {} | output: {} | cached: {}",
+                checkpoint.requests,
+                checkpoint.input.map_or_else(|| "n/a".to_string(), |n| n.to_string()),
+                checkpoint.output.map_or_else(|| "n/a".to_string(), |n| n.to_string()),
+                checkpoint.cached.map_or_else(|| "n/a".to_string(), |n| n.to_string())
+            );
+            if let Some(events) = &self.events {
+                events.on_event(RuntimeEvent::CompactionUsage {
+                    requests: checkpoint.requests,
+                    input_tokens: checkpoint.input,
+                    output_tokens: checkpoint.output,
+                    cached_tokens: checkpoint.cached,
+                });
+            }
+        }
         self.session.ensure_writable()?;
         let before = self.messages.len();
         recover_pending_calls(&mut self.messages);
@@ -911,6 +985,7 @@ impl Agent {
         // in a poisoned session. Restart to replay the authoritative WAL.
         self.session.ensure_writable()?;
         self.prompt.refresh_for_task(&self.workdir, user_input)?;
+        self.compression.set_event_sink(self.events.clone());
         self.compression.new_user_turn();
         // Reuse immutable image encodings across this task's model/tool turns.
         // Dropped on completion, error, or cancellation; never written to WAL.
@@ -1073,6 +1148,17 @@ impl Agent {
                     completion
                 }
                 Err(error) => {
+                    let usage = crate::provider::reported_error_usage(&error);
+                    self.usage.record(usage);
+                    stats.record_failed(usage);
+                    if let Some(events) = &self.events {
+                        events.on_event(RuntimeEvent::FailedRequestUsage {
+                            input_tokens: usage.and_then(|u| u.input),
+                            output_tokens: usage.and_then(|u| u.output),
+                            cached_tokens: usage.and_then(|u| u.cached),
+                            reasoning_tokens: usage.and_then(|u| u.reasoning),
+                        });
+                    }
                     if !printed_text
                         && !streamed_reasoning
                         && overflow_retries == 0
@@ -1122,7 +1208,8 @@ impl Agent {
                         events.on_event(RuntimeEvent::ModelFailed);
                     }
                     crate::runtime_log!(
-                        "[usage] incomplete model request: token usage unknown; {} completed request(s) this turn; interruption_note_durable={persisted}",
+                        "[usage] incomplete model request: reported usage={}; {} model attempt(s) this turn; interruption_note_durable={persisted}",
+                        if usage.is_some() { "available" } else { "unknown" },
                         stats.calls
                     );
                     return Err(error);
@@ -1143,7 +1230,22 @@ impl Agent {
                 on_text("\n");
             }
             stats.record(&completion);
-            let response = completion.message;
+            let mut response = completion.message;
+            if response
+                .provider_items
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .any(|part| part["type"] == "kroma_anthropic_content_blocks")
+            {
+                if let PersistedContext::Builtin(state) = self.compression.state() {
+                    response
+                        .provider_items
+                        .get_or_insert_with(Vec::new)
+                        .push(serde_json::json!({"type":"kroma_context_revision",
+                            "revision":state.revision}));
+                }
+            }
             let calls = response.tool_calls.clone().unwrap_or_default();
             if stats.profile {
                 crate::runtime_log!(
@@ -1292,10 +1394,14 @@ impl Agent {
     fn append_pending_steering(&mut self) -> Result<()> {
         let mut pending = self.task_input.take_steering();
         while let Some(text) = pending.pop_front() {
-            self.messages.push(Message::new(
+            let mut message = Message::new(
                 "user",
                 format!("[Steering instruction for the current task]\n{text}"),
-            ));
+            );
+            // A steer is not a new user task and must not age out images
+            // attached to the task it modifies.
+            message.provider_items = Some(vec![serde_json::json!({"type":"kroma_steering"})]);
+            self.messages.push(message);
             if let Err(error) = self
                 .session
                 .append(&self.messages, &self.compression.state())
@@ -1319,6 +1425,7 @@ struct TaskStats {
     cached: Option<u64>,
     reasoning: Option<u64>,
     compaction: CompactionUsage,
+    failed_attempts: usize,
     profile: bool,
     started: Option<Instant>,
     context_time: Duration,
@@ -1342,6 +1449,22 @@ impl TaskStats {
 
     fn record_compaction(&mut self, usage: CompactionUsage) {
         self.compaction = usage;
+    }
+
+    fn record_failed(&mut self, usage: Option<&crate::model::Usage>) {
+        let first = self.calls == 0;
+        self.input = add_reported(self.input, usage.and_then(|u| u.input), first);
+        self.output = add_reported(self.output, usage.and_then(|u| u.output), first);
+        self.cached = add_reported(self.cached, usage.and_then(|u| u.cached), first);
+        self.reasoning = add_reported(self.reasoning, usage.and_then(|u| u.reasoning), first);
+        self.calls += 1;
+        self.failed_attempts += 1;
+        crate::runtime_log!(
+            "[usage] failed model request: input: {} | output: {} | cached: {}",
+            display_count(usage.and_then(|u| u.input)),
+            display_count(usage.and_then(|u| u.output)),
+            display_count(usage.and_then(|u| u.cached))
+        );
     }
 
     fn record(&mut self, completion: &Completion) {
@@ -1382,9 +1505,10 @@ impl TaskStats {
         }
         self.reported = true;
         crate::runtime_log!(
-            "[usage] task_status={status} | completed_model_requests={} | completed_tool_calls={} | failed_attempt_usage=unknown_if_any",
+            "[usage] task_status={status} | model_requests={} | completed_tool_calls={} | failed_model_requests={}",
             self.calls,
             self.tools,
+            self.failed_attempts,
         );
         self.report();
     }
@@ -1428,11 +1552,12 @@ impl TaskStats {
         let uncached =
             total_input.and_then(|input| total_cached.and_then(|cached| input.checked_sub(cached)));
         crate::runtime_log!(
-            "[usage] effective: foreground={} checkpoint={} | uncached_input={} | cached_input={} | failed_attempt_usage=unknown_if_any",
+            "[usage] effective: foreground={} checkpoint={} | uncached_input={} | cached_input={} | failed_model_requests={}",
             self.calls,
             self.compaction.requests,
             display_count(uncached),
-            display_count(total_cached)
+            display_count(total_cached),
+            self.failed_attempts
         );
         if self.profile {
             let ms = |time: Duration| format!("{:.2}", time.as_secs_f64() * 1_000.0);

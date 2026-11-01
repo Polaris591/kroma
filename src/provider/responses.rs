@@ -190,6 +190,10 @@ impl Stream {
         }
         Ok(())
     }
+    pub(super) fn reported_usage(&self) -> Option<Usage> {
+        self.usage.clone()
+    }
+
     pub fn finish(self) -> Result<(Message, Option<Usage>)> {
         if !self.done || self.status.as_deref() != Some("completed") {
             bail!("Responses stream was not completed: {:?}", self.status);

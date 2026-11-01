@@ -200,6 +200,20 @@ impl CommandRegistry {
                 agent.session_id()
             )))
         })?;
+        registry.register_agent_async("/compact", |agent, _, args| {
+            Box::pin(async move {
+                require_no_args(args, "/compact")?;
+                let report = agent.compact().await?;
+                Ok(CommandReply::text(if report.compacted {
+                    format!(
+                        "Context compacted: ~{} -> ~{} tokens (estimated). Original conversation history is preserved.",
+                        report.before_tokens, report.after_tokens,
+                    )
+                } else {
+                    "Nothing to compact: no sufficiently large completed history outside the recent-history retention window. Original history is unchanged.".to_owned()
+                }))
+            })
+        })?;
         registry.register("/sessions", |agent, _, args| {
             require_no_args(args, "/sessions")?;
             let mut lines = Vec::new();

@@ -3,6 +3,8 @@
 
 pub enum RuntimeEvent<'a> {
     TaskStarted,
+    /// A synchronous context checkpoint is awaiting the model, not hung in preparation.
+    CompactionStarted,
     ContextPrepared {
         messages: usize,
         estimated_input_tokens: usize,
@@ -23,6 +25,14 @@ pub enum RuntimeEvent<'a> {
         output_tokens: Option<u64>,
         reasoning_tokens: Option<u64>,
         cached_tokens: Option<u64>,
+    },
+    /// Usage from a failed model attempt, including attempts later recovered
+    /// by context compression. Missing counters remain unknown, not zero.
+    FailedRequestUsage {
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        cached_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
     },
     /// Emitted after the failed model turn's durable interruption attempt.
     /// A partially streamed response was not committed as assistant content.
