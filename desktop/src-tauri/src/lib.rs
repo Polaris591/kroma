@@ -132,6 +132,12 @@ fn view(host: &Host) -> Result<Value> {
         "project":host.project,
         "ready":host.runtime.is_some(),
         "running":host.cancel.is_some(),
+        // Capture the actual connected backend, not the editable default
+        // profile (which may change without rebuilding this runtime).
+        "connected_model": host.runtime.as_ref().and_then(|runtime| {
+            runtime.selected_model_name.clone().or_else(||
+                runtime.agent.model_report().map(|report| report.model.clone()))
+        }),
         "snapshot":snapshot,
         "sessions":sessions_for(&host.project)?,
         "profiles":profile_list()?,

@@ -22,6 +22,7 @@ const bootstrap = (): Bootstrap => ({
   project: '/project',
   ready: true,
   running: false,
+  connected_model: 'connected-model',
   snapshot: snapshot('old', 1),
   sessions: [{id: 'old', name: 'Old', recent: true}],
   profiles: {active: null, profiles: []},

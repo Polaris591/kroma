@@ -38,6 +38,7 @@ export interface SessionEntry { id: string; name: string | null; recent: boolean
 export interface McpProjectStatus { configured: boolean; trusted: boolean; }
 export interface Bootstrap {
   project: string; ready: boolean; running: boolean;
+  connected_model: string | null;
   snapshot: SessionSnapshot | null; sessions: SessionEntry[];
   profiles: Profiles; plugins: PluginSummary[]; plugin_warnings: string[];
   mcp_project: McpProjectStatus;

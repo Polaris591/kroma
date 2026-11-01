@@ -44,7 +44,7 @@
   $: snapshot = data?.snapshot ?? null;
   $: history = [...olderMessages, ...(snapshot?.messages ?? [])].filter(m => m.role !== 'system');
   $: visibleHistory = history.slice(-historyCount);
-  $: modelName = data?.profiles.profiles.find(p => p.name === data?.profiles.active)?.model || '未配置模型';
+  $: modelName = data?.connected_model || '未连接模型';
   $: usage = snapshot?.usage?.coding;
   $: pluginCount = data?.plugins.filter(p => p.enabled).length ?? 0;
   $: canSend = !!data?.ready && !busy && !running && (prompt.trim().length > 0 || attached.length > 0);
