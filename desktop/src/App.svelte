@@ -9,7 +9,7 @@
   } from '@lucide/svelte';
   import { api, type Bootstrap, type DesktopEvent, type StreamEnvelope, type Message, type ProfileInput } from './lib/api';
   import { compactCount, cachePercentage } from './lib/format';
-  import { applySnapshot, isActiveTask } from './lib/snapshot';
+  import { applySnapshot, historyPageBelongsTo, isActiveTask } from './lib/snapshot';
   import MessageView from './components/MessageView.svelte';
   import Markdown from './components/Markdown.svelte';
   import SettingsView from './components/SettingsView.svelte';
@@ -78,12 +78,21 @@
   async function loadOlderHistory() {
     const current = data?.snapshot;
     if (!current || historyBusy) return;
+    const generation = taskGeneration;
+    const session = current.session_id;
     historyBusy = true;
     try {
       const loaded = olderMessages.length + current.messages.length;
       const before = Math.max(0, (current.total_messages ?? loaded) - loaded);
       const page = await api.historyPage(before, 200);
+      // A page can arrive after the user switched sessions. Never splice
+      // another conversation's messages into the visible transcript.
+      if (!historyPageBelongsTo(page.session_id, data?.snapshot?.session_id, generation, taskGeneration)
+          || page.session_id !== session) return;
       olderMessages = [...page.messages, ...olderMessages];
+      // The visible slice is a count of newest messages; expand it by the
+      // page size so prepending older messages actually changes the view.
+      historyCount += page.messages.length;
       historyHasMore = page.next_before != null && page.next_before > 0;
     } catch (e) { showError(e); }
     finally { historyBusy = false; }

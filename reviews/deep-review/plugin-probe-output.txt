@@ -1,0 +1,13 @@
+{
+  "baseline": {
+    "code": 0,
+    "timedOut": false,
+    "elapsedMs": 1732
+  },
+  "cyclic": {
+    "code": null,
+    "timedOut": true,
+    "elapsedMs": 2019
+  },
+  "pluginEnabled": false
+}

@@ -4,7 +4,7 @@ mod responses;
 use crate::model::{ModelBackend, ModelFuture, StreamFuture, TaskImageCache};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
-use reqwest::{header::RETRY_AFTER, Client, StatusCode};
+use reqwest::{header::RETRY_AFTER, redirect, Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -189,6 +189,19 @@ pub fn reported_error_usage(error: &anyhow::Error) -> Option<&Usage> {
         .chain()
         .find_map(|cause| cause.downcast_ref::<ReportedModelFailure>())
         .map(|failure| &failure.usage)
+}
+
+/// Preserve provider-reported usage on every early failure path, including an
+/// SSE `error` event or a connection reset after `message_start`, not only on
+/// a structurally complete response that fails final validation.
+fn with_reported_usage(error: anyhow::Error, usage: Option<Usage>) -> anyhow::Error {
+    match usage {
+        Some(usage) => anyhow::Error::new(ReportedModelFailure {
+            detail: format!("{error:#}"),
+            usage,
+        }),
+        None => error,
+    }
 }
 
 fn image_capability_rejection(error: &anyhow::Error) -> bool {
@@ -812,6 +825,24 @@ impl ModelClient {
             // No whole-request deadline: a healthy streamed reasoning
             // response can legitimately take longer than 120 seconds.
             .connect_timeout(Duration::from_secs(20))
+            // Provider credentials use custom headers (Anthropic x-api-key),
+            // which reqwest does not strip on a cross-host redirect. Refuse
+            // any origin change rather than disclose a key to a redirect
+            // target that was never configured as the provider.
+            .redirect(redirect::Policy::custom(|attempt| {
+                let same_origin = attempt.previous().last().is_some_and(|previous| {
+                    previous.scheme() == attempt.url().scheme()
+                        && previous.host_str() == attempt.url().host_str()
+                        && previous.port_or_known_default() == attempt.url().port_or_known_default()
+                });
+                if attempt.previous().len() > 10 {
+                    attempt.error("too many provider redirects")
+                } else if same_origin {
+                    attempt.follow()
+                } else {
+                    attempt.error("refusing a cross-origin provider redirect")
+                }
+            }))
             .build()
             .context("failed to initialize HTTP client")?;
         Ok(Self {
@@ -893,13 +924,20 @@ impl ModelClient {
     }
 
     pub fn effective_output_tokens(&self) -> Option<usize> {
-        let hard_limit = self.output_limit.or(self.catalog_output_limit);
+        let hard_limit = self.hard_output_limit();
         self.requested_output
             .map(|n| {
                 let requested = n.min(MAX_TURN_OUTPUT_TOKENS);
                 hard_limit.map_or(requested, |limit| requested.min(limit))
             })
             .or_else(|| hard_limit.map(|limit| limit.min(4096)))
+    }
+
+    /// Provider-declared hard maximum, with the verified catalog as fallback.
+    /// Text generation (including checkpoint retries) must honor the same cap
+    /// as ordinary coding requests.
+    fn hard_output_limit(&self) -> Option<usize> {
+        self.output_limit.or(self.catalog_output_limit)
     }
 
     fn authenticated(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -1487,7 +1525,10 @@ impl ModelClient {
             } else {
                 summary_completion_budget(output_tokens, truncations)
             };
-            let max_tokens = self.output_limit.map_or(budget, |limit| budget.min(limit));
+            let max_tokens = self
+                .hard_output_limit()
+                .map_or(budget, |limit| budget.min(limit))
+                .min(MAX_TURN_OUTPUT_TOKENS);
             requests += 1;
             let payload = payload_for(max_tokens)?;
             let request = self.request(&payload);
@@ -1654,6 +1695,7 @@ impl ModelClient {
         tools: &[Value],
         instruction: &str,
         output_tokens: usize,
+        max_completion_tokens: usize,
     ) -> Result<SummaryResult> {
         let mut conversation = messages.to_vec();
         conversation.push(Message::new("user", instruction));
@@ -1674,9 +1716,9 @@ impl ModelClient {
         let mut attempt = 0usize;
         self.text_generation_with_budget(output_tokens, false, |retry_budget| {
             let max_tokens = if attempt == 0 {
-                cache_max_tokens
+                cache_max_tokens.map(|tokens| tokens.min(max_completion_tokens))
             } else {
-                Some(retry_budget)
+                Some(retry_budget.min(max_completion_tokens))
             };
             attempt += 1;
             self.checkpoint_payload(&conversation, tools, max_tokens, active_turn)
@@ -1832,60 +1874,67 @@ impl ModelClient {
         };
         let mut first_token = None;
         let mut total_stream_bytes = 0usize;
-        while let Some(chunk) = tokio::time::timeout(self.stream_idle_timeout, stream.next())
-            .await
-            .context("model streaming idle timeout")?
-        {
-            let chunk = chunk.context("model streaming connection failed")?;
-            total_stream_bytes = total_stream_bytes.saturating_add(chunk.len());
-            if total_stream_bytes > MAX_STREAM_BYTES {
-                bail!("model stream exceeds the 64 MiB limit");
+        let mut reached_end = false;
+        let stream_result: Result<()> = async {
+            while let Some(chunk) = tokio::time::timeout(self.stream_idle_timeout, stream.next())
+                .await
+                .context("model streaming idle timeout")?
+            {
+                let chunk = chunk.context("model streaming connection failed")?;
+                total_stream_bytes = total_stream_bytes.saturating_add(chunk.len());
+                if total_stream_bytes > MAX_STREAM_BYTES {
+                    bail!("model stream exceeds the 64 MiB limit");
+                }
+                if !chunk.is_empty() {
+                    *received_stream_data = true;
+                }
+                let done = consume_sse_lines(&mut pending, &chunk, |line| {
+                    process_sse_line_with_reasoning(
+                        line,
+                        &mut data_lines,
+                        &mut data_bytes,
+                        &mut result,
+                        on_text,
+                        on_reasoning,
+                    )?;
+                    if first_token.is_none() && result.received_delta() {
+                        first_token = Some(started.elapsed());
+                    }
+                    Ok(result.done())
+                })?;
+                if done {
+                    reached_end = true;
+                    break;
+                }
             }
-            if !chunk.is_empty() {
-                *received_stream_data = true;
-            }
-            let done = consume_sse_lines(&mut pending, &chunk, |line| {
+            if !reached_end {
+                if !pending.is_empty() {
+                    process_sse_line_with_reasoning(
+                        &pending,
+                        &mut data_lines,
+                        &mut data_bytes,
+                        &mut result,
+                        on_text,
+                        on_reasoning,
+                    )?;
+                }
                 process_sse_line_with_reasoning(
-                    line,
+                    &[],
                     &mut data_lines,
                     &mut data_bytes,
                     &mut result,
                     on_text,
                     on_reasoning,
                 )?;
-                if first_token.is_none() && result.received_delta() {
-                    first_token = Some(started.elapsed());
-                }
-                Ok(result.done())
-            })?;
-            if done {
-                let (message, usage) = result.finish()?;
-                return Ok(Completion {
-                    message,
-                    usage,
-                    elapsed: started.elapsed(),
-                    first_token,
-                });
             }
+            Ok(())
         }
-        if !pending.is_empty() {
-            process_sse_line_with_reasoning(
-                &pending,
-                &mut data_lines,
-                &mut data_bytes,
-                &mut result,
-                on_text,
-                on_reasoning,
-            )?;
+        .await;
+        if let Err(error) = stream_result {
+            // SSE error events, idle timeouts and connection failures can
+            // occur after the provider already reported input/output usage.
+            return Err(with_reported_usage(error, result.reported_usage()));
         }
-        process_sse_line_with_reasoning(
-            &[],
-            &mut data_lines,
-            &mut data_bytes,
-            &mut result,
-            on_text,
-            on_reasoning,
-        )?;
         if first_token.is_none() && result.received_delta() {
             first_token = Some(started.elapsed());
         }
@@ -2097,7 +2146,43 @@ impl ModelBackend for ModelClient {
         instruction: &'a str,
         output_tokens: usize,
     ) -> ModelFuture<'a, SummaryResult> {
-        Box::pin(self.checkpoint_completion(messages, tools, instruction, output_tokens))
+        Box::pin(self.checkpoint_completion(
+            messages,
+            tools,
+            instruction,
+            output_tokens,
+            MAX_TURN_OUTPUT_TOKENS,
+        ))
+    }
+
+    fn generate_checkpoint_with_ceiling<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        instruction: &'a str,
+        output_tokens: usize,
+        max_completion_tokens: usize,
+    ) -> ModelFuture<'a, SummaryResult> {
+        Box::pin(self.checkpoint_completion(
+            messages,
+            tools,
+            instruction,
+            output_tokens,
+            max_completion_tokens,
+        ))
+    }
+
+    fn checkpoint_output_ceiling(&self, _output_tokens: usize, output_reserve: usize) -> usize {
+        // The first attempt deliberately reuses the coding request's
+        // max_tokens for prompt-cache reuse. Chat omits that field unless the
+        // profile requested one, so the runtime output reserve is the only
+        // declared bound; native protocols always send an explicit value.
+        // Truncated retries are clamped to the remaining window headroom in
+        // `checkpoint_completion`, so they do not inflate this admission value.
+        match self.protocol {
+            ApiProtocol::Chat if self.requested_output.is_none() => output_reserve,
+            _ => self.effective_output_tokens().unwrap_or(4096),
+        }
     }
 
     fn generate_short_text<'a>(
@@ -2188,6 +2273,66 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(reported_error_usage(&error).unwrap().output, Some(19));
+    }
+
+    #[tokio::test]
+    async fn sse_error_after_usage_keeps_reported_usage() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            let events = [
+                json!({"type":"message_start","message":{"usage":{"input_tokens":123,"output_tokens":5}}}),
+                json!({"type":"error","error":{"type":"overloaded_error","message":"upstream failed"}}),
+            ];
+            let mut sse = String::new();
+            for event in &events {
+                sse.push_str("data: ");
+                sse.push_str(&event.to_string());
+                sse.push_str("\n\n");
+            }
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", sse.len(), sse).unwrap();
+            stream.flush().unwrap();
+        });
+        let client = ModelClient::new(&url, None, "mock".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap();
+        let error = match ModelBackend::complete(
+            &client,
+            &[Message::new("user", "hello")],
+            &[],
+            &mut |_| {},
+        )
+        .await
+        {
+            Ok(_) => panic!("SSE error must fail the request"),
+            Err(error) => error,
+        };
+        let usage = reported_error_usage(&error).expect("usage reported before the error");
+        assert_eq!(usage.input, Some(123));
+        assert_eq!(usage.output, Some(5));
+        server.join().unwrap();
     }
 
     #[test]
@@ -2990,6 +3135,200 @@ mod tests {
         assert_eq!(sent["reasoning_effort"], "low");
         assert!(sent.get("thinking").is_none());
         assert_eq!(client.reasoning_level().as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn catalog_output_cap_applies_to_text_generation() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = value.trim().parse().unwrap();
+                }
+            }
+            let mut bytes = vec![0; len];
+            reader.read_exact(&mut bytes).unwrap();
+            drop(reader);
+            let payload: Value = serde_json::from_slice(&bytes).unwrap();
+            let reply = json!({"choices":[{"message":{"role":"assistant","content":"done"},
+                "finish_reason":"stop"}]})
+            .to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.len(), reply).unwrap();
+            stream.flush().unwrap();
+            payload
+        });
+        let client = ModelClient::new(&url, None, "mock".into())
+            .unwrap()
+            .with_catalog_defaults(Some(512), None);
+        let output = client.generate_text("system", "input", 4096).await.unwrap();
+        assert_eq!(output.text, "done");
+        assert_eq!(
+            server.join().unwrap()["max_tokens"],
+            512,
+            "non-streaming text generation must honor the catalog hard cap"
+        );
+    }
+
+    #[test]
+    fn checkpoint_ceiling_covers_wire_first_attempt_and_truncated_retry() {
+        let native = ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap()
+            .with_output_tokens(Some(32_768));
+        assert_eq!(
+            native.checkpoint_output_ceiling(4096, 32_768),
+            32_768,
+            "the first checkpoint attempt reuses the coding request's max_tokens"
+        );
+        let capped = ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())
+            .unwrap()
+            .with_catalog_defaults(Some(512), None)
+            .with_protocol("anthropic")
+            .unwrap();
+        assert_eq!(capped.checkpoint_output_ceiling(4096, 4096), 512);
+        let chat = ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into()).unwrap();
+        assert_eq!(
+            chat.checkpoint_output_ceiling(4096, 1024),
+            1024,
+            "Chat without an explicit cap uses the runtime output reserve"
+        );
+        // Retries are clamped by generate_checkpoint_with_ceiling to the
+        // remaining window headroom rather than inflating admission here.
+    }
+
+    #[tokio::test]
+    async fn checkpoint_retries_are_clamped_to_window_headroom() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut budgets = Vec::new();
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut len = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = value.trim().parse().unwrap();
+                    }
+                }
+                let mut bytes = vec![0; len];
+                reader.read_exact(&mut bytes).unwrap();
+                drop(reader);
+                let payload: Value = serde_json::from_slice(&bytes).unwrap();
+                budgets.push(payload.get("max_tokens").and_then(Value::as_u64));
+                let reply = json!({"stop_reason":"max_tokens",
+                    "usage":{"input_tokens":3,"output_tokens":1}})
+                .to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.len(), reply).unwrap();
+                stream.flush().unwrap();
+            }
+            budgets
+        });
+        let client = ModelClient::new(&url, None, "mock".into())
+            .unwrap()
+            .with_output_tokens(Some(4096))
+            .with_protocol("anthropic")
+            .unwrap();
+        let messages = [
+            Message::new("system", "system"),
+            Message::new("user", "history"),
+        ];
+        let error = match client
+            .checkpoint_completion(&messages, &[], "summarize", 2048, 6000)
+            .await
+        {
+            Ok(_) => panic!("all four attempts stay truncated"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("truncated"), "{error:#}");
+        let budgets = server.join().unwrap();
+        assert_eq!(budgets[0], Some(4096), "first attempt keeps cache cap");
+        assert!(
+            budgets.iter().flatten().all(|budget| *budget <= 6000),
+            "retry exceeded remaining window headroom: {budgets:?}"
+        );
+        assert!(budgets[1..].iter().flatten().all(|budget| *budget == 6000));
+    }
+
+    #[tokio::test]
+    async fn provider_refuses_cross_origin_redirect_with_credentials() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_address = target.local_addr().unwrap();
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source_address = source.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            write!(
+                stream,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_address}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        });
+        let client = ModelClient::new(
+            &format!("http://{source_address}/v1"),
+            Some("secret-provider-key".into()),
+            "mock".into(),
+        )
+        .unwrap();
+        let error = match client.generate_text("system", "input", 128).await {
+            Ok(_) => panic!("cross-origin redirect must fail closed"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("redirect"), "{error:#}");
+        server.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        match target.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(_) => panic!("provider credentials reached the redirect target"),
+            Err(error) => panic!("unexpected redirect target error: {error}"),
+        }
     }
 
     #[test]

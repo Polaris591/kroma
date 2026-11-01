@@ -8,6 +8,7 @@ use std::{
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 use windows_sys::Win32::{
     Foundation::{HANDLE, INVALID_HANDLE_VALUE},
@@ -34,8 +35,31 @@ fn usable(handle: HANDLE) -> bool {
 
 /// Owns the process tree until successful shell completion.
 pub(crate) struct ChildTreeGuard {
-    job: OwnedHandle,
+    job: Option<OwnedHandle>,
     armed: bool,
+}
+
+/// Jobs from successful commands stay alive for the lifetime of this Kroma
+/// process. Closing the guard handle would otherwise enforce
+/// KILL_ON_JOB_CLOSE immediately, even though a Unix shell command that starts
+/// a background process has already succeeded. Windows does not allow that
+/// flag to be cleared after creation. Keeping one handle means background work
+/// outlives its shell command but not Kroma; a force-killed Kroma still closes
+/// every handle and terminates contained descendants.
+static DISARMED_JOBS: OnceLock<Mutex<Vec<OwnedHandle>>> = OnceLock::new();
+
+fn retain_disarmed_job(job: OwnedHandle) {
+    const MAX_RETAINED_JOBS: usize = 128;
+    let jobs = DISARMED_JOBS.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut jobs) = jobs.lock() {
+        jobs.push(job);
+        if jobs.len() > MAX_RETAINED_JOBS {
+            // Dropping the oldest job ends only very old background work.
+            // This bounds handle growth without changing the newest command's
+            // lifecycle.
+            jobs.remove(0);
+        }
+    }
 }
 
 impl ChildTreeGuard {
@@ -53,7 +77,10 @@ impl ChildTreeGuard {
         }
         // SAFETY: CreateJobObjectW returned a fresh owned handle, wrapped once.
         let job = unsafe { OwnedHandle::from_raw_handle(raw) };
-        let guard = Self { job, armed: true };
+        let guard = Self {
+            job: Some(job),
+            armed: true,
+        };
         // If the owning Kroma process is force-killed (for example when its
         // parent plugin is cancelled), dropping OS handles must also kill
         // the contained PowerShell/descendants. Rust Drop won't run then.
@@ -61,7 +88,11 @@ impl ChildTreeGuard {
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         let set = unsafe {
             SetInformationJobObject(
-                guard.job.as_raw_handle(),
+                guard
+                    .job
+                    .as_ref()
+                    .expect("fresh job handle")
+                    .as_raw_handle(),
                 JobObjectExtendedLimitInformation,
                 (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -78,7 +109,17 @@ impl ChildTreeGuard {
                 .ok_or_else(|| io::Error::other("shell handle unavailable"))?;
             // SAFETY: both handles remain owned/live throughout this call; the
             // child was created by this process with assignment access.
-            if unsafe { AssignProcessToJobObject(guard.job.as_raw_handle(), process) } == 0 {
+            if unsafe {
+                AssignProcessToJobObject(
+                    guard
+                        .job
+                        .as_ref()
+                        .expect("fresh job handle")
+                        .as_raw_handle(),
+                    process,
+                )
+            } == 0
+            {
                 return Err(io::Error::last_os_error());
             }
             resume_initial_thread(
@@ -98,12 +139,20 @@ impl ChildTreeGuard {
 
     pub(crate) fn disarm(&mut self) {
         self.armed = false;
+        // Transfer the job handle to the process-lifetime registry instead of
+        // closing it. KILL_ON_JOB_CLOSE remains set (Windows ignores attempts
+        // to clear it), so closing the last handle would kill background work.
+        if let Some(job) = self.job.take() {
+            retain_disarmed_job(job);
+        }
     }
 
     pub(crate) fn terminate(&self) {
         if self.armed {
-            // SAFETY: job is exclusively owned and live; no user memory passed.
-            unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
+            if let Some(job) = &self.job {
+                // SAFETY: job is exclusively owned and live; no user memory passed.
+                unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
+            }
         }
     }
 }
@@ -152,9 +201,11 @@ fn resume_initial_thread(pid: u32) -> io::Result<()> {
 impl Drop for ChildTreeGuard {
     fn drop(&mut self) {
         if self.armed {
-            // SAFETY: job is exclusively owned and live; no user memory passed.
-            // Termination is nonblocking; OwnedHandle then closes the job.
-            unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
+            if let Some(job) = &self.job {
+                // SAFETY: job is exclusively owned and live; no user memory passed.
+                // Termination is nonblocking; the option then closes the job.
+                unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
+            }
         }
     }
 }
@@ -261,6 +312,57 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A successfully completed shell may intentionally start a background
+    /// process. Disarming must clear kill-on-close, not just skip the explicit
+    /// termination call.
+    #[tokio::test]
+    async fn successful_shell_can_leave_a_background_descendant() {
+        let dir = scratch("background");
+        let worker = dir.join("background.ps1");
+        std::fs::write(
+            &worker,
+            "Set-Content -LiteralPath 'started.txt' -Value 'started'\r\nStart-Sleep -Milliseconds 1500\r\nSet-Content -LiteralPath 'survived.txt' -Value 'alive'\r\n",
+        )
+        .unwrap();
+        let parent = dir.join("parent.ps1");
+        std::fs::write(
+            &parent,
+            format!(
+                "Start-Process -FilePath powershell -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','{}' -WindowStyle Hidden\r\nStart-Sleep -Milliseconds 700\r\n",
+                worker.display()
+            ),
+        )
+        .unwrap();
+        let mut command = tokio::process::Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&parent)
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, mut guard) = ChildTreeGuard::spawn(&mut command).unwrap();
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+        assert!(
+            dir.join("started.txt").is_file(),
+            "background descendant never started inside the job"
+        );
+        guard.disarm();
+        drop(guard);
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(
+            dir.join("survived.txt").is_file(),
+            "a successful shell's background descendant was killed on job close"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The grandchild announces itself first, so a surviving marker proves

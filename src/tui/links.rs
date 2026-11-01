@@ -218,19 +218,11 @@ pub fn display_target_available(value: &str, workdir: &Path) -> bool {
 /// Use an OS default handler without constructing a shell command from
 /// model-produced text. Only explicit user clicks reach this function.
 pub fn open_target(value: &str, workdir: &Path) -> Result<()> {
-    let destination = if value.starts_with("http://")
-        || value.starts_with("https://")
-        || value.starts_with("www.")
-    {
+    if value.starts_with("http://") || value.starts_with("https://") || value.starts_with("www.") {
         let normalized = normalize_target(value).context("invalid web address")?;
-        let url = reqwest::Url::parse(&normalized).context("invalid web address")?;
-        if !matches!(url.scheme(), "http" | "https") {
-            bail!("only HTTP and HTTPS addresses can be opened");
-        }
-        std::ffi::OsString::from(url.as_str())
-    } else {
-        local_path(value, workdir)?.into_os_string()
-    };
+        return crate::external::open_http_url(&normalized);
+    }
+    let destination = local_path(value, workdir)?.into_os_string();
     open_with_system(&destination)
 }
 

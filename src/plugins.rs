@@ -30,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
         Arc, Mutex, RwLock,
     },
@@ -39,6 +39,55 @@ use std::{
 
 const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const PLUGIN_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Optional whole-tool deadline for long-running plugin tools. Zero or unset
+/// preserves the documented unlimited behavior; hooks and ordinary calls keep
+/// their fixed 120-second timeout.
+fn plugin_tool_timeout() -> Option<Duration> {
+    optional_seconds_env("KROMA_PLUGIN_TOOL_TIMEOUT_SECS")
+}
+
+fn optional_seconds_env(name: &str) -> Option<Duration> {
+    let Ok(raw) = env::var(name) else {
+        return None;
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(seconds) => Some(Duration::from_secs(seconds)),
+        Err(_) => {
+            crate::runtime_log!("[plugin] ignoring invalid {name}={raw:?}");
+            None
+        }
+    }
+}
+
+/// Opt-in minimum-privilege mode for plugin processes. Default behavior is
+/// unchanged because documented plugins may read a provider key from the host
+/// environment. `KROMA_PLUGIN_ISOLATE_ENV=1` removes credential-shaped values.
+fn plugin_env_isolation() -> bool {
+    env::var("KROMA_PLUGIN_ISOLATE_ENV")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn plugin_env_secret(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "KROMA_API_KEY" | "PGPASSWORD" | "MYSQL_PWD" | "REDISCLI_AUTH" | "COOKIE"
+    ) || upper.starts_with("AWS_")
+        || upper.starts_with("AZURE_")
+        || upper.starts_with("GCP_")
+        || upper.starts_with("GOOGLE_")
+        || upper.starts_with("GITHUB_")
+        || upper.starts_with("SSH_")
+        || upper.ends_with("_KEY")
+        || upper.ends_with("_TOKEN")
+        || upper.ends_with("_SECRET")
+        || upper.ends_with("_PASSWORD")
+        || upper.ends_with("_PWD")
+        || upper.ends_with("_COOKIE")
+        || upper.ends_with("_CREDENTIALS")
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct PluginManifest {
@@ -427,6 +476,7 @@ impl PluginManifest {
                 name.as_str(),
                 "task_started"
                     | "task_finished"
+                    | "compaction_started"
                     | "context_prepared"
                     | "model_started"
                     | "model_finished"
@@ -635,10 +685,21 @@ fn is_secret_setting(key: &str) -> bool {
 
 fn redact_secret_settings(settings: &mut BTreeMap<String, toml::Value>) {
     for (key, value) in settings.iter_mut() {
-        if is_secret_setting(key) && !matches!(value, toml::Value::String(text) if text.is_empty())
-        {
+        if is_secret_setting(key) && secret_is_set(value) {
             *value = toml::Value::String("••••".into());
         }
+    }
+}
+
+/// Empty strings are an explicit "not configured" value, not a secret. GUI
+/// hosts need this distinction to show a useful placeholder and to offer an
+/// explicit clear action for a previously stored value.
+fn secret_is_set(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::String(text) => !text.is_empty(),
+        toml::Value::Array(items) => !items.is_empty(),
+        toml::Value::Table(table) => !table.is_empty(),
+        _ => true,
     }
 }
 
@@ -877,6 +938,15 @@ impl PluginCatalog {
                     .filter(|key| is_secret_setting(key))
                     .cloned()
                     .collect();
+                // `secret_settings` identifies sensitive fields; a field can
+                // still be unset. Report configured values separately so the
+                // GUI neither claims an empty key is set nor hides the
+                // ability to clear a stored one.
+                let set_secrets: Vec<String> = settings
+                    .iter()
+                    .filter(|(key, value)| is_secret_setting(key) && secret_is_set(value))
+                    .map(|(key, _)| key.clone())
+                    .collect();
                 redact_secret_settings(&mut settings);
                 json!({
                     "id": plugin.manifest.id,
@@ -890,6 +960,7 @@ impl PluginCatalog {
                     "protocol_version": PLUGIN_API_VERSION,
                     "settings": settings,
                     "secret_settings": secret_settings,
+                    "set_secrets": set_secrets,
                     "has_model": plugin.manifest.model.is_some(),
                     "has_context": plugin.manifest.context.is_some(),
                     "has_ui": plugin.manifest.ui.is_some(),
@@ -2255,6 +2326,9 @@ struct PluginWorker {
     process: Mutex<Option<PluginProcess>>,
     next_request: AtomicU64,
     active: Mutex<Option<(u64, u32)>>,
+    /// PID already terminated by a cancellation guard. The process object
+    /// must not send the whole tree a second teardown signal.
+    terminated_pid: Arc<AtomicU32>,
 }
 
 impl PluginWorker {
@@ -2270,6 +2344,7 @@ impl PluginWorker {
             process: Mutex::new(None),
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
+            terminated_pid: Arc::clone(&self.terminated_pid),
         }
     }
 
@@ -2282,11 +2357,31 @@ impl PluginWorker {
     ) -> Self {
         let mut entrypoints = Vec::new();
         let mut pending = vec![dir.to_path_buf()];
+        // A project plugin can contain a junction/symlink back to its own
+        // directory or to a huge external tree. Bound the total work, not
+        // just the pending stack, and never visit the same canonical folder
+        // twice. Discovery must stay cheap even for a disabled plugin.
+        const MAX_SCAN_ENTRIES: usize = 20_000;
+        const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+        let mut visited = std::collections::BTreeSet::new();
+        let mut scanned_entries = 0usize;
+        let mut scanned_bytes = 0u64;
+        let mut truncated = false;
         while let Some(folder) = pending.pop() {
+            let canonical = folder.canonicalize().unwrap_or_else(|_| folder.clone());
+            if !visited.insert(canonical) {
+                continue;
+            }
             let Ok(entries) = fs::read_dir(&folder) else {
                 continue;
             };
             for entry in entries.flatten() {
+                if scanned_entries >= MAX_SCAN_ENTRIES || scanned_bytes >= MAX_SCAN_BYTES {
+                    truncated = true;
+                    pending.clear();
+                    break;
+                }
+                scanned_entries += 1;
                 let path = entry.path();
                 if path.is_dir() {
                     if !matches!(
@@ -2306,9 +2401,15 @@ impl PluginWorker {
                 }
                 if let Ok(info) = entry.metadata() {
                     if info.len() <= 1024 * 1024 {
+                        if scanned_bytes.saturating_add(info.len()) > MAX_SCAN_BYTES {
+                            truncated = true;
+                            pending.clear();
+                            break;
+                        }
                         // Detect edits even when mtime granularity is coarse
                         // and a dependency is replaced with the same length.
                         let bytes = fs::read(&path).unwrap_or_default();
+                        scanned_bytes = scanned_bytes.saturating_add(bytes.len() as u64);
                         let fingerprint = bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
                             (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
                         });
@@ -2316,6 +2417,14 @@ impl PluginWorker {
                     }
                 }
             }
+        }
+        if truncated {
+            crate::runtime_log!(
+                "[plugin] fingerprint scan for {} stopped at the safety budget ({} entries, {} bytes); nested dependencies may be ignored",
+                dir.display(),
+                scanned_entries,
+                scanned_bytes
+            );
         }
         // Also track executable script paths outside the plugin folder.
         for value in manifest.command.iter().chain(&manifest.args) {
@@ -2346,6 +2455,7 @@ impl PluginWorker {
             process: Mutex::new(None),
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
+            terminated_pid: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -2365,7 +2475,8 @@ impl PluginWorker {
     }
 
     async fn invoke_async_tool(self: &Arc<Self>, message: Value) -> Result<PluginResponse> {
-        self.invoke_async_with_timeout(message, None).await
+        self.invoke_async_with_timeout(message, plugin_tool_timeout())
+            .await
     }
 
     async fn invoke_async_timeout(
@@ -2409,7 +2520,8 @@ impl PluginWorker {
     fn cancel_active_request(&self) {
         if let Ok(active) = self.active.lock() {
             if let Some((_, pid)) = *active {
-                terminate_plugin(pid);
+                self.terminated_pid.store(pid, Ordering::SeqCst);
+                terminate_plugin_async(pid);
             }
         }
     }
@@ -2420,7 +2532,8 @@ impl PluginWorker {
         if let Ok(active) = self.active.lock() {
             if let Some((request, pid)) = *active {
                 if request == id {
-                    terminate_plugin(pid);
+                    self.terminated_pid.store(pid, Ordering::SeqCst);
+                    terminate_plugin_async(pid);
                 }
             }
         }
@@ -2481,6 +2594,13 @@ impl PluginWorker {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if plugin_env_isolation() {
+                for (key, _) in env::vars_os() {
+                    if plugin_env_secret(&key.to_string_lossy()) {
+                        builder.env_remove(key);
+                    }
+                }
+            }
             #[cfg(unix)]
             unsafe {
                 use std::os::unix::process::CommandExt;
@@ -2529,10 +2649,14 @@ impl PluginWorker {
                     }
                 });
             }
+            // Forget any earlier cancellation PID before recording the new
+            // process; a recycled PID must not suppress its own cleanup.
+            self.terminated_pid.store(0, Ordering::SeqCst);
             *process = Some(PluginProcess {
                 child,
                 stdin,
                 stdout: BufReader::new(stdout),
+                terminated_pid: Arc::clone(&self.terminated_pid),
             });
         }
         if cancellation.is_some_and(|(_, cancelled)| cancelled.load(Ordering::SeqCst)) {
@@ -2601,10 +2725,17 @@ fn terminate_plugin(pid: u32) {
     }
 }
 
+/// Cancellation can run on an async/UI thread. Do the potentially blocking
+/// whole-tree teardown (taskkill / the Unix SIGKILL grace period) off-thread.
+fn terminate_plugin_async(pid: u32) {
+    std::thread::spawn(move || terminate_plugin(pid));
+}
+
 struct PluginProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    terminated_pid: Arc<AtomicU32>,
 }
 
 #[derive(Deserialize)]
@@ -2684,7 +2815,13 @@ impl PluginProcess {
 
 impl Drop for PluginProcess {
     fn drop(&mut self) {
-        terminate_plugin(self.child.id());
+        let pid = self.child.id();
+        // A cancellation guard already sent SIGINT/taskkill for this tree.
+        // Repeating the whole-tree teardown here was both redundant and
+        // blocking; still reap the direct child handle.
+        if self.terminated_pid.load(Ordering::SeqCst) != pid {
+            terminate_plugin(pid);
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -2710,6 +2847,19 @@ mod tests {
         let changed = worker();
         assert!(!before.same_definition(&changed));
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compaction_started_is_an_accepted_plugin_event() -> Result<()> {
+        let manifest: PluginManifest = toml::from_str(
+            "id='events'\nname='Events'\ncommand='node'\nevents=['compaction_started']\n",
+        )?;
+        manifest.validate()?;
+        let unsupported: PluginManifest = toml::from_str(
+            "id='events'\nname='Events'\ncommand='node'\nevents=['not_a_real_event']\n",
+        )?;
+        assert!(unsupported.validate().is_err());
         Ok(())
     }
 

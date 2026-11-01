@@ -1,0 +1,2 @@
+PAGINATION {"loadedOlder":200,"historyCount":150,"visibleUnchanged":true}
+HISTORY_RACE {"visibleSession":"B","wrongSessionVisible":true}

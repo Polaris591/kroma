@@ -205,7 +205,7 @@ impl PromptComposer {
             "system",
             format!(
                 "You are Kroma, an AI coding agent. {tool_description} The starting working directory is {}. Be accurate about command results and do not claim a command ran unless a tool result confirms it. Avoid destructive commands unless explicitly requested. Reply concisely in the user's language.",
-                workdir.display()
+                crate::path_display::for_shell(workdir)
             ),
         )]
     }

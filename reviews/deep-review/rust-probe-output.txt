@@ -1,0 +1,20 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.39s
+     Running `target\debug\examples\review_probe.exe`
+[model] request attempt=1 started
+[model] request attempt=1 failed; usage unknown
+REDIRECT credential_forwarded=true
+[model] request attempt=1 started
+[model] request attempt=1 failed; usage unknown
+FAILED_USAGE error_event=true usage=None error=Anthropic stream error: {"message":"audit failure","type":"overloaded_error"}
+[model] request attempt=1 started
+[model] request attempt=1 failed; usage unknown
+FAILED_USAGE error_event=false usage=Some(Usage { input: Some(123), output: Some(5), total: Some(128), cached: None, reasoning: None }) error=Anthropic stream ended without stop_reason
+[model] using configured limits; skipping optional metadata lookup
+UNICODE_SEARCH {"has_more":false,"matches":[{"excerpt":"","index":1,"role":"user"}],"next_before_index":null,"note":"Use history_read with a match index. This transcript includes the durable checkpoint and valid journal messages; the complete raw history remains authoritative.","query":"needle","total_messages":2}
+TRUST_RACE attempts=24 errors=0 persisted=1
+TRUST_REVOKE_RACE delay_ms=1 revoked_project_trusted_again=true
+TRUST_REVOKE_RACE delay_ms=5 revoked_project_trusted_again=true
+TRUST_REVOKE_RACE delay_ms=10 revoked_project_trusted_again=true
+TRUST_REVOKE_RACE delay_ms=20 revoked_project_trusted_again=true
+MCP_CONFIG_LIMIT declared_limit_mib=1 input_mib=32 additional_peak_alloc_bytes=33555050 configured_servers=0

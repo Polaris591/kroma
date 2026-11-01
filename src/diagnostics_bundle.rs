@@ -308,14 +308,16 @@ fn redact_path(path: &Path) -> String {
     let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"));
     if let Some(home) = home {
         let home = Path::new(&home);
-        if let Ok(rest) = path.strip_prefix(home) {
+        // Windows canonicalization returns `\\?\C:\...` while HOME is usually
+        // plain `C:\...`; compare after normalizing the verbatim prefix.
+        if let Some(rest) = crate::path_display::strip_prefix_equivalent(path, home) {
             if rest.as_os_str().is_empty() {
                 return "~".into();
             }
-            return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
+            return format!("~/{}", crate::path_display::for_shell(&rest));
         }
     }
-    path.display().to_string()
+    crate::path_display::for_shell(path)
 }
 
 #[cfg(test)]

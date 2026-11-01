@@ -282,7 +282,11 @@ impl Agent {
         } else {
             catalog.default_path().to_path_buf()
         };
-        let session = SessionStore::open_at(path, &workdir)?;
+        let session = if defer_initial_save {
+            SessionStore::open_transient(path, &workdir)?
+        } else {
+            SessionStore::open_at(path, &workdir)?
+        };
         let previous = if defer_initial_save {
             None
         } else {
@@ -797,7 +801,7 @@ impl Agent {
     /// Release the previous history lock immediately on TUI /new, without
     /// persisting an unused conversation or changing the recent-session ID.
     pub fn enter_welcome(&mut self) -> Result<()> {
-        let next = SessionStore::open_at(transient_session_path(), &self.workdir)?;
+        let next = SessionStore::open_transient(transient_session_path(), &self.workdir)?;
         let context = self.context_factory.restore(
             self.context_factory.initial(),
             self.context_budget,
@@ -1219,11 +1223,20 @@ impl Agent {
             // their tool results. The freshly returned calls/results remain
             // protected until a subsequent successful model response.
             self.compression.mark_consumed(self.messages.len());
+            // A dynamic before_model_request hook may have rewritten the
+            // provider view. Its reported input tokens then describe a
+            // different request, so use them for cost accounting only and
+            // leave the conservative estimator in charge of compaction.
+            let measured = self
+                .model
+                .usage_matches_projection()
+                .then_some(completion.usage.as_ref())
+                .flatten();
             self.compression.observe_with_bytes(
                 &budget_view,
                 budget_view_bytes,
-                completion.usage.as_ref().and_then(|usage| usage.input),
-                completion.usage.as_ref().and_then(|usage| usage.cached),
+                measured.and_then(|usage| usage.input),
+                measured.and_then(|usage| usage.cached),
             );
             self.usage.record(completion.usage.as_ref());
             if printed_text {
@@ -1703,7 +1716,16 @@ mod tests {
         // The old conversation lock is released when /new goes home.
         let probe = SessionStore::open_at(path, &dir)?;
         drop(probe);
+        let transient = agent.archive_path().to_path_buf();
+        let transient_lock = transient.parent().unwrap().join(format!(
+            ".{}.lock",
+            transient.file_name().unwrap().to_string_lossy()
+        ));
+        let transient_wal = crate::session::journal_path(&transient);
         drop(agent);
+        assert!(!transient.exists(), "throwaway welcome snapshot");
+        assert!(!transient_lock.exists(), "throwaway welcome lock");
+        assert!(!transient_wal.exists(), "throwaway welcome WAL");
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

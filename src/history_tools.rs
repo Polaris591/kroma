@@ -34,14 +34,35 @@ struct ReadArgs {
 }
 
 fn excerpt(text: &str, query: &str) -> Option<String> {
-    let lower = text.to_lowercase();
     let needle = query.to_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    // Lowercase mapping can change byte lengths (`İ` becomes `i` + combining
+    // dot). Keep an offset for every lowercase byte so the excerpt is sliced
+    // from the original text at the matched character, not at a byte offset
+    // that only happens to be valid for the folded string.
+    let mut lower = String::new();
+    let mut original_offsets = Vec::with_capacity(text.len() + 1);
+    for (index, ch) in text.char_indices() {
+        for folded in ch.to_lowercase() {
+            original_offsets.extend(std::iter::repeat_n(index, folded.len_utf8()));
+            lower.push(folded);
+        }
+    }
+    original_offsets.push(text.len());
     let position = lower.find(&needle)?;
-    let mut start = position.saturating_sub(160);
+    let matched_end = position.saturating_add(needle.len());
+    let original_start = original_offsets[position];
+    let original_end = original_offsets
+        .get(matched_end)
+        .copied()
+        .unwrap_or(text.len());
+    let mut start = original_start.saturating_sub(160);
     while !text.is_char_boundary(start) {
         start -= 1;
     }
-    let mut end = (position + needle.len() + 240).min(text.len());
+    let mut end = original_end.saturating_add(240).min(text.len());
     while end < text.len() && !text.is_char_boundary(end) {
         end += 1;
     }
@@ -251,6 +272,15 @@ mod tests {
         let found = excerpt(&text, "NEEDLE").expect("match");
         assert!(found.contains("needle"));
         assert!(found.is_char_boundary(0));
+    }
+
+    #[test]
+    fn excerpts_map_folded_offsets_back_to_the_original_text() {
+        // U+0130 lowercases to `i` plus a combining dot, changing byte length.
+        // The excerpt must still point at the original match.
+        let text = "İ".repeat(300) + "needle";
+        let found = excerpt(&text, "needle").expect("match after length-changing fold");
+        assert!(found.contains("needle"));
     }
 
     #[test]

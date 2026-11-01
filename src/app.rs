@@ -212,7 +212,7 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
             .thinking_levels_source
             .unwrap_or(FieldSource::Unknown),
     };
-    let mut resolved = model_catalog::resolve(
+    let resolved = model_catalog::resolve(
         &inputs,
         &upstream,
         metadata,
@@ -228,20 +228,15 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
     // Responses and Anthropic always send an explicit output limit. Even
     // when /models has no hard maximum, their default wire value is 4096;
     // reserve that same amount instead of an unrelated window/8 heuristic.
-    let effective_output = if config.api_protocol == "chat" {
-        resolved.effective_turn_output
-    } else {
-        let actual = model.effective_output_tokens().unwrap_or(4096);
-        resolved.report.effective_turn_output_tokens.value = Some(actual);
-        resolved.report.effective_turn_output_tokens.source = FieldSource::Computed;
-        resolved.report.effective_turn_output_tokens.note =
-            Some("actual native request max_output_tokens/max_tokens".into());
-        if config.max_output_tokens.is_none() {
-            resolved.report.requested_output_tokens.note =
-                Some("provider default; Kroma sends an explicit native output cap".into());
-        }
-        Some(actual)
-    };
+    let resolved_output = resolved.effective_turn_output;
+    let effective_output =
+        model_catalog::effective_wire_output(&config.api_protocol, resolved.effective_turn_output);
+    let mut report =
+        model_catalog::annotate_wire_output(resolved.report, &config.api_protocol, resolved_output);
+    if config.api_protocol != "chat" && config.max_output_tokens.is_none() {
+        report.requested_output_tokens.note =
+            Some("provider default; Kroma sends an explicit native output cap".into());
+    }
     let budget = ContextConfig::from_limits(resolved.context_window, effective_output)?;
     let reserve_source = if std::env::var_os("KROMA_OUTPUT_RESERVE_TOKENS").is_some() {
         FieldSource::Environment
@@ -250,8 +245,7 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
     } else {
         FieldSource::Default
     };
-    let report =
-        model_catalog::finish_report(resolved.report, budget.output_reserve(), reserve_source);
+    let report = model_catalog::finish_report(report, budget.output_reserve(), reserve_source);
     Ok((model, budget, report))
 }
 
@@ -369,6 +363,38 @@ mod tests {
             assert_eq!(budget.output_reserve(), 4096, "{protocol}");
             assert_eq!(report.effective_turn_output_tokens.value, Some(4096));
             assert_eq!(report.output_reserve.value, Some(4096));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn offline_diagnostics_match_runtime_native_output_reserve() -> Result<()> {
+        for protocol in ["responses", "anthropic"] {
+            let profile = crate::profiles::ProviderProfile {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "unknown".into(),
+                api_key: None,
+                deepseek_thinking: None,
+                api_protocol: Some(protocol.into()),
+                reasoning_effort: Some("auto".into()),
+                context_window: Some(8192),
+                max_output_tokens: None,
+                thinking_levels: None,
+                catalog_model: None,
+            };
+            let config = Config::from_profile(&profile, Default::default(), None)?;
+            let (offline, offline_report) = config.resolved_limits_without_probe()?;
+            let (_, runtime, _) = model_from_profile(&profile).await?;
+            assert_eq!(
+                offline.output_reserve(),
+                runtime.output_reserve(),
+                "{protocol}: offline config show must not disagree with runtime"
+            );
+            assert_eq!(
+                offline_report.effective_turn_output_tokens.value,
+                Some(4096),
+                "{protocol}"
+            );
         }
         Ok(())
     }

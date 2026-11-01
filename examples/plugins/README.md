@@ -59,7 +59,12 @@ kroma plugins set web provider free
 
 Changes take effect after restarting Kroma or running `/plugins reload` in an idle TUI.
 Launch Kroma with the Exa/Brave key in its environment; environment changes need
-a restart. SearXNG must enable JSON search. Mwmbl, Bing RSS and DuckDuckGo HTML/Lite
+a restart. Plugin processes inherit the host environment by default so this
+example can read its provider key. Set `KROMA_PLUGIN_ISOLATE_ENV=1` to remove
+credential-shaped variables from plugin children when a plugin should use saved
+settings instead. `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` optionally caps a
+non-streaming plugin tool call; unset preserves the unlimited default.
+SearXNG must enable JSON search. Mwmbl, Bing RSS and DuckDuckGo HTML/Lite
 are keyless best-effort engines with unequal ranking quality; see the web plugin
 guide for the measured results on one network. Configure at least one keyed
 provider in the priority list, or select a backend explicitly. Auto may incur

@@ -14,7 +14,10 @@ use serde_json::{json, Value};
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, RwLock,
+    },
     time::Instant,
 };
 
@@ -416,6 +419,8 @@ pub(super) struct PluginModelHooks {
     budget: ContextConfig,
     workers: Vec<Arc<PluginWorker>>,
     session: RwLock<Option<(String, PathBuf)>>,
+    /// Updated by the last projection. The Agent reads it after completion.
+    usage_matches_projection: AtomicBool,
 }
 
 impl PluginModelHooks {
@@ -429,6 +434,7 @@ impl PluginModelHooks {
             budget,
             workers,
             session: RwLock::new(None),
+            usage_matches_projection: AtomicBool::new(true),
         }
     }
 
@@ -440,6 +446,8 @@ impl PluginModelHooks {
         // Model request Hooks operate on ephemeral provider input, never the
         // durable transcript or ToolRegistry. No extra history copies when a
         // Hook leaves the request unchanged.
+        self.usage_matches_projection
+            .store(false, Ordering::Relaxed);
         let mut view: Cow<'_, [Message]> = Cow::Borrowed(messages);
         let mut schemas: Cow<'_, [Value]> = Cow::Borrowed(tools);
         let (session_id, archive) = self
@@ -480,6 +488,12 @@ impl PluginModelHooks {
         self.inner.project_for_budget(&mut planned);
         self.budget
             .validate_final_request(&planned, schemas.as_ref())?;
+        // A borrowed view means every hook left the request byte-identical;
+        // then provider usage describes the Agent's planning projection.
+        self.usage_matches_projection.store(
+            matches!(view, Cow::Borrowed(_)) && matches!(schemas, Cow::Borrowed(_)),
+            Ordering::Relaxed,
+        );
         Ok((view.into_owned(), schemas))
     }
 }
@@ -494,6 +508,9 @@ impl ModelBackend for PluginModelHooks {
 
     fn project_for_budget(&self, messages: &mut [Message]) {
         self.inner.project_for_budget(messages);
+    }
+    fn usage_matches_projection(&self) -> bool {
+        self.usage_matches_projection.load(Ordering::Relaxed)
     }
     fn accepts_images(&self) -> Option<bool> {
         self.inner.accepts_images()

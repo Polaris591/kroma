@@ -517,6 +517,33 @@ pub fn finish_report(
     report
 }
 
+/// Completion budget the wire request will actually use for planning.
+/// Responses and Anthropic always send an explicit limit and default to 4096;
+/// Chat may omit `max_tokens` unless the profile requested one.
+pub fn effective_wire_output(protocol: &str, resolved: Option<usize>) -> Option<usize> {
+    if protocol == "chat" {
+        resolved
+    } else {
+        Some(resolved.unwrap_or(4096))
+    }
+}
+
+/// Keep the offline diagnostics report consistent with the runtime. Native
+/// protocols replace the resolved planning value with the concrete wire value.
+pub fn annotate_wire_output(
+    mut report: ModelReport,
+    protocol: &str,
+    resolved: Option<usize>,
+) -> ModelReport {
+    if protocol != "chat" {
+        report.effective_turn_output_tokens.value = Some(resolved.unwrap_or(4096));
+        report.effective_turn_output_tokens.source = FieldSource::Computed;
+        report.effective_turn_output_tokens.note =
+            Some("actual native request max_output_tokens/max_tokens".into());
+    }
+    report
+}
+
 /// A process-model plugin owns its provider contract. This report describes
 /// only what the host can verify without contacting the plugin.
 pub fn plugin_report(

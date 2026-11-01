@@ -1,0 +1,10 @@
+{
+  "visibleSession": "B",
+  "olderMessages": [
+    {
+      "role": "user",
+      "content": "A PRIVATE older history"
+    }
+  ],
+  "wrongSessionMerged": true
+}

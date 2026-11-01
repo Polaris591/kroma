@@ -13,6 +13,7 @@ pub mod desktop_host;
 pub mod diagnostics;
 pub mod diagnostics_bundle;
 pub mod events;
+pub mod external;
 pub mod host_attachments;
 pub mod mcp;
 pub mod model;
@@ -36,6 +37,7 @@ mod atomic_file;
 mod cache_trace;
 mod catalog_file;
 mod history_tools;
+mod path_display;
 mod private_file;
 #[cfg(windows)]
 mod winsys;

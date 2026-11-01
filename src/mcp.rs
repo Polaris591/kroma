@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     env, fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -79,10 +80,16 @@ fn is_host_secret(name: &str) -> bool {
         || upper.starts_with("DATABASE_URL")
         || upper.starts_with("REDIS_URL")
         || upper.starts_with("MONGODB_URI")
+        || matches!(
+            upper.as_str(),
+            "PGPASSWORD" | "MYSQL_PWD" | "REDISCLI_AUTH" | "COOKIE"
+        )
         || upper.ends_with("_KEY")
         || upper.ends_with("_TOKEN")
         || upper.ends_with("_SECRET")
         || upper.ends_with("_PASSWORD")
+        || upper.ends_with("_PWD")
+        || upper.ends_with("_COOKIE")
         || upper.ends_with("_CREDENTIALS")
 }
 
@@ -204,6 +211,71 @@ fn fingerprint(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Read at most `limit + 1` bytes so an untrusted file cannot force a full
+/// allocation before its size is rejected. The extra byte distinguishes an
+/// exactly-at-limit file from an oversized one without a racy metadata pass.
+fn read_bounded(path: &Path, limit: u64) -> std::io::Result<(Vec<u8>, bool)> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    let oversized = bytes.len() as u64 > limit;
+    Ok((bytes, oversized))
+}
+
+/// A cross-process lock around the trust store read/modify/write. Atomic
+/// replacement prevents torn files but not lost updates when two approvals or
+/// a revoke race. The lock file is intentionally persistent: deleting it could
+/// create two independent locks.
+struct TrustStoreLock {
+    _file: fs::File,
+}
+
+impl TrustStoreLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let parent = path.parent().context("MCP trust store has no parent")?;
+        fs::create_dir_all(parent)?;
+        let lock_path = parent.join("trusted-mcp.json.lock");
+        for _ in 0..250 {
+            let mut options = fs::OpenOptions::new();
+            options.read(true).write(true).create(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.share_mode(0);
+            }
+            match options.open(&lock_path) {
+                Ok(file) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::fd::AsRawFd;
+                        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }
+                            != 0
+                        {
+                            let error = std::io::Error::last_os_error();
+                            if error.kind() == std::io::ErrorKind::WouldBlock {
+                                std::thread::sleep(Duration::from_millis(20));
+                                continue;
+                            }
+                            return Err(error).context("locking MCP trust store");
+                        }
+                    }
+                    return Ok(Self { _file: file });
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::PermissionDenied
+                    ) || (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33))) =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error).context("opening MCP trust store lock"),
+            }
+        }
+        bail!("MCP trust store is busy in another Kroma process")
+    }
+}
+
 fn trust_store_path() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
@@ -221,11 +293,9 @@ fn project_key(workdir: &Path) -> String {
 
 fn load_trust_store() -> Result<BTreeMap<String, String>> {
     let path = trust_store_path()?;
-    match fs::read(&path) {
-        Ok(bytes) if bytes.len() as u64 > MAX_MCP_CONFIG_BYTES => {
-            bail!("MCP trust store exceeds 1 MiB")
-        }
-        Ok(bytes) => serde_json::from_slice(&bytes)
+    match read_bounded(&path, MAX_MCP_CONFIG_BYTES) {
+        Ok((_, true)) => bail!("MCP trust store exceeds 1 MiB"),
+        Ok((bytes, false)) => serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid MCP trust store {}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
         Err(error) => {
@@ -253,8 +323,9 @@ pub fn project_mcp_trusted(workdir: &Path) -> Result<bool> {
     if !config.is_file() {
         return Ok(true);
     }
-    let bytes = fs::read(&config)
-        .with_context(|| format!("reading project MCP config {}", config.display()))?;
+    let bytes = read_bounded(&config, MAX_MCP_CONFIG_BYTES)
+        .with_context(|| format!("reading project MCP config {}", config.display()))?
+        .0;
     if bytes.len() as u64 > MAX_MCP_CONFIG_BYTES {
         bail!("project MCP config exceeds 1 MiB");
     }
@@ -269,14 +340,16 @@ pub fn trust_project_mcp(workdir: &Path) -> Result<PathBuf> {
         .canonicalize()
         .with_context(|| format!("project path does not exist: {}", workdir.display()))?;
     let config = workdir.join(".kroma").join("mcp.json");
-    let bytes = fs::read(&config)
-        .with_context(|| format!("no project MCP config at {}", config.display()))?;
+    let bytes = read_bounded(&config, MAX_MCP_CONFIG_BYTES)
+        .with_context(|| format!("no project MCP config at {}", config.display()))?
+        .0;
     if bytes.len() as u64 > MAX_MCP_CONFIG_BYTES {
         bail!("project MCP config exceeds 1 MiB");
     }
+    let path = trust_store_path()?;
+    let _lock = TrustStoreLock::acquire(&path)?;
     let mut store = load_trust_store()?;
     store.insert(project_key(&workdir), fingerprint(&bytes));
-    let path = trust_store_path()?;
     let parent = path.parent().context("MCP trust store has no parent")?;
     let temp = crate::private_file::save(
         parent,
@@ -295,9 +368,10 @@ pub fn revoke_project_mcp(workdir: &Path) -> Result<()> {
     let workdir = workdir
         .canonicalize()
         .with_context(|| format!("project path does not exist: {}", workdir.display()))?;
+    let path = trust_store_path()?;
+    let _lock = TrustStoreLock::acquire(&path)?;
     let mut store = load_trust_store()?;
     store.remove(&project_key(&workdir));
-    let path = trust_store_path()?;
     let parent = path.parent().context("MCP trust store has no parent")?;
     let temp = crate::private_file::save(
         parent,
@@ -431,8 +505,10 @@ fn configured_servers_with(
     for (path, project) in paths {
         // Read the exact bytes once and make the trust decision and parser use
         // the same snapshot. Reopening the path after approval would allow a
-        // project to swap the file between the hash check and execution.
-        let bytes = match fs::read(&path) {
+        // project to swap the file between the hash check and execution. The
+        // read itself is bounded so an oversized untrusted config cannot
+        // allocate its full size before the limit is checked.
+        let (bytes, oversized) = match read_bounded(&path, MAX_MCP_CONFIG_BYTES) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) if project => {
@@ -448,7 +524,7 @@ fn configured_servers_with(
                 return Err(error).with_context(|| format!("reading MCP config {}", path.display()))
             }
         };
-        if bytes.len() as u64 > MAX_MCP_CONFIG_BYTES {
+        if oversized {
             if project {
                 warnings.push(format!(
                     "project MCP config {} skipped: exceeds 1 MiB",
@@ -1442,6 +1518,34 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn bounded_read_stops_one_byte_past_the_limit() {
+        let dir = scratch("bounded-read");
+        let path = dir.join("oversized.json");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(32 * 1024 * 1024)
+            .unwrap();
+        let (bytes, oversized) = read_bounded(&path, 1024).unwrap();
+        assert!(oversized);
+        assert_eq!(bytes.len(), 1025, "read only limit+1 bytes");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn credential_shaped_environment_names_are_filtered() {
+        for name in [
+            "PGPASSWORD",
+            "MYSQL_PWD",
+            "SESSION_COOKIE",
+            "COOKIE",
+            "REDISCLI_AUTH",
+        ] {
+            assert!(is_host_secret(name), "{name}");
+        }
+        assert!(!is_host_secret("PATH"));
     }
 
     #[cfg(unix)]

@@ -16,3 +16,17 @@ export function applySnapshot(data: Bootstrap, snapshot: SessionSnapshot): Boots
 export function isActiveTask(generation: number, current: number): boolean {
   return generation === current;
 }
+
+/**
+ * A history page is safe to splice only when both the task generation and the
+ * visible session still match the request. Otherwise a slow response can put
+ * another conversation's older messages into the transcript.
+ */
+export function historyPageBelongsTo(
+  pageSession: string,
+  visibleSession: string | undefined,
+  pageGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return pageGeneration === currentGeneration && pageSession === visibleSession;
+}

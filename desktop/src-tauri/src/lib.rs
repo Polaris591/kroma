@@ -25,6 +25,9 @@ use tokio::sync::watch;
 struct Host {
     project: PathBuf,
     generation: u64,
+    /// Monotonic token for concurrent IPC connect attempts. Only the newest
+    /// attempt may publish a runtime; older completions are discarded.
+    connect_epoch: u64,
     runtime: Option<DefaultRuntime>,
     events: Arc<DesktopEvents>,
     cancel: Option<watch::Sender<bool>>,
@@ -67,6 +70,7 @@ impl DesktopState {
         Self(Arc::new(Mutex::new(Host {
             project: initial_project(),
             generation: 0,
+            connect_epoch: 0,
             runtime: None,
             events: Arc::new(DesktopEvents::default()),
             cancel: None,
@@ -189,10 +193,11 @@ async fn connect(
     state: State<'_, DesktopState>,
     profile: Option<String>,
 ) -> std::result::Result<Value, String> {
-    let (project, version) = {
-        let host = state.0.lock().map_err(ui_error)?;
+    let (project, version, epoch) = {
+        let mut host = state.0.lock().map_err(ui_error)?;
         require_idle(&host).map_err(ui_error)?;
-        (host.project.clone(), host.generation)
+        host.connect_epoch = host.connect_epoch.wrapping_add(1);
+        (host.project.clone(), host.generation, host.connect_epoch)
     };
     let config = if let Some(name) = profile.as_ref().filter(|s| !s.is_empty()) {
         let profiles = Profiles::load().map_err(ui_error)?;
@@ -218,6 +223,9 @@ async fn connect(
     require_idle(&host).map_err(ui_error)?;
     if host.generation != version {
         return Err("Project changed during connection".into());
+    }
+    if host.connect_epoch != epoch {
+        return Err("A newer connection attempt superseded this one".into());
     }
     let selected = host
         .runtime
@@ -533,29 +541,15 @@ fn parse_setting(value: Value) -> Result<toml::Value> {
     }
 }
 
+#[cfg(test)]
 fn validate_external_url(raw: &str) -> Result<String> {
-    if raw.len() > 4096 || raw.chars().any(char::is_control) {
-        bail!("invalid external URL");
-    }
-    let lower = raw.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-        bail!("only HTTP(S) links can be opened externally");
-    }
+    kroma::external::validate_http_url(raw)?;
     Ok(raw.to_owned())
 }
 
 #[tauri::command]
 fn open_external(url: String) -> std::result::Result<(), String> {
-    let url = validate_external_url(&url).map_err(ui_error)?;
-    #[cfg(target_os = "windows")]
-    let child = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let child = std::process::Command::new("open").arg(&url).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let child = std::process::Command::new("xdg-open").arg(&url).spawn();
-    child.map(|_| ()).map_err(ui_error)
+    kroma::external::open_http_url(&url).map_err(ui_error)
 }
 
 #[tauri::command]

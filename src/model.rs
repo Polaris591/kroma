@@ -155,6 +155,38 @@ pub trait ModelBackend: Send + Sync {
         })
     }
 
+    /// Produce one checkpoint with an explicit completion headroom. Context
+    /// planning supplies the tokens that remain after the selected source
+    /// prefix, and the provider must keep every attempt and truncated retry
+    /// within that value. The default backend simply forwards the target.
+    fn generate_checkpoint_with_ceiling<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        instruction: &'a str,
+        output_tokens: usize,
+        _max_completion_tokens: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        self.generate_checkpoint(messages, tools, instruction, output_tokens)
+    }
+
+    /// Maximum completion tokens the first checkpoint attempt may reserve.
+    /// Context planning uses this before admitting a checkpoint so the source
+    /// prefix plus the cache-matching wire `max_tokens` value fits the model
+    /// window. Truncated retries are separately clamped to the remaining
+    /// headroom by `generate_checkpoint_with_ceiling`.
+    fn checkpoint_output_ceiling(&self, output_tokens: usize, _output_reserve: usize) -> usize {
+        output_tokens.max(128).saturating_mul(2).saturating_add(512)
+    }
+
+    /// True when usage reported by the last completion describes the same
+    /// projection the Agent passed to `complete`. A request-rewriting hook
+    /// returns false so provider-reported tokens are not used to calibrate a
+    /// different (pre-hook) view. Cost accounting still records the usage.
+    fn usage_matches_projection(&self) -> bool {
+        true
+    }
+
     /// Optional low-budget title/label request. Unlike a checkpoint, short text
     /// should not reserve a large hidden-reasoning completion allowance.
     /// Other backends may reuse their normal text-generation path.

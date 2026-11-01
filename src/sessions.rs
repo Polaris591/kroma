@@ -45,8 +45,28 @@ pub struct SessionEntry {
 }
 
 impl SessionCatalog {
+    /// Derive a sidecar from the default snapshot path. `.json` snapshots keep
+    /// their historical `main.names.json` companions. For a custom suffix such
+    /// as `foo.session`, append instead of replacing the extension: replacing
+    /// it made `foo.session` and `foo.other` share `foo.names.json`, leaking
+    /// one default session's title into the other.
+    fn sidecar(&self, suffix: &str) -> PathBuf {
+        let file_name = self.default.file_name().unwrap_or_default();
+        if file_name
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with(".json")
+        {
+            return self.default.with_extension(suffix);
+        }
+        let mut name = self.default.as_os_str().to_os_string();
+        name.push(".");
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
     fn last_path(&self) -> PathBuf {
-        self.default.with_extension("last.json")
+        self.sidecar("last.json")
     }
 
     /// Explicit session navigation is more precise than filesystem mtimes,
@@ -69,7 +89,7 @@ impl SessionCatalog {
     }
 
     fn usage_path(&self) -> PathBuf {
-        self.default.with_extension("usage.json")
+        self.sidecar("usage.json")
     }
 
     fn usage_map(&self) -> Result<std::collections::BTreeMap<String, SessionUsage>> {
@@ -115,7 +135,7 @@ impl SessionCatalog {
     }
 
     fn models_path(&self) -> PathBuf {
-        self.default.with_extension("models.json")
+        self.sidecar("models.json")
     }
 
     fn models(&self) -> Result<std::collections::BTreeMap<String, SessionModel>> {
@@ -150,7 +170,7 @@ impl SessionCatalog {
         Ok(())
     }
     fn names_path(&self) -> PathBuf {
-        self.default.with_extension("names.json")
+        self.sidecar("names.json")
     }
     fn names(&self) -> Result<std::collections::BTreeMap<String, String>> {
         match fs::read(self.names_path()) {
@@ -279,7 +299,7 @@ impl SessionCatalog {
             let serial = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
             let id = format!("s{nanos:x}-{serial:x}-{:x}", std::process::id());
             let path = self.named_path(&id)?;
-            if !path.exists() && !path.with_extension("json.wal").exists() {
+            if !path.exists() && !crate::session::journal_path(&path).exists() {
                 return Ok((id, path));
             }
         }
@@ -304,7 +324,7 @@ impl SessionCatalog {
             if let Some(id) = self.id_for_path(&path) {
                 // The JSON checkpoint can be old while the WAL contains the
                 // latest turns; order by the most recent durable write.
-                let wal = path.with_extension("json.wal");
+                let wal = crate::session::journal_path(&path);
                 let modified = entry
                     .metadata()?
                     .modified()
@@ -386,6 +406,57 @@ mod tests {
         assert_eq!(catalog.recent()?.as_deref(), Some(branch.as_str()));
         catalog.remember_active("default")?;
         assert_eq!(catalog.recent()?.as_deref(), Some("default"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn non_json_default_uses_distinct_sidecars_and_appended_wal() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-custom-session-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let first = SessionCatalog::from_default(root.join("foo.session"))?;
+        let second = SessionCatalog::from_default(root.join("foo.other"))?;
+        assert_ne!(first.names_path(), second.names_path());
+        assert_eq!(first.names_path(), root.join("foo.session.names.json"));
+        assert_eq!(
+            crate::session::journal_path(first.default_path()),
+            root.join("foo.session.wal")
+        );
+        fs::write(first.default_path(), b"{}")?;
+        first.name_session("default", "FIRST SESSION TITLE")?;
+        assert!(second.names()?.is_empty());
+
+        // A newer WAL must update list ordering even when the snapshot name
+        // does not end in `.json`.
+        let catalog = SessionCatalog::from_default(root.join("main.json"))?;
+        assert_eq!(
+            catalog.names_path(),
+            root.join("main.names.json"),
+            ".json snapshots keep their existing sidecar names"
+        );
+        fs::write(catalog.default_path(), b"{}")?;
+        let wal = crate::session::journal_path(catalog.default_path());
+        fs::write(&wal, b"journal")?;
+        let old = UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let new = UNIX_EPOCH + std::time::Duration::from_secs(2_000);
+        fs::File::options()
+            .write(true)
+            .open(catalog.default_path())?
+            .set_times(std::fs::FileTimes::new().set_modified(old))?;
+        fs::File::options()
+            .write(true)
+            .open(&wal)?
+            .set_times(std::fs::FileTimes::new().set_modified(new))?;
+        let entry = catalog
+            .list()?
+            .into_iter()
+            .find(|entry| entry.id == "default")
+            .expect("default session");
+        assert_eq!(entry.modified, Some(new));
         fs::remove_dir_all(root)?;
         Ok(())
     }

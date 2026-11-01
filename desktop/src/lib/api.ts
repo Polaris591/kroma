@@ -24,6 +24,8 @@ export interface PluginSummary {
   id: string; name: string; version: string; description: string;
   enabled: boolean; project: boolean; settings: Record<string, unknown>;
   secret_settings?: string[];
+  /// Sensitive fields that currently have a non-empty value.
+  set_secrets?: string[];
   has_model: boolean; has_context: boolean; has_ui: boolean;
 }
 export interface ProfileSummary {

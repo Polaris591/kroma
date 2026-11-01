@@ -1,0 +1,601 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src\lib.rs (target\debug\deps\kroma-13897d88d57377d7.exe)
+
+running 415 tests
+test agent::tests::execution_guidance_is_targeted_without_skipping_checks ... ok
+test agent::tests::totals_are_unknown_if_any_request_has_missing_usage ... ok
+test agent::tests::batching_guidance_is_stable_for_new_and_resumed_sessions ... ok
+test agent::tests::previous_image_survives_a_new_log_but_respects_the_image_budget ... ok
+test app::tests::replacement_model_and_context_budget_are_one_operation ... ok
+test app::tests::profile_limits_and_levels_reach_the_runtime ... ok
+test app::tests::complete_chat_profile_skips_slow_optional_model_discovery ... ok
+test app::tests::fully_specified_responses_profile_skips_optional_metadata_lookup ... ok
+test attachments::tests::steering_does_not_age_out_original_task_image ... ok
+test attachments::tests::text_only_and_old_history_never_load_visual_bytes ... ok
+test cache_trace::tests::append_and_rewrite_have_distinct_fingerprints ... ok
+test cache_trace::tests::same_messages_distinguish_prompt_tools_and_effort_changes ... ok
+test attachments::tests::repeating_the_same_image_does_not_reactivate_older_user_turns ... ok
+test attachments::tests::mixed_image_log_image_order_survives_all_protocols_and_session_roundtrip ... ok
+test attachments::tests::inline_attachment_text_order_delete_and_legacy_history ... ok
+test config::tests::complete_env_is_independent_from_saved_profiles ... ok
+test config::tests::standalone_process_model_needs_no_http_endpoint_or_saved_profile ... ok
+test commands::tests::names_must_be_unique_and_slash_prefixed ... ok
+test context::tests::below_soft_limit_never_requests_a_summary ... ok
+test cache_trace::tests::trace_contains_only_counts_hashes_and_roles ... ok
+test agent::tests::failed_user_wal_append_prevents_followup_model_and_tool_execution ... ok
+test context::tests::checkpoint_source_keeps_provider_provenance_for_identical_cache_replay ... ok
+test context::tests::checkpoint_source_uses_raw_evidence_not_a_legacy_trc_preview ... ok
+test agent::tests::interrupted_stream_is_recorded_and_recovered_without_replaying_tools ... ok
+test agent::tests::transient_tui_startup_does_not_create_an_empty_conversation ... ok
+test agent::tests::welcome_does_not_lock_or_resume_an_existing_default_history ... ok
+test context::tests::checkpoint_validation_accepts_none_known_without_inventing_work ... ok
+test context::tests::compacted_prefix_invalidates_old_signed_thinking_without_rewriting_raw_history ... ok
+test context::tests::checkpoint_validation_does_not_accept_length_as_structure ... ok
+test attachments::tests::image_encoding_is_identical_per_protocol_and_scoped_to_one_task ... ok
+test context::tests::checkpoint_facts_survive_first_second_and_third_compaction ... ok
+test agent::tests::switching_sessions_keeps_histories_and_compaction_isolated ... ok
+test context::tests::deepseek_500k_diagnostic_stays_below_the_90_percent_of_window_trigger ... ok
+test context::tests::a_committed_checkpoint_is_not_followed_by_a_second_one_in_the_same_prepare ... ok
+test context::tests::changed_prompt_content_invalidates_cache_and_reaches_checkpoint ... ok
+test context::tests::checkpoint_uses_the_request_tool_prefix_for_cache_reuse ... ok
+test context::tests::compacted_session_archive_remains_fully_searchable ... ok
+test context::tests::checkpoint_timeout_preserves_history_and_does_not_retry_this_turn ... ok
+test context::tests::conservative_hard_limit_triggers_checkpoint_despite_low_measured_watermark ... ok
+test context::tests::incremental_json_suffix_counts_match_full_serialization ... ok
+test context::tests::incompatible_provider_reasoning_does_not_trigger_a_checkpoint ... ok
+test context::tests::measured_input_tokens_are_extended_only_while_the_prefix_is_unchanged ... ok
+test context::tests::extra_prompt_and_tool_tokens_are_included_in_the_checkpoint_decision ... ok
+test context::tests::later_checkpoints_count_the_previous_summary_in_the_replaced_context ... ok
+test context::tests::checkpoint_boundary_never_splits_tool_calls_from_results ... ok
+test context::tests::failed_summary_keeps_history_and_retries_only_on_a_new_user_turn ... ok
+test context::tests::thresholds_and_retention_follow_the_configured_window ... ok
+test context_state::tests::builtin_state_keeps_legacy_v3_wire_format ... ok
+test context_state::tests::external_state_is_unambiguously_versioned_and_round_trips ... ok
+test context::tests::one_checkpoint_at_soft_limit_preserves_task_and_recent_history ... ok
+test context::tests::measured_provider_boundary_controls_the_trigger ... ok
+test convenience::tests::file_references_keep_newlines_and_missing_names_unchanged ... ok
+test context::tests::small_window_compacts_earlier_than_90_percent_of_the_window ... ok
+test desktop_host::tests::output_frames_keep_channel_and_tool_identity ... ok
+test convenience::tests::export_refuses_overwrite_and_writes_chat_without_tools ... ok
+test convenience::tests::suggestions_enter_directories_and_filter_hidden_or_excess_candidates ... ok
+test history_tools::tests::excerpts_respect_utf8_boundaries ... ok
+test history_tools::tests::read_schema_bounds_are_declared ... ok
+test context::tests::deepseek_500k_request_ceiling_allows_more_than_the_old_420508_hard_limit ... ok
+test mcp::tests::a_server_request_with_our_id_is_not_our_response ... ok
+test diagnostics_bundle::tests::default_bundle_is_allowlisted_and_never_overwrites ... ok
+test desktop_host::tests::high_frequency_text_is_coalesced_and_completion_is_never_lost ... ok
+test mcp::tests::fingerprint_is_sha256 ... ok
+test context::tests::failed_summary_at_hard_limit_falls_back_to_old_tool_previews ... ok
+test history_tools::tests::search_and_read_include_newest_wal_and_tool_arguments ... ok
+test mcp::tests::image_tool_results_keep_file_reference_instead_of_base64 ... ok
+test mcp::tests::modern_request_includes_inline_metadata ... ok
+test history_tools::tests::pending_parallel_calls_are_not_synthesized_into_history ... ok
+test mcp::tests::child_environment_filters_sensitive_kroma_names ... ok
+test mcp::tests::project_configs_cannot_expand_secrets_or_arbitrary_environment ... ok
+test mcp::tests::project_mcp_env_allowlist_is_narrow ... ok
+test context::tests::empty_or_obviously_incomplete_checkpoint_is_not_committed ... ok
+test context::tests::oversized_tool_output_is_previewed_without_changing_history_or_state ... ok
+test context::tests::deepseek_500k_compacts_once_at_450k_and_never_on_the_next_prepare ... ok
+test context::tests::dense_tool_append_is_counted_conservatively_before_450k ... ok
+test mcp::tests::tool_names_are_stable_and_namespaced ... ok
+test attachments::tests::thirty_historical_images_are_lightweight_refs ... ok
+test model_catalog::tests::bundled_records_carry_verifiable_sources_and_exact_keys ... ok
+test model_catalog::tests::custom_hosts_do_not_inherit_official_capabilities_by_name ... ok
+test model_catalog::tests::explicit_values_are_kept_but_hard_caps_are_not_bypassed ... ok
+test model_catalog::tests::fields_fall_back_independently_from_catalog ... ok
+test model_catalog::tests::image_capability_keeps_three_states_and_upstream_wins ... ok
+test model_catalog::tests::official_catalog_requires_the_official_https_endpoint ... ok
+test model_catalog::tests::unknown_models_and_images_remain_usable_and_unknown ... ok
+test plugins::context::tests::context_state_patch_distinguishes_missing_and_explicit_null ... ok
+test plugins::stream::tool_fragments_tests::fragments_are_ordered_and_validated ... ok
+test plugins::stream::tool_fragments_tests::rejects_holes_duplicate_ids_and_mutated_metadata ... ok
+test plugins::stream::tool_fragments_tests::rejects_invalid_arguments_and_oversized_calls ... ok
+test plugins::tests::edited_imported_js_helper_invalidates_worker_reuse_without_touching_main ... ok
+test plugins::tests::invalid_manifests_rejected ... ok
+test mcp::tests::new_mcp_call_recovers_an_invalid_connection_without_replaying_the_old_call ... ok
+test plugins::tests::plugin_summaries_redact_secret_settings ... ok
+test plugins::tests::transient_try_is_enabled_but_never_persisted_or_configurable ... ok
+test plugins::tests::validates_process_thinking_tiers_and_dynamic_panels ... ok
+test private_file::tests::private_storage_is_unique_and_rejects_symlink_directory ... ok
+test profiles::tests::invalid_limits_and_levels_are_rejected ... ok
+test profiles::tests::model_limits_and_levels_round_trip_and_stay_optional ... ok
+test profiles::tests::save_and_reload_with_private_permissions_and_distinct_legacy_path ... ok
+test profiles::tests::selection_validation_and_missing_file_are_explicit ... ok
+test prompt::tests::absent_files_preserve_the_existing_system_prompt ... ok
+test prompt::tests::built_in_guidance_does_not_repeat_core_execution_directives ... ok
+test prompt::tests::default_guidance_is_counted_once_in_the_projection_budget ... ok
+test prompt::tests::global_and_project_instructions_are_projected_in_order_and_reload ... ok
+test prompt::tests::nested_instructions_apply_only_to_explicitly_referenced_files ... ok
+test prompt::tests::prose_words_do_not_probe_or_load_matching_nested_folders ... ok
+test prompt::tests::quoted_extension_text_does_not_suppress_its_contribution ... ok
+test prompt::tests::same_length_instruction_changes_are_visible_and_budgeted ... ok
+test prompt::tests::v7_is_projected_once_without_mutating_persisted_history ... ok
+test protocol::tool_status_tests::status_is_durable_and_legacy_results_remain_readable ... ok
+test provider::anthropic::tests::disable_thinking_respects_capabilities ... ok
+test provider::anthropic::tests::native_anthropic_request_enables_prompt_caching ... ok
+test provider::anthropic::tests::nonstream_apec_usage_includes_all_input_categories ... ok
+test provider::anthropic::tests::overflowed_anthropic_input_sum_does_not_wrap ... ok
+test provider::anthropic::tests::signed_thinking_and_tools_preserve_original_interleaved_block_order ... ok
+test provider::anthropic::tests::signed_thinking_tool_round_trip ... ok
+test provider::anthropic::tests::stream_usage_includes_cache_reads_and_writes_without_double_counting_deltas ... ok
+test provider::responses::tests::max_effort_is_not_downgraded ... ok
+test provider::responses::tests::only_visible_reasoning_summaries_stream_not_encrypted_items ... ok
+test provider::responses::tests::round_trip_tool_and_encrypted_reasoning ... ok
+test provider::tests::anthropic_cache_rejection_retries_once_and_remembers_gateway_capability ... ok
+test provider::tests::apec_retries_truncated_summary_and_counts_both_requests ... ok
+test provider::tests::apec_truncated_response_is_never_accepted_as_memory ... ok
+test provider::tests::capability_fallback_uses_actual_error_field_not_json_wrapper ... ok
+test provider::tests::changing_reasoning_updates_next_payload_without_rebuilding_backend ... ok
+test provider::tests::chat_tool_arguments_must_be_objects_not_arrays_or_scalars ... ok
+test provider::tests::checkpoint_keeps_generic_chat_effort_and_responses_summary_fallback ... ok
+test provider::tests::checkpoint_payload_preserves_the_cached_prefix_and_appends_one_instruction ... ok
+test provider::tests::checkpoint_payload_replays_old_reasoning_by_origin_like_the_coding_request ... ok
+test provider::tests::declared_model_modalities_drive_image_compatibility ... ok
+test provider::tests::deepseek_apec_uses_low_effort_without_changing_coding_effort ... ok
+test provider::tests::deepseek_cache_usage_is_not_assumed_when_absent ... ok
+test provider::tests::deepseek_empty_tool_reasoning_is_explicit_but_sol_is_not ... ok
+test provider::tests::deepseek_reasoning_effort_only_preserves_tool_turn_thoughts ... ok
+test provider::tests::deepseek_reasoning_origin_prevents_cross_model_leakage ... ok
+test provider::tests::deepseek_replay_does_not_leak_old_model_thoughts ... ok
+test provider::tests::deepseek_replays_tagged_reasoning_across_user_turns_and_resume ... ok
+test provider::tests::deepseek_stream_reasoning_survives_tool_replay_and_serde ... ok
+test provider::tests::discovery_uses_upstream_model_capabilities_and_authentication ... ok
+test provider::tests::duplicate_tool_ids_are_rejected_before_any_command_executes ... ok
+test mcp::tests::stdio_timeout_invalidates_connection ... ok
+test plugins::tests::plugin_check_smoke_talks_to_the_process_without_persisting_activation ... ok
+test provider::tests::incomplete_stream_is_not_treated_as_success ... ok
+test mcp::tests::stdio_overlimit_invalidates_without_reusing_stale_bytes ... ok
+test provider::tests::malformed_chat_tool_arguments_are_rejected_before_persisting_assistant ... ok
+test mcp::tests::waiting_shared_tool_cancel_does_not_interrupt_active_call ... ok
+test provider::tests::malformed_image_is_an_error_not_a_reason_to_downgrade_every_image ... ok
+test provider::tests::metadata_missing_or_rejected_uses_explicit_fallback_without_guessing ... ok
+test provider::tests::model_metadata_does_not_guess_missing_limits ... ok
+test provider::tests::opaque_reasoning_is_not_replayed_after_a_model_switch ... ok
+test provider::tests::profile_levels_reject_unadvertised_reasoning_tiers ... ok
+test provider::tests::protocol_specific_payloads_do_not_cross_contaminate ... ok
+test provider::tests::reassembles_streaming_tool_calls ... ok
+test provider::tests::short_title_uses_small_budget_without_touching_coding_reasoning ... ok
+test provider::tests::sse_handles_crlf_and_data_lines ... ok
+test provider::tests::sse_incremental_scanner_preserves_line_boundaries_across_chunks ... ok
+test provider::tests::task_image_cache_preserves_full_wire_payload_across_all_protocols ... ok
+test provider::tests::thinking_deltas_are_not_displayed_as_assistant_text ... ok
+test provider::tests::tool_result_contains_call_id ... ok
+test provider::tests::truncated_short_title_keeps_measured_usage_and_does_not_retry ... ok
+test provider::tests::truncated_streams_keep_reported_usage_in_typed_error ... ok
+test provider::tests::unknown_finish_reason_is_rejected ... ok
+test provider::tests::upstream_error_event_is_not_treated_as_success ... ok
+test provider::tests::usage_only_sse_chunk_preserves_token_counts ... ok
+test provider::tests::usage_reports_reasoning_as_part_of_output ... ok
+test provider::tests::visual_rejection_once_falls_back_to_text_references_without_changing_history ... ok
+test session::tests::archive_reader_handles_empty_duplicate_and_old_generation_journals ... ok
+test session::tests::archive_reader_merges_snapshot_and_new_journal_like_session_load ... ok
+test session::tests::batch_cancel_never_replays_pending_side_effects ... ok
+test session::tests::batch_crash_preserves_completed_results_and_marks_only_unfinished ... ok
+test session::tests::bench_large_session_save ... ignored, local performance benchmark; run with --ignored --nocapture
+test session::tests::failed_partial_wal_append_blocks_reuse_and_recovers_unknown_tool ... ok
+test session::tests::interrupted_tool_call_is_marked_unknown ... ok
+test session::tests::journal_appends_and_crash_recovery_keep_batch_results ... ok
+test session::tests::journal_round_trip_preserves_reasoning_and_tool_call_order ... ok
+test mcp::tests::one_failed_mcp_server_does_not_break_independent_connection ... ok
+test session::tests::partially_written_tool_result_blocks_session_until_reopen_and_marks_unknown ... ok
+test session::tests::resetting_history_cannot_replay_old_journal_generation ... ok
+test provider::tests::incomplete_stream_times_out_without_becoming_a_valid_response ... ok
+test session::tests::saves_loads_and_clears_history ... ok
+test session::tests::truncated_journal_tail_does_not_replay_unknown_shell_command ... ok
+test sessions::tests::catalog_ids_are_scoped_and_cannot_escape_directory ... ok
+test sessions::tests::ai_title_can_only_fill_an_unnamed_session ... ok
+test sessions::tests::model_selection_is_per_session_and_copied_to_branches ... ok
+test mcp::tests::stdio_invalid_json_and_eof_invalidate_connection ... ok
+test shell::redirect::tests::heredoc_bodies_and_quoted_delimiters_are_untouched ... ok
+test shell::redirect::tests::rewrites_only_whole_unquoted_redirect_targets ... ok
+test shell::tests::cancellation_cleanup_removes_only_uncommitted_capture ... ok
+test shell::tests::clear_deletes_only_referenced_large_tool_capture ... ok
+test sessions::tests::session_names_are_metadata_and_resolve_only_unique_matches ... ok
+test shell::tests::forked_mcp_image_remains_readable_after_clearing_source ... ok
+test shell::tests::session_orphan_cleanup_keeps_live_and_unrelated_captures ... ok
+test mcp::tests::stdio_normal_and_near_limit_responses_work ... ok
+test provider::tests::metadata_404_invalid_json_and_timeout_are_bounded_and_diagnosable ... ok
+test provider::tests::first_stream_timeout_retries_before_any_response_body ... ok
+test shell::tests::clearing_a_session_keeps_another_sessions_capture ... ok
+test shell::tests::shell_starts_in_the_requested_workdir ... ok
+test shell::tests::windows_bash_reports_a_failing_pipeline ... ok
+test session::tests::snapshot_io_failure_prevents_further_mutations ... ok
+test skills::tests::discovers_valid_skills_and_project_override_without_eager_body ... ok
+test steering::tests::drop_clears_steering_but_preserves_queued_tasks ... ok
+test steering::tests::sealing_is_atomic_and_steering_keeps_order ... ok
+test skills::tests::reloading_the_body_does_not_require_a_new_discovery ... ok
+test tools::tests::older_rust_hook_signature_remains_source_compatible ... ok
+test tools::tests::tool_dispatch_rejects_unknown_tool_without_execution ... ok
+test shell::tests::windows_bash_nul_redirect_in_spaced_workdir_does_not_create_a_file ... ok
+test tui::command_catalog::tests::catalog_names_are_unique_and_descriptions_are_bilingual ... ok
+test tui::command_catalog::tests::enabled_plugin_commands_appear_once_in_completion ... ok
+test tui::editor::tests::ctrl_arrow_and_word_delete_follow_grapheme_boundaries ... ok
+test tui::editor::tests::grapheme_navigation_and_deletion_keep_emoji_and_combining_marks_intact ... ok
+test tui::editor::tests::inline_attachment_is_atomic_and_keeps_text_order ... ok
+test tui::editor::tests::mouse_selection_tracks_unicode_wrapping_and_attachment_labels ... ok
+test tui::attachments::tests::logs_and_files_are_stored_as_compact_references ... ok
+test tui::editor::tests::undo_and_redo_restore_attachment_as_one_edit_and_path_completion ... ok
+test tui::editor::tests::unicode_edit_history_and_multiline ... ok
+test tui::editor::tests::unicode_vertical_motion_matches_cell_columns_not_codepoints ... ok
+test tui::editor::tests::wrapped_cursor_stays_visible_and_blank_is_not_sent ... ok
+test tui::gitinfo::tests::parses_nul_paths_renames_binary_and_missing_baseline ... ok
+test tui::gitinfo::tests::reads_branch_worktree_file_and_detached_head ... ok
+test shell::tests::windows_shell_reports_output_and_exit_code ... ok
+test tools::tests::inline_tool_output_omits_redundant_byte_counts ... ok
+test tui::highlight::tests::languages_are_lossless_and_have_semantic_tokens ... ok
+test tui::highlight::tests::multiline_state_and_block_reset ... ok
+test tui::highlight::tests::random_unicode_tabs_and_long_lines_round_trip_without_panics ... ok
+test tui::highlight::tests::rust_lifetimes_are_not_unterminated_character_literals ... ok
+test tui::links::tests::detects_urls_windows_paths_unicode_and_compiler_locations ... ok
+test tui::links::tests::nonexistent_local_path_cannot_be_launched ... ok
+test tui::links::tests::strips_line_and_column_but_not_the_windows_drive_colon ... ok
+test tui::links::tests::trims_punctuation_and_accepts_quoted_paths_with_spaces ... ok
+test tui::logo::tests::compact_mark_keeps_three_wedges_at_the_requested_size ... ok
+test tui::logo::tests::supplied_mark_has_three_distinct_brand_colors ... ok
+test tui::markdown::tests::code_blocks_preserve_consecutive_and_edge_blank_lines ... ok
+test tui::markdown::tests::code_gutter_ends_at_fence ... ok
+test tui::markdown::tests::code_tabs_use_deterministic_four_column_stops ... ok
+test tui::markdown::tests::fenced_code_and_diff_have_language_labels_and_semantic_rows ... ok
+test tui::markdown::tests::handles_heading_lists_code_and_bold_without_literal_markup ... ok
+test tui::markdown::tests::headings_paragraphs_nested_lists_and_tables_have_distinct_rows ... ok
+test tui::markdown::tests::list_code_blocks_keep_numbering_and_code_rows ... ok
+test tui::markdown::tests::multi_paragraph_list_items_keep_their_numbering ... ok
+test tui::markdown::tests::named_markdown_links_keep_their_targets_when_display_text_differs ... ok
+test tui::markdown::tests::narrow_tables_fall_back_to_labeled_rows ... ok
+test tui::markdown::tests::ordered_list_number_width_and_independent_lists_are_stable ... ok
+test tui::markdown::tests::ordered_lists_keep_source_start_and_increment_per_level ... ok
+test tui::markdown::tests::tab_stops_measure_grapheme_clusters_not_scalar_widths ... ok
+test tui::markdown::tests::wide_table_keeps_layout_while_narrow_table_falls_back ... ok
+test tui::markdown::tests::wide_tables_keep_all_columns_even_beyond_four ... ok
+test tui::picker::tests::dock_mouse_selection_tracks_scrolling_and_ignores_query_or_blank_rows ... ok
+test tui::picker::tests::one_fuzzy_picker_preserves_stable_selection_and_category_switching ... ok
+test tui::picker::tests::picker_backspace_removes_complete_unicode_graphemes ... ok
+test tui::picker::tests::resume_picker_preserves_recent_first_order_and_arrow_navigation ... ok
+test sessions::tests::concurrent_model_updates_do_not_lose_or_fail_writes ... ok
+test tui::terminal_feedback::tests::progress_only_targets_windows_terminal_and_clears_on_exit ... ok
+test tui::terminal_feedback::tests::truecolor_detection_and_nearest_cube_grey_fallback ... ok
+test tui::tests::active_task_does_not_accept_unroutable_media ... ok
+test tui::tests::clicking_a_tool_chevron_expands_only_that_tool_and_keeps_draft ... ok
+test tui::tests::common_picker_filters_commands_without_overwriting_unsent_draft ... ok
+test tui::tests::completion_escape_preserves_draft_and_ctrl_c_still_cancels_active_task ... ok
+test tui::tests::control_c_clears_draft_then_exits_or_cancels ... ok
+test tui::tests::copying_with_ctrl_shift_c_does_not_cancel_active_task ... ok
+test tui::preferences::tests::preferences_round_trip_and_reject_invalid_values ... ok
+warning: in the working copy of 'file', LF will be replaced by CRLF the next time Git touches it
+test tui::tests::ctrl_c_copies_editor_selection_without_discarding_draft_or_cancelling ... ok
+test tui::tests::escape_preserves_draft_and_dismisses_transient_feedback ... ok
+test tui::tests::ctrl_click_on_missing_file_is_not_advertised_or_selected ... ok
+test tui::tests::file_search_picker_replaces_only_the_file_word ... ok
+test tui::tests::execution_inspection_routes_locally_and_modal_escape_preserves_the_draft ... ok
+test tui::tests::image_is_projected_into_real_multimodal_provider_content ... ok
+test tui::tests::input_mouse_drag_selects_draft_and_editing_clears_only_its_highlight ... ok
+test tui::tests::live_stream_batch_is_bounded_and_preserves_queued_event_order ... ok
+test tui::tests::long_paste_is_an_attachment_and_its_content_is_not_in_ui ... ok
+test tui::tests::named_sessions_are_searchable_and_switch_preserves_the_draft ... ok
+test tui::tests::plugin_alt_shortcuts_do_not_override_regular_input_or_ctrl_keys ... ok
+test tui::tests::plugin_panel_captures_keys_without_clearing_the_unsent_draft ... ok
+test tui::tests::recalled_media_is_real_and_discarding_draft_never_deletes_sent_file ... ok
+test tui::tests::slash_index_tab_completes_without_executing_and_arguments_can_be_typed ... ok
+test tui::tests::tab_completes_builtin_slash_command ... ok
+test tui::tests::task_completion_drains_last_usage_without_replaying_transcript_deltas ... ok
+test tui::tests::thinking_picker_uses_current_backend_after_model_switch ... ok
+test tui::tests::undo_restores_pending_attachment_and_its_file ... ok
+test tui::theme::tests::builtin_text_and_status_colors_have_accessible_contrast ... ok
+test tui::theme::tests::monochrome_theme_uses_terminal_default_foreground_and_background ... ok
+test tui::gitinfo::tests::unborn_repository_keeps_branch_status_without_fabricated_diff_counts ... ok
+test tui::theme::tests::rejects_invalid_colors_without_touching_file ... ok
+test tui::theme::tests::selected_picker_actions_and_diff_tints_keep_text_readable ... ok
+test tui::theme::tests::presets_custom_hex_and_cycle_reload ... ok
+test tui::title::tests::title_sanitization_handles_markdown_and_multiline_output ... ok
+test tui::tool_display::tests::explicit_diagnostics_not_stderr_progress ... ok
+test tui::tool_display::tests::familiar_commands_are_named_without_claiming_results ... ok
+test tui::view::graphite_tests::comfortable_prose_caps_at_96_cells_but_code_and_wide_layout_use_more_space ... ok
+test tui::view::graphite_tests::execution_picker_preserves_draft_and_invalid_ids_never_open_another_call ... ok
+test tui::title::tests::first_turn_title_is_model_generated_and_never_overwrites_manual_name ... ok
+test tui::view::graphite_tests::inspector_is_bounded_read_only_searchable_and_uses_current_call_identity ... ok
+test tui::view::graphite_tests::plain_answers_end_quietly_but_failures_and_tool_durations_remain ... ok
+test tui::view::graphite_tests::graphite_input_and_prose_share_a_column_without_message_boxes ... ok
+test tui::view::graphite_tests::recent_sessions_use_ids_and_reflow_without_stale_hit_regions ... ok
+test tui::view::redesign_snapshots::export_graphite_visual_gallery ... ignored, Graphite visual artifact lane: run with --ignored --nocapture
+test tui::view::redesign_tests::cancellation_is_localized_and_live_completion_has_no_duplicate_notice ... ok
+test tui::gitinfo::tests::repository_snapshot_reports_only_the_turn_delta ... ok
+test tui::view::redesign_tests::completed_groups_collapse_and_failures_diagnostics_and_interruptions_stay_visible ... ok
+test tui::view::redesign_tests::code_copy_hits_only_its_label_and_returns_original_tabs_blanks_and_unicode ... ok
+test tui::view::redesign_tests::context_thresholds_unknown_usage_and_notice_severity_are_distinct ... ok
+test tui::view::redesign_tests::group_hidden_success_hint_is_clickable_and_disclosure_does_not_leak_sessions ... ok
+test tui::view::redesign_tests::late_git_results_are_scoped_to_session_and_turn_and_summary_is_success_only ... ok
+test tui::view::redesign_tests::obsidian_refinements_deduplicate_group_headers_humanize_session_ids_and_toggle_reasoning ... ok
+test tui::view::redesign_tests::raised_blocks_wrap_without_polluting_selection_or_links ... ok
+test tui::view::redesign_tests::full_transcript_search_expands_every_step_and_never_edits_the_draft ... ok
+test tui::view::redesign_tests::selection_of_whole_code_and_tool_cards_excludes_decoration_gutters_and_labels ... ok
+test tui::view::redesign_tests::waiting_phase_tracks_model_output_and_idle_hint_uses_last_output ... ok
+test tui::view::tests::activity_stays_with_newest_message_when_reader_is_browsing_history ... ok
+test tui::view::tests::background_title_and_apec_usage_cannot_replace_coding_cache_or_context ... ok
+test tui::view::tests::bench_streaming_frame_latency_three_hundred_and_three_thousand_messages ... ignored, TUI draw microbenchmark; run manually for frame timings
+test tui::view::tests::bilingual_chrome_picker_descriptions_and_unknown_usage_render_at_multiple_sizes ... ok
+test tui::view::tests::borrowed_viewport_renders_the_same_cells_as_original_paragraph ... ok
+test tui::view::tests::branded_activity_animates_without_reflow_or_disabling_steering ... ok
+test tui::view::tests::clickable_regions_follow_scrolling_without_reusing_stale_coordinates ... ok
+test tui::view::tests::code_block_blank_lines_are_not_merged_or_trimmed ... ok
+test tui::view::tests::code_whitespace_emoji_and_tabs_survive_the_render_pipeline ... ok
+test tui::view::tests::collapsed_tool_summary_preserves_full_arguments_archive_reference_and_stderr_warning ... ok
+test tui::view::tests::command_output_is_visible_after_scrolling_old_history ... ok
+test tui::view::tests::command_output_survives_same_session_reload_without_entering_wal ... ok
+test tui::view::tests::completion_row_reports_the_outcome_and_how_long_the_turn_took ... ok
+test tui::view::tests::composer_mouse_selection_is_visible_and_copies_unicode_exactly ... ok
+test tui::view::tests::connecting_steering_stays_in_composer_not_activity_row ... ok
+test tui::view::redesign_tests::turn_navigation_survives_five_turns_reflow_and_preserves_the_draft ... ok
+test tui::view::tests::context_display_uses_total_window_not_reserved_input_budget ... ok
+test tui::view::tests::context_checkpoint_has_visible_activity_and_returns_to_connecting ... ok
+test tui::view::tests::conversation_is_readable_without_competing_boxes ... ok
+test tui::view::tests::context_status_uses_total_window_in_wide_and_narrow_terminals ... ok
+test tui::view::tests::copied_code_selection_keeps_leading_indentation ... ok
+test tui::view::tests::declarative_plugin_footer_status_fits_only_wide_terminals ... ok
+test tui::view::tests::copy_selection_never_breaks_a_combined_emoji_cluster ... ok
+test tui::view::tests::expanded_git_diff_uses_semantic_add_remove_colors ... ok
+test tui::view::tests::expanded_tool_and_reasoning_have_distinct_gutters_and_sections ... ok
+test tui::view::tests::expanded_tool_output_keeps_leading_indentation ... ok
+test tui::view::tests::failed_tools_prefer_actionable_diagnostics_over_unrelated_stdout ... ok
+test tui::view::tests::failure_is_explained_without_expanding_tools_and_command_is_one_line ... ok
+test tui::view::tests::failures_remain_visible_after_reloading_durable_tool_records ... ok
+test tui::view::tests::final_only_reasoning_inserts_before_streamed_answer ... ok
+test tui::view::tests::five_column_table_stays_aligned_until_the_terminal_is_narrow ... ok
+test tui::view::tests::footer_distinguishes_context_from_api_tokens_and_cached_ratio ... ok
+test tui::view::tests::footer_is_one_compact_row_without_repeated_command_hints ... ok
+test tui::view::tests::header_separation_and_role_body_columns_are_consistent ... ok
+test tui::view::tests::drag_selection_autoscrolls_and_copies_across_multiple_viewports ... ok
+test tui::view::tests::history_navigation_reports_unseen_updates_without_moving_and_survives_completion ... ok
+test tui::view::tests::history_wrapping_keeps_zwj_emoji_as_one_visible_character ... ok
+test tui::view::tests::history_render_cache_is_reused_until_content_changes ... ok
+test tui::view::tests::home_header_shows_workdir_title_and_zero_context ... ok
+test tui::view::tests::home_draws_original_brand_mark_and_clears_on_first_send ... ok
+test tui::view::tests::live_reasoning_renders_before_text_and_reconciles_without_duplicates ... ok
+test tui::view::tests::long_draft_does_not_jump_when_drag_selection_starts ... ok
+test tui::view::tests::long_literal_url_reconstructs_full_destination_after_wrapping ... ok
+test tui::view::tests::long_named_markdown_link_remains_clickable_across_wrapped_rows ... ok
+test tui::view::tests::long_successful_tool_bursts_collapse_without_hiding_failures ... ok
+test tui::view::tests::long_table_cells_fall_back_and_wrap_without_overrunning_the_terminal ... ok
+test tui::view::tests::markdown_and_plain_links_hit_the_correct_screen_cells ... ok
+test tui::view::tests::markdown_code_keeps_semantic_indentation_across_themes ... ok
+test tui::view::tests::mixed_attachments_keep_numbered_order_after_history_restore ... ok
+test tui::view::tests::mobile_review_transcript_keeps_markdown_hierarchy_visible ... ok
+test tui::view::tests::model_failures_are_highlighted_in_header_body_and_final_status ... ok
+test tui::view::tests::mouse_selection_copies_exact_visible_transcript_cells ... ok
+test tui::view::tests::narrow_code_wrap_preserves_indent_and_continuation_gutter ... ok
+test tui::tests::language_and_layout_commands_save_and_bad_settings_preserve_current_state ... ok
+test tui::view::tests::notification_dismisses_without_losing_important_transcript_events ... ok
+test tui::view::tests::narrow_terminal_draw_does_not_panic ... ok
+test tui::view::tests::one_reasoning_notice_per_user_turn_preserves_every_expanded_segment ... ok
+test tui::view::tests::older_history_is_reachable_without_rendering_it_all_initially ... ok
+test tui::view::tests::ordered_list_marker_and_soft_wrap_alignment_survive_the_render_pipeline ... ok
+test tui::view::tests::only_existing_prose_files_or_valid_urls_are_clickable ... ok
+test tui::view::tests::plugin_presentation_slots_render_without_changing_model_history ... ok
+test tui::view::tests::reasoning_block_is_separated_from_the_answer_that_follows_it ... ok
+test tui::view::tests::plugin_panel_overlay_scrolls_and_keeps_composer_unchanged ... ok
+test tui::view::tests::resize_clears_invalid_selection_without_copying_wrong_text ... ok
+test tui::view::tests::resize_preserves_logical_history_line_instead_of_old_wrapped_row ... ok
+test tui::view::tests::screenshot_regressions_compact_tools_localized_labels_and_single_history_hint ... ok
+test tui::view::tests::redesign_snapshot_matrix ... ok
+test tui::view::tests::scrollbar_drag_does_not_replace_existing_selection ... ok
+test tui::view::tests::scrollbar_can_reach_entries_older_than_initial_lazy_history_window ... ok
+test tui::view::tests::scrollbar_thumb_can_be_dragged_between_earliest_and_latest_history ... ok
+test provider::tests::healthy_stream_can_outlive_idle_timeout ... ok
+test tui::view::tests::searchable_picker_renders_over_history_without_obscuring_editor ... ok
+test tui::view::tests::short_chat_starts_below_header_and_live_status_follows_the_latest_message ... ok
+test tui::view::tests::short_top_aligned_history_keeps_links_clickable ... ok
+test tui::view::tests::selection_can_auto_scroll_upward_and_keeps_earlier_text ... ok
+test tui::view::tests::legacy_attachment_markers_stop_at_private_use_boundary ... ok
+test tui::view::tests::single_tool_chevron_expands_only_its_own_output ... ok
+test tui::view::tests::status_keeps_model_thinking_and_context_visible_at_eighty_columns ... ok
+test tui::view::tests::tool_history_shows_executed_arguments_when_plugin_rewrites_call ... ok
+test tui::view::tests::test_backend_buffer_shows_code_indentation_list_numbers_and_wide_tables ... ok
+test tui::view::tests::verbatim_windows_paths_are_readable_in_the_header ... ok
+test tui::view::tests::welcome_hints_shrink_before_the_work_area_does ... ok
+test tui::view::tests::widescreen_centres_the_reading_column_instead_of_gluing_it_left ... ok
+test tui::view::tests::wrapping_keeps_short_english_identifiers_intact_under_bullets ... ok
+test tui::view::tests::wrapping_keeps_source_line_identity_within_the_reading_column ... ok
+test tui::view::tests::zero_and_tiny_terminal_draws_are_safe ... ok
+test usage::tests::cache_hit_rate_distinguishes_zero_from_unreported_and_uses_paired_calls ... ok
+test usage::tests::cache_percent_never_rounds_a_partial_hit_to_exactly_one_hundred ... ok
+test usage::tests::compact_status_shows_read_uncached_and_not_reported_separately ... ok
+test usage::tests::compact_tokens_formats_million_and_sub_kilounits ... ok
+test usage::tests::latest_request_is_not_confused_with_cumulative_cold_start ... ok
+test usage::tests::missing_tokens_are_not_zero_and_cached_is_not_double_counted ... ok
+test usage::tests::separate_categories_sum_measured_usage_without_mixing_last_coding_request ... ok
+test winsys::tests::abrupt_owner_test_helper ... ok
+test tui::view::tests::usage_and_cache_restore_before_next_model_call_and_are_session_scoped ... ok
+test tui::view::tests::svg_task_layout_is_readable_across_narrow_and_wide_chinese_terminals ... ok
+test winsys::tests::replace_file_overwrites_an_existing_target ... ok
+test winsys::tests::wide_rejects_an_embedded_nul ... ok
+test tui::view::tests::scrolling_pins_visible_history_while_streaming_then_returns_to_latest ... ok
+test tui::view::redesign_snapshots::calm_transcript_golden_matrix ... ok
+test shell::tests::windows_powershell_executes_unicode_and_propagates_exit_codes ... ok
+test shell::tests::windows_cancel_kills_shell_descendants ... ok
+test mcp::tests::cancelled_mcp_tool_closes_descendant_process_tree ... ok
+test mcp::tests::mcp_drop_cleans_up_descendant_processes ... ok
+test tui::gitinfo::tests::command_timeout_is_unknown_not_zero_changes ... ok
+test mcp::tests::mcp_timeout_cleans_up_descendant_processes ... ok
+test app::tests::unknown_native_model_reserves_the_exact_output_cap_sent_on_wire ... ok
+test winsys::tests::force_killing_job_owner_terminates_its_shell_descendants ... ok
+test winsys::tests::cancelling_a_shell_terminates_its_descendants ... ok
+
+test result: ok. 412 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 6.07s
+
+     Running unittests src\main.rs (target\debug\deps\kroma-a43154b25976de9e.exe)
+
+running 1 test
+test tests::live_input_routes_to_steering_or_follow_up_instead_of_mixing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\architecture_backends.rs (target\debug\deps\architecture_backends-6a57489bab4ec9a6.exe)
+
+running 8 tests
+test embedding_can_replace_base_prompt_without_affecting_default ... ok
+test runtime_accepts_independent_model_and_registered_tool ... ok
+test tool_finished_is_durable_and_agent_future_is_send ... ok
+test oversized_extension_prompt_is_rejected_before_model_call ... ok
+test replacing_base_prompt_updates_existing_session_projection ... ok
+test prompt_contribution_is_projection_only_and_events_have_stable_order ... ok
+test custom_context_state_survives_wal_and_process_restart ... ok
+test custom_context_can_fork_and_rewind_without_losing_saved_future_state ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests\architecture_repair_regressions.rs (target\debug\deps\architecture_repair_regressions-e23072510621fe80.exe)
+
+running 7 tests
+test external_context_policy_can_read_budgets_without_private_fields ... ok
+test context_window_display_and_input_budget_remain_distinct_after_model_switch ... ok
+test agent_future_is_send_for_multithreaded_tokio_host ... ok
+test forged_projection_cannot_overwrite_original_user_history ... ok
+test tool_finished_and_model_finished_events_follow_wal_commits ... ok
+test replacement_base_prompt_applies_to_existing_sessions_only_in_projection ... ok
+test huge_prompt_or_tool_schema_is_rejected_before_model_request ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests\context_compaction_e2e.rs (target\debug\deps\context_compaction_e2e-4801462141dcd34c.exe)
+
+running 6 tests
+test checkpoint_failure_at_hard_limit_uses_preview_and_continues ... ok
+test one_checkpoint_then_tool_work_continues_and_raw_wal_survives ... ok
+test checkpoint_failure_below_hard_limit_does_not_abort_the_task ... ok
+test manual_compact_failure_preserves_raw_history_and_context ... ok
+test cancelled_manual_compact_leaves_session_usable_without_replaying_tools ... ok
+test compact_command_bypasses_threshold_preserves_history_and_survives_restart ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests\instruction_steering.rs (target\debug\deps\instruction_steering-83699a3eef5db23a.exe)
+
+running 3 tests
+test project_instructions_reload_between_tasks_without_polluting_saved_system ... ok
+test steering_after_a_text_only_response_prevents_early_completion ... ok
+test steering_waits_for_all_tool_results_and_queue_is_separate ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests\lifecycle_contract.rs (target\debug\deps\lifecycle_contract-6b26c379497b1047.exe)
+
+running 4 tests
+test cancelled_task_settles_completed_checkpoint_usage_immediately ... ok
+test compaction_usage_is_settled_before_foreground_task_finished ... ok
+test cancellation_is_durable_before_task_finished_and_drops_steering ... ok
+test model_failure_is_durable_before_events_and_next_task_is_clean ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests\mcp_skills_e2e.rs (target\debug\deps\mcp_skills_e2e-8fce53aace97d7df.exe)
+
+running 5 tests
+test skills_expose_metadata_and_load_on_demand ... ok
+test streamable_http_modern_mcp_sse_and_inline_metadata ... ok
+test streamable_http_legacy_mcp_json_and_handshake ... ok
+test project_mcp_config_is_inert_until_explicitly_trusted_windows ... ok
+test independent_mcp_servers_connect_concurrently_in_stable_order ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests\model_catalog_e2e.rs (target\debug\deps\model_catalog_e2e-9b22767b5fc6da8b.exe)
+
+running 2 tests
+test explicit_alias_fills_partial_proxy_without_inheriting_by_name ... ok
+test model_switch_updates_budget_and_report_together ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\model_protocol_mock_e2e.rs (target\debug\deps\model_protocol_mock_e2e-2bdfa7f4050a1f14.exe)
+
+running 4 tests
+test responses_summary_rejection_falls_back_once_and_remembers_choice ... ok
+test anthropic_full_agent_tool_loop_restart_and_summary_without_api ... ok
+test responses_full_agent_tool_loop_restart_and_summary_without_api ... ok
+test responses_partial_stream_error_never_replays_the_request ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests\plugins_e2e.rs (target\debug\deps\plugins_e2e-33961c196172faff.exe)
+
+running 44 tests
+test disabled_plugin_has_no_model_wrapper_event_worker_or_tool_replacement ... ok
+test declarative_tui_status_panel_only_from_enabled_plugin ... ok
+test enabled_model_provider_errors_and_broken_manifests_fail_closed ... ok
+test declarative_ui_slots_compose_and_detect_conflicting_owners ... ok
+test external_context_policy_roundtrip_and_rewind_branch ... ok
+test external_context_can_reset_state_and_requires_explicit_branch_state ... ok
+test external_tools_and_hooks_receive_matching_session_archive_and_call_id ... ok
+test context_policy_does_not_advance_state_when_commit_fails ... ok
+test idle_reload_ignores_broken_disabled_plugins_but_preserves_active_models ... ok
+test idle_reload_refuses_invalid_enabled_plugin_without_blocking_other_warnings ... ok
+test idle_reload_preserves_unchanged_provider_and_context_but_blocks_actual_changes ... ok
+Plugin 'shared' setting 'key0' updated. Run /plugins reload while idle, or restart.
+Plugin 'shared' setting 'key1' updated. Run /plugins reload while idle, or restart.
+test failed_plugin_overflow_recovery_still_accounts_for_compaction_usage ... ok
+Plugin 'shared' setting 'key3' updated. Run /plugins reload while idle, or restart.
+Plugin 'shared' setting 'key8' updated. Run /plugins reload while idle, or restart.
+Plugin 'shared' setting 'key5' updated. Run /plugins reload while idle, or restart.
+test failed_external_context_task_does_not_replay_old_lifecycle ... ok
+Plugin 'shared' setting 'key7' updated. Run /plugins reload while idle, or restart.
+Plugin 'shared' setting 'key9' updated. Run /plugins reload while idle, or restart.
+test external_context_plugin_tracks_fork_rewind_and_resume_archives ... ok
+test invalid_plugin_does_not_prevent_loading_other_plugins ... ok
+Plugin 'shared' setting 'key6' updated. Run /plugins reload while idle, or restart.
+test local_plugin_install_follows_file_and_directory_symlinks_when_supported ... ok
+test invalid_manifest_can_be_disabled_and_uninstalled ... ok
+Plugin 'shared' setting 'key11' updated. Run /plugins reload while idle, or restart.
+test actual_external_compaction_shortens_model_view_without_dropping_wal_history ... ok
+Plugin 'shared' setting 'key4' updated. Run /plugins reload while idle, or restart.
+Plugin 'shared' setting 'key2' updated. Run /plugins reload while idle, or restart.
+Plugin 'shared' setting 'key10' updated. Run /plugins reload while idle, or restart.
+test independent_kroma_processes_do_not_lose_plugin_settings ... ok
+test plugin_tool_name_collision_does_not_change_builtin_tools_or_prompt ... ok
+test dropping_stalled_event_subscription_terminates_worker ... ok
+test plugin_ui_shortcut_collisions_are_rejected ... ok
+test process_model_declares_vision_without_changing_http_model_contracts ... ok
+test external_context_branch_is_cancellable_and_full_copy_notifies_plugin ... ok
+test idle_reload_rebuilds_tools_prompt_commands_without_changing_history ... ok
+test cancelling_stuck_plugin_call_kills_process_and_next_call_recovers ... ok
+test install_enable_configure_execute_disable ... ok
+test model_request_hooks_can_change_projection_and_tools_without_touching_wal ... ok
+test model_replacement_and_pre_request_hook_keep_budget_and_original_history ... ok
+test plugin_jsonl_rejects_incorrect_response_correlation ... ok
+test process_model_backend_supports_non_http_protocol_and_correlated_jsonl ... ok
+test idle_reload_restarts_worker_only_when_entrypoint_file_changes ... ok
+test subscribed_events_are_async_and_unsupported_deltas_are_ignored ... ok
+test process_model_rejects_invalid_tool_calls_before_executing_them ... ok
+test process_plugin_tool_streams_progress_without_changing_final_result ... ok
+test cancelling_external_context_prepare_restarts_worker_without_losing_session ... ok
+test tool_replacement_prompt_override_and_hooks_execute ... ok
+test session_identity_reaches_command_model_hook_and_event_plugins ... ok
+test streaming_model_emits_live_text_reasoning_tools_and_usage ... ok
+test streaming_process_model_context_overflow_retries_through_external_policy ... ok
+test plugin_private_data_is_lazy_scoped_and_persists_across_restart ... ok
+test web_tools_roundtrip_through_kroma_to_local_http_server ... ok
+test streaming_model_cancellation_recovers_and_bad_frames_fail ... ok
+test slow_event_plugin_cannot_block_other_event_subscribers ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.84s
+
+     Running tests\plugins_performance.rs (target\debug\deps\plugins_performance-4c91772665b23906.exe)
+
+running 1 test
+test disabled_plugins_do_not_change_tool_dispatch_hot_path ... ignored, run separately in release mode; timing depends on host load
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\session_branches.rs (target\debug\deps\session_branches-d26136efc12f7f7a.exe)
+
+running 3 tests
+test history_never_offers_a_dangling_tool_call_as_a_checkpoint ... ok
+test forks_completed_checkpoint_and_keeps_both_histories_after_restart ... ok
+test rewind_preserves_the_old_future_and_undo_is_repeatable ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running unittests examples\tool_ablation.rs (target\debug\examples\tool_ablation-d6cc5415175db9fe.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

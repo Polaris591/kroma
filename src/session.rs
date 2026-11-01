@@ -155,8 +155,33 @@ pub struct SessionStore {
     journal_path: PathBuf,
     workdir: String,
     // Keep an OS advisory lock for the entire lifetime of the session.
-    _lock: fs::File,
+    _lock: Option<fs::File>,
+    /// A welcome-mode scratch session owns its lock and snapshot and removes
+    /// them on drop. Persistent sessions never delete their lock: doing so
+    /// could create two independent inodes for the same path.
+    transient: bool,
     journal: Mutex<JournalCursor>,
+}
+
+impl Drop for SessionStore {
+    fn drop(&mut self) {
+        if !self.transient {
+            return;
+        }
+        // Close the OS handle before unlinking: Windows refuses to delete a
+        // file opened without shared delete access.
+        self._lock.take();
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(&self.journal_path);
+        if let Some(name) = self.path.file_name() {
+            let lock = self
+                .path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(format!(".{}.lock", name.to_string_lossy()));
+            let _ = fs::remove_file(lock);
+        }
+    }
 }
 
 /// Only the Agent can create this handle; an injected context policy receives
@@ -221,6 +246,13 @@ fn journal_name(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The WAL path belongs to any session snapshot path, not only `.json` files.
+/// Append rather than replace the extension so a custom `KROMA_SESSION_FILE`
+/// and `SessionCatalog` agree on one journal location.
+pub(crate) fn journal_path(path: &Path) -> PathBuf {
+    journal_name(path)
+}
+
 // Stable FNV-1a: detects incomplete/corrupt journal entries without a crate.
 // The journal is not an authenticated security boundary.
 fn checksum(bytes: &[u8]) -> u64 {
@@ -265,6 +297,17 @@ impl SessionStore {
     }
 
     pub(crate) fn open_at(path: PathBuf, workdir: &Path) -> Result<Self> {
+        Self::open_at_with_lifecycle(path, workdir, false)
+    }
+
+    /// Open an explicit throwaway session. Only these sessions remove their
+    /// own lock/snapshot/WAL on drop; a normal saved conversation keeps its
+    /// lock file even after the process exits.
+    pub(crate) fn open_transient(path: PathBuf, workdir: &Path) -> Result<Self> {
+        Self::open_at_with_lifecycle(path, workdir, true)
+    }
+
+    fn open_at_with_lifecycle(path: PathBuf, workdir: &Path, transient: bool) -> Result<Self> {
         let parent = path.parent().context("invalid session path")?;
         #[cfg(unix)]
         let parent_existed = parent.exists();
@@ -310,7 +353,8 @@ impl SessionStore {
             journal_path: journal_name(&path),
             path,
             workdir: workdir.to_string_lossy().into_owned(),
-            _lock: lock_file,
+            _lock: Some(lock_file),
+            transient,
             journal: Mutex::new(JournalCursor {
                 generation: new_generation(),
                 ..JournalCursor::default()

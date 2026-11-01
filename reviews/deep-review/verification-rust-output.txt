@@ -1,0 +1,19 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.80s
+     Running `target\debug\examples\report_verification.exe`
+[compact] requesting one checkpoint for messages 1..2 (100282 source tokens, 4096 output target)
+[compact] checkpoint request failed: text-generation model returned HTTP 400 Bad Request: {"error":{"message":"context_length_exceeded (audit mock)","type":"invalid_request_error"}}
+CHECKPOINT admitted=true source_heuristic_over_100k=true wire_max_tokens=32768 window=128000 result_error=true soft_limit=92672
+CATALOG effective_turn_cap=Some(512) text_generation_wire_max=8192
+PLUGIN_CHECK_ENV {"kroma_dummy_seen":true,"openai_dummy_seen":true}
+EVENT_WHITELIST rejected=plugin 'event' declares unsupported event 'compaction_started'
+EMPTY_SECRET [{"api_version":1,"description":"","enabled":false,"has_context":false,"has_model":false,"has_ui":false,"id":"empty-secret","name":"Empty secret","project":false,"protocol_version":1,"secret_settings":["api_key"],"settings":{"api_key":""},"transient":false,"version":""}]
+PROJECT_TRUST changed_manifest_still_enabled=true
+[model] upstream limits: context=None output=None (unavailable: metadata request failed; missing values use Kroma defaults)
+NATIVE_LIMIT offline_reserve=1024 runtime_reserve=4096 offline_effective=None runtime_effective=Some(4096)
+TRANSIENT_LOCKS initial=1 after_three_new_and_drop=4
+WINDOWS_DIAGNOSTICS home_redacted=false verbatim_prefix=true
+GIT_BASH_PATH quoted_verbatim_exit=2 normalized_exit=0
+WINDOWS_BACKGROUND_CONTROL parent_success=true descendant_completed=true
+WINDOWS_BACKGROUND shell_exit=Number(0) descendant_completed=false
+CUSTOM_SUFFIX wal_mtime_ignored=true unrelated_default_inherits_title=true

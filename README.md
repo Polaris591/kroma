@@ -109,6 +109,13 @@ plugins can be removed with `kroma plugins uninstall <id>` or
 For development, `kroma plugins check <dir>` validates the manifest and runs a
 bounded process-smoke request. `KROMA_PLUGIN_TRY=<dir>` loads one directory for
 this process only without writing activation state; see the plugin guide.
+Plugin processes inherit the host environment by default, because the shipped
+web example reads provider keys from it. Set `KROMA_PLUGIN_ISOLATE_ENV=1` to
+remove credential-shaped variables from plugin children. Non-streaming plugin
+tools have no artificial deadline by default; set
+`KROMA_PLUGIN_TOOL_TIMEOUT_SECS` to a positive value for automation. Hook and
+ordinary plugin calls retain their 120-second limit, and cancellation always
+terminates the plugin process tree.
 
 The **V1 plugin host** exposes tools, Prompt/Hook rewriting, process-backed
 model Providers (including streaming tools/reasoning and image-reference
@@ -405,10 +412,14 @@ endpoint are not bundled with Kroma. A server uses **either** `command`
 (`args`, `env`, optional `cwd`) **or** `url` (optional `headers`).
 Use `${ENV_NAME}` placeholders to resolve credentials from the environment.
 Host secret variables (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, cloud and
-provider credentials, and `KROMA_*`) are stripped from local stdio children.
-Project configs are disabled until approved with `kroma trust-project`; approval
-is bound to the project path and the exact config bytes, so editing the file
-requires approval again. Project configs may only expand non-secret `MCP_*` and
+provider credentials, database passwords, cookies, and `KROMA_*`) are stripped
+from local stdio children. Project configs are disabled until approved with
+`kroma trust-project`; approval is bound to the project path and the exact
+config bytes, so editing the file requires approval again. Approval and revoke
+operations share a cross-process lock, so concurrent writers cannot lose an
+update or revive a revoked project. Config reads stop one byte past the 1 MiB
+limit, so an oversized untrusted project file cannot allocate its full size
+before it is rejected. Project configs may only expand non-secret `MCP_*` and
 basic path environment variables; credential-shaped names are rejected. Set `KROMA_TRUST_PROJECT_MCP=1` to approve for one run.
 
 The default MCP protocol version is `2025-11-25` and uses the standard
@@ -957,9 +968,9 @@ Commands: `/new`, `/sessions`, `/resume <id>`, `/clear` (active session only), `
 3. If the model returns `tool_calls`, Kroma executes each `shell(command)` call in order and appends the result with its `tool_call_id`.
 4. Kroma sends the updated history to the model, repeating until it receives a normal assistant response. There is no artificial Agent Loop step limit.
 
-Each shell result reports `exit_code`, `stdout`, and `stderr`. Shell commands have no artificial timeout or output limit. Failed commands are reported back to the model, which decides whether to retry or correct the task. Streaming model HTTP requests have a 20-second connection-establishment timeout and a 300-second idle timeout (for response headers or a gap between streamed network chunks), **not** a 120-second total-request deadline. Before receiving any stream data, transport timeouts, connect errors, and transient HTTP 429/502/503/504 may be retried up to 3 additional times. Numeric `Retry-After` values are honored up to 10 seconds; longer or unparseable server wait instructions are not silently overridden. Permanent HTTP failures (such as 401) return immediately. Partially delivered streams are never retried to avoid duplicate output or tool execution. Failed attempts have unknown provider usage unless separately reported. Separate non-streaming checkpoint requests retain a 120-second request deadline. Task summaries now include a `task_status` marker on completion, failure and Ctrl+C cancellation; incomplete provider usage remains unknown rather than zero.
+Each shell result reports `exit_code`, `stdout`, and `stderr`. Shell commands have no artificial timeout or output limit by default; `KROMA_SHELL_TIMEOUT_SECS` sets an optional per-command wall-clock deadline for unattended automation (`0` or unset means unlimited). Failed commands are reported back to the model, which decides whether to retry or correct the task. Streaming model HTTP requests have a 20-second connection-establishment timeout and a 300-second idle timeout (for response headers or a gap between streamed network chunks), **not** a 120-second total-request deadline. Before receiving any stream data, transport timeouts, connect errors, and transient HTTP 429/502/503/504 may be retried up to 3 additional times. Numeric `Retry-After` values are honored up to 10 seconds; longer or unparseable server wait instructions are not silently overridden. Permanent HTTP failures (such as 401) return immediately. Partially delivered streams are never retried to avoid duplicate output or tool execution. Provider-reported usage survives an SSE error event or a connection failure after `message_start`. Separate non-streaming checkpoint requests retain a 120-second request deadline and honor the same catalog output cap as coding requests. Task summaries now include a `task_status` marker on completion, failure and Ctrl+C cancellation; incomplete provider usage remains unknown rather than zero.
 
-**Security:** `shell` executes arbitrary commands with the permissions of the Kroma process. The working directory is **not** a sandbox. Use a container or a restricted account for untrusted tasks, and never run this prototype with elevated privileges against important data. Very large command output is truncated inline and written to private capture files, so it can still consume disk; a hanging command may run indefinitely until the user cancels it. On Unix, cancellation terminates the shell process group; independently detached descendants can survive. On Windows, cancellation terminates the job object, which contains every descendant created through the shell.
+**Security:** `shell` executes arbitrary commands with the permissions of the Kroma process. The working directory is **not** a sandbox. Use a container or a restricted account for untrusted tasks, and never run this prototype with elevated privileges against important data. Very large command output is truncated inline and written to private capture files, so it can still consume disk; a hanging command may run indefinitely until the user cancels it or an optional `KROMA_SHELL_TIMEOUT_SECS` deadline expires. On Unix, cancellation terminates the shell process group; independently detached descendants can survive. On Windows, cancellation terminates the job object, which contains every descendant created through the shell. A successfully completed command may leave background descendants running; Kroma retains their job handle until Kroma exits, then the OS closes it and terminates them. Force-killing Kroma also terminates contained descendants.
 
 ## Validation
 

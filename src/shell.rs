@@ -29,6 +29,22 @@ const OUTPUT_PREVIEW_BYTES: usize = 3072;
 // capture stays available even when a diagnostic falls outside the samples.
 const DIAGNOSTIC_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_LINES: usize = 16;
+
+/// Optional per-command wall-clock limit for unattended automation. Unset or
+/// zero preserves the documented interactive default: no artificial timeout.
+fn shell_deadline() -> Option<Duration> {
+    let Ok(raw) = env::var("KROMA_SHELL_TIMEOUT_SECS") else {
+        return None;
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(seconds) => Some(Duration::from_secs(seconds)),
+        Err(_) => {
+            crate::runtime_log!("[shell] ignoring invalid KROMA_SHELL_TIMEOUT_SECS={raw:?}");
+            None
+        }
+    }
+}
 static CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
 const ORPHAN_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -899,28 +915,47 @@ async fn execute_internal(
     let pid = child.id().context("shell process has no PID")?;
     #[cfg(unix)]
     let mut guard = ProcessGroupGuard::new(pid as i32);
-    let status = if let Some(on_output) = on_output {
-        let mut ticker = tokio::time::interval(Duration::from_millis(100));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut stdout_offset = 0;
-        let mut stderr_offset = 0;
-        let status = loop {
-            tokio::select! {
-                result = child.wait() => break result.with_context(|| format!("failed to run {}", shell.program.display()))?,
-                _ = ticker.tick() => {
-                    preview_new_bytes(&stdout_path, &mut stdout_offset, "stdout", on_output)?;
-                    preview_new_bytes(&stderr_path, &mut stderr_offset, "stderr", on_output)?;
+    let wait = async {
+        if let Some(on_output) = on_output {
+            let mut ticker = tokio::time::interval(Duration::from_millis(100));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut stdout_offset = 0;
+            let mut stderr_offset = 0;
+            let status = loop {
+                tokio::select! {
+                    result = child.wait() => break result.with_context(|| format!("failed to run {}", shell.program.display()))?,
+                    _ = ticker.tick() => {
+                        preview_new_bytes(&stdout_path, &mut stdout_offset, "stdout", on_output)?;
+                        preview_new_bytes(&stderr_path, &mut stderr_offset, "stderr", on_output)?;
+                    }
                 }
+            };
+            preview_new_bytes(&stdout_path, &mut stdout_offset, "stdout", on_output)?;
+            preview_new_bytes(&stderr_path, &mut stderr_offset, "stderr", on_output)?;
+            Ok::<_, anyhow::Error>(status)
+        } else {
+            child
+                .wait()
+                .await
+                .with_context(|| format!("failed to run {}", shell.program.display()))
+        }
+    };
+    let status = match shell_deadline() {
+        Some(limit) => match tokio::time::timeout(limit, wait).await {
+            Ok(status) => status?,
+            Err(_) => {
+                // The wait future is dropped before touching the child again.
+                #[cfg(any(unix, windows))]
+                guard.terminate();
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                bail!(
+                    "shell command exceeded KROMA_SHELL_TIMEOUT_SECS ({}s)",
+                    limit.as_secs()
+                );
             }
-        };
-        preview_new_bytes(&stdout_path, &mut stdout_offset, "stdout", on_output)?;
-        preview_new_bytes(&stderr_path, &mut stderr_offset, "stderr", on_output)?;
-        status
-    } else {
-        child
-            .wait()
-            .await
-            .with_context(|| format!("failed to run {}", shell.program.display()))?
+        },
+        None => wait.await?,
     };
     #[cfg(any(unix, windows))]
     guard.disarm();

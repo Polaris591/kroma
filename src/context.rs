@@ -1004,13 +1004,13 @@ impl Compression {
             }
             view.truncate(end);
             let tokens = self.source_tokens(&view, model);
-            // A thinking model may need twice the target output for hidden
-            // reasoning. Keep the one checkpoint request inside the window.
-            let output = self
-                .budget
-                .summary_tokens()
-                .saturating_mul(2)
-                .saturating_add(512);
+            // Reserve the provider's first (cache-matching) attempt here.
+            // Truncated retries are separately clamped to the remaining
+            // window headroom by generate_checkpoint_with_ceiling.
+            let output = model.checkpoint_output_ceiling(
+                self.budget.summary_tokens(),
+                self.budget.output_reserve(),
+            );
             if tokens.saturating_add(output) <= self.budget.window() {
                 return Some((boundary, view, tokens));
             }
@@ -1068,11 +1068,12 @@ impl Compression {
         // context is committed only after a complete, validated summary.
         let result = tokio::time::timeout(
             self.checkpoint_timeout,
-            model.generate_checkpoint(
+            model.generate_checkpoint_with_ceiling(
                 &source,
                 &self.request_tools,
                 CHECKPOINT_PROMPT,
                 output_tokens,
+                self.budget.window().saturating_sub(source_tokens),
             ),
         )
         .await

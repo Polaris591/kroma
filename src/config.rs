@@ -285,22 +285,31 @@ impl Config {
             None,
             catalog,
         );
-        let budget = crate::context::ContextConfig::from_limits(
-            resolved.context_window,
+        let resolved_output = resolved.effective_turn_output;
+        let effective_output = crate::model_catalog::effective_wire_output(
+            &self.api_protocol,
             resolved.effective_turn_output,
-        )?;
+        );
+        let budget =
+            crate::context::ContextConfig::from_limits(resolved.context_window, effective_output)?;
         let reserve_source = if env::var_os("KROMA_OUTPUT_RESERVE_TOKENS").is_some() {
             FieldSource::Environment
-        } else if resolved.effective_turn_output.is_some() {
+        } else if effective_output.is_some() {
             FieldSource::Computed
         } else {
             FieldSource::Default
         };
-        let report = crate::model_catalog::finish_report(
+        let mut report = crate::model_catalog::annotate_wire_output(
             resolved.report,
-            budget.output_reserve(),
-            reserve_source,
+            &self.api_protocol,
+            resolved_output,
         );
+        if self.api_protocol != "chat" && self.max_output_tokens.is_none() {
+            report.requested_output_tokens.note =
+                Some("provider default; Kroma sends an explicit native output cap".into());
+        }
+        let report =
+            crate::model_catalog::finish_report(report, budget.output_reserve(), reserve_source);
         Ok((budget, report))
     }
 }

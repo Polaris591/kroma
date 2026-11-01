@@ -33,7 +33,7 @@ pub fn file_reference(text: &str, workdir: &Path) -> Result<String> {
                     let full = candidate.canonicalize()?;
                     output.push_str(&format!(
                         "File {} (read with Shell as needed)",
-                        full.display()
+                        crate::path_display::for_shell(&full)
                     ));
                     output.push_str(trailing);
                     output.push_str(suffix);
@@ -172,7 +172,7 @@ mod tests {
         let canonical = root.join("src/agent.rs").canonicalize()?;
         assert!(projected.contains(&format!(
             "{} (read with Shell as needed)\n",
-            canonical.display()
+            crate::path_display::for_shell(&canonical)
         )));
         assert!(projected.contains("第二行 @missing.rs  保留空格\n"));
         assert!(projected.ends_with("(read with Shell as needed)，"));

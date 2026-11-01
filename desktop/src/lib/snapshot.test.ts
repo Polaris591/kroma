@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applySnapshot, isActiveTask } from './snapshot';
+import { applySnapshot, historyPageBelongsTo, isActiveTask } from './snapshot';
 import type { Bootstrap, SessionSnapshot } from './api';
 
 const snapshot = (id: string, input = 1): SessionSnapshot => ({
@@ -51,5 +51,12 @@ describe('desktop task completion snapshots', () => {
   it('rejects late events from a superseded task', () => {
     expect(isActiveTask(3, 3)).toBe(true);
     expect(isActiveTask(2, 3)).toBe(false);
+  });
+
+  it('rejects a history page from another session or superseded task', () => {
+    expect(historyPageBelongsTo('B', 'B', 4, 4)).toBe(true);
+    expect(historyPageBelongsTo('A', 'B', 4, 4)).toBe(false);
+    expect(historyPageBelongsTo('B', 'B', 3, 4)).toBe(false);
+    expect(historyPageBelongsTo('B', undefined, 4, 4)).toBe(false);
   });
 });

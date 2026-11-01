@@ -15,8 +15,18 @@
   async function saveSetting(key: string) {
     if (!current) return;
     const value = editing[key];
-    if (current.secret_settings?.includes(key) && (value === '' || value === '••••')) return;
+    const secret = current.secret_settings?.includes(key) ?? false;
+    if (secret && (value === '' || value === '••••')) return;
     await onAction('set', current.id, undefined, key, value);
+    if (secret) editing[key] = '';
+  }
+  async function clearSetting(key: string) {
+    if (!current) return;
+    await onAction('set', current.id, undefined, key, null);
+    editing[key] = '';
+  }
+  function secretIsSet(key: string) {
+    return current?.set_secrets?.includes(key) ?? false;
   }
 </script>
 
@@ -66,9 +76,16 @@
                       onchange={async e => {editing[key] = Number(e.currentTarget.value); await saveSetting(key)}} />
                   {:else}
                     <div class="config-input"><input value={String(editing[key] ?? '')}
-                      placeholder={current.secret_settings?.includes(key) ? '已设置；留空保持不变' : ''}
+                      placeholder={current.secret_settings?.includes(key)
+                        ? (secretIsSet(key) ? '已设置；留空保持不变' : '未设置')
+                        : ''}
                       onchange={e => editing[key] = e.currentTarget.value} />
-                      <button class="small secondary" onclick={() => saveSetting(key)}>保存</button></div>
+                      <button class="small secondary" onclick={() => saveSetting(key)}>保存</button>
+                      {#if current.secret_settings?.includes(key) && secretIsSet(key)}
+                        <button class="small secondary" title="移除已保存的值"
+                          onclick={() => clearSetting(key)}>清除</button>
+                      {/if}
+                    </div>
                   {/if}
                 </label>
               {/each}
