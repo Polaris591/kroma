@@ -1,6 +1,6 @@
 //! Click targets for transcript text. Nothing runs until the user explicitly
 //! Ctrl-clicks; no URL/file scanning occurs in the Agent's model context.
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthStr;
 
@@ -246,7 +246,7 @@ fn open_with_system(value: &std::ffi::OsStr) -> Result<()> {
         )
     } as isize;
     if result <= 32 {
-        bail!("Windows could not open this target (ShellExecute code {result})");
+        anyhow::bail!("Windows could not open this target (ShellExecute code {result})");
     }
     Ok(())
 }
