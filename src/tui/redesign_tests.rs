@@ -52,7 +52,16 @@ fn raised_blocks_wrap_without_polluting_selection_or_links() {
             .iter()
             .filter(|(_, item)| matches!(item, Decor::Surface(_)))
             .count();
-        assert!(rows > 5, "wrapped block lost its surface");
+        assert!(rows > 0, "code block retains its surface");
+        assert!(
+            cache
+                .decor
+                .iter()
+                .filter(|(_, item)| matches!(item, Decor::Gutter { glyph: "▎", .. }))
+                .count()
+                == 1,
+            "user identity is marked once, not on every wrapped row"
+        );
         let user_row = ui
             .selection_rows
             .iter()
@@ -159,7 +168,11 @@ fn context_thresholds_unknown_usage_and_notice_severity_are_distinct() {
             .find(|span| span.content.starts_with("Context "))
             .unwrap();
         assert_eq!(context.style.fg, Some(color));
-        assert!(context.content.contains("100k)"), "{}", context.content);
+        assert_eq!(
+            context.content.as_ref(),
+            format!("Context {}%", input / 1000)
+        );
+        assert!(ui.context_display().contains("/ 100k"));
     }
     for (level, color) in [
         (NoticeLevel::Info, ui.themes.colors.accent_text),
@@ -229,7 +242,7 @@ fn late_git_results_are_scoped_to_session_and_turn_and_summary_is_success_only()
     ui.task_outcome = Some(TaskOutcome::Completed);
     assert!(ui
         .task_status()
-        .contains("Changed 3 files +42 −7 · Added 2 files · /diff"));
+        .contains("Workspace 3 files +42 −7 · Untracked 2 files · /diff"));
     ui.task_outcome = Some(TaskOutcome::Failed);
     assert!(!ui.task_status().contains("/diff"));
     ui.task_outcome = Some(TaskOutcome::Cancelled);

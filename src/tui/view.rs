@@ -1,5 +1,7 @@
 #[path = "chrome.rs"]
 mod chrome;
+#[path = "inspector.rs"]
+mod inspector;
 #[path = "navigation.rs"]
 mod navigation;
 #[path = "transcript.rs"]
@@ -15,12 +17,14 @@ use super::{
     picker::Picker,
     theme::{Theme, ThemeStore},
 };
-use crate::{events::RuntimeEvent, plugins::PluginLayoutSpec, protocol::Message};
+use crate::{
+    events::RuntimeEvent, plugins::PluginLayoutSpec, protocol::Message, sessions::SessionEntry,
+};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use serde_json::Value;
@@ -45,7 +49,7 @@ fn hanging_indent(line: &Line<'_>, width: usize) -> usize {
     let chars = prefix.chars().take(24).collect::<Vec<_>>();
     if let Some(marker) = chars
         .iter()
-        .position(|ch| matches!(ch, '•' | '◦' | '▪' | '│' | '▸' | '◆'))
+        .position(|ch| matches!(ch, '•' | '◦' | '▪' | '│' | '▸' | '◆' | '▍'))
     {
         if marker < 16 && chars.get(marker + 1) == Some(&' ') {
             return (marker + 2).min(width.saturating_sub(1));
@@ -82,7 +86,7 @@ fn wrap_history(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize>
 }
 
 fn wrap_document(text: Text<'static>, width: usize) -> (Text<'static>, Vec<usize>) {
-    wrap_document_with_preformatted(text, width, &[])
+    wrap_document_with_preformatted(text, width, &[], &[])
 }
 
 /// `preformatted` contains source-row indexes whose interior whitespace is
@@ -92,6 +96,7 @@ fn wrap_document_with_preformatted(
     text: Text<'static>,
     width: usize,
     preformatted: &[usize],
+    reading_rows: &[usize],
 ) -> (Text<'static>, Vec<usize>) {
     let width = width.max(1);
     let mut rows = Vec::new();
@@ -99,6 +104,11 @@ fn wrap_document_with_preformatted(
     // visual row index changes when the terminal width changes.
     let mut source_lines = Vec::new();
     for (source_index, line) in text.lines.into_iter().enumerate() {
+        let width = if reading_rows.binary_search(&source_index).is_ok() {
+            width.min(100)
+        } else {
+            width
+        };
         let keep_leading_whitespace = preformatted.binary_search(&source_index).is_ok();
         let mut spans = Vec::new();
         let mut columns = 0usize;
@@ -259,26 +269,29 @@ fn markdown_link_regions(wrapped: &Text<'_>, targets: &[(String, String)]) -> Ve
 /// wrapping, never the header, tool timeline, history viewport, or composer.
 /// Leaving the entire app in a 160-cell island made maximized terminals feel
 /// broken and forced long commands into unreadably narrow columns.
-fn reading_area(area: Rect, _full_width: bool) -> Rect {
-    let margin = if area.width >= 100 {
+fn reading_area(area: Rect, full_width: bool) -> Rect {
+    let margin = if full_width && area.width >= 100 {
         2
-    } else if area.width >= 55 {
-        1
     } else {
-        0
+        1
     };
-    let available = area.width.saturating_sub(margin * 2);
-    Rect::new(
-        area.x.saturating_add(margin),
-        area.y,
-        available,
-        area.height,
-    )
+    let max_available = area.width.saturating_sub(margin * 2);
+    let available = if full_width {
+        max_available
+    } else {
+        max_available.min(112)
+    };
+    let x = if full_width {
+        area.x.saturating_add(margin)
+    } else {
+        area.x
+            .saturating_add((area.width.saturating_sub(available)) / 2)
+    };
+    Rect::new(x, area.y, available, area.height)
 }
 
 fn body_line(line: Line<'static>) -> Line<'static> {
-    // Role labels start four cells from the transcript edge: "  ◆ Kroma".
-    // Keep prose on that exact column across Windows/Unix terminals.
+    // Share the composer text column; decoration stays outside copied text.
     let mut spans = vec![Span::raw("    ")];
     spans.extend(line.spans);
     Line::from(spans)
@@ -315,7 +328,7 @@ struct VisibleLink {
 
 /// Styled transcript, markdown link targets, per-call disclosure rows, prose
 /// rows eligible for implicit links, and source rows whose whitespace is
-/// preformatted content.
+/// preformatted content, decoration anchors, and limited-width reading rows.
 type HistoryDocument = (
     Text<'static>,
     Vec<(String, String)>,
@@ -323,6 +336,7 @@ type HistoryDocument = (
     Vec<usize>,
     Vec<usize>,
     Vec<(usize, Decor)>,
+    Vec<usize>,
 );
 
 #[derive(Clone, Copy)]
@@ -335,6 +349,7 @@ enum Decor {
     Surface(Surface),
     CodeLabel(markdown::CodeBlock),
     Group(String),
+    Inspect(String),
     TurnStart(usize),
     Gutter {
         column: u16,
@@ -355,6 +370,7 @@ struct HistoryCache {
     source_lines: Vec<usize>,
     links: Vec<links::Region>,
     decor: Vec<(usize, Decor)>,
+    expanded_tool_calls: HashSet<String>,
     expanded_tool_groups: HashSet<String>,
     // Wrapped transcript row -> actual tool call ID, for per-call disclosure.
     tool_rows: Vec<(usize, String)>,
@@ -386,6 +402,7 @@ pub enum UiEvent {
         changes: Option<super::gitinfo::Changes>,
     },
     TaskStarted,
+    CompactionStarted,
     ModelStarted,
     Usage {
         input: Option<u64>,
@@ -439,6 +456,7 @@ impl crate::events::EventSink for UiSink {
     fn on_event(&self, event: RuntimeEvent<'_>) {
         let message = match event {
             RuntimeEvent::TaskStarted => Some(UiEvent::TaskStarted),
+            RuntimeEvent::CompactionStarted => Some(UiEvent::CompactionStarted),
             RuntimeEvent::ModelStarted { .. } => Some(UiEvent::ModelStarted),
             RuntimeEvent::ContextPrepared {
                 estimated_input_tokens,
@@ -468,6 +486,20 @@ impl crate::events::EventSink for UiSink {
                 if let Some(text) = reasoning.filter(|s| !s.is_empty()) {
                     let _ = self.0.send(UiEvent::ReasoningFinal(text.to_owned()));
                 }
+                None
+            }
+            RuntimeEvent::FailedRequestUsage {
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                reasoning_tokens,
+            } => {
+                let _ = self.0.send(UiEvent::Usage {
+                    input: input_tokens,
+                    output: output_tokens,
+                    cached: cached_tokens,
+                    reasoning: reasoning_tokens,
+                });
                 None
             }
             RuntimeEvent::CompactionUsage {
@@ -678,7 +710,8 @@ pub struct UiState {
     git_revision: u64,
     git_info: super::gitinfo::Info,
     turn_changes: Option<super::gitinfo::Changes>,
-    recent_sessions: Vec<(String, Option<std::time::SystemTime>)>,
+    recent_sessions: Vec<SessionEntry>,
+    recent_session_rows: Vec<(Rect, String)>,
     notification_level: NoticeLevel,
     received_model_output: bool,
     last_output: Instant,
@@ -766,7 +799,13 @@ pub struct UiState {
 // Three original Kroma logo wedges, lit in sequence. No generic spinner.
 const BRAND_PULSE_FRAMES: usize = 6;
 
+enum PanelPlacement {
+    Centered,
+    Docked,
+}
+
 struct PluginPanel {
+    placement: PanelPlacement,
     search: Option<transcript_panel::Search>,
     title: String,
     body: String,
@@ -779,6 +818,7 @@ impl UiState {
     pub fn open_plugin_panel(&mut self, content: String) {
         let (title, body) = content.split_once("\n\n").unwrap_or(("Plugin", &content));
         self.plugin_panel = Some(PluginPanel {
+            placement: PanelPlacement::Centered,
             search: None,
             title: title.to_owned(),
             body: body.to_owned(),
@@ -870,6 +910,7 @@ impl UiState {
             git_info: super::gitinfo::Info::default(),
             turn_changes: None,
             recent_sessions: Vec::new(),
+            recent_session_rows: Vec::new(),
             notification_level: NoticeLevel::Info,
             received_model_output: false,
             last_output: Instant::now(),
@@ -983,6 +1024,30 @@ impl UiState {
         self.picker = Some(picker);
     }
 
+    fn has_activity_tail(&self) -> bool {
+        if self.home {
+            return false;
+        }
+        if self.running
+            || matches!(
+                self.task_outcome,
+                Some(TaskOutcome::Failed | TaskOutcome::Cancelled)
+            )
+        {
+            return true;
+        }
+        let start = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry.kind, Kind::User))
+            .unwrap_or(0);
+        self.task_outcome.is_some()
+            && (self.entries[start..]
+                .iter()
+                .any(|entry| matches!(entry.kind, Kind::Tool))
+                || !self.change_summary().is_empty())
+    }
+
     fn task_status(&self) -> String {
         let language = self.preferences.language;
         if self.running {
@@ -998,7 +1063,7 @@ impl UiState {
             Some(TaskOutcome::Completed) => {
                 format!(
                     "{}{elapsed}{}",
-                    language.text("Completed", "已完成"),
+                    language.text("Execution finished", "本轮执行已结束"),
                     self.change_summary()
                 )
             }
@@ -1084,38 +1149,40 @@ impl UiState {
     }
 
     pub fn usage_report(&self) -> String {
-        if self.preferences.language == super::preferences::Language::En {
-            return format!(
-                "{}\n{}",
-                self.context_display(),
-                self.usage
-                    .report_breakdown(&self.title_usage, &self.apec_usage)
-            );
-        }
-        let context = self.context_display().replace("Ctx", "上下文");
+        let language = self.preferences.language;
         let mut rows = vec![
-            context,
-            "本会话已记录用量（跨重启保存；旧版未记录的请求不可恢复）：".into(),
+            self.context_display()
+                .replace("Ctx", language.text("Context", "上下文")),
+            self.usage_variants()[0].clone(),
         ];
-        for (label, meter) in [
-            ("编程模型", &self.usage),
-            ("自动标题", &self.title_usage),
-            ("APEC 摘要", &self.apec_usage),
-        ] {
+        if language == super::preferences::Language::En {
             rows.push(
-                meter
-                    .summary_line(label)
-                    .replace("call(s)", "次请求")
-                    .replace("In ", "输入 ")
-                    .replace("Out ", "输出 ")
-                    .replace("Cache read ", "缓存读取 ")
-                    .replace("Hit ", "命中率 ")
-                    .replace("Reasoning ", "推理 "),
+                self.usage
+                    .report_breakdown(&self.title_usage, &self.apec_usage),
             );
+        } else {
+            rows.push("本会话已记录用量（跨重启保存；旧版未记录的请求不可恢复）：".into());
+            for (label, meter) in [
+                ("编程模型", &self.usage),
+                ("自动标题", &self.title_usage),
+                ("APEC 摘要", &self.apec_usage),
+            ] {
+                rows.push(
+                    meter
+                        .summary_line(label)
+                        .replace("call(s)", "次请求")
+                        .replace("In ", "输入 ")
+                        .replace("Out ", "输出 ")
+                        .replace("Cache read ", "缓存读取 ")
+                        .replace("Hit ", "命中率 ")
+                        .replace("Reasoning ", "推理 "),
+                );
+            }
+            rows.push("缓存读取属于输入的一部分；推理属于输出的一部分。".into());
+            rows.push("— 表示未报告；≥ 表示部分请求未报告；~ 表示估算或部分测量。".into());
+            rows.push("APEC 仅统计已完成的摘要；未完成或失败的请求可能产生未报告的费用。".into());
         }
-        rows.push("缓存读取属于输入的一部分；推理属于输出的一部分。".into());
-        rows.push("— 表示未报告；≥ 表示部分请求未报告；~ 表示估算或部分测量。".into());
-        rows.push("APEC 仅统计已完成的摘要；未完成或失败的请求可能产生未报告的费用。".into());
+        rows.extend(self.plugin_statuses.iter().cloned());
         rows.join("\n")
     }
 
@@ -1166,8 +1233,7 @@ impl UiState {
             .unwrap_or_else(|| ellipsize_cells(&self.usage_variants()[2], width))
     }
     /// One quiet footer. Usage and cache readings are secondary to the
-    /// conversation, so fit them *whole* rather than truncating numbers or
-    /// repeating command hints on every frame. /usage retains the breakdown.
+    /// conversation. Detailed usage stays in /usage, not in a second status row.
     fn footer_line(&self, colors: Theme, width: usize) -> Line<'static> {
         let language = self.preferences.language;
         let context = self
@@ -1179,56 +1245,17 @@ impl UiState {
             self.thinking.as_deref().unwrap_or("—")
         );
         let metadata = format!("{} · {thinking} · {context}", self.model);
-        let compact_metadata = format!("{} · {context}", self.model);
-        let fallback = format!("{thinking} · {context}");
-        let mut candidates = Vec::new();
-        if let (Some(input), window) = (self.context_input, self.context_window) {
-            if window > 0 {
-                let wide = format!(
-                    "{} · {thinking} · {} {}{}% ({}/{})",
-                    self.model,
-                    language.text("Context", "上下文"),
-                    if self.context_estimated { "~" } else { "" },
-                    Self::context_percent(input, window as u64),
-                    crate::usage::compact_tokens(input),
-                    crate::usage::compact_tokens(window as u64)
-                );
-                if self.usage.calls > 0 {
-                    candidates.push(format!("{wide} · {}", self.usage_variants()[2]));
-                }
-                candidates.push(wide);
-            }
-        }
-        if self.usage.calls > 0 {
-            let variants = self.usage_variants();
-            if width >= 110 && !self.plugin_statuses.is_empty() {
-                let statuses = self.plugin_statuses.join(" · ");
-                candidates.push(format!("{metadata} · {} · {statuses}", variants[1]));
-            }
-            // On wide terminals show input/output and cached percentage.
-            // On narrower ones keep model, context and cache before detail.
-            candidates.push(format!("{metadata} · {}", variants[1]));
-            candidates.push(format!("{metadata} · {}", variants[2]));
-            if width >= 70 {
-                candidates.push(metadata.clone());
-            }
-            candidates.push(format!("{compact_metadata} · {}", variants[2]));
-            candidates.push(format!("{context} · {}", variants[2]));
+        let mut chosen = if UnicodeWidthStr::width(metadata.as_str()) <= width {
+            metadata
         } else {
-            if width >= 110 && !self.plugin_statuses.is_empty() {
-                candidates.push(format!("{metadata} · {}", self.plugin_statuses.join(" · ")));
+            self.footer_status(width)
+        };
+        if width >= 110 && !self.plugin_statuses.is_empty() {
+            let expanded = format!("{chosen} · {}", self.plugin_statuses.join(" · "));
+            if UnicodeWidthStr::width(expanded.as_str()) <= width {
+                chosen = expanded;
             }
-            candidates.push(metadata);
-            candidates.push(fallback);
-            candidates.push(compact_metadata);
         }
-        // Very narrow terminal: preserve context first, and report cache as
-        // unknown instead of inventing zero when it has not been measured.
-        candidates.push(context);
-        let chosen = candidates
-            .into_iter()
-            .find(|candidate| UnicodeWidthStr::width(candidate.as_str()) <= width)
-            .unwrap_or_else(|| ellipsize_cells(&self.footer_status(width), width));
         let mut spans = Vec::new();
         for (index, section) in chosen.split(" · ").enumerate() {
             if index > 0 {
@@ -1624,6 +1651,10 @@ impl UiState {
             return self.preferences.language.text("Ready", "就绪").into();
         }
         let phase = match self.phase {
+            "compacting" => self.preferences.language.text(
+                "Compacting context (120s limit)",
+                "正在压缩上下文（最多 120 秒）",
+            ),
             "thinking" => self.preferences.language.text("Thinking", "正在思考"),
             "waiting" if !self.received_model_output => {
                 self.preferences.language.text("Connecting", "正在连接模型")
@@ -1668,7 +1699,7 @@ impl UiState {
             // The outcome marker matches the transcript markers above, so a
             // finished turn is recognisable without reading the words.
             let (marker, color) = match self.task_outcome {
-                Some(TaskOutcome::Completed) => ("✓", colors.success),
+                Some(TaskOutcome::Completed) => ("·", colors.faint),
                 Some(TaskOutcome::Failed) => ("✕", colors.error),
                 Some(TaskOutcome::Cancelled) => ("⊘", colors.muted),
                 None => ("·", colors.muted),
@@ -1750,7 +1781,6 @@ impl UiState {
             .unwrap_or_default()
             .into_iter()
             .take(3)
-            .map(|entry| (entry.name.unwrap_or(entry.id), entry.modified))
             .collect();
         self.session_title = self.model_catalog.as_ref().and_then(|catalog| {
             catalog
@@ -2127,6 +2157,9 @@ impl UiState {
                 self.context_input = Some(tokens);
                 self.context_estimated = false;
             }
+            UiEvent::CompactionStarted => {
+                self.set_phase("compacting");
+            }
             UiEvent::ModelStarted => {
                 self.active_assistant = None;
                 self.active_reasoning = None;
@@ -2290,6 +2323,28 @@ impl UiState {
     /// The small disclosure chevron expands exactly one tool call. Clicks
     /// elsewhere still select text, and Ctrl+O continues to expand all calls.
     /// Coordinates come from the same wrapped source rows as the renderer.
+    pub fn invalidate_history_cache(&mut self) {
+        self.history_cache = None;
+    }
+
+    pub fn toggle_all_tools(&mut self) {
+        let tool_ids = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::Tool))
+            .filter_map(|e| e.call_id.as_ref())
+            .collect::<Vec<_>>();
+        let all_manually_open = !tool_ids.is_empty()
+            && (!self.expanded_tool_calls.is_empty() || !self.expanded_tool_groups.is_empty())
+            && tool_ids
+                .iter()
+                .all(|id| self.expanded_tool_calls.contains(*id));
+        self.tools_expanded = !(self.tools_expanded || all_manually_open);
+        self.expanded_tool_calls.clear();
+        self.expanded_tool_groups.clear();
+        self.history_cache = None;
+    }
+
     pub fn toggle_tool_at(&mut self, column: u16, row: u16) -> bool {
         if !self.selection_area.contains((column, row).into()) {
             return false;
@@ -2306,9 +2361,6 @@ impl UiState {
             self.selection_end = None;
             self.mouse_release();
             return true;
-        }
-        if self.tools_expanded {
-            return false;
         }
         let wrapped_row = self.history_top_row + view_row;
         let Some(id) = self.history_cache.as_ref().and_then(|cache| {
@@ -2338,13 +2390,37 @@ impl UiState {
         {
             return false;
         }
-        let expanded = if is_group {
-            &mut self.expanded_tool_groups
-        } else {
-            &mut self.expanded_tool_calls
-        };
-        if !expanded.insert(id.clone()) {
-            expanded.remove(&id);
+        if self.tools_expanded {
+            for entry in &self.entries {
+                if matches!(entry.kind, Kind::Tool) {
+                    if let Some(call_id) = &entry.call_id {
+                        self.expanded_tool_calls.insert(call_id.clone());
+                        self.expanded_tool_groups.insert(call_id.clone());
+                    }
+                }
+            }
+            self.tools_expanded = false;
+        }
+        if is_group {
+            if !self.expanded_tool_groups.insert(id.clone()) {
+                self.expanded_tool_groups.remove(&id);
+                if let Some(idx) = self
+                    .entries
+                    .iter()
+                    .position(|e| e.call_id.as_deref() == Some(id.as_str()))
+                {
+                    for entry in &self.entries[idx..] {
+                        if !matches!(entry.kind, Kind::Tool | Kind::Reasoning) {
+                            break;
+                        }
+                        if let Some(call_id) = &entry.call_id {
+                            self.expanded_tool_calls.remove(call_id);
+                        }
+                    }
+                }
+            }
+        } else if !self.expanded_tool_calls.insert(id.clone()) {
+            self.expanded_tool_calls.remove(&id);
         }
         self.history_cache = None;
         self.selection_start = None;
@@ -2656,6 +2732,7 @@ impl UiState {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             );
         }
         let mut lines = Vec::new();
@@ -2664,6 +2741,7 @@ impl UiState {
         let mut plain_link_rows = Vec::new();
         let mut preformatted_rows = Vec::new();
         let mut decor = Vec::new();
+        let mut reading_rows = Vec::new();
         // One collapsed reasoning entry per user turn, even if the model
         // alternates reasoning/tool calls several times. Ctrl+R still renders
         // every reasoning segment in its original chronological position.
@@ -2683,6 +2761,7 @@ impl UiState {
                 plain_link_rows,
                 preformatted_rows,
                 decor,
+                reading_rows,
             );
         }
         // Large investigations may run dozens of short successful grep/sed
@@ -2723,18 +2802,16 @@ impl UiState {
                             Style::default().fg(theme.text),
                         ))));
                     }
-                    for row in block_start..lines.len() {
-                        decor.push((row, Decor::Surface(Surface::Raised)));
-                        decor.push((
-                            row,
-                            Decor::Gutter {
-                                column: 1,
-                                glyph: "▎",
-                                color: theme.user,
-                                first_only: false,
-                            },
-                        ));
-                    }
+                    reading_rows.extend(block_start..lines.len());
+                    decor.push((
+                        block_start,
+                        Decor::Gutter {
+                            column: 1,
+                            glyph: "▎",
+                            color: theme.user,
+                            first_only: true,
+                        },
+                    ));
                     lines.push(Line::default());
                 }
                 Kind::Assistant => {
@@ -2762,11 +2839,6 @@ impl UiState {
                     ));
                     if !entry.body.is_empty() {
                         let prose = width.saturating_sub(5);
-                        let prose = if self.full_width_prose() {
-                            prose
-                        } else {
-                            super::tool_display::prose_width(prose)
-                        };
                         let document = markdown::render_document(&entry.body, theme, prose);
                         for block in &document.blocks {
                             let mut block = block.clone();
@@ -2792,6 +2864,11 @@ impl UiState {
                             }
                         }
                         let base = lines.len();
+                        reading_rows.extend(
+                            (0..rendered.len())
+                                .filter(|row| code_rows.binary_search(row).is_err())
+                                .map(|row| base + row),
+                        );
                         decor.extend(
                             code_rows
                                 .iter()
@@ -2832,6 +2909,7 @@ impl UiState {
                                 &mut preformatted_rows,
                                 &mut markdown_targets,
                                 &mut reasoning_notice_shown,
+                                &mut reading_rows,
                             );
                         }
                     }
@@ -2840,8 +2918,23 @@ impl UiState {
                         .copied()
                         .filter(|item| matches!(item.kind, Kind::Tool))
                         .collect::<Vec<_>>();
-                    let card = self.tool_card(&tools, theme, width);
+                    let card = self.tool_card(
+                        &tools,
+                        theme,
+                        width.saturating_sub(if width >= inspector::MIN_ACTION_WIDTH {
+                            UnicodeWidthStr::width(self.inspection_label()) + 2
+                        } else {
+                            0
+                        }),
+                    );
                     let base = lines.len();
+                    if width >= inspector::MIN_ACTION_WIDTH {
+                        decor.extend(
+                            card.rows
+                                .iter()
+                                .map(|(row, id)| (base + row, Decor::Inspect(id.clone()))),
+                        );
+                    }
                     tool_rows.extend(card.rows.into_iter().map(|(row, id)| (base + row, id)));
                     decor.extend(
                         card.groups
@@ -2867,6 +2960,7 @@ impl UiState {
                         &mut preformatted_rows,
                         &mut markdown_targets,
                         &mut reasoning_notice_shown,
+                        &mut reading_rows,
                     );
                 }
                 Kind::Info => {
@@ -2884,11 +2978,20 @@ impl UiState {
                     )));
                     for line in entry.body.lines() {
                         let localized;
-                        let line = if entry.title == "COMMAND"
-                            && self.preferences.language == super::preferences::Language::Zh
-                        {
+                        let line = if entry.title == "COMMAND" {
                             if let Some(id) = line.strip_prefix("Resumed session: ") {
-                                localized = format!("已恢复会话：{id}");
+                                let label = if chrome::is_generated_session_id(id) {
+                                    self.session_title.as_deref().unwrap_or_else(|| {
+                                        display_session_title(id, self.preferences.language)
+                                    })
+                                } else {
+                                    id
+                                };
+                                if self.preferences.language == super::preferences::Language::Zh {
+                                    localized = format!("已恢复会话：{label}");
+                                } else {
+                                    localized = format!("Resumed session: {label}");
+                                }
                                 &localized
                             } else {
                                 line
@@ -2944,7 +3047,7 @@ impl UiState {
         // Reserve one stable trailing transcript row for the live model phase
         // (or the final turn duration). Only the status glyphs animate: cached
         // markdown and selection/source-line identities never reflow per tick.
-        if self.running || self.task_outcome.is_some() {
+        if self.has_activity_tail() {
             lines.push(Line::default());
             lines.push(Line::default());
         }
@@ -2955,10 +3058,12 @@ impl UiState {
             plain_link_rows,
             preformatted_rows,
             decor,
+            reading_rows,
         )
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
+        self.recent_session_rows.clear();
         self.editor
             .localize_attachment_labels(self.preferences.language);
         let colors = self.active_colors();
@@ -2993,7 +3098,7 @@ impl UiState {
             .plugin_layout
             .as_ref()
             .and_then(|layout| layout.header_rows)
-            .unwrap_or(2)
+            .unwrap_or(if area.height < 20 { 1 } else { 2 })
             .min(area.height.saturating_sub(5));
         let composer_max = self
             .plugin_layout
@@ -3020,9 +3125,9 @@ impl UiState {
         let header_line = Rect::new(layout[0].x, layout[0].y, layout[0].width, 1);
         self.draw_header(frame, header_line, colors);
         let history_slot = Rect::new(
-            layout[1].x.saturating_add(1),
+            layout[1].x,
             layout[1].y,
-            layout[1].width.saturating_sub(2),
+            layout[1].width.saturating_sub(1),
             layout[1].height,
         );
         if self.selection_area.width > 0 && self.selection_area.width != history_slot.width {
@@ -3034,11 +3139,12 @@ impl UiState {
             self.mouse_release();
         }
         self.viewport_height = history_slot.height;
-        let has_activity_tail = !self.home && (self.running || self.task_outcome.is_some());
+        let has_activity_tail = self.has_activity_tail();
         let cached = self.history_cache.as_ref().is_some_and(|cache| {
             cache.width == history_slot.width
                 && cache.visible == self.history_visible
                 && cache.tools_expanded == self.tools_expanded
+                && cache.expanded_tool_calls == self.expanded_tool_calls
                 && cache.expanded_tool_groups == self.expanded_tool_groups
                 && cache.reasoning_expanded == self.reasoning_expanded
                 && cache.has_activity_tail == has_activity_tail
@@ -3066,12 +3172,24 @@ impl UiState {
             if self.navigation_turn.is_some() {
                 self.pending_scroll_turn = self.navigation_turn;
             }
-            let (raw, targets, raw_tool_rows, plain_rows, preformatted_rows, raw_decor) =
-                self.history_document(colors, usize::from(history_slot.width));
+            let (
+                raw,
+                targets,
+                raw_tool_rows,
+                plain_rows,
+                preformatted_rows,
+                raw_decor,
+                reading_rows,
+            ) = self.history_document(colors, usize::from(history_slot.width));
             let (mut text, source_lines) = wrap_document_with_preformatted(
                 raw,
                 usize::from(history_slot.width),
                 &preformatted_rows,
+                if self.full_width_prose() {
+                    &[]
+                } else {
+                    &reading_rows
+                },
             );
             let mut link_regions = markdown_link_regions(&text, &targets);
             let mut valid_paths = HashMap::<String, bool>::new();
@@ -3133,7 +3251,7 @@ impl UiState {
                         Decor::Gutter {
                             first_only: true,
                             ..
-                        }
+                        } | Decor::Inspect(_)
                     ) || row == start
                     {
                         decor.push((row, item.clone()));
@@ -3165,6 +3283,7 @@ impl UiState {
                 links: link_regions,
                 tool_rows,
                 decor,
+                expanded_tool_calls: self.expanded_tool_calls.clone(),
                 expanded_tool_groups: self.expanded_tool_groups.clone(),
             });
         }
@@ -3378,6 +3497,21 @@ impl UiState {
                 );
             }
         }
+        for (row, item) in decorations
+            .iter()
+            .filter(|(row, _)| (start_row..end_row).contains(row))
+        {
+            if let Decor::Inspect(_) = item {
+                let label = self.inspection_label();
+                let width = UnicodeWidthStr::width(label) as u16;
+                buffer.set_string(
+                    history.right().saturating_sub(width + 1),
+                    history.y + (row - start_row) as u16,
+                    label,
+                    Style::default().fg(colors.accent_text),
+                );
+            }
+        }
         // The activity belongs to the most recent message, not a floating
         // header/composer bar. Only paint the last (reserved) transcript row.
         // Timer ticks never rebuild wrapped Markdown or move scroll anchors.
@@ -3394,30 +3528,6 @@ impl UiState {
                     ),
                 );
             }
-        }
-        if self.home {
-            super::logo::draw(
-                frame,
-                Rect::new(
-                    history_slot.x,
-                    history_slot.y,
-                    history_slot.width,
-                    history_slot.height.saturating_sub(
-                        if history_slot.height >= 22 && !self.recent_sessions.is_empty() {
-                            6
-                        } else if history_slot.height >= 25 {
-                            4
-                        } else if history_slot.height >= 8 {
-                            2
-                        } else {
-                            0
-                        },
-                    ),
-                ),
-                colors,
-                self.themes.preset(),
-                self.preferences.language,
-            );
         }
         if self.home {
             self.draw_welcome_details(frame, history_slot, colors);
@@ -3504,15 +3614,12 @@ impl UiState {
         let composer = layout[3];
         let border = if self.attach_mode {
             colors.accent_text
-        } else if self.running {
-            colors.accent
         } else {
             colors.border
         };
         let mut block = Block::default()
             .style(Style::default().bg(colors.surface))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .borders(Borders::TOP)
             .border_style(Style::default().fg(border));
         if self.attach_mode {
             block = block.title_top(Line::styled(
@@ -3551,8 +3658,8 @@ impl UiState {
                 )
             } else {
                 self.preferences.language.text(
-                    "Ask anything, or describe a coding task…",
-                    "输入问题或编程任务，输入 / 查看命令…",
+                    "Describe a task, or / for commands…",
+                    "描述任务，或输入 / 查看命令…",
                 )
             };
             Paragraph::new(hint).style(Style::default().fg(colors.muted))
@@ -3643,10 +3750,20 @@ impl UiState {
             self.footer_line(colors, status_area.width as usize)
         };
         frame.render_widget(Paragraph::new(footer), status_area);
-        if let Some(picker) = &self.picker {
-            picker.draw(frame, history_slot, colors, self.preferences.language);
+        if let Some(picker) = &mut self.picker {
+            picker.draw(
+                frame,
+                Rect::new(area.x, history_slot.y, area.width, history_slot.height),
+                colors,
+                self.preferences.language,
+            );
         }
-        self.draw_panel(frame, full_area, colors);
+        self.draw_panel(
+            frame,
+            full_area,
+            Rect::new(area.x, history_slot.y, area.width, history_slot.height),
+            colors,
+        );
     }
 }
 
@@ -3889,16 +4006,14 @@ mod tests {
         assert_eq!(reopened.usage.cached, 8_000);
         assert_eq!(reopened.apec_usage.calls, 1);
         assert_eq!(reopened.context_input, Some(10_000));
-        let footer = reopened
-            .footer_line(reopened.themes.colors, 180)
-            .to_string();
+        let footer = reopened.usage_report();
         assert!(
             footer.contains("80%"),
-            "cache ratio must display immediately: {footer}"
+            "cache ratio must be available in /usage immediately: {footer}"
         );
         assert!(
             footer.contains("10k"),
-            "last request usage must display immediately: {footer}"
+            "last request usage must be available in /usage immediately: {footer}"
         );
 
         reopened.session = other.clone();
@@ -3975,6 +4090,28 @@ mod tests {
             .selection_rows
             .iter()
             .any(|row| row.contains('▎') || row.contains('◆')));
+    }
+
+    #[test]
+    fn context_checkpoint_has_visible_activity_and_returns_to_connecting() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::events::EventSink::on_event(&UiSink(tx), RuntimeEvent::CompactionStarted);
+        let mut ui = UiState::new(
+            "test".into(),
+            "session".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        ui.event(UiEvent::TaskStarted);
+        ui.event(rx.try_recv().unwrap());
+        assert_eq!(ui.phase, "compacting");
+        assert!(ui.activity_status().contains("120"));
+        let rows = rendered_rows(&mut ui, 100, 28);
+        assert!(rows.iter().any(|row| row.contains("120")));
+        ui.event(UiEvent::ModelStarted);
+        assert_eq!(ui.phase, "waiting");
+        ui.event(UiEvent::TaskFinished);
+        assert_eq!(ui.phase, "ready");
     }
 
     #[test]
@@ -4224,7 +4361,7 @@ mod tests {
             .unwrap();
         let editor = rows
             .iter()
-            .position(|row| row.contains("Ask anything"))
+            .position(|row| row.contains("Describe a task"))
             .unwrap();
         assert_eq!(header, 0);
         assert!(answer < 10, "no empty wall above a short conversation");
@@ -4295,14 +4432,14 @@ mod tests {
         let rows = rendered_text(&mut ui, 100, 36);
         let completed = rows
             .iter()
-            .position(|row| row.contains("Completed"))
+            .position(|row| row.contains("Execution finished"))
             .unwrap();
-        assert!(rows[completed].contains('✓'));
+        assert!(rows[completed].contains('·'));
         assert!(
             completed
                 < rows
                     .iter()
-                    .position(|row| row.contains("Ask anything"))
+                    .position(|row| row.contains("Describe a task"))
                     .unwrap()
         );
     }
@@ -4389,8 +4526,10 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Context ~0.2% (1.6k/1M)"));
-        assert!(rendered.contains("Cache 75%"));
+        assert!(rendered.contains("Context ~0.2%"));
+        assert!(!rendered.contains("(1.6k/1M)"));
+        assert!(!rendered.contains("Cache"));
+        assert!(ui.usage_report().contains("Cache 75%"));
         assert!(ui.usage_variants()[1].contains("In/out 8.0k / 500 · Cache 75%"));
         let mut narrow = Terminal::new(TestBackend::new(40, 26)).unwrap();
         narrow.draw(|frame| ui.draw(frame)).unwrap();
@@ -4402,8 +4541,8 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            narrow_render.contains("Cache") && narrow_render.contains("75%"),
-            "cache read and rate must remain visible on narrow terminals"
+            narrow_render.contains("Context ~0.2%") && !narrow_render.contains("Cache"),
+            "narrow terminals prioritize context; cache remains available in /usage"
         );
     }
 
@@ -4458,7 +4597,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Cache 80%"));
+        assert!(!rendered.contains("Cache"));
+        assert!(ui.usage_report().contains("Cache 80%"));
+        assert!(rendered.contains("Context 0.1%"));
         assert!(ui.usage_variants()[1].contains("In/out 1.0k / 80 · Cache 80%"));
         assert!(!rendered.contains("Out 95") && !rendered.contains("Total In"));
     }
@@ -4482,9 +4623,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("K R O M A"));
-        assert!(text.contains("Shift+Enter newline"));
-        assert!(text.contains("/resume history"));
+        assert!(text.matches("Kroma").count() >= 2);
+        assert!(text.contains("Start a task below"));
+        assert!(text.contains("Ctrl+P to explore"));
         assert!(!text.contains("Previous conversation"));
         assert!(contents
             .iter()
@@ -4529,12 +4670,16 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("◆ Kroma"));
         assert!(
-            text.lines()
-                .any(|line| line.contains("workspace-demo") && line.contains("deepseek")),
+            text.contains("workspace-demo"),
             "welcome details keep the workdir visible"
         );
+        assert_eq!(
+            text.matches("deepseek-v4.1-flash").count(),
+            1,
+            "model appears only in the footer"
+        );
         assert!(text.contains("Context —"));
-        assert!(text.contains("Enter send"));
+        assert!(text.contains("Start a task below"));
         state.add_user("Fix the tests");
         assert_eq!(state.terminal_title(), "● Kroma — default");
     }
@@ -4557,8 +4702,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("K R O M A"));
-        assert!(text.contains("Enter · /help · /resume"));
+        assert!(text.contains("Kroma"));
+        assert!(state.editor_area.height >= 1);
+        assert!(text.contains("Start a task"));
         assert!(!text.contains("Shift+Enter newline"));
     }
 
@@ -4661,8 +4807,8 @@ mod tests {
         terminal.draw(|frame| state.draw(frame)).unwrap();
         let area = reading_area(Rect::new(0, 0, 210, 35), false);
         assert_eq!(
-            area.width, 206,
-            "the full-screen timeline and input must use the maximized window"
+            area.width, 112,
+            "comfortable mode centres a 112-column reading container on widescreen terminals"
         );
         let left = i32::from(area.x);
         let right = 210 - i32::from(area.x) - i32::from(area.width);
@@ -4673,8 +4819,8 @@ mod tests {
         assert!(state.selection_area.width > 100);
         assert!(state.selection_rows.join("\n").contains("cargo test"));
         let small = reading_area(Rect::new(0, 0, 40, 20), false);
-        assert_eq!(small.width, 40);
-        assert_eq!(small.x, 0);
+        assert_eq!(small.width, 38);
+        assert_eq!(small.x, 1);
         // `/layout wide` still fills the terminal, edge to edge.
         let wide = reading_area(Rect::new(0, 0, 210, 35), true);
         assert_eq!(wide.width, 206);
@@ -5002,11 +5148,7 @@ mod tests {
                 output.contains("Kroma"),
                 "no app identity at {width} columns"
             );
-            let expected_context = if width >= 80 {
-                "Context 25% (32k/128k)"
-            } else {
-                "Context 25%"
-            };
+            let expected_context = "Context 25%";
             assert!(
                 output.contains(expected_context),
                 "no context at {width} columns"
@@ -5256,9 +5398,17 @@ mod tests {
             rows[first].starts_with("              ALPHA_BETA_GAMMA_DELTA"),
             "source indentation must survive a narrow first row: {rows:#?}"
         );
-        assert!(
-            rows[first + 1].starts_with("       \""),
-            "continuation aligns six cells under the code gutter, with the source space preserved: {rows:#?}"
+        let reconstructed = rows[first..]
+            .iter()
+            .take_while(|row| !row.is_empty())
+            .map(|row| {
+                row.strip_prefix("      ")
+                    .expect("every code continuation aligns under the gutter")
+            })
+            .collect::<String>();
+        assert_eq!(
+            reconstructed, "        ALPHA_BETA_GAMMA_DELTA = \"0123456789abcdefghijklmnop\"",
+            "wrapping must preserve every source space: {rows:#?}"
         );
     }
 
@@ -6314,7 +6464,8 @@ mod tests {
         let mut state = UiState::new("mock".into(), "default".into(), theme, &[]);
         state.configure_status(500_000, Some("high".into()));
         state.event(UiEvent::ActualInput(100_000));
-        for (width, expected) in [(110, "Context 20% (100k/500k)"), (40, "Context 20%")] {
+        assert!(state.usage_report().contains("100k / 500k"));
+        for (width, expected) in [(110, "Context 20%"), (40, "Context 20%")] {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| state.draw(frame)).unwrap();
             let text = terminal
@@ -6456,7 +6607,7 @@ fn main() { println!(\"hello\"); }
                 "localized footer missing at {width}: {output}"
             );
             assert!(
-                output.contains("未报告"),
+                ui.usage_report().contains("未报告"),
                 "unknown must not become 0 at {width}: {output}"
             );
             assert!(
@@ -6471,11 +6622,11 @@ fn main() { println!(\"hello\"); }
         ui.picker = None;
         ui.enter_home();
         let output = rendered_rows(&mut ui, 100, 30).join("\n");
-        assert!(output.contains("Enter发送"));
-        assert!(output.contains("/resume历史"));
+        assert!(output.contains("在下方开始任务"));
+        assert!(output.contains("Ctrl+P查看更多"));
         ui.apply_preferences(super::super::preferences::Preferences::default());
         let output = rendered_rows(&mut ui, 100, 30).join("\n");
-        assert!(output.contains("Entersend"));
+        assert!(output.contains("Startataskbelow"));
     }
 
     #[test]
@@ -6524,9 +6675,13 @@ fn main() { println!(\"hello\"); }
         ui.scroll_to_bottom();
         assert_eq!(ui.unread_updates, 0);
         assert!(ui.scroll_anchor.is_none());
-        assert!(rendered_rows(&mut ui, 80, 24)
+        assert!(!rendered_rows(&mut ui, 80, 24)
             .join("\n")
-            .contains("Completed"));
+            .contains("Executionfinished"));
+        assert!(
+            !ui.has_activity_tail(),
+            "ordinary answers end without a redundant completion row"
+        );
         ui.task_outcome = Some(TaskOutcome::Failed);
         assert!(ui.task_status().contains("failed"));
         ui.task_outcome = Some(TaskOutcome::Cancelled);
@@ -6995,8 +7150,9 @@ fn main() { println!(\"hello\"); }
         let footer = rows.last().expect("footer row");
         let visible: String = footer.chars().filter(|ch| *ch != ' ').collect();
         assert!(visible.contains("deepseek"), "{visible:?}");
-        assert!(visible.contains("上下文0.1%(1.0k/1M)"), "{visible:?}");
-        assert!(visible.contains("缓存87%"), "{visible:?}");
+        assert!(visible.contains("上下文0.1%"), "{visible:?}");
+        assert!(!visible.contains("缓存"), "{visible:?}");
+        assert!(ui.usage_report().contains("缓存命中 87%"));
         assert!(ui.usage_variants()[1].contains("输入/输出 1.5k / 8"));
         assert!(
             !visible.contains("/usage") && !visible.contains("/help"),
@@ -7032,14 +7188,24 @@ fn main() { println!(\"hello\"); }
         // The real loop takes the duration when the task future resolves: the
         // final event drain keeps only measurements, so a TaskFinished event
         // may never reach the UI.
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "done".into(),
+            args: "echo done".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "done".into(),
+            result: "exit: 0".into(),
+            failed: false,
+        });
         ui.finish_task();
         ui.task_outcome = Some(TaskOutcome::Completed);
         let rows = rendered_text(&mut ui, 80, 24);
         let completed = rows
             .iter()
-            .find(|row| row.contains('✓') && row.contains("Completed"))
+            .find(|row| row.contains("Execution finished"))
             .expect("completion marker");
-        assert!(completed.contains("Completed · "), "{completed:?}");
+        assert!(completed.contains("Execution finished · "), "{completed:?}");
         assert!(
             completed.trim_end().ends_with('s'),
             "the row reports how long the turn took: {completed:?}"
@@ -7073,3 +7239,7 @@ mod redesign_tests;
 #[cfg(test)]
 #[path = "redesign_snapshots.rs"]
 mod redesign_snapshots;
+
+#[cfg(test)]
+#[path = "graphite_tests.rs"]
+mod graphite_tests;

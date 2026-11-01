@@ -17,18 +17,21 @@ fn fixture(scene: &str, preset: &str) -> UiState {
                 ("Add tests", 172800),
             ]
             .into_iter()
-            .map(|(title, age)| {
-                (
-                    title.into(),
-                    Some(std::time::SystemTime::now() - Duration::from_secs(age)),
-                )
+            .map(|(title, age)| SessionEntry {
+                id: format!("session-{age}"),
+                name: Some(title.into()),
+                modified: Some(std::time::SystemTime::now() - Duration::from_secs(age)),
             })
             .collect();
         }
         return ui;
     }
     ui.add_user("Review the change. 请检查代码。\nPreserve Unicode and indentation.");
-    if scene.starts_with("tools-") || scene == "single-tool" || scene == "failure" {
+    if scene.starts_with("tools-")
+        || scene == "single-tool"
+        || scene == "failure"
+        || scene == "inspector"
+    {
         let count = if scene == "single-tool" { 1 } else { 3 };
         for index in 0..count {
             let id = format!("call-{index}");
@@ -108,6 +111,49 @@ fn fixture(scene: &str, preset: &str) -> UiState {
     if scene == "picker" {
         ui.open_command_completion("/".into());
     }
+    if scene == "inspector" {
+        ui.editor.paste("Unsent draft 中文");
+        ui.inspect_tool("call-1");
+    }
+    if scene == "multi-turn" {
+        for index in 1..=2 {
+            ui.add_user(&format!("Follow-up {index} · 保留上下文"));
+            ui.event(UiEvent::Text(format!(
+                "Response {index} with a focused explanation."
+            )));
+        }
+        ui.finish_task();
+        ui.task_outcome = Some(TaskOutcome::Completed);
+    }
+    for (name, kind, label, value) in [
+        (
+            "picker-models",
+            super::super::picker::Kind::Models,
+            "Fast · test-model",
+            "/model fast",
+        ),
+        (
+            "picker-sessions",
+            super::super::picker::Kind::Sessions,
+            "Fix Unicode",
+            "/resume real-session",
+        ),
+        (
+            "picker-files",
+            super::super::picker::Kind::Files,
+            "src/tui/view.rs",
+            "@src/tui/view.rs",
+        ),
+    ] {
+        if scene == name {
+            ui.editor.paste("Unsent draft");
+            ui.picker = Some(Picker::new(
+                kind,
+                vec![super::super::picker::Item::new(label, value, "fixture")],
+                "",
+            ));
+        }
+    }
     if scene == "panel" {
         ui.open_plugin_panel(
             "Review\n\nA scrollable plugin panel.\nThe draft stays editable after closing.".into(),
@@ -118,7 +164,7 @@ fn fixture(scene: &str, preset: &str) -> UiState {
 
 #[test]
 fn calm_transcript_golden_matrix() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("reviews/tui-redesign/final");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("reviews/tui-graphite/final");
     let update = std::env::var_os("KROMA_UPDATE_SNAPSHOTS").is_some();
     if update {
         std::fs::create_dir_all(&root).unwrap();
@@ -146,6 +192,11 @@ fn calm_transcript_golden_matrix() {
                 "panel",
                 "running",
                 "idle",
+                "multi-turn",
+                "inspector",
+                "picker-models",
+                "picker-sessions",
+                "picker-files",
             ] {
                 let mut ui = fixture(scene, preset);
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -164,11 +215,97 @@ fn calm_transcript_golden_matrix() {
                     std::fs::write(&path, &actual).unwrap();
                 }
                 assert_eq!(
-                    std::fs::read_to_string(&path).unwrap(),
+                    std::fs::read_to_string(&path)
+                        .unwrap()
+                        .replace("\r\n", "\n"),
                     actual,
                     "snapshot {name}"
                 );
             }
         }
     }
+}
+
+#[test]
+#[ignore = "Graphite visual artifact lane: run with --ignored --nocapture"]
+fn export_graphite_visual_gallery() {
+    use std::fmt::Write;
+    fn rgb(color: Color, fallback: (u8, u8, u8)) -> (u8, u8, u8) {
+        if let Color::Rgb(r, g, b) = color {
+            (r, g, b)
+        } else {
+            fallback
+        }
+    }
+    fn escape(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("reviews/tui-graphite/gallery");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut html = String::from("<!doctype html><html lang=zh><meta charset=utf-8><title>Kroma Graphite</title><style>body{background:#101114;color:#e5e3df;font:15px system-ui;margin:32px}pre{font:13px/1.5 'Cascadia Mono',Consolas,monospace;white-space:pre;margin:0}summary{cursor:pointer;margin:20px 0 8px}.frame{overflow:auto;padding:12px;background:#17191e}span{display:inline-block}a{color:#9aaeff}</style><h1>Kroma Graphite</h1><p>TestBackend 彩色样板，不是实时终端截图；mono 的原生终端颜色在此使用深色模拟。ANSI 文件可在真彩色终端中重放。</p>");
+    for preset in ["dark", "light", "mono"] {
+        let scenes: &[&str] = if preset == "dark" {
+            &[
+                "home-recent",
+                "multi-turn",
+                "tools-failed",
+                "running",
+                "picker",
+                "inspector",
+            ]
+        } else {
+            &["home-recent", "picker", "inspector"]
+        };
+        for (width, height) in [(80, 24), (160, 40)] {
+            for scene in scenes {
+                let mut ui = fixture(scene, preset);
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.draw(frame)).unwrap();
+                let name = format!("{preset}-{scene}-{width}x{height}");
+                write!(
+                    html,
+                    "<details><summary>{name}</summary><div class=frame><pre>"
+                )
+                .unwrap();
+                let mut ansi = String::from("\x1b[0m\x1b[2J\x1b[H\x1b[?25l");
+                for y in 0..height {
+                    let mut x = 0;
+                    while x < width {
+                        let cell = terminal.backend().buffer().cell((x, y)).unwrap();
+                        let (r, g, b) = rgb(cell.fg, (229, 227, 223));
+                        let (br, bg, bb) = rgb(cell.bg, (16, 17, 20));
+                        let columns = UnicodeWidthStr::width(cell.symbol())
+                            .max(1)
+                            .min(usize::from(width - x));
+                        let bold = cell.modifier.contains(Modifier::BOLD);
+                        let italic = cell.modifier.contains(Modifier::ITALIC);
+                        write!(html,"<span style=\"width:{columns}ch;color:#{r:02x}{g:02x}{b:02x};background:#{br:02x}{bg:02x}{bb:02x};font-weight:{};font-style:{}\">{}</span>",if bold {700} else {400},if italic {"italic"} else {"normal"},escape(cell.symbol())).unwrap();
+                        write!(
+                            ansi,
+                            "\x1b[{};{}H\x1b[0;38;2;{r};{g};{b};48;2;{br};{bg};{bb}{}{}m{}",
+                            y + 1,
+                            x + 1,
+                            if bold { ";1" } else { "" },
+                            if italic { ";3" } else { "" },
+                            cell.symbol()
+                        )
+                        .unwrap();
+                        x += columns as u16;
+                    }
+                    html.push('\n');
+                }
+                html.push_str("</pre></div></details>");
+                std::fs::write(root.join(format!("{name}.ansi")), ansi).unwrap();
+            }
+        }
+    }
+    html.push_str("</html>");
+    std::fs::write(root.join("index.html"), html).unwrap();
+    println!(
+        "Graphite visual gallery: {}",
+        root.join("index.html").display()
+    );
 }

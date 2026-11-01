@@ -70,39 +70,38 @@ impl Theme {
     fn from_settings(settings: &ThemeSettings) -> Result<Self> {
         let mut theme = match settings.preset.as_str() {
             "dark" => Self {
-                // Obsidian Dark: neutral charcoal elevation with restrained brand accents.
-                background: Color::Rgb(11, 12, 14),
-                text: Color::Rgb(236, 238, 242),
-                muted: Color::Rgb(142, 149, 165),
-                accent: Color::Rgb(110, 136, 255),
-                border: Color::Rgb(38, 41, 50),
-                user: Color::Rgb(226, 140, 156),
-                tool: Color::Rgb(142, 149, 165),
-                code: Color::Rgb(213, 217, 226),
-                error: Color::Rgb(240, 82, 82),
-                surface: Color::Rgb(19, 21, 25),
-                overlay: Color::Rgb(26, 29, 35),
-                faint: Color::Rgb(94, 100, 116),
-                accent_text: Color::Rgb(140, 162, 255),
-                success: Color::Rgb(76, 195, 138),
-                warning: Color::Rgb(229, 169, 60),
+                background: Color::Rgb(16, 17, 20),
+                text: Color::Rgb(229, 227, 223),
+                muted: Color::Rgb(168, 172, 182),
+                accent: Color::Rgb(154, 174, 255),
+                border: Color::Rgb(48, 54, 64),
+                user: Color::Rgb(213, 161, 173),
+                tool: Color::Rgb(168, 172, 182),
+                code: Color::Rgb(229, 227, 223),
+                error: Color::Rgb(230, 147, 147),
+                surface: Color::Rgb(23, 25, 30),
+                overlay: Color::Rgb(32, 35, 42),
+                faint: Color::Rgb(133, 141, 155),
+                accent_text: Color::Rgb(154, 174, 255),
+                success: Color::Rgb(143, 197, 164),
+                warning: Color::Rgb(217, 184, 121),
             },
             "light" => Self {
-                background: Color::Rgb(250, 250, 252),
-                text: Color::Rgb(20, 22, 28),
-                muted: Color::Rgb(85, 91, 110),
-                accent: Color::Rgb(59, 91, 219),
-                border: Color::Rgb(216, 220, 230),
-                user: Color::Rgb(156, 54, 80),
-                tool: Color::Rgb(85, 91, 110),
-                code: Color::Rgb(44, 49, 64),
-                error: Color::Rgb(186, 38, 38),
-                surface: Color::Rgb(241, 242, 246),
-                overlay: Color::Rgb(230, 232, 240),
-                faint: Color::Rgb(116, 122, 142),
-                accent_text: Color::Rgb(54, 79, 199),
-                success: Color::Rgb(20, 114, 72),
-                warning: Color::Rgb(138, 90, 0),
+                background: Color::Rgb(246, 245, 242),
+                text: Color::Rgb(37, 38, 43),
+                muted: Color::Rgb(84, 89, 101),
+                accent: Color::Rgb(59, 83, 150),
+                border: Color::Rgb(203, 203, 208),
+                user: Color::Rgb(137, 72, 94),
+                tool: Color::Rgb(84, 89, 101),
+                code: Color::Rgb(37, 38, 43),
+                error: Color::Rgb(161, 62, 72),
+                surface: Color::Rgb(238, 237, 233),
+                overlay: Color::Rgb(229, 228, 223),
+                faint: Color::Rgb(97, 102, 114),
+                accent_text: Color::Rgb(59, 83, 150),
+                success: Color::Rgb(44, 107, 73),
+                warning: Color::Rgb(121, 88, 31),
             },
             "mono" => Self {
                 // Respect the user's native foreground/background pair.
@@ -303,16 +302,9 @@ mod tests {
                     ("faint", colors.faint),
                     ("accent", colors.accent),
                 ] {
-                    if name == "faint" && surface == colors.overlay {
-                        continue;
-                    }
                     let (a, b) = (luminance(ink), luminance(surface));
                     let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
-                    let minimum = if matches!(name, "accent" | "faint") {
-                        3.0
-                    } else {
-                        4.5
-                    };
+                    let minimum = 4.5;
                     assert!(
                         ratio >= minimum,
                         "{preset} {name} on {surface:?}: {ratio:.2} < {minimum}"
@@ -362,5 +354,34 @@ mod tests {
             ..Default::default()
         };
         assert!(Theme::from_settings(&settings).is_err());
+    }
+    #[test]
+    fn selected_picker_actions_and_diff_tints_keep_text_readable() {
+        for preset in ["dark", "light"] {
+            let theme = Theme::from_settings(&ThemeSettings {
+                preset: preset.into(),
+                ..ThemeSettings::default()
+            })
+            .unwrap();
+            let selected = Theme::blend(theme.accent, theme.overlay, 0.08);
+            for ink in [theme.text, theme.muted, theme.accent_text] {
+                let (a, b) = (luminance(ink), luminance(selected));
+                assert!(
+                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5,
+                    "{preset} selected text {ink:?} on {selected:?}"
+                );
+            }
+            for line in ["+new_value", "-old_value"] {
+                let style = super::super::highlight::diff_style(line, theme);
+                let (a, b) = (
+                    luminance(style.fg.unwrap()),
+                    luminance(style.bg.unwrap_or(theme.surface)),
+                );
+                assert!(
+                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5,
+                    "{preset} diff {line}"
+                );
+            }
+        }
     }
 }

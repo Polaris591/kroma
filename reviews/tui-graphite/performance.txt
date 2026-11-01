@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src\lib.rs (target\debug\deps\kroma-13897d88d57377d7.exe)
+
+running 1 test
+TUI scenario=streaming-window messages=300 terminal=80x24 frames=60 median=9820us p95=10426us
+TUI scenario=streaming-window messages=3000 terminal=80x24 frames=60 median=9859us p95=10522us
+TUI scenario=all-history messages=3000 terminal=100x30 forced-cache-rebuilds=8 median=86027us p95=87752us
+TUI scenario=expanded-tool-output lines=4800 terminal=100x30 forced-cache-rebuilds=12 median=78793us p95=80209us
+TUI scenario=long-code-block lines=900 terminal=100x30 forced-cache-rebuilds=12 median=13073us p95=14162us
+test tui::view::tests::bench_streaming_frame_latency_three_hundred_and_three_thousand_messages ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 412 filtered out; finished in 3.03s
+

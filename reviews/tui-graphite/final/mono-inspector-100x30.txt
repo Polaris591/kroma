@@ -1,0 +1,30 @@
+ ◆ Kroma / untitled session                                                                 project 
+                                                                                                    
+  ▎  Review the change. 请 检 查 代 码 。                                                                 
+     Preserve Unicode and indentation.                                                              
+                                                                                                    
+   ▸ ✓ Run · echo step-2 · 3 steps · 3.6s                                                           
+                                                                                                    
+   ·  Execution finished · 35.3s                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  Snapshot · Run Rust tests · Esc ───────────────────────────────────────────────────────────────── 
+     Command                                                                                        
+     cargo test                                                                                     
+                                                                                                    
+     Output                                                                                         
+     exit: 0                                                                                        
+     verified                                                                                       
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ────────────────────────────────────────────────────────────────────────────────────────────────── 
+   › Unsent draft 中 文                                                                               
+                                                                                                    
+   test-model · Think high · Context —                                                              

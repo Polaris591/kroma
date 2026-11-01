@@ -1,0 +1,40 @@
+                        ◆ Kroma / untitled session                                                                               project                        
+                                                                                                                                                                
+                         ▎  Review the change. 请 检 查 代 码 。                                                                                                      
+                            Preserve Unicode and indentation.                                                                                                   
+                                                                                                                                                                
+                         ◆  Updated the implementation.                                                                                                         
+                                                                                                                                                                
+                            • Preserved input and links                                                                                                         
+                            • Verified Unicode selection                                                                                                        
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                        ────────────────────────────────────────────────────────────────────────────────────────────────────────────────                        
+                          › Describe a task, or / for commands…                                                                                                 
+                                                                                                                                                                
+                          test-model · Think high · Context —                                                          Ctrl+P Commands                          

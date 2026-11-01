@@ -1,0 +1,8 @@
+# Generated review artifacts: regenerate with the documented commands.
+/before/
+/gallery/
+/conpty/
+*.patch
+*.diff
+*-tests.txt
+working-tree-before.txt

@@ -1,0 +1,16 @@
+ ◆ Kroma / untitled session             
+  ▎  Review the change. 请 检 查 代 码 。     
+     Preserve Unicode and indentation.  
+                                        
+   ▸ ◌ Running 3 steps · 2.4s           
+   ▸ ✓ Run · echo step-0 · 1.2s         
+   ▸ ✓ Run Rust tests · 1.2s            
+   ▸ ◌ Run · echo step-2                
+     ↳ test unicode_copy ... ok         
+                                        
+   ▲▲▲  Running Run · echo step-2 ·     
+                                        
+ ────────────────────────────────────── 
+   › Steer this task, or /queue anoth   
+                                        
+   test-model · high · Context —        

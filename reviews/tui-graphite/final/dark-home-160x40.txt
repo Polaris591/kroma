@@ -1,0 +1,40 @@
+                        ◆ Kroma / new conversation                                                                               project                        
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                █  █                                                                                                                            
+                               ██████       Kroma                                                                                                               
+                             ▄██ ██ ██▄                                                                                                                         
+                            ▄███▄██▄███▄                                                                                                                        
+                                                                                                                                                                
+                            D:/fixture/project                                                                                                                  
+                                                                                                                                                                
+                            Start a task below · Ctrl+P to explore                                                                                              
+                                                                                                                                                                
+                        ────────────────────────────────────────────────────────────────────────────────────────────────────────────────                        
+                          › Describe a task, or / for commands…                                                                                                 
+                                                                                                                                                                
+                          test-model · Think high · Context —                                                          Ctrl+P Commands                          

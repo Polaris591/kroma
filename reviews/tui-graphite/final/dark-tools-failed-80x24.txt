@@ -1,0 +1,24 @@
+ ◆ Kroma / untitled session                                             project 
+                                                                                
+  ▎  Review the change. 请 检 查 代 码 。                                             
+     Preserve Unicode and indentation.                                          
+                                                                                
+   ▸ ✕ Executed 3 steps · 1 failed · 3.6s                                       
+   ▸ ✕ Run Rust tests · 1.2s                                           [view]   
+     ↳ exit 101 · error[E0599]: method not found                                
+     … Another 2 successful steps                                               
+                                                                                
+   ·  Execution finished · 35.3s                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ────────────────────────────────────────────────────────────────────────────── 
+   › Describe a task, or / for commands…                                        
+                                                                                
+   test-model · Think high · Context —                                          

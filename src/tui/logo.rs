@@ -1,20 +1,19 @@
 //! The supplied Kroma SVG mark, sampled into terminal half-block cells.
 //! Windows Terminal, SSH and ordinary POSIX terminals all show the same
 //! three wedges, without Kitty/Sixel image protocols or network access.
-use super::{preferences::Language, theme::Theme};
+use super::theme::Theme;
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::Paragraph,
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
 
+#[cfg(test)]
 const MARK_WIDTH: usize = 28;
+#[cfg(test)]
 const MARK_HEIGHT: usize = 12;
-const COMPACT_MARK_WIDTH: u16 = 20;
-const COMPACT_MARK_HEIGHT: u16 = 8;
 const LEFT: [(f64, f64); 3] = [(46.18, 6.61), (0.0, 86.6), (30.79, 86.6)];
 const MIDDLE: [(f64, f64); 3] = [(35.88, 86.6), (64.12, 86.6), (50.0, 13.23)];
 const RIGHT: [(f64, f64); 3] = [(69.21, 86.6), (100.0, 86.6), (53.82, 6.61)];
@@ -92,67 +91,37 @@ fn mark_rows_sized(
         .collect()
 }
 
-pub(super) fn draw(frame: &mut Frame, area: Rect, theme: Theme, preset: &str, language: Language) {
-    if area.width < 24 || area.height < 5 {
+/// Draw the compact original mark inside a layout owned by the welcome view.
+pub(super) fn draw(frame: &mut Frame, area: Rect, theme: Theme, preset: &str) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
-    // Full art needs breathing room. Medium terminals get the same sampled
-    // mark at 20x8 cells; only genuinely short terminals fall back to the
-    // wordmark. This keeps the input area usable instead of clipping the art.
-    let (mark_width, mark_height) = if area.height >= 20 && area.width >= MARK_WIDTH as u16 + 6 {
-        (MARK_WIDTH as u16, MARK_HEIGHT as u16)
-    } else if area.height >= 14 && area.width >= COMPACT_MARK_WIDTH + 6 {
-        (COMPACT_MARK_WIDTH, COMPACT_MARK_HEIGHT)
-    } else {
-        (0, 0)
-    };
-    let show_mark = mark_width > 0;
-    let height: u16 = if show_mark { mark_height + 4 } else { 3 };
-    let top = area.y + area.height.saturating_sub(height) / 2;
+    let show_mark = area.height >= 5 && area.width >= 24;
     if show_mark {
         frame.render_widget(
             Paragraph::new(Text::from(mark_rows_sized(
                 theme,
                 preset == "light",
                 preset == "mono",
-                usize::from(mark_width),
-                usize::from(mark_height),
-            )))
-            .alignment(Alignment::Center),
-            Rect::new(area.x, top, area.width, mark_height),
+                12,
+                5,
+            ))),
+            Rect::new(area.x, area.y, 12, 5),
         );
     }
-    let title = if show_mark {
-        top + mark_height + 1
-    } else {
-        top
-    };
+    let offset = if show_mark { 16 } else { 0 };
     frame.render_widget(
         Paragraph::new(Span::styled(
-            "K R O M A",
+            "Kroma",
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-        ))
-        .alignment(Alignment::Center),
-        Rect::new(area.x, title, area.width, 1),
+        )),
+        Rect::new(
+            area.x + offset,
+            area.y + if show_mark { 2 } else { 0 },
+            area.width.saturating_sub(offset),
+            1,
+        ),
     );
-    if area.height >= 7 {
-        let full_hint = language.text(
-            "Enter send · Shift+Enter newline · /help commands · /resume history",
-            "Enter 发送 · Shift+Enter 换行 · /help 命令 · /resume 历史",
-        );
-        let short_hint = language.text("Enter · /help · /resume", "Enter 发送 · /help · /resume");
-        let hint = if UnicodeWidthStr::width(full_hint) <= area.width as usize {
-            full_hint
-        } else {
-            short_hint
-        };
-        frame.render_widget(
-            Paragraph::new(hint)
-                .style(Style::default().fg(theme.muted))
-                .alignment(Alignment::Center),
-            Rect::new(area.x, title + 2, area.width, 1),
-        );
-    }
 }
 
 #[cfg(test)]

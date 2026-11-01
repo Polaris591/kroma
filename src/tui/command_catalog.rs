@@ -58,6 +58,12 @@ commands![
         "清空当前会话"
     ),
     (
+        "/compact",
+        "",
+        "Compact context now; preserve original history",
+        "立即压缩上下文，保留原始会话记录"
+    ),
+    (
         "/sessions",
         "",
         "Browse saved conversations",
@@ -119,6 +125,12 @@ commands![
         "",
         "Effective model limits and their sources",
         "查看有效模型限制及其来源"
+    ),
+    (
+        "/inspect",
+        "[call-id]",
+        "Inspect recorded commands and output",
+        "检视执行命令与输出"
     ),
     ("/diff", "", "Show workspace changes", "查看工作区修改"),
     (

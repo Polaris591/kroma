@@ -12,12 +12,14 @@ File choices complete the current directory, not a project-wide search.
 F2 changes theme; Shift+Tab cycles thinking; /think high selects directly.
 /language [en|zh] and /layout [comfortable|wide] are saved settings.
 Ctrl+O expands tool details; Ctrl+R expands every reasoning segment.
+/inspect browses calls; click [view] for a read-only snapshot above the input.
+Esc closes inspection and restores the draft; Ctrl+T opens searchable full history.
 Click a group chevron for steps, a step chevron for Command/Output.
 Successful groups collapse; failures, warnings and unknown results stay visible.
 Long expanded groups show the latest 8 steps and always retain failures.
 Click ⧉ Copy on a code label to copy raw code (including tabs and blank lines).
 Rose marks your messages, blue marks Kroma; green/yellow/red indicate status.
-Context is total-window use (~ estimated, — unknown); cache is secondary.
+Context is total-window use (~ estimated, — unknown); /usage has cache and token details.
 Context turns yellow at 70%, red at 90%; /usage has API-token breakdowns.
 Git status and per-turn /diff summaries are best effort, never inferred as zero.
 Ctrl+Left/Right moves by word; Ctrl+W or Alt+Backspace deletes a word.
@@ -40,12 +42,14 @@ Ctrl+P 搜索命令；Tab 切换模型、会话、文件类别。
 F2 切换主题；Shift+Tab 切换思考强度；/think high 直接选择。
 /language [zh|en] 与 /layout [comfortable|wide] 设置会保存。
 Ctrl+O 展开工具详情；Ctrl+R 展开每段思考摘要。
+/inspect 浏览调用；点击 [检视] 在输入台上方查看只读执行快照。
+Esc 关闭检视并保留草稿；Ctrl+T 查看可搜索的全文记录。
 点击组头箭头展开步骤，点击步骤箭头查看执行命令和输出。
 成功组默认折叠；失败、警告、中断原因无需展开即可见。
 较长展开组显示最近 8 步，失败步骤始终保留。
 点击代码标签的 ⧉ 复制，原样复制代码（含 Tab、缩进和空行）。
 粉色表示你，蓝色表示 Kroma；绿/黄/红仅表达状态。
-上下文使用总窗口：~ 为估算、— 为未知；缓存仅为次要指标。
+上下文使用总窗口：~ 为估算、— 为未知；/usage 查看缓存和用量详情。
 上下文达到 70% 变黄、90% 变红；/usage 查看 API 用量明细。
 Git 状态与本轮 /diff 改动摘要尽力采集；未知不显示为零。
 Ctrl+左右方向键按词移动；Ctrl+W 或 Alt+Backspace 删除前一个词。

@@ -1,0 +1,30 @@
+ ◆ Kroma / untitled session                                                                 project 
+                                                                                                    
+  ▎  Review the change. 请 检 查 代 码 。                                                                 
+     Preserve Unicode and indentation.                                                              
+                                                                                                    
+   ▸ ◌ Running 3 steps · 2.4s                                                                       
+   ▸ ✓ Run · echo step-0 · 1.2s                                                            [view]   
+   ▸ ✓ Run Rust tests · 1.2s                                                               [view]   
+   ▸ ◌ Run · echo step-2                                                                   [view]   
+     ↳ test unicode_copy ... ok                                                                     
+                                                                                                    
+   ▲▲▲  Running Run · echo step-2 · 0s                                                              
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ────────────────────────────────────────────────────────────────────────────────────────────────── 
+   › Steer this task, or /queue another…                                                            
+                                                                                                    
+   test-model · Think high · Context —                                                              

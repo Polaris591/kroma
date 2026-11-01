@@ -387,6 +387,15 @@ fn picker_event(state: &mut UiState, event: Event, workdir: &std::path::Path) ->
             .as_mut()
             .unwrap()
             .key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        Event::Mouse(mouse)
+            if mouse.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) =>
+        {
+            state
+                .picker
+                .as_mut()
+                .unwrap()
+                .click(mouse.column, mouse.row)
+        }
         _ => PickerAction::None,
     };
     match action {
@@ -505,11 +514,12 @@ fn key_action(
             return InputAction::None;
         }
         KeyCode::Char('o') if ctrl => {
-            state.tools_expanded = !state.tools_expanded;
+            state.toggle_all_tools();
             return InputAction::None;
         }
         KeyCode::Char('r') if ctrl => {
             state.reasoning_expanded = !state.reasoning_expanded;
+            state.invalidate_history_cache();
             return InputAction::None;
         }
         KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -849,6 +859,8 @@ fn input_event(
                             ),
                         }
                     }
+                } else if let Some(id) = state.recent_session_at(mouse.column, mouse.row) {
+                    return InputAction::Submit(format!("/resume {id}"));
                 } else if let Some(code) = state.code_at(mouse.column, mouse.row).map(str::to_owned)
                 {
                     match copy_selection(&code) {
@@ -869,6 +881,11 @@ fn input_event(
                             ),
                         ),
                     }
+                } else if let Some(id) = state
+                    .inspection_at(mouse.column, mouse.row)
+                    .map(str::to_owned)
+                {
+                    state.inspect_tool(&id);
                 } else if state.toggle_tool_at(mouse.column, mouse.row) {
                     // The disclosure chevron owns this click.
                 } else if state.start_editor_selection(mouse.column, mouse.row) {
@@ -997,6 +1014,14 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
     }
     if input == "/help" {
         state.show_help();
+        return true;
+    }
+    if input == "/inspect" {
+        state.browse_execution();
+        return true;
+    }
+    if let Some(id) = input.strip_prefix("/inspect ") {
+        state.inspect_tool(id.trim());
         return true;
     }
     if input == "/usage" {
@@ -1815,6 +1840,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     }
                     continue;
                 }
+                let is_compact = text.split_whitespace().next() == Some("/compact");
+                if is_compact {
+                    state.event(UiEvent::TaskStarted);
+                    screen.draw(&mut state)?;
+                }
+                let mut command_tick = tokio::time::interval(std::time::Duration::from_millis(40));
+                command_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let command_result = {
                     let command = commands.execute_async(&text, &mut agent, &task_input);
                     tokio::pin!(command);
@@ -1822,16 +1854,42 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                         tokio::select! {
                             result = &mut command => break Some(result),
                             event = input.next() => match event {
-                                Some(Ok(Event::Key(key))) if
-                                    (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-                                    || key.code == KeyCode::Esc => break None,
+                                Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release &&
+                                    ((key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+                                    || key.code == KeyCode::Esc) => break None,
+                                Some(Ok(Event::Resize(_, _))) => screen.draw(&mut state)?,
                                 Some(Err(error)) => return Err(error.into()),
                                 None => break None,
                                 _ => {} // Ignore unrelated input while the command executes.
-                            }
+                            },
+                            message = rx.recv() => {
+                                if let Some(message) = message { state.event(message); }
+                                drain_live_events(&mut state, &mut rx);
+                                screen.draw(&mut state)?;
+                            },
+                            _ = command_tick.tick(), if is_compact => {
+                                if state.tick_activity() { screen.draw(&mut state)?; }
+                            },
                         }
                     }
                 };
+                if is_compact {
+                    // Completion may win select! just before its progress,
+                    // usage and new context estimate are read. Apply them
+                    // before clearing running, including on Esc/Ctrl+C.
+                    while let Ok(message) = rx.try_recv() {
+                        state.event(message);
+                    }
+                    state.event(UiEvent::TaskFinished);
+                    state.task_outcome = Some(match &command_result {
+                        Some(Ok(_)) => view::TaskOutcome::Completed,
+                        Some(Err(_)) => view::TaskOutcome::Failed,
+                        None => view::TaskOutcome::Cancelled,
+                    });
+                    if let Err(error) = state.save_usage() {
+                        state.note(format!("Unable to save session usage: {error:#}"));
+                    }
+                }
                 let Some(command_result) = command_result else {
                     state.note("Command cancelled");
                     continue;
@@ -2544,8 +2602,17 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| ui.draw(frame)).unwrap();
         // 30-row terminal: status is row 29, composer input is row 27.
-        assert!(ui.start_editor_selection(6, 27));
-        assert!(ui.drag_editor_selection(11, 27));
+        let x = (0..100)
+            .find(|&x| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, 27))
+                    .is_some_and(|cell| cell.symbol() == "u")
+            })
+            .expect("painted draft start");
+        assert!(ui.start_editor_selection(x, 27));
+        assert!(ui.drag_editor_selection(x + 5, 27));
         assert_eq!(ui.editor_selected_text().as_deref(), Some("unsen"));
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(
@@ -2931,5 +2998,45 @@ mod tests {
         assert!(ui.notification.contains("Settings unchanged"));
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+    #[test]
+    fn execution_inspection_routes_locally_and_modal_escape_preserves_the_draft() {
+        let (mut ui, model) = setup();
+        ui.event(UiEvent::ToolStarted {
+            name: "shell".into(),
+            id: "call-1".into(),
+            args: "echo real-command".into(),
+        });
+        ui.event(UiEvent::ToolFinished {
+            id: "call-1".into(),
+            result: "exit: 0\nreal output".into(),
+            failed: false,
+        });
+        ui.editor.paste("unsent draft");
+        assert!(show_local_command(&mut ui, "/inspect", &model));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        let selected = picker_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            std::env::temp_dir().as_path(),
+        );
+        let InputAction::Submit(command) = selected else {
+            panic!("inspection picker must select a local command");
+        };
+        assert_eq!(command, "/inspect call-1");
+        assert!(show_local_command(&mut ui, &command, &model));
+        assert!(ui.has_plugin_panel());
+        let action = input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            true,
+            &model,
+            std::env::temp_dir().as_path(),
+        );
+        assert!(matches!(action, InputAction::None));
+        assert!(!ui.has_plugin_panel());
+        assert_eq!(ui.editor.text(), "unsent draft");
     }
 }

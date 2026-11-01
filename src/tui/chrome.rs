@@ -135,26 +135,15 @@ impl UiState {
     }
     pub(super) fn draw_header(&self, frame: &mut Frame, area: Rect, theme: Theme) {
         let language = self.preferences.language;
-        let (status, ink) = if self.running {
-            (
-                format!(
-                    "● {} {}s",
-                    language.text("Running", "运行中"),
-                    self.task_started
-                        .map_or(0, |start| start.elapsed().as_secs())
-                ),
-                theme.accent_text,
-            )
-        } else {
-            match self.task_outcome {
-                Some(TaskOutcome::Failed) => {
-                    (language.text("✕ Failed", "✕ 失败").into(), theme.error)
-                }
-                Some(TaskOutcome::Cancelled) => {
-                    (language.text("⊘ Cancelled", "⊘ 已取消").into(), theme.muted)
-                }
-                _ => (language.text("✓ Ready", "✓ 就绪").into(), theme.faint),
+        let (status, ink) = match self.task_outcome {
+            Some(TaskOutcome::Failed) if !self.running => {
+                (language.text("✕ Failed", "✕ 失败").to_owned(), theme.error)
             }
+            Some(TaskOutcome::Cancelled) if !self.running => (
+                language.text("⊘ Cancelled", "⊘ 已取消").to_owned(),
+                theme.warning,
+            ),
+            _ => (String::new(), theme.faint),
         };
         let workdir_name = self
             .link_workdir
@@ -188,6 +177,7 @@ impl UiState {
         if UnicodeWidthStr::width(right.as_str()) > usize::from(area.width.saturating_sub(10)) {
             right = status.clone();
         }
+        let right = right.trim_end().to_owned();
         let right_width = UnicodeWidthStr::width(right.as_str()) as u16;
         let label = ellipsize_cells(
             self.session_label(),
@@ -201,7 +191,7 @@ impl UiState {
                     Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  {label}"),
+                    format!(" / {label}"),
                     Style::default().fg(if self.home { theme.faint } else { theme.muted }),
                 ),
             ])),
@@ -239,7 +229,7 @@ impl UiState {
         if changes.files > 0 {
             summary = format!(
                 " · {} {} {} +{} −{}",
-                language.text("Changed", "改动"),
+                language.text("Workspace", "工作区变化"),
                 changes.files,
                 language.text("files", "个文件"),
                 changes.added,
@@ -249,7 +239,7 @@ impl UiState {
         if changes.untracked > 0 {
             summary.push_str(&format!(
                 " · {} {} {}",
-                language.text("Added", "新增"),
+                language.text("Untracked", "未跟踪"),
                 changes.untracked,
                 language.text("files", "个文件")
             ));
@@ -259,58 +249,80 @@ impl UiState {
         }
         summary
     }
-    pub(super) fn draw_welcome_details(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        if area.height < 8 {
+    pub(in crate::tui) fn recent_session_at(&self, column: u16, row: u16) -> Option<&str> {
+        if !self.home || self.running || self.picker.is_some() || self.plugin_panel.is_some() {
+            return None;
+        }
+        self.recent_session_rows
+            .iter()
+            .find_map(|(area, id)| area.contains((column, row).into()).then_some(id.as_str()))
+    }
+
+    pub(super) fn draw_welcome_details(&mut self, frame: &mut Frame, area: Rect, theme: Theme) {
+        if area.height < 4 || area.width < 8 {
             return;
         }
         let language = self.preferences.language;
-        let branch = self.git_info.branch.as_deref().unwrap_or("");
-        let context = format!(
-            "{} · {}{}",
-            self.model,
-            self.workdir_label(),
-            if branch.is_empty() {
-                String::new()
-            } else {
-                format!(" · {branch}")
-            }
+        let inner = Rect::new(
+            area.x + 4,
+            area.y,
+            area.width.saturating_sub(6),
+            area.height,
         );
-        let reserve = if area.height >= 22 && !self.recent_sessions.is_empty() {
-            6
-        } else if area.height >= 25 {
-            4
+        let mark_rows = if area.height >= 16 && inner.width >= 24 {
+            5
         } else {
-            2
+            1
         };
-        let logo_area_height = area.height.saturating_sub(reserve);
-        let mark_height = if logo_area_height >= 20 && area.width >= 34 {
-            12
-        } else if logo_area_height >= 14 && area.width >= 26 {
-            8
+        let recent_count = self.recent_sessions.len().min(if area.height >= 16 {
+            3
+        } else if area.height >= 11 {
+            2
+        } else {
+            0
+        });
+        let recent_rows = if recent_count > 0 {
+            recent_count as u16 + 2
         } else {
             0
         };
-        let block_height = if mark_height > 0 { mark_height + 4 } else { 3 };
-        let logo_bottom = area.y + logo_area_height.saturating_sub(block_height) / 2 + block_height;
-        let max_y = area.bottom().saturating_sub(
-            if area.height >= 22 && !self.recent_sessions.is_empty() {
-                5
-            } else {
-                2
-            },
+        let height = (mark_rows + 4 + recent_rows).min(area.height);
+        let top = area
+            .bottom()
+            .saturating_sub(height + u16::from(area.height > height));
+        super::super::logo::draw(
+            frame,
+            Rect::new(inner.x, top, inner.width, mark_rows),
+            theme,
+            self.themes.preset(),
         );
-        let y = (logo_bottom + 1).min(max_y);
-        frame.render_widget(
-            Paragraph::new(ellipsize_cells(&context, usize::from(area.width)))
-                .alignment(Alignment::Center)
+        let path_y = top + mark_rows + 1;
+        if path_y < area.bottom() {
+            frame.render_widget(
+                Paragraph::new(ellipsize_cells(
+                    &self.workdir_label(),
+                    usize::from(inner.width),
+                ))
                 .style(Style::default().fg(theme.faint)),
-            Rect::new(area.x, y, area.width, 1),
-        );
-        if area.height >= 22 && !self.recent_sessions.is_empty() {
-            let col_width = usize::from(area.width.saturating_sub(4)).min(52);
-            for (index, (raw_title, modified)) in self.recent_sessions.iter().take(3).enumerate() {
-                let title = display_session_title(raw_title, language);
-                let age = modified
+                Rect::new(inner.x, path_y, inner.width, 1),
+            );
+        }
+        if recent_count > 0 {
+            let heading_y = path_y + 2;
+            frame.render_widget(
+                Paragraph::new(language.text("Continue working", "继续工作"))
+                    .style(Style::default().fg(theme.muted)),
+                Rect::new(inner.x, heading_y, inner.width, 1),
+            );
+            for (index, entry) in self.recent_sessions.iter().take(recent_count).enumerate() {
+                let y = heading_y + 1 + index as u16;
+                if y >= area.bottom() {
+                    break;
+                }
+                let title =
+                    display_session_title(entry.name.as_deref().unwrap_or(&entry.id), language);
+                let age = entry
+                    .modified
                     .and_then(|time| time.elapsed().ok())
                     .map(|elapsed| {
                         let mins = elapsed.as_secs() / 60;
@@ -323,28 +335,49 @@ impl UiState {
                         }
                     })
                     .unwrap_or_else(|| "—".into());
-                let line = if col_width >= 24 {
-                    let age_width = UnicodeWidthStr::width(age.as_str());
-                    let max_title = col_width.saturating_sub(age_width + 2);
-                    let clipped = ellipsize_cells(title, max_title);
-                    let used = UnicodeWidthStr::width(clipped.as_str()) + age_width;
-                    let pad = col_width.saturating_sub(used).max(2);
-                    Line::from(vec![
-                        Span::styled(clipped, Style::default().fg(theme.muted)),
-                        Span::raw(" ".repeat(pad)),
-                        Span::styled(age, Style::default().fg(theme.faint)),
-                    ])
-                } else {
-                    Line::styled(
-                        ellipsize_cells(&format!("{title} · {age}"), usize::from(area.width)),
-                        Style::default().fg(theme.muted),
-                    )
-                };
-                frame.render_widget(
-                    Paragraph::new(line).alignment(Alignment::Center),
-                    Rect::new(area.x, y + 2 + index as u16, area.width, 1),
-                );
+                let age_width = UnicodeWidthStr::width(age.as_str());
+                let width = usize::from(inner.width).min(64);
+                let clipped = ellipsize_cells(title, width.saturating_sub(age_width + 4));
+                let pad =
+                    width.saturating_sub(UnicodeWidthStr::width(clipped.as_str()) + age_width + 2);
+                let hit = Rect::new(inner.x, y, width as u16, 1);
+                let hovered = self
+                    .hover_pointer
+                    .is_some_and(|(x, y)| hit.contains((x, y).into()));
+                let line = Line::from(vec![
+                    Span::styled(
+                        "› ",
+                        Style::default().fg(if hovered {
+                            theme.accent_text
+                        } else {
+                            theme.faint
+                        }),
+                    ),
+                    Span::styled(
+                        clipped,
+                        Style::default().fg(if hovered {
+                            theme.accent_text
+                        } else {
+                            theme.text
+                        }),
+                    ),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(age, Style::default().fg(theme.faint)),
+                ]);
+                frame.render_widget(Paragraph::new(line), hit);
+                self.recent_session_rows.push((hit, entry.id.clone()));
             }
+        }
+        let hint_y = top + height - 1;
+        if hint_y < area.bottom() {
+            frame.render_widget(
+                Paragraph::new(language.text(
+                    "Start a task below · Ctrl+P to explore",
+                    "在下方开始任务 · Ctrl+P 查看更多",
+                ))
+                .style(Style::default().fg(theme.faint)),
+                Rect::new(inner.x, hint_y, inner.width, 1),
+            );
         }
     }
 }

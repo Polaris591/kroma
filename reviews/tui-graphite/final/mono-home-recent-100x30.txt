@@ -1,0 +1,30 @@
+ ◆ Kroma / new conversation                                                                 project 
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+         █  █                                                                                       
+        ██████       Kroma                                                                          
+      ▄██ ██ ██▄                                                                                    
+     ▄███▄██▄███▄                                                                                   
+                                                                                                    
+     D:/fixture/project                                                                             
+                                                                                                    
+     Continue working                                                                               
+     › Fix Unicode                                             1h ago                               
+     › Review tool output                                      2h ago                               
+     › Add tests                                               2d ago                               
+                                                                                                    
+     Start a task below · Ctrl+P to explore                                                         
+                                                                                                    
+ ────────────────────────────────────────────────────────────────────────────────────────────────── 
+   › Describe a task, or / for commands…                                                            
+                                                                                                    
+   test-model · Think high · Context —                                                              

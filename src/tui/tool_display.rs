@@ -188,6 +188,11 @@ pub(super) fn has_diagnostic(details: &str) -> bool {
             .unwrap_or(line.trim())
             .trim_start()
             .to_ascii_lowercase();
+        if line.contains("lf will be replaced by crlf")
+            || line.contains("crlf will be replaced by lf")
+        {
+            return false;
+        }
         line.starts_with("warning:")
             || line.starts_with("warning[")
             || line.starts_with("error:")

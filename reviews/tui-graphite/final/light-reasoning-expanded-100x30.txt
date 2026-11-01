@@ -1,0 +1,30 @@
+ ◆ Kroma / untitled session                                                                 project 
+                                                                                                    
+  ▎  Review the change. 请 检 查 代 码 。                                                                 
+     Preserve Unicode and indentation.                                                              
+                                                                                                    
+   ◇  Reasoning · Ctrl+R to collapse · 0.0s                                                         
+                                                                                                    
+     │ Inspect the existing API, then verify the change.                                            
+     │                                                                                              
+     │ Keep failures visible.                                                                       
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ────────────────────────────────────────────────────────────────────────────────────────────────── 
+   › Describe a task, or / for commands…                                                            
+                                                                                                    
+   test-model · Think high · Context —                                                              

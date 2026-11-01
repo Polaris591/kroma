@@ -1,0 +1,30 @@
+ ◆ Kroma / untitled session                                                                 project 
+                                                                                                    
+  ▎  Review the change. 请 检 查 代 码 。                                                                 
+     Preserve Unicode and indentation.                                                              
+                                                                                                    
+  ◆  Updated the implementation.                                                                    
+                                                                                                    
+     • Preserved input and links                                                                    
+     • Verified Unicode selection                                                                   
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  Sessions · ↑↓ select · Enter resume · Esc close ───────────────────────────────────────────────── 
+   ›                                                                                                
+   › Fix Unicode  — fixture                                                                         
+                                                                                                    
+ ────────────────────────────────────────────────────────────────────────────────────────────────── 
+   › Unsent draft                                                                                   
+                                                                                                    
+   test-model · Think high · Context —                                                              

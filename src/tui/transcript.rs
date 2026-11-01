@@ -181,6 +181,7 @@ impl UiState {
         preformatted_rows: &mut Vec<usize>,
         markdown_targets: &mut Vec<(String, String)>,
         reasoning_notice_shown: &mut bool,
+        reading_rows: &mut Vec<usize>,
     ) {
         if entry.body.trim().is_empty() {
             return;
@@ -232,6 +233,11 @@ impl UiState {
                 }
             }
             let base = lines.len();
+            reading_rows.extend(
+                (0..rendered.len())
+                    .filter(|row| code_rows.binary_search(row).is_err())
+                    .map(|row| base + row),
+            );
             preformatted_rows.extend(code_rows.into_iter().map(|row| base + row));
             for line in rendered {
                 let mut spans = line.spans;

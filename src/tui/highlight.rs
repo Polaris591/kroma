@@ -78,7 +78,7 @@ fn style(token: Token, theme: Theme) -> Style {
                 theme.error
             },
             theme.surface,
-            0.15,
+            0.08,
         ));
     }
     style

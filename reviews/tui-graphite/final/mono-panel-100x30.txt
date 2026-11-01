@@ -1,0 +1,30 @@
+ ◆ Kroma / untitled session                                                                 project 
+                                                                                                    
+ ╭ Review · ↑↓/PgUp/PgDn · Esc Close ─────────────────────────────────────────────────────────────╮ 
+ │A scrollable plugin panel.                                                                      │ 
+ │The draft stays editable after closing.                                                         │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ │                                                                                                │ 
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+                                                                                                    
+   test-model · Think high · Context —                                                              

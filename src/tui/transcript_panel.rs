@@ -1,6 +1,7 @@
 //! Optional full transcript reuses the existing scrollable overlay and input focus.
 use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::widgets::BorderType;
 
 #[derive(Default)]
 pub(super) struct Search {
@@ -160,23 +161,44 @@ impl UiState {
 }
 
 impl UiState {
-    pub(super) fn draw_panel(&mut self, frame: &mut Frame, full_area: Rect, colors: Theme) {
+    pub(super) fn draw_panel(
+        &mut self,
+        frame: &mut Frame,
+        full_area: Rect,
+        dock_area: Rect,
+        colors: Theme,
+    ) {
         if let Some(panel) = &mut self.plugin_panel {
-            let width = full_area.width.saturating_sub(2).min(100);
-            let height = full_area.height.saturating_sub(2).min(26);
-            if width >= 16 && height >= 4 {
-                let area = Rect::new(
-                    full_area.x + (full_area.width - width) / 2,
-                    full_area.y + (full_area.height - height) / 2,
-                    width,
-                    height,
-                );
+            let area = match panel.placement {
+                PanelPlacement::Centered => {
+                    let width = full_area.width.saturating_sub(2).min(100);
+                    let height = full_area.height.saturating_sub(2).min(26);
+                    Rect::new(
+                        full_area.x + (full_area.width - width) / 2,
+                        full_area.y + (full_area.height - height) / 2,
+                        width,
+                        height,
+                    )
+                }
+                PanelPlacement::Docked => {
+                    let height = dock_area.height.min(12);
+                    Rect::new(
+                        dock_area.x,
+                        dock_area.bottom().saturating_sub(height),
+                        dock_area.width,
+                        height,
+                    )
+                }
+            };
+            let width = area.width;
+            let docked = matches!(panel.placement, PanelPlacement::Docked);
+            if width >= 16 && area.height >= if docked { 2 } else { 4 } {
                 frame.render_widget(Clear, area);
                 let inner = Rect::new(
-                    area.x + 1,
+                    area.x + if docked { 4 } else { 1 },
                     area.y + 1,
-                    area.width.saturating_sub(2),
-                    area.height.saturating_sub(2),
+                    area.width.saturating_sub(if docked { 6 } else { 2 }),
+                    area.height.saturating_sub(if docked { 1 } else { 2 }),
                 );
                 let reflow = panel.wrapped_width != usize::from(inner.width);
                 if reflow {
@@ -187,7 +209,7 @@ impl UiState {
                 }
                 panel.refresh_search(reflow);
 
-                let heading = if width < 44 {
+                let heading = if docked || width < 44 {
                     format!(
                         " {} · Esc ",
                         ellipsize_cells(&panel.title, width.saturating_sub(10) as usize)
@@ -199,7 +221,11 @@ impl UiState {
                         self.preferences.language.text("Close", "关闭")
                     )
                 };
-                let heading = if let Some(search) = &panel.search {
+                let heading = if let Some(search) = panel
+                    .search
+                    .as_ref()
+                    .filter(|search| search.editing || !search.query.is_empty())
+                {
                     format!(
                         "{} /{} · {}/{} ",
                         ellipsize_cells(&heading, width.saturating_sub(28) as usize),
@@ -215,12 +241,16 @@ impl UiState {
                     heading
                 };
                 let block = Block::default()
-                    .borders(Borders::ALL)
+                    .borders(if docked { Borders::TOP } else { Borders::ALL })
                     .title(Line::styled(
                         heading,
                         Style::default().fg(colors.accent_text),
                     ))
-                    .border_type(BorderType::Rounded)
+                    .border_type(if docked {
+                        BorderType::Plain
+                    } else {
+                        BorderType::Rounded
+                    })
                     .border_style(Style::default().fg(colors.border))
                     .style(Style::default().bg(colors.overlay));
                 frame.render_widget(block, area);

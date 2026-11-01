@@ -1,0 +1,16 @@
+ ◆ Kroma / untitled session             
+  ▎  Review the change. 请 检 查 代 码 。     
+     Preserve Unicode and indentation.  
+                                        
+   ▸ ⊘ Executed 3 steps · 3.6s          
+   ▸ ⊘ Run Rust tests · 1.2s            
+     ⊘ Interrupted · result unknown (   
+     will not rerun automatically)      
+     … Another 2 successful steps       
+                                        
+   ·  Execution finished · 35.3s        
+                                        
+ ────────────────────────────────────── 
+   › Describe a task, or / for comman   
+                                        
+   test-model · high · Context —        

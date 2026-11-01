@@ -1,0 +1,16 @@
+ ◆ Kroma / untitled session             
+  Snapshot · Run Rust tests · Esc ───── 
+     Command                            
+     cargo test                         
+                                        
+     Output                             
+     exit: 0                            
+     verified                           
+                                        
+                                        
+                                        
+                                        
+ ────────────────────────────────────── 
+   › Unsent draft 中 文                   
+                                        
+   test-model · high · Context —        

@@ -1,0 +1,24 @@
+ ◆ Kroma / untitled session                                             project 
+                                                                                
+  ▎  Review the change. 请 检 查 代 码 。                                             
+     Preserve Unicode and indentation.                                          
+                                                                                
+  ◆  Updated the implementation.                                                
+                                                                                
+     • Preserved input and links                                                
+     • Verified Unicode selection                                               
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+  Commands · Models · Sessions · Files  Tab · Esc ───────────────────────────── 
+   ›                                                                            
+   › Fast · test-model  — fixture                                               
+                                                                                
+ ────────────────────────────────────────────────────────────────────────────── 
+   › Unsent draft                                                               
+                                                                                
+   test-model · Think high · Context —                                          

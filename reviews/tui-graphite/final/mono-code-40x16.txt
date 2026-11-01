@@ -1,0 +1,16 @@
+ ◆ Kroma / untitled session             
+  ▎  Review the change. 请 检 查 代 码 。     
+     Preserve Unicode and indentation.  
+                                        
+  ◆                     rust · ⧉ Copy   
+     │ // preserve source text          
+     │ fn greet(name: &str) {           
+     │     println!("Hello {name}");    
+     │     let count: usize = 42;       
+     │ }                                
+                                        
+                                        
+ ────────────────────────────────────── 
+   › Describe a task, or / for comman   
+                                        
+   test-model · high · Context —        

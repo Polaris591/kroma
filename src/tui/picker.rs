@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -91,7 +91,13 @@ pub struct Picker {
     pub query: String,
     pub items: Vec<Item>,
     pub completion: bool,
+    /// Optional heading for a contextual picker.
+    pub(super) title: Option<String>,
+    /// Keep chronological sources in their supplied order.
+    pub(super) preserve_order: bool,
     selected: usize,
+    area: Rect,
+    list_start: usize,
 }
 
 fn clip_cells(value: &str, max_width: usize) -> String {
@@ -142,7 +148,11 @@ impl Picker {
             items,
             query: query.into(),
             selected: 0,
+            area: Rect::default(),
+            list_start: 0,
             completion: false,
+            title: None,
+            preserve_order: kind == Kind::Sessions,
         }
     }
 
@@ -177,7 +187,7 @@ impl Picker {
                     .map(|rank| (rank, item))
             })
             .collect::<Vec<_>>();
-        if self.kind != Kind::Sessions {
+        if !self.preserve_order {
             items.sort_by(|(rank_a, a), (rank_b, b)| {
                 rank_a.cmp(rank_b).then_with(|| a.label.cmp(&b.label))
             });
@@ -212,7 +222,8 @@ impl Picker {
                 .get(self.selected)
                 .map_or(Action::None, |item| Action::Selected(item.value.clone())),
             KeyCode::Backspace => {
-                if self.query.pop().is_some() {
+                if let Some((at, _)) = self.query.grapheme_indices(true).next_back() {
+                    self.query.truncate(at);
                     self.selected = 0;
                     Action::Changed
                 } else {
@@ -232,20 +243,43 @@ impl Picker {
         }
     }
 
-    pub fn draw(&self, frame: &mut Frame, parent: Rect, theme: Theme, language: Language) {
+    /// Select only an item actually painted by the most recent draw.
+    pub fn click(&mut self, column: u16, row: u16) -> Action {
+        if !self.area.contains((column, row).into()) || row < self.area.y + 2 {
+            return Action::None;
+        }
+        let index = self.list_start + usize::from(row - self.area.y - 2);
+        if let Some(value) = self.matches().get(index).map(|item| item.value.clone()) {
+            self.selected = index;
+            Action::Selected(value)
+        } else {
+            Action::None
+        }
+    }
+
+    pub fn draw(&mut self, frame: &mut Frame, parent: Rect, theme: Theme, language: Language) {
+        self.area = Rect::default();
         if parent.width < 16 || parent.height < 3 {
             return;
         }
-        let height = parent.height.min(11);
-        let width = parent.width.min(72);
+        let height = parent
+            .height
+            .min(self.matches().len().saturating_add(3).clamp(4, 10) as u16);
+        let width = parent.width;
         let area = Rect::new(
-            parent.x + (parent.width - width) / 2,
+            parent.x,
             parent.bottom().saturating_sub(height),
             width,
             height,
         );
+        self.area = area;
         frame.render_widget(Clear, area);
-        let title_line = if self.completion {
+        let title_line = if let Some(title) = &self.title {
+            Line::styled(
+                format!(" {} · Esc ", title),
+                Style::default().fg(theme.accent_text),
+            )
+        } else if self.completion {
             Line::styled(
                 language
                     .text(
@@ -303,9 +337,8 @@ impl Picker {
         };
         frame.render_widget(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(Borders::TOP)
                 .title(title_line)
-                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.border))
                 .style(Style::default().bg(theme.overlay)),
             area,
@@ -314,7 +347,7 @@ impl Picker {
             area.x + 2,
             area.y + 1,
             area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
+            area.height.saturating_sub(1),
         );
         if inner.height == 0 {
             return;
@@ -359,7 +392,7 @@ impl Picker {
                         max_label.saturating_sub(UnicodeWidthStr::width(name.as_str()) + 4),
                     );
                     let background = if active {
-                        Theme::blend(theme.accent, theme.overlay, 0.22)
+                        Theme::blend(theme.accent, theme.overlay, 0.08)
                     } else {
                         theme.overlay
                     };
@@ -384,6 +417,7 @@ impl Picker {
                 })
                 .collect()
         };
+        self.list_start = start;
         frame.render_widget(
             Paragraph::new(lines),
             Rect::new(
@@ -395,7 +429,7 @@ impl Picker {
         );
         let cursor_offset = UnicodeWidthStr::width(self.query.as_str());
         frame.set_cursor_position((
-            inner.x + 2 + (cursor_offset as u16).min(inner.width.saturating_sub(3)),
+            inner.x + 2 + cursor_offset.min(usize::from(inner.width.saturating_sub(3))) as u16,
             inner.y,
         ));
     }
@@ -460,5 +494,59 @@ mod tests {
             picker.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Action::Close
         );
+    }
+    #[test]
+    fn dock_mouse_selection_tracks_scrolling_and_ignores_query_or_blank_rows() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let items = (0..20)
+            .map(|i| Item::new(format!("item-{i:02}"), format!("value-{i}"), "description"))
+            .collect();
+        let mut picker = Picker::new(Kind::Commands, items, "");
+        let theme = super::super::theme::ThemeStore::load_at(None)
+            .unwrap()
+            .colors;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let parent = Rect::new(1, 2, 78, 18);
+        for _ in 0..9 {
+            picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        terminal
+            .draw(|frame| picker.draw(frame, parent, theme, Language::En))
+            .unwrap();
+        assert_eq!(picker.area.x, parent.x);
+        assert_eq!(picker.area.width, parent.width);
+        assert_eq!(picker.area.bottom(), parent.bottom());
+        assert_eq!(
+            picker.click(picker.area.x + 4, picker.area.y + 2),
+            Action::Selected("value-2".into())
+        );
+        assert_eq!(
+            picker.click(picker.area.x + 4, picker.area.y + 1),
+            Action::None
+        );
+        assert_eq!(
+            picker.click(picker.area.right(), picker.area.y + 2),
+            Action::None
+        );
+        picker.query = "missing".into();
+        terminal
+            .draw(|frame| picker.draw(frame, parent, theme, Language::En))
+            .unwrap();
+        assert_eq!(
+            picker.click(picker.area.x + 4, picker.area.y + 2),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn picker_backspace_removes_complete_unicode_graphemes() {
+        let mut picker = Picker::new(Kind::Files, Vec::new(), "👩‍💻e\u{301}");
+        assert_eq!(
+            picker.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            Action::Changed
+        );
+        assert_eq!(picker.query, "👩‍💻");
+        picker.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(picker.query.is_empty());
     }
 }

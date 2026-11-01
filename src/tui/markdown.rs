@@ -51,6 +51,8 @@ struct TableContent {
 struct ListState {
     ordered: bool,
     next: u64,
+    items: usize,
+    loose: bool,
 }
 
 fn padded_cell(cell: &str, width: usize) -> String {
@@ -190,7 +192,12 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
     let mut inline_rows = Vec::new();
     let mut current_link: Option<String> = None;
     let mut spans = Vec::new();
-    let mut styles = vec![Style::default().fg(theme.text)];
+    let body_fg = if theme.background == ratatui::style::Color::Reset {
+        theme.text
+    } else {
+        Theme::blend(theme.text, theme.muted, 0.74)
+    };
+    let mut styles = vec![Style::default().fg(body_fg)];
     let mut lists: Vec<ListState> = Vec::new();
     let mut lexer = super::highlight::Lexer::default();
     let mut blocks = Vec::new();
@@ -230,7 +237,9 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
                 Event::Text(value) | Event::Code(value) => table_content.cell.push_str(&value),
                 Event::SoftBreak | Event::HardBreak => table_content.cell.push(' '),
                 Event::End(TagEnd::Table) => {
+                    let start = lines.len();
                     render_table(&mut lines, table.take().unwrap(), theme, width);
+                    preformatted_rows.extend(start..lines.len());
                     blank_after(&mut lines);
                 }
                 _ => {}
@@ -254,16 +263,23 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
                     let marker = match level {
                         pulldown_cmark::HeadingLevel::H1 => "◆ ",
                         pulldown_cmark::HeadingLevel::H2 => "▸ ",
-                        _ => "• ",
+                        _ => "▍ ",
                     };
                     spans.push(Span::styled(marker, Style::default().fg(theme.accent)));
-                    styles.push(
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    );
+                    styles.push(Style::default().fg(theme.text).add_modifier(Modifier::BOLD));
                 }
-                Tag::Strong => styles.push(styles.last().unwrap().add_modifier(Modifier::BOLD)),
+                Tag::Paragraph => {
+                    if let Some(top) = lists.first_mut() {
+                        top.loose = true;
+                    }
+                }
+                Tag::Strong => styles.push(
+                    styles
+                        .last()
+                        .unwrap()
+                        .fg(theme.text)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Tag::Emphasis => styles.push(styles.last().unwrap().add_modifier(Modifier::ITALIC)),
                 Tag::Strikethrough => {
                     styles.push(styles.last().unwrap().add_modifier(Modifier::CROSSED_OUT))
@@ -301,36 +317,51 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
                     styles.push(Style::default().fg(theme.code));
                 }
                 Tag::List(start) => {
-                    if lists.is_empty() && !spans.is_empty() {
+                    if !spans.is_empty() {
                         emit_line(&mut lines, &mut spans, &mut last_blank);
                     }
                     lists.push(ListState {
                         ordered: start.is_some(),
                         next: start.unwrap_or(1),
+                        items: 0,
+                        loose: false,
                     });
                 }
                 Tag::Item => {
                     if !spans.is_empty() {
                         emit_line(&mut lines, &mut spans, &mut last_blank);
                     }
+                    if lists.len() == 1 && lists[0].items > 0 && lists[0].loose {
+                        blank_after(&mut lines);
+                    }
                     let depth = lists.len();
                     let indent = "  ".repeat(depth.saturating_sub(1).min(8));
+                    let ordered = lists.last().is_some_and(|list| list.ordered);
                     let marker = match lists.last_mut() {
                         Some(list) if list.ordered => {
+                            list.items += 1;
                             let number = list.next;
                             list.next = list.next.saturating_add(1);
                             format!("{number}.")
                         }
-                        _ => match depth {
-                            1 => "•".to_owned(),
-                            2 => "◦".to_owned(),
-                            _ => "▪".to_owned(),
-                        },
+                        Some(list) => {
+                            list.items += 1;
+                            match depth {
+                                1 => "•".to_owned(),
+                                2 => "◦".to_owned(),
+                                _ => "▪".to_owned(),
+                            }
+                        }
+                        None => "•".to_owned(),
                     };
-                    spans.push(Span::styled(
-                        format!("{indent}{marker} "),
-                        Style::default().fg(theme.accent),
-                    ));
+                    let marker_style = if ordered {
+                        Style::default()
+                            .fg(theme.accent_text)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.muted)
+                    };
+                    spans.push(Span::styled(format!("{indent}{marker} "), marker_style));
                 }
                 Tag::BlockQuote(_) => {
                     if !spans.is_empty() {
@@ -462,8 +493,10 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::UNDERLINED)
+                } else if theme.background == ratatui::style::Color::Reset {
+                    Style::default().fg(theme.code).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme.code)
+                    Style::default().fg(theme.accent_text).bg(theme.surface)
                 };
                 spans.push(Span::styled(value.into_string(), style));
             }
@@ -472,11 +505,16 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
                 emit_line(&mut lines, &mut spans, &mut last_blank);
             }
             Event::Rule => {
-                emit_line(&mut lines, &mut spans, &mut last_blank);
+                if !spans.is_empty() {
+                    emit_line(&mut lines, &mut spans, &mut last_blank);
+                }
+                blank_after(&mut lines);
                 lines.push(Line::from(Span::styled(
-                    "────────────────",
+                    "────────────────────────",
                     Style::default().fg(theme.border),
                 )));
+                last_blank = false;
+                blank_after(&mut lines);
             }
             Event::TaskListMarker(checked) => spans.push(Span::styled(
                 if checked { "[x] " } else { "[ ] " },
