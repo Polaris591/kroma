@@ -20,11 +20,11 @@
                                                                                                     
                  Enter send · Shift+Enter newline · /help commands · /resume history                
                                                                                                     
-                                                                                                    
-                                                                                                    
                                    test-model · D:/fixture/project                                  
+                                                                                                    
+                                                                                                    
                                                                                                     
   ╭──────────────────────────────────────────────────────────────────────────────────────────────╮  
   │ › Ask anything, or describe a coding task…                                                   │  
-  ╰──────────────────────────────────────────────────────────── Enter send · Shift+Enter newline ╯  
-    test-model │ Think high │ Context —                                                             
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯  
+    test-model · Think high · Context —                                                             

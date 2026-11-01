@@ -1,16 +1,16 @@
 ◆ Kroma  untitled session        ✓ Ready
                                         
-  ▎                                     
   ▎  Review the change. 请 检 查 代 码 。     
   ▎  Preserve Unicode and indentation.  
-  ▎                                     
                                         
    ▸ ✓ Run · echo ste… · 3 steps · 3.6s 
                                         
    ✓  Completed · 35.3s                 
                                         
                                         
+                                        
+                                        
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

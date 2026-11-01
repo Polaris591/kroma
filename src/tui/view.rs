@@ -6,7 +6,7 @@ mod navigation;
 mod transcript;
 #[path = "transcript_panel.rs"]
 mod transcript_panel;
-pub(super) use chrome::NoticeLevel;
+pub(super) use chrome::{display_session_title, NoticeLevel};
 
 use super::{
     attachments::{Attachment, MAX_ATTACHMENTS},
@@ -1184,12 +1184,8 @@ impl UiState {
         let mut candidates = Vec::new();
         if let (Some(input), window) = (self.context_input, self.context_window) {
             if window > 0 {
-                let filled = ((input as f64 / window as f64) * 8.0)
-                    .round()
-                    .clamp(0.0, 8.0) as usize;
-                let bar = format!("{}{}", "▰".repeat(filled), "▱".repeat(8 - filled));
                 let wide = format!(
-                    "{} · {thinking} · {} {bar} {}{}% {}/{}",
+                    "{} · {thinking} · {} {}{}% ({}/{})",
                     self.model,
                     language.text("Context", "上下文"),
                     if self.context_estimated { "~" } else { "" },
@@ -1236,7 +1232,7 @@ impl UiState {
         let mut spans = Vec::new();
         for (index, section) in chosen.split(" · ").enumerate() {
             if index > 0 {
-                spans.push(Span::styled(" │ ", Style::default().fg(colors.faint)));
+                spans.push(Span::styled(" · ", Style::default().fg(colors.faint)));
             }
             let ink = if section.starts_with("Cache ") || section.starts_with("缓存 ") {
                 colors.faint
@@ -1704,7 +1700,7 @@ impl UiState {
             .enumerate()
         {
             let active = index == self.activity_frame / 2;
-            let faded = Theme::blend(ink, colors.background, 0.25);
+            let faded = Theme::blend(ink, colors.background, 0.18);
             spans.push(Span::styled(
                 "▲",
                 Style::default()
@@ -1719,7 +1715,7 @@ impl UiState {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             self.activity_status(),
-            Style::default().fg(colors.text),
+            Style::default().fg(colors.muted),
         ));
         if self.last_output.elapsed() >= Duration::from_secs(8) {
             spans.push(Span::styled(
@@ -2295,10 +2291,26 @@ impl UiState {
     /// elsewhere still select text, and Ctrl+O continues to expand all calls.
     /// Coordinates come from the same wrapped source rows as the renderer.
     pub fn toggle_tool_at(&mut self, column: u16, row: u16) -> bool {
-        if self.tools_expanded || !self.selection_area.contains((column, row).into()) {
+        if !self.selection_area.contains((column, row).into()) {
             return false;
         }
-        let wrapped_row = self.history_top_row + (row - self.selection_area.y) as usize;
+        let view_row = (row - self.selection_area.y) as usize;
+        if self
+            .selection_rows
+            .get(view_row)
+            .is_some_and(|line| line.starts_with("  ◇  "))
+        {
+            self.reasoning_expanded = !self.reasoning_expanded;
+            self.history_cache = None;
+            self.selection_start = None;
+            self.selection_end = None;
+            self.mouse_release();
+            return true;
+        }
+        if self.tools_expanded {
+            return false;
+        }
+        let wrapped_row = self.history_top_row + view_row;
         let Some(id) = self.history_cache.as_ref().and_then(|cache| {
             cache
                 .tool_rows
@@ -2321,7 +2333,7 @@ impl UiState {
                 .any(|(line, item)| *line == wrapped_row && matches!(item, Decor::Group(_)))
         });
         if !is_group
-            && !(self.selection_area.x.saturating_add(2)..=self.selection_area.x.saturating_add(3))
+            && !(self.selection_area.x.saturating_add(1)..=self.selection_area.x.saturating_add(5))
                 .contains(&column)
         {
             return false;
@@ -2705,14 +2717,12 @@ impl UiState {
                             self.entries.len().saturating_sub(self.history_visible) + index,
                         ),
                     ));
-                    lines.push(Line::default());
                     for line in entry.body.lines() {
                         lines.push(body_line(Line::from(Span::styled(
                             line.to_owned(),
                             Style::default().fg(theme.text),
                         ))));
                     }
-                    lines.push(Line::default());
                     for row in block_start..lines.len() {
                         decor.push((row, Decor::Surface(Surface::Raised)));
                         decor.push((
@@ -3392,15 +3402,17 @@ impl UiState {
                     history_slot.x,
                     history_slot.y,
                     history_slot.width,
-                    history_slot
-                        .height
-                        .saturating_sub(if history_slot.height >= 25 {
+                    history_slot.height.saturating_sub(
+                        if history_slot.height >= 22 && !self.recent_sessions.is_empty() {
                             6
+                        } else if history_slot.height >= 25 {
+                            4
                         } else if history_slot.height >= 8 {
                             2
                         } else {
                             0
-                        }),
+                        },
+                    ),
                 ),
                 colors,
                 self.themes.preset(),
@@ -3502,33 +3514,13 @@ impl UiState {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border));
-        if self.attach_mode || self.running {
+        if self.attach_mode {
             block = block.title_top(Line::styled(
-                self.preferences.language.text(
-                    if self.attach_mode {
-                        " Attachment path · Esc cancel "
-                    } else {
-                        " Steer task · /queue to enqueue "
-                    },
-                    if self.attach_mode {
-                        " 附件路径 · Esc 取消 "
-                    } else {
-                        " 引导任务 · /queue 排队 "
-                    },
-                ),
+                self.preferences
+                    .language
+                    .text(" Attachment path · Esc cancel ", " 附件路径 · Esc 取消 "),
                 Style::default().fg(colors.accent_text),
             ));
-        } else if self.editor.text().is_empty() && composer.width >= 60 {
-            block = block.title_bottom(
-                Line::styled(
-                    self.preferences.language.text(
-                        " Enter send · Shift+Enter newline ",
-                        " Enter 发送 · Shift+Enter 换行 ",
-                    ),
-                    Style::default().fg(colors.faint),
-                )
-                .right_aligned(),
-            );
         }
         frame.render_widget(block, composer);
         let editor_inner = Rect::new(
@@ -4397,7 +4389,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Context ▱▱▱▱▱▱▱▱ ~0.2% 1.6k/1M"));
+        assert!(rendered.contains("Context ~0.2% (1.6k/1M)"));
         assert!(rendered.contains("Cache 75%"));
         assert!(ui.usage_variants()[1].contains("In/out 8.0k / 500 · Cache 75%"));
         let mut narrow = Terminal::new(TestBackend::new(40, 26)).unwrap();
@@ -5011,7 +5003,7 @@ mod tests {
                 "no app identity at {width} columns"
             );
             let expected_context = if width >= 80 {
-                "Context ▰▰▱▱▱▱▱▱ 25%"
+                "Context 25% (32k/128k)"
             } else {
                 "Context 25%"
             };
@@ -6322,8 +6314,7 @@ mod tests {
         let mut state = UiState::new("mock".into(), "default".into(), theme, &[]);
         state.configure_status(500_000, Some("high".into()));
         state.event(UiEvent::ActualInput(100_000));
-        for (width, expected) in [(110, "Context ▰▰▱▱▱▱▱▱ 20% 100k/500k"), (40, "Context 20%")]
-        {
+        for (width, expected) in [(110, "Context 20% (100k/500k)"), (40, "Context 20%")] {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| state.draw(frame)).unwrap();
             let text = terminal
@@ -7004,7 +6995,7 @@ fn main() { println!(\"hello\"); }
         let footer = rows.last().expect("footer row");
         let visible: String = footer.chars().filter(|ch| *ch != ' ').collect();
         assert!(visible.contains("deepseek"), "{visible:?}");
-        assert!(visible.contains("上下文▱▱▱▱▱▱▱▱0.1%1.0k/1M"), "{visible:?}");
+        assert!(visible.contains("上下文0.1%(1.0k/1M)"), "{visible:?}");
         assert!(visible.contains("缓存87%"), "{visible:?}");
         assert!(ui.usage_variants()[1].contains("输入/输出 1.5k / 8"));
         assert!(

@@ -3,7 +3,7 @@
    ◇  Reasoning · Ctrl+R to collapse · │
    0.0s                                │
                                        │
-     │ Inspect the existing API, then  │
+     │ Inspect the existing API, then  ┃
        verify the change.              ┃
      │                                 ┃
      │ Keep failures visible.          ┃
@@ -13,4 +13,4 @@
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

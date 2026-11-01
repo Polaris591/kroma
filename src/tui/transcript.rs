@@ -66,7 +66,7 @@ impl UiState {
             tool_rows.push((lines.len(), id.clone()));
         }
         lines.push(Line::from(vec![
-            Span::styled(format!("  {caret} "), Style::default().fg(theme.border)),
+            Span::styled(format!("  {caret} "), Style::default().fg(theme.faint)),
             Span::styled(format!("{marker} "), Style::default().fg(color)),
             Span::styled(
                 command,
@@ -76,7 +76,7 @@ impl UiState {
                     theme.muted
                 }),
             ),
-            Span::styled(elapsed, Style::default().fg(theme.muted)),
+            Span::styled(elapsed, Style::default().fg(theme.faint)),
         ]));
         if warning && !expanded {
             lines.push(body_line(Line::styled(
@@ -186,15 +186,19 @@ impl UiState {
             return;
         }
         if !*reasoning_notice_shown {
-            let label = if self.reasoning_expanded {
-                self.preferences.language.text(
-                    "  ◇  Reasoning · Ctrl+R to collapse",
-                    "  ◇  思考内容 · Ctrl+R 折叠",
+            let (heading, hint) = if self.reasoning_expanded {
+                (
+                    self.preferences.language.text("Reasoning", "思考内容"),
+                    self.preferences
+                        .language
+                        .text(" · Ctrl+R to collapse", " · Ctrl+R 折叠"),
                 )
             } else {
-                self.preferences.language.text(
-                    "  ◇  Reasoning collapsed · Ctrl+R",
-                    "  ◇  思考已折叠 · Ctrl+R",
+                (
+                    self.preferences
+                        .language
+                        .text("Reasoning collapsed", "思考已折叠"),
+                    " · Ctrl+R",
                 )
             };
             let elapsed = entry
@@ -202,10 +206,11 @@ impl UiState {
                 .or_else(|| entry.started.map(|start| start.elapsed()))
                 .map(|duration| format!(" · {:.1}s", duration.as_secs_f64()))
                 .unwrap_or_default();
-            lines.push(Line::styled(
-                format!("{label}{elapsed}"),
-                Style::default().fg(theme.muted),
-            ));
+            lines.push(Line::from(vec![
+                Span::styled("  ◇  ", Style::default().fg(theme.faint)),
+                Span::styled(heading, Style::default().fg(theme.muted)),
+                Span::styled(format!("{hint}{elapsed}"), Style::default().fg(theme.faint)),
+            ]));
             *reasoning_notice_shown = true;
             lines.push(Line::default());
         }
@@ -284,13 +289,18 @@ impl UiState {
             .iter()
             .any(|e| interrupted(e) || super::super::tool_display::has_diagnostic(&e.details));
         let expanded = self.tools_expanded || self.expanded_tool_groups.contains(key);
+        let show = expanded || running || tools.len() == 1;
+        let any_important = tools.iter().any(|entry| {
+            entry.failed
+                || interrupted(entry)
+                || super::super::tool_display::has_diagnostic(&entry.details)
+                || entry
+                    .call_id
+                    .as_ref()
+                    .is_some_and(|id| self.expanded_tool_calls.contains(id))
+        });
+        let children_visible = show || any_important;
         if tools.len() > 1 {
-            let caption = tools
-                .iter()
-                .find(|e| e.title.ends_with(" · running"))
-                .or_else(|| tools.iter().find(|e| e.failed && !interrupted(e)))
-                .copied()
-                .unwrap_or(tools[tools.len() - 1]);
             let (glyph, ink) = if running {
                 ("◌", theme.accent)
             } else if failed {
@@ -308,15 +318,44 @@ impl UiState {
             } else {
                 String::new()
             };
-            let suffix = format!(
-                " · {} {}{elapsed}",
-                tools.len(),
-                self.preferences.language.text("steps", "步")
-            );
-            let summary = compact_line(
-                &self.tool_summary(caption),
-                width.saturating_sub(6 + UnicodeWidthStr::width(suffix.as_str())),
-            );
+            let language = self.preferences.language;
+            let step_word = language.text("steps", "步");
+            let (summary, suffix) = if children_visible {
+                let failed_count = tools.iter().filter(|e| e.failed && !interrupted(e)).count();
+                let title = if running {
+                    format!(
+                        "{} {} {step_word}",
+                        language.text("Running", "正在执行"),
+                        tools.len()
+                    )
+                } else if failed_count > 0 {
+                    format!(
+                        "{} {} {step_word} · {failed_count} {}",
+                        language.text("Executed", "已执行"),
+                        tools.len(),
+                        language.text("failed", "步失败")
+                    )
+                } else {
+                    format!(
+                        "{} {} {step_word}",
+                        language.text("Executed", "已执行"),
+                        tools.len()
+                    )
+                };
+                let summary = compact_line(
+                    &title,
+                    width.saturating_sub(6 + UnicodeWidthStr::width(elapsed.as_str())),
+                );
+                (summary, elapsed)
+            } else {
+                let caption = tools[tools.len() - 1];
+                let suffix = format!(" · {} {step_word}{elapsed}", tools.len());
+                let summary = compact_line(
+                    &self.tool_summary(caption),
+                    width.saturating_sub(6 + UnicodeWidthStr::width(suffix.as_str())),
+                );
+                (summary, suffix)
+            };
             card.groups.push((0, key.to_owned()));
             card.lines.push(Line::from(vec![
                 Span::styled(
@@ -332,10 +371,9 @@ impl UiState {
                         theme.muted
                     }),
                 ),
-                Span::styled(suffix, Style::default().fg(theme.muted)),
+                Span::styled(suffix, Style::default().fg(theme.faint)),
             ]));
         }
-        let show = expanded || running || tools.len() == 1;
         let mut hidden = 0;
         let limit = if tools.len() > 12 { tools.len() - 8 } else { 0 };
         for (index, entry) in tools.iter().enumerate() {
@@ -353,17 +391,27 @@ impl UiState {
             }
         }
         if hidden > 0 && (show || failed || warning) {
+            let step_noun = if show {
+                self.preferences
+                    .language
+                    .text(if hidden == 1 { "step" } else { "steps" }, "步")
+            } else {
+                self.preferences.language.text(
+                    if hidden == 1 {
+                        "successful step"
+                    } else {
+                        "successful steps"
+                    },
+                    "步成功",
+                )
+            };
             card.groups.push((card.lines.len(), key.to_owned()));
             card.lines.push(body_line(Line::styled(
                 format!(
-                    "… {} {hidden} {}",
-                    self.preferences.language.text("Another", "另有"),
-                    self.preferences.language.text(
-                        if show { "steps" } else { "successful steps" },
-                        if show { "步" } else { "步成功" }
-                    )
+                    "… {} {hidden} {step_noun}",
+                    self.preferences.language.text("Another", "另有")
                 ),
-                Style::default().fg(theme.muted),
+                Style::default().fg(theme.faint),
             )));
         }
         card

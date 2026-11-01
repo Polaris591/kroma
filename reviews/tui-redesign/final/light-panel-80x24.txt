@@ -21,4 +21,4 @@
  │                                                                            │ 
  │                                                                            │ 
  ╰────────────────────────────────────────────────────────────────────────────╯ 
-   test-model │ Think high │ Context —                                          
+   test-model · Think high · Context —                                          

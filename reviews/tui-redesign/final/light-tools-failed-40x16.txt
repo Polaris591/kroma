@@ -1,8 +1,8 @@
 ◆ Kroma  untitled session        ✓ Ready
                                         
-  ▎                                    │
-                                       │
-   ▸ ✕ Run Rust tests · 3 steps · 3.6s │
+  ▎  Preserve Unicode and indentation. │
+                                       ┃
+   ▸ ✕ Executed 3 steps · 1 fai… · 3.6s┃
    ▸ ✕ Run Rust tests · 1.2s           ┃
      ↳ exit 101 · error[E0599]: method ┃
      …                                 ┃
@@ -13,4 +13,4 @@
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

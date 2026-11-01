@@ -1,8 +1,8 @@
 ◆ Kroma  untitled session        ✓ Ready
                                         
-  ▎                                    │
-                                       │
-  ◆                      diff · ⧉ Copy │
+  ▎  Preserve Unicode and indentation. │
+                                       ┃
+  ◆                      diff · ⧉ Copy ┃
      │ diff --git a/main.rs b/main.rs  ┃
      │ @@ -1 +1 @@                     ┃
      │ -old_value                      ┃
@@ -13,4 +13,4 @@
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

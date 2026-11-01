@@ -1,16 +1,16 @@
 ◆ Kroma  untitled session        ✓ Ready
                                         
- ╭ Commands · ↑↓ select · Tab complete╮│
- │ › /                                ││
- │ › /clear  — Clear the current con… │┃
- │   /commands  — Search all slash c… │┃
- │   /continue  — Resume the latest … │┃
- │   /diff  — Show workspace changes  │┃
- │   /editor  — Edit draft in extern… │┃
- │   /exit  — Exit Kroma              │┃
- │   /export <path>  — Export conver… │┃
- ╰────────────────────────────────────╯┃
+ ╭ Commands · ↑↓ select · Tab complete╮ 
+ │ › /                                │ 
+ │ › /clear  — Clear the current con… │ 
+ │   /commands  — Search all slash c… │ 
+ │   /continue  — Resume the latest … │ 
+ │   /diff  — Show workspace changes  │ 
+ │   /editor  — Edit draft in extern… │ 
+ │   /exit  — Exit Kroma              │ 
+ │   /export <path>  — Export conver… │ 
+ ╰────────────────────────────────────╯ 
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

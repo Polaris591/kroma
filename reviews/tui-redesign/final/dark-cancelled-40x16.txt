@@ -1,16 +1,16 @@
 ◆ Kroma  untitled session    ⊘ Cancelled
                                         
-  ▎  Preserve Unicode and indentation. │
-  ▎                                    │
-                                       ┃
-  ◆  Updated the implementation.       ┃
-                                       ┃
-     • Preserved input and links       ┃
-     • Verified Unicode selection      ┃
-                                       ┃
-   ⊘  Cancelled · side effects are no  ┃
-                                       ┃
+  ▎  Review the change. 请 检 查 代 码 。     
+  ▎  Preserve Unicode and indentation.  
+                                        
+  ◆  Updated the implementation.        
+                                        
+     • Preserved input and links        
+     • Verified Unicode selection       
+                                        
+   ⊘  Cancelled · side effects are no   
+                                        
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

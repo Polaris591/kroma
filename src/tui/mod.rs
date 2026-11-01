@@ -334,11 +334,12 @@ fn picker_items(
             .list()?
             .into_iter()
             .map(|session| {
-                PickerItem::new(
-                    session.name.unwrap_or_else(|| session.id.clone()),
-                    format!("/resume {}", session.id),
-                    session.id,
+                let label = view::display_session_title(
+                    session.name.as_deref().unwrap_or(&session.id),
+                    state.preferences.language,
                 )
+                .to_owned();
+                PickerItem::new(label, format!("/resume {}", session.id), session.id)
             })
             .collect(),
         PickerKind::Files => crate::convenience::suggestions(workdir, &format!("@{query}"))?
@@ -392,6 +393,10 @@ fn picker_event(state: &mut UiState, event: Event, workdir: &std::path::Path) ->
         PickerAction::Close => state.picker = None,
         PickerAction::NextKind => {
             let kind = state.picker.as_ref().unwrap().kind.next();
+            open_picker(state, kind, "", workdir);
+        }
+        PickerAction::PrevKind => {
+            let kind = state.picker.as_ref().unwrap().kind.prev();
             open_picker(state, kind, "", workdir);
         }
         PickerAction::Changed => {

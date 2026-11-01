@@ -45,6 +45,14 @@ impl Kind {
             Self::Files => Self::Commands,
         }
     }
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Commands => Self::Files,
+            Self::Models => Self::Commands,
+            Self::Sessions => Self::Models,
+            Self::Files => Self::Sessions,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -75,6 +83,7 @@ pub enum Action {
     Close,
     Selected(String),
     NextKind,
+    PrevKind,
 }
 
 pub struct Picker {
@@ -182,6 +191,10 @@ impl Picker {
         }
         match key.code {
             KeyCode::Esc => Action::Close,
+            KeyCode::BackTab if !self.completion => Action::PrevKind,
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) && !self.completion => {
+                Action::PrevKind
+            }
             KeyCode::Tab if !self.completion => Action::NextKind,
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
@@ -232,33 +245,66 @@ impl Picker {
             height,
         );
         frame.render_widget(Clear, area);
+        let title_line = if self.completion {
+            Line::styled(
+                language
+                    .text(
+                        " Commands · ↑↓ select · Tab complete · Esc close ",
+                        " 命令索引 · ↑↓选择 · Tab 补全 · Esc 关闭 ",
+                    )
+                    .to_owned(),
+                Style::default().fg(theme.accent_text),
+            )
+        } else if self.kind == Kind::Sessions {
+            Line::styled(
+                language
+                    .text(
+                        " Sessions · ↑↓ select · Enter resume · Esc close ",
+                        " 会话 · ↑↓选择 · Enter 恢复 · Esc 关闭 ",
+                    )
+                    .to_owned(),
+                Style::default().fg(theme.accent_text),
+            )
+        } else if width < 52 {
+            Line::styled(
+                format!(" {} ", self.kind.localized_title(language)),
+                Style::default().fg(theme.accent_text),
+            )
+        } else {
+            let mut spans = vec![Span::raw(" ")];
+            for (index, tab) in [Kind::Commands, Kind::Models, Kind::Sessions, Kind::Files]
+                .into_iter()
+                .enumerate()
+            {
+                if index > 0 {
+                    spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
+                }
+                let active = tab == self.kind;
+                spans.push(Span::styled(
+                    tab.localized_title(language),
+                    Style::default()
+                        .fg(if active {
+                            theme.accent_text
+                        } else {
+                            theme.faint
+                        })
+                        .add_modifier(if active {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ));
+            }
+            spans.push(Span::styled(
+                language.text("  Tab · Esc ", "  Tab 切换 · Esc "),
+                Style::default().fg(theme.faint),
+            ));
+            Line::from(spans)
+        };
         frame.render_widget(
             Block::default()
                 .borders(Borders::ALL)
-                .title(if self.completion {
-                    language
-                        .text(
-                            " Commands · ↑↓ select · Tab complete · Esc close ",
-                            " 命令索引 · ↑↓选择 · Tab 补全 · Esc 关闭 ",
-                        )
-                        .to_owned()
-                } else if self.kind == Kind::Sessions {
-                    language
-                        .text(
-                            " Sessions · ↑↓ select · Enter resume · Esc close ",
-                            " 会话 · ↑↓选择 · Enter 恢复 · Esc 关闭 ",
-                        )
-                        .to_owned()
-                } else if width < 48 {
-                    format!(" {} ", self.kind.localized_title(language))
-                } else {
-                    format!(
-                        " {} · {} ",
-                        self.kind.localized_title(language),
-                        language.text("Tab: switch · Esc: close", "Tab 切换 · Esc 关闭")
-                    )
-                })
-                .title_style(Style::default().fg(theme.accent_text))
+                .title(title_line)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.border))
                 .style(Style::default().bg(theme.overlay)),
@@ -313,7 +359,7 @@ impl Picker {
                         max_label.saturating_sub(UnicodeWidthStr::width(name.as_str()) + 4),
                     );
                     let background = if active {
-                        Theme::blend(theme.accent, theme.overlay, 0.35)
+                        Theme::blend(theme.accent, theme.overlay, 0.22)
                     } else {
                         theme.overlay
                     };

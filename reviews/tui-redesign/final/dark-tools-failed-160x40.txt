@@ -1,11 +1,9 @@
   ◆ Kroma  untitled session                                                                                                                   project  ✓ Ready  
                                                                                                                                                                 
-    ▎                                                                                                                                                           
     ▎  Review the change. 请 检 查 代 码 。                                                                                                                           
     ▎  Preserve Unicode and indentation.                                                                                                                        
-    ▎                                                                                                                                                           
                                                                                                                                                                 
-     ▸ ✕ Run Rust tests · 3 steps · 3.6s                                                                                                                        
+     ▸ ✕ Executed 3 steps · 1 failed · 3.6s                                                                                                                     
      ▸ ✕ Run Rust tests · 1.2s                                                                                                                                  
        ↳ exit 101 · error[E0599]: method not found                                                                                                              
        … Another 2 successful steps                                                                                                                             
@@ -34,7 +32,9 @@
                                                                                                                                                                 
                                                                                                                                                                 
                                                                                                                                                                 
+                                                                                                                                                                
+                                                                                                                                                                
   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮  
   │ › Ask anything, or describe a coding task…                                                                                                               │  
-  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Enter send · Shift+Enter newline ╯  
-    test-model │ Think high │ Context —                                                                                                      Ctrl+P Commands    
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  
+    test-model · Think high · Context —                                                                                                      Ctrl+P Commands    

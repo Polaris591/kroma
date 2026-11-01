@@ -1,8 +1,8 @@
 ◆ Kroma  untitled session        ✓ Ready
                                         
-  ▎                                    │
-                                       │
-   ▸ ⊘ Run · echo ste… · 3 steps · 3.6s│
+  ▎  Preserve Unicode and indentation. │
+                                       ┃
+   ▸ ⊘ Executed 3 steps · 3.6s         ┃
    ▸ ⊘ Run Rust tests · 1.2s           ┃
      ⊘ Interrupted · result unknown (  ┃
      will not rerun automatically)     ┃
@@ -13,4 +13,4 @@
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

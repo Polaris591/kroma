@@ -4,27 +4,27 @@
                                                                                                     
                                                                                                     
                                                                                                     
-                                                ▄  ▄                                                
-                                               █    █                                               
-                                              ██ ██ ██                                              
-                                            ▄██▀ ██ ▀██▄                                            
-                                           ▄███ ▄██▄ ███▄                                           
-                                          ▄████ ████ ████▄                                          
-                                         ▄████  ████  ████▄                                         
-                                        ██████ ▄████▄ ██████                                        
-                                       ██████▀ ██████ ▀██████                                       
-                                     ▄███████  ██████  ███████▄                                     
-                                    ▄████████ ████████ ████████▄                                    
+                                                █  █                                                
+                                               █▀▄▄▀█                                               
+                                             ▄██ ██ ██▄                                             
+                                            ▄███ ██ ███▄                                            
+                                           ████ ████ ████                                           
+                                          █████ ████ █████                                          
+                                        ▄█████ ██████ █████▄                                        
                                                                                                     
                                               K R O M A                                             
                                                                                                     
                  Enter send · Shift+Enter newline · /help commands · /resume history                
                                                                                                     
-                                                                                                    
-                                                                                                    
                                    test-model · D:/fixture/project                                  
+                                                                                                    
+                        Fix Unicode                                   1h ago                        
+                        Review tool output                            2h ago                        
+                        Add tests                                     2d ago                        
+                                                                                                    
+                                                                                                    
                                                                                                     
   ╭──────────────────────────────────────────────────────────────────────────────────────────────╮  
   │ › Ask anything, or describe a coding task…                                                   │  
-  ╰──────────────────────────────────────────────────────────── Enter send · Shift+Enter newline ╯  
-    test-model │ Think high │ Context —                                                             
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯  
+    test-model · Think high · Context —                                                             

@@ -1,16 +1,16 @@
 ◆ Kroma  untitled session        ✓ Ready
                                         
-  ▎                                     
   ▎  Review the change. 请 检 查 代 码 。     
   ▎  Preserve Unicode and indentation.  
-  ▎                                     
                                         
    ◇  Reasoning collapsed · Ctrl+R ·    
    0.0s                                 
                                         
    ✓  Completed · 35.3s                 
                                         
+                                        
+                                        
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

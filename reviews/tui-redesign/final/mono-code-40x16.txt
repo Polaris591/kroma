@@ -2,7 +2,7 @@
                                         
                                        │
   ◆                      rust · ⧉ Copy │
-     │ // preserve source text         │
+     │ // preserve source text         ┃
      │ fn greet(name: &str) {          ┃
      │     println!("Hello {name}");   ┃
      │     let count: usize = 42;      ┃
@@ -13,4 +13,4 @@
 ╭──────────────────────────────────────╮
 │ › Ask anything, or describe a coding │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

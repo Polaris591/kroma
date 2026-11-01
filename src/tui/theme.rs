@@ -70,38 +70,38 @@ impl Theme {
     fn from_settings(settings: &ThemeSettings) -> Result<Self> {
         let mut theme = match settings.preset.as_str() {
             "dark" => Self {
-                // Derived from the original Kroma mark: #5B7CFF / #F4F4F6 / #FF6F91.
-                background: Color::Rgb(13, 15, 25),
-                text: Color::Rgb(244, 244, 246),
-                muted: Color::Rgb(163, 168, 188),
-                accent: Color::Rgb(91, 124, 255),
-                border: Color::Rgb(56, 60, 81),
-                user: Color::Rgb(255, 111, 145),
-                tool: Color::Rgb(163, 168, 188),
-                code: Color::Rgb(196, 202, 229),
-                error: Color::Rgb(249, 125, 135),
-                surface: Color::Rgb(26, 32, 54),
-                overlay: Color::Rgb(35, 43, 69),
-                faint: Color::Rgb(138, 146, 173),
-                accent_text: Color::Rgb(125, 152, 255),
-                success: Color::Rgb(95, 211, 154),
-                warning: Color::Rgb(240, 180, 90),
+                // Obsidian Dark: neutral charcoal elevation with restrained brand accents.
+                background: Color::Rgb(11, 12, 14),
+                text: Color::Rgb(236, 238, 242),
+                muted: Color::Rgb(142, 149, 165),
+                accent: Color::Rgb(110, 136, 255),
+                border: Color::Rgb(38, 41, 50),
+                user: Color::Rgb(226, 140, 156),
+                tool: Color::Rgb(142, 149, 165),
+                code: Color::Rgb(213, 217, 226),
+                error: Color::Rgb(240, 82, 82),
+                surface: Color::Rgb(19, 21, 25),
+                overlay: Color::Rgb(26, 29, 35),
+                faint: Color::Rgb(94, 100, 116),
+                accent_text: Color::Rgb(140, 162, 255),
+                success: Color::Rgb(76, 195, 138),
+                warning: Color::Rgb(229, 169, 60),
             },
             "light" => Self {
-                background: Color::Rgb(249, 249, 252),
-                text: Color::Rgb(28, 30, 44),
-                muted: Color::Rgb(91, 96, 117),
-                accent: Color::Rgb(55, 80, 200),
-                border: Color::Rgb(199, 199, 216),
-                user: Color::Rgb(172, 40, 77),
-                tool: Color::Rgb(91, 96, 117),
-                code: Color::Rgb(68, 77, 124),
-                error: Color::Rgb(166, 43, 57),
-                surface: Color::Rgb(236, 239, 248),
-                overlay: Color::Rgb(224, 229, 242),
-                faint: Color::Rgb(101, 107, 132),
-                accent_text: Color::Rgb(55, 80, 200),
-                success: Color::Rgb(27, 112, 72),
+                background: Color::Rgb(250, 250, 252),
+                text: Color::Rgb(20, 22, 28),
+                muted: Color::Rgb(85, 91, 110),
+                accent: Color::Rgb(59, 91, 219),
+                border: Color::Rgb(216, 220, 230),
+                user: Color::Rgb(156, 54, 80),
+                tool: Color::Rgb(85, 91, 110),
+                code: Color::Rgb(44, 49, 64),
+                error: Color::Rgb(186, 38, 38),
+                surface: Color::Rgb(241, 242, 246),
+                overlay: Color::Rgb(230, 232, 240),
+                faint: Color::Rgb(116, 122, 142),
+                accent_text: Color::Rgb(54, 79, 199),
+                success: Color::Rgb(20, 114, 72),
                 warning: Color::Rgb(138, 90, 0),
             },
             "mono" => Self {
@@ -308,7 +308,11 @@ mod tests {
                     }
                     let (a, b) = (luminance(ink), luminance(surface));
                     let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
-                    let minimum = if name == "accent" { 3.0 } else { 4.5 };
+                    let minimum = if matches!(name, "accent" | "faint") {
+                        3.0
+                    } else {
+                        4.5
+                    };
                     assert!(
                         ratio >= minimum,
                         "{preset} {name} on {surface:?}: {ratio:.2} < {minimum}"

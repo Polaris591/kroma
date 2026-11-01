@@ -1,8 +1,8 @@
 ◆ Kroma  untitled session   ● Running 0s
                                         
-  ▎                                    │
-                                       │
-   ▸ ◌ Run · echo ste… · 3 steps · 2.4s│
+  ▎  Preserve Unicode and indentation. │
+                                       ┃
+   ▸ ◌ Running 3 steps · 2.4s          ┃
    ▸ ✓ Run · echo step-0 · 1.2s        ┃
    ▸ ✓ Run Rust tests · 1.2s           ┃
    ▸ ◌ Run · echo step-2               ┃
@@ -10,7 +10,7 @@
                                        ┃
    ▲▲▲  Running Run · echo step-2 · 0  ┃
                                        ┃
-╭ Steer task · /queue to enqueue ──────╮
+╭──────────────────────────────────────╮
 │ › Steer this task, or /queue another │
 ╰──────────────────────────────────────╯
-  test-model │ Think high │ Context —   
+  test-model · Think high · Context —   

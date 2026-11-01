@@ -10,6 +10,33 @@ pub(in crate::tui) enum NoticeLevel {
     Error,
 }
 
+pub(in crate::tui) fn is_generated_session_id(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let (Some(first), Some(second), Some(third), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    first.starts_with('s')
+        && first.len() >= 10
+        && first[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        && !second.is_empty()
+        && second.bytes().all(|b| b.is_ascii_hexdigit())
+        && !third.is_empty()
+        && third.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub(in crate::tui) fn display_session_title(
+    raw: &str,
+    language: super::super::preferences::Language,
+) -> &str {
+    if raw.trim().is_empty() || raw == "default" || is_generated_session_id(raw) {
+        language.text("Untitled session", "未命名会话")
+    } else {
+        raw
+    }
+}
+
 impl UiState {
     pub(in crate::tui) fn terminal_title(&self) -> String {
         let prefix = if self.running {
@@ -126,17 +153,19 @@ impl UiState {
                 Some(TaskOutcome::Cancelled) => {
                     (language.text("⊘ Cancelled", "⊘ 已取消").into(), theme.muted)
                 }
-                _ => (language.text("✓ Ready", "✓ 就绪").into(), theme.muted),
+                _ => (language.text("✓ Ready", "✓ 就绪").into(), theme.faint),
             }
         };
+        let workdir_name = self
+            .link_workdir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let show_workdir = !workdir_name.is_empty()
+            && (!workdir_name.eq_ignore_ascii_case("kroma") || self.git_info.branch.is_some());
         let mut right = String::new();
-        if area.width >= 50 {
-            right.push_str(
-                self.link_workdir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(""),
-            );
+        if area.width >= 50 && show_workdir {
+            right.push_str(workdir_name);
             right.push_str("  ");
         }
         if area.width >= 70 {
@@ -150,17 +179,8 @@ impl UiState {
         }
         right.push_str(&status);
         if UnicodeWidthStr::width(right.as_str()) > usize::from(area.width.saturating_sub(12)) {
-            right = if area.width >= 50 {
-                format!(
-                    "{}  {status}",
-                    ellipsize_cells(
-                        self.link_workdir
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or(""),
-                        16
-                    )
-                )
+            right = if area.width >= 50 && show_workdir {
+                format!("{}  {status}", ellipsize_cells(workdir_name, 16))
             } else {
                 status.clone()
             };
@@ -180,7 +200,10 @@ impl UiState {
                     "Kroma",
                     Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  {label}"), Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!("  {label}"),
+                    Style::default().fg(if self.home { theme.faint } else { theme.muted }),
+                ),
             ])),
             area,
         );
@@ -188,7 +211,7 @@ impl UiState {
         let prefix = right.strip_suffix(&status).unwrap_or("");
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(prefix.to_owned(), Style::default().fg(theme.muted)),
+                Span::styled(prefix.to_owned(), Style::default().fg(theme.faint)),
                 Span::styled(
                     if prefix.is_empty() {
                         right.clone()
@@ -252,17 +275,41 @@ impl UiState {
                 format!(" · {branch}")
             }
         );
-        let y = area
-            .bottom()
-            .saturating_sub(if area.height >= 25 { 6 } else { 2 });
+        let reserve = if area.height >= 22 && !self.recent_sessions.is_empty() {
+            6
+        } else if area.height >= 25 {
+            4
+        } else {
+            2
+        };
+        let logo_area_height = area.height.saturating_sub(reserve);
+        let mark_height = if logo_area_height >= 20 && area.width >= 34 {
+            12
+        } else if logo_area_height >= 14 && area.width >= 26 {
+            8
+        } else {
+            0
+        };
+        let block_height = if mark_height > 0 { mark_height + 4 } else { 3 };
+        let logo_bottom = area.y + logo_area_height.saturating_sub(block_height) / 2 + block_height;
+        let max_y = area.bottom().saturating_sub(
+            if area.height >= 22 && !self.recent_sessions.is_empty() {
+                5
+            } else {
+                2
+            },
+        );
+        let y = (logo_bottom + 1).min(max_y);
         frame.render_widget(
             Paragraph::new(ellipsize_cells(&context, usize::from(area.width)))
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(theme.muted)),
+                .style(Style::default().fg(theme.faint)),
             Rect::new(area.x, y, area.width, 1),
         );
-        if area.height >= 25 && !self.recent_sessions.is_empty() {
-            for (index, (title, modified)) in self.recent_sessions.iter().take(3).enumerate() {
+        if area.height >= 22 && !self.recent_sessions.is_empty() {
+            let col_width = usize::from(area.width.saturating_sub(4)).min(52);
+            for (index, (raw_title, modified)) in self.recent_sessions.iter().take(3).enumerate() {
+                let title = display_session_title(raw_title, language);
                 let age = modified
                     .and_then(|time| time.elapsed().ok())
                     .map(|elapsed| {
@@ -276,20 +323,28 @@ impl UiState {
                         }
                     })
                     .unwrap_or_else(|| "—".into());
-                let line = ellipsize_cells(&format!("{title} · {age}"), usize::from(area.width));
+                let line = if col_width >= 24 {
+                    let age_width = UnicodeWidthStr::width(age.as_str());
+                    let max_title = col_width.saturating_sub(age_width + 2);
+                    let clipped = ellipsize_cells(title, max_title);
+                    let used = UnicodeWidthStr::width(clipped.as_str()) + age_width;
+                    let pad = col_width.saturating_sub(used).max(2);
+                    Line::from(vec![
+                        Span::styled(clipped, Style::default().fg(theme.muted)),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(age, Style::default().fg(theme.faint)),
+                    ])
+                } else {
+                    Line::styled(
+                        ellipsize_cells(&format!("{title} · {age}"), usize::from(area.width)),
+                        Style::default().fg(theme.muted),
+                    )
+                };
                 frame.render_widget(
-                    Paragraph::new(line)
-                        .alignment(Alignment::Center)
-                        .style(Style::default().fg(theme.muted)),
-                    Rect::new(area.x, y + 1 + index as u16, area.width, 1),
+                    Paragraph::new(line).alignment(Alignment::Center),
+                    Rect::new(area.x, y + 2 + index as u16, area.width, 1),
                 );
             }
-            frame.render_widget(
-                Paragraph::new(language.text("/resume View all sessions", "/resume 查看全部"))
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(theme.muted)),
-                Rect::new(area.x, y + 4, area.width, 1),
-            );
         }
     }
 }

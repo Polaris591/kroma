@@ -159,14 +159,7 @@ fn context_thresholds_unknown_usage_and_notice_severity_are_distinct() {
             .find(|span| span.content.starts_with("Context "))
             .unwrap();
         assert_eq!(context.style.fg, Some(color));
-        assert_eq!(
-            context
-                .content
-                .chars()
-                .filter(|ch| matches!(ch, '▰' | '▱'))
-                .count(),
-            8
-        );
+        assert!(context.content.contains("100k)"), "{}", context.content);
     }
     for (level, color) in [
         (NoticeLevel::Info, ui.themes.colors.accent_text),
@@ -407,7 +400,7 @@ fn group_hidden_success_hint_is_clickable_and_disclosure_does_not_leak_sessions(
     let row = ui
         .selection_rows
         .iter()
-        .position(|row| row.contains("successful steps"))
+        .position(|row| row.contains("successful step"))
         .unwrap();
     assert!(ui.toggle_tool_at(ui.selection_area.x + 6, ui.selection_area.y + row as u16));
     assert!(ui.expanded_tool_groups.contains("success"));
@@ -439,4 +432,68 @@ fn selection_of_whole_code_and_tool_cards_excludes_decoration_gutters_and_labels
     assert!(copied.contains("    let count = 42;"));
     assert!(copied.contains("    actual output"));
     assert!(ui.selection_rows.iter().all(|row| !row.contains('│')));
+}
+
+#[test]
+fn obsidian_refinements_deduplicate_group_headers_humanize_session_ids_and_toggle_reasoning() {
+    let mut ui = ui();
+    ui.set_link_workdir(Path::new("D:/Kroma"));
+    ui.add_user("你好");
+    ui.event(UiEvent::ReasoningFinal("hidden chain of thought".into()));
+    tool(
+        &mut ui,
+        "fail-1",
+        true,
+        "exit: 128
+fatal: not a git repository",
+    );
+    tool(
+        &mut ui,
+        "ok-2",
+        false,
+        "exit: 0
+clean",
+    );
+    let buffer = draw(&mut ui, 100, 30);
+    let header: String = (0..100)
+        .map(|x| buffer.cell((x, 0)).unwrap().symbol())
+        .collect();
+    assert_eq!(
+        header.matches("Kroma").count(),
+        1,
+        "do not repeat Kroma workdir in header: {header}"
+    );
+    let text = ui.history_text(ui.themes.colors, 100).to_string();
+    assert!(text.contains("Executed 2 steps · 1 failed"));
+    assert_eq!(
+        text.matches("echo fail-1").count(),
+        1,
+        "failed child command must not be duplicated on parent row"
+    );
+    assert!(text.contains("Another 1 successful step"));
+    assert!(!text.contains("1 successful steps"));
+    let reasoning_row = ui
+        .selection_rows
+        .iter()
+        .position(|row| row.contains("Reasoning collapsed"))
+        .unwrap();
+    assert!(ui.toggle_tool_at(
+        ui.selection_area.x + 4,
+        ui.selection_area.y + reasoning_row as u16
+    ));
+    assert!(ui.reasoning_expanded);
+    assert_eq!(
+        super::chrome::display_session_title(
+            "s18e3af53f0efa0fc-0-2398",
+            super::super::preferences::Language::En
+        ),
+        "Untitled session"
+    );
+    assert_eq!(
+        super::chrome::display_session_title(
+            "s18e3af53f0efa0fc-0-2398",
+            super::super::preferences::Language::Zh
+        ),
+        "未命名会话"
+    );
 }

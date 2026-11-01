@@ -1,9 +1,7 @@
   ◆ Kroma  untitled session                                                                                                                   project  ✓ Ready  
                                                                                                                                                                 
-    ▎                                                                                                                                                           
     ▎  Review the change. 请 检 查 代 码 。                                                                                                                           
     ▎  Preserve Unicode and indentation.                                                                                                                        
-    ▎                                                                                                                                                           
                                                                                                                                                                 
     ◆  Updated the implementation.                                                                                                                              
                                                                                                                                                                 
@@ -11,6 +9,8 @@
        • Verified Unicode selection                                                                                                                             
                                                                                                                                                                 
      ✓  Completed · 35.3s                                                                                                                                       
+                                                                                                                                                                
+                                                                                                                                                                
                                                                                                                                                                 
                                                                                                                                                                 
                                                                                                                                                                 
@@ -36,5 +36,5 @@
                                             ╰──────────────────────────────────────────────────────────────────────╯                                            
   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮  
   │ › Ask anything, or describe a coding task…                                                                                                               │  
-  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Enter send · Shift+Enter newline ╯  
-    test-model │ Think high │ Context —                                                                                                      Ctrl+P Commands    
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  
+    test-model · Think high · Context —                                                                                                      Ctrl+P Commands    
