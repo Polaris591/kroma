@@ -74,11 +74,16 @@ append. Tool and model failures are not replayed into the next task.
 ## Failure and cancellation checks
 
 - A failed model request attempts to persist one interruption note; any
-  partially streamed assistant text is discarded.
+  partially streamed assistant text is discarded. Early failures after the
+  user turn was appended (for example context-budget or attachment errors)
+  also attempt one durable failure boundary.
 - `cancel` synthesizes missing tool results for previous calls, preserves their
   call IDs, appends the cancel note, then emits `TaskFinished { cancelled }`.
+  Calling it after a task future has already returned is a no-op; it never
+  creates a second cancellation record.
 - Cancellation aborts pending context/plugin lifecycle work. It does not undo
-  filesystem side effects.
+  filesystem side effects. A cancelled `/compact` settles its checkpoint usage
+  before the command is reported as cancelled.
 - An ordinary task failure clears unconsumed external-context lifecycle
   notifications. The built-in context policy runs checkpoints synchronously and
   has no background maintenance to preserve or cancel.

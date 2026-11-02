@@ -1202,11 +1202,23 @@ async fn execute_task(
                 outcome=&mut future => break Some(outcome),
                 key=input.next() => {
                     match key {
-                        Some(Ok(event)) => match input_event(state,event,true,model,workdir) {
-                            InputAction::Cancel => break None,
-                            InputAction::Submit(text) => running_input(state,&task_input,text,model),
-                            _ => {},
-                        },
+                        Some(Ok(event)) => {
+                            // Geometry (wrapped rows, links, hit targets) is
+                            // refreshed by draw. A click can arrive after a
+                            // scroll/stream update but before the next tick.
+                            if matches!(
+                                &event,
+                                Event::Mouse(mouse)
+                                    if matches!(mouse.kind, MouseEventKind::Down(_))
+                            ) {
+                                screen.draw(state)?;
+                            }
+                            match input_event(state,event,true,model,workdir) {
+                                InputAction::Cancel => break None,
+                                InputAction::Submit(text) => running_input(state,&task_input,text,model),
+                                _ => {},
+                            }
+                        }
                         Some(Err(error)) => return Err(error.into()),
                         None => break None,
                     }
@@ -1448,7 +1460,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
             )),
         ),
     };
-    let mut state = UiState::new(
+    let mut state = UiState::new_default(
         model_name,
         agent.session_id().to_owned(),
         themes,
@@ -1891,6 +1903,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     }
                 }
                 let Some(command_result) = command_result else {
+                    if is_compact {
+                        agent.cancel_compaction();
+                    }
                     state.note("Command cancelled");
                     continue;
                 };
@@ -1998,7 +2013,12 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             }
                         }
                         if !reply.output.is_empty() {
-                            state.info("COMMAND", reply.output);
+                            let label = if text.split_whitespace().next() == Some("/diff") {
+                                "DIFF"
+                            } else {
+                                "COMMAND"
+                            };
+                            state.info(label, reply.output);
                         }
                         match reply.action {
                             CommandAction::Exit => break,

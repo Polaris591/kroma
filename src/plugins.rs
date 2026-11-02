@@ -5,6 +5,8 @@ mod context;
 mod model;
 mod stream;
 const PLUGIN_API_VERSION: u32 = 1;
+const MAX_INSTALL_ENTRIES: usize = 20_000;
+const MAX_INSTALL_BYTES: u64 = 64 * 1024 * 1024;
 
 fn default_plugin_api_version() -> u32 {
     PLUGIN_API_VERSION
@@ -1955,10 +1957,23 @@ fn copy_directory(source: &Path, target: &Path) -> Result<()> {
     // Copy symlink *targets* so plugin bundles from pnpm or local workspaces
     // are installable without elevated link-creation privileges on Windows.
     // Only detect actual recursive cycles; ordinary symlinks are allowed.
-    fn copy_tree(source: &Path, target: &Path, parents: &mut Vec<PathBuf>) -> Result<()> {
+    struct Budget {
+        entries: usize,
+        bytes: u64,
+    }
+    fn copy_tree(
+        source: &Path,
+        target: &Path,
+        parents: &mut Vec<PathBuf>,
+        budget: &mut Budget,
+    ) -> Result<()> {
         let resolved = source.canonicalize()?;
         if parents.contains(&resolved) {
             bail!("cyclic plugin directory link: {}", source.display());
+        }
+        budget.entries = budget.entries.saturating_add(1);
+        if budget.entries > MAX_INSTALL_ENTRIES {
+            bail!("plugin bundle exceeds {MAX_INSTALL_ENTRIES} entries");
         }
         parents.push(resolved);
         let result = (|| -> Result<()> {
@@ -1968,8 +1983,16 @@ fn copy_directory(source: &Path, target: &Path) -> Result<()> {
                 let from = entry.path();
                 let to = target.join(entry.file_name());
                 if from.is_dir() {
-                    copy_tree(&from, &to, parents)?;
+                    copy_tree(&from, &to, parents, budget)?;
                 } else if from.is_file() {
+                    let size = from.metadata()?.len();
+                    budget.bytes = budget.bytes.saturating_add(size);
+                    if budget.bytes > MAX_INSTALL_BYTES {
+                        bail!(
+                            "plugin bundle exceeds {} MiB",
+                            MAX_INSTALL_BYTES / (1024 * 1024)
+                        );
+                    }
                     fs::copy(&from, &to)?;
                 } else {
                     bail!("unreadable plugin entry: {}", from.display());
@@ -1983,7 +2006,15 @@ fn copy_directory(source: &Path, target: &Path) -> Result<()> {
         }
         result
     }
-    copy_tree(source, target, &mut Vec::new())
+    copy_tree(
+        source,
+        target,
+        &mut Vec::new(),
+        &mut Budget {
+            entries: 0,
+            bytes: 0,
+        },
+    )
 }
 
 struct PluginToolAdapter {

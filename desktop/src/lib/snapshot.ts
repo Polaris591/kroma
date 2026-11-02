@@ -1,5 +1,39 @@
 import type { Bootstrap, SessionSnapshot } from './api';
 
+export interface OperationGuard {
+  /** Start a new operation and return its token; every older token becomes stale. */
+  begin(): number;
+  /** Token of the newest operation, for readers that must not supersede it. */
+  current(): number;
+  /** True while `candidate` is still the newest operation. */
+  isCurrent(candidate: number): boolean;
+  /**
+   * Await a request that would replace the whole Bootstrap and return its value
+   * only while `candidate` is still newest, otherwise `null`. Rejections from a
+   * superseded request still propagate to the caller's `catch`.
+   */
+  settleBootstrap(candidate: number, request: Promise<Bootstrap>): Promise<Bootstrap | null>;
+}
+
+/**
+ * Guards async operations that install a whole Bootstrap. A newer operation
+ * (refresh, connect, project or session switch) supersedes every older one, so
+ * a late response must be dropped instead of overwriting the state the user is
+ * now looking at.
+ */
+export function createOperationGuard(): OperationGuard {
+  let generation = 0;
+  return {
+    begin: () => ++generation,
+    current: () => generation,
+    isCurrent: candidate => candidate === generation,
+    settleBootstrap: async (candidate, request) => {
+      const next = await request;
+      return candidate === generation ? next : null;
+    },
+  };
+}
+
 /** Apply the one durable snapshot emitted at a task boundary. */
 export function applySnapshot(data: Bootstrap, snapshot: SessionSnapshot): Bootstrap {
   const known = data.sessions.some(session => session.id === snapshot.session_id);

@@ -50,6 +50,29 @@ impl Drop for TestDirectory {
     }
 }
 
+/// Read one loopback provider request body so a test can inspect the exact
+/// wire fields ModelClient built.
+fn read_mock_provider_request(stream: &mut std::net::TcpStream) -> Result<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Read};
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mut size = 0;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header == "\r\n" {
+            break;
+        }
+        if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+            size = value.trim().parse()?;
+        }
+    }
+    let mut body = vec![0; size];
+    reader.read_exact(&mut body)?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
 #[test]
 fn local_plugin_install_follows_file_and_directory_symlinks_when_supported() -> Result<()> {
     let temp = TestDirectory::new()?;
@@ -1258,6 +1281,124 @@ async fn model_request_hooks_can_change_projection_and_tools_without_touching_wa
         serde_json::to_value(&definitions)?,
         tools_before,
         "provider projection must not modify Kroma's tool registry"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn no_op_model_request_hook_preserves_checkpoint_budget_contract() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins").join("passthrough");
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join("plugin.toml"),
+        "id='passthrough'\nname='Passthrough request hook'\ncommand='node'\nargs=['main.js']\nhooks=['before_model_request']\n",
+    )?;
+    fs::write(
+        directory.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin})
+.on("line",line=>{
+ JSON.parse(line);
+ process.stdout.write(JSON.stringify({content:"{}"})+"\n");
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("passthrough", true)?;
+    let catalog = PluginCatalog::discover_at(global, state, temp.path())?;
+
+    // The mock provider mirrors the real client: a cached first checkpoint
+    // attempt spends the profile's requested max_tokens unless the caller
+    // supplies a tighter ceiling.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    let received = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen = received.clone();
+    let server = std::thread::spawn(move || -> Result<()> {
+        use std::io::Write;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // The listener is nonblocking only so the test can time out
+                    // accept; the accepted socket must be blocking for the
+                    // bounded header/body reads.
+                    stream.set_nonblocking(false)?;
+                    break stream;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() > deadline {
+                        anyhow::bail!("mock provider never received the checkpoint request");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let request = read_mock_provider_request(&mut stream)?;
+        *seen.lock().unwrap() = Some(request);
+        let body = r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"checkpoint ok"}}],"usage":{"prompt_tokens":8,"completion_tokens":3}}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        )?;
+        stream.flush()?;
+        Ok(())
+    });
+
+    let client = Arc::new(
+        ModelClient::new(
+            &format!("http://{address}/v1"),
+            Some("mock-key".into()),
+            "mock".into(),
+        )?
+        .with_protocol("chat")?
+        .with_output_tokens(Some(8192)),
+    );
+    let budget = ContextConfig::with_output_reserve(32768, 1024)?;
+    let inner: Arc<dyn ModelBackend> = client.clone();
+    let wrapped = catalog.model_hooks(inner.clone(), budget);
+    assert!(
+        !Arc::ptr_eq(&wrapped, &inner),
+        "an enabled before_model_request hook must wrap the backend"
+    );
+    // The provider plans its cache-matching attempt at the requested 8192; the
+    // generic trait default would mis-plan this as 512.max(128) * 2 + 512.
+    assert_eq!(
+        client.checkpoint_output_ceiling(512, budget.output_reserve()),
+        8192
+    );
+    assert_eq!(
+        wrapped.checkpoint_output_ceiling(512, budget.output_reserve()),
+        8192,
+        "a no-op request hook must not replace the provider's planning ceiling"
+    );
+
+    let history = [
+        Message::new("system", "system"),
+        Message::new("user", "hello"),
+    ];
+    let checkpoint = wrapped
+        .generate_checkpoint_with_ceiling(&history, &[], "summarize", 512, 1000)
+        .await?;
+    assert_eq!(checkpoint.text, "checkpoint ok");
+    server.join().expect("mock provider thread panicked")?;
+    let request = received
+        .lock()
+        .unwrap()
+        .clone()
+        .context("checkpoint request was never captured")?;
+    assert_eq!(request["stream"], serde_json::json!(false));
+    assert_eq!(
+        request["max_tokens"].as_u64(),
+        Some(1000),
+        "the wrapped backend must forward the explicit completion ceiling to the wire"
     );
     Ok(())
 }

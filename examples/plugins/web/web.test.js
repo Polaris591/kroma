@@ -479,6 +479,27 @@ test("Firecrawl extraction validates source status and reuses its own continuati
   await assert.rejects(search("test", {provider: "firecrawl", firecrawl_api_key: "key", firecrawl_api_version: "v3"}), {code: "CONFIG_ERROR"});
 });
 
+test("Firecrawl reads apply the same target check instead of forwarding a private URL", async () => {
+  const allow = process.env.KROMA_WEB_ALLOW_PRIVATE;
+  delete process.env.KROMA_WEB_ALLOW_PRIVATE;
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return mock(JSON.stringify({success: true, data: {markdown: "Private page", metadata: {statusCode: 200}}}), "application/json");
+  };
+  const config = {fetch_provider: "firecrawl", firecrawl_api_key: "fake-key"};
+  try {
+    await assert.rejects(fetchPage("http://169.254.169.254/latest/meta-data/", config), {code: "BLOCKED_ADDRESS"});
+    assert.equal(calls, 0, "a blocked target must not be sent to the extraction API");
+    process.env.KROMA_WEB_ALLOW_PRIVATE = "1";
+    assert.equal(JSON.parse(await fetchPage("http://169.254.169.254/latest/meta-data/", config)).text, "Private page");
+    assert.equal(calls, 1);
+  } finally {
+    if (allow === undefined) delete process.env.KROMA_WEB_ALLOW_PRIVATE;
+    else process.env.KROMA_WEB_ALLOW_PRIVATE = allow;
+  }
+});
+
 const priorityKeys = {parallel_api_key: "fake-p", you_api_key: "fake-y", exa_api_key: "fake-e", tavily_api_key: "fake-t"};
 const found = {title: "Docs", url: "https://nodejs.org/api/globals.html", snippets: ["Source"], highlights: ["Source"], content: "Source", excerpts: ["Source"]};
 function priorityResponse(host) {

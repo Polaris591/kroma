@@ -104,22 +104,36 @@ fn replay_journal(
         if *byte != b'\n' {
             continue;
         }
-        let line = &contents[complete_bytes..i];
+        let line_start = complete_bytes;
+        let line = &contents[line_start..i];
         complete_bytes = i + 1;
-        let split = line
-            .iter()
-            .rposition(|b| *b == b'\t')
-            .context("corrupt session journal: missing checksum")?;
-        let (payload, trailer) = line.split_at(split);
-        let saved_checksum = std::str::from_utf8(&trailer[1..])
-            .ok()
-            .and_then(|value| u64::from_str_radix(value, 16).ok())
-            .context("corrupt session journal checksum")?;
-        if checksum(payload) != saved_checksum {
-            bail!("corrupt session journal: checksum mismatch");
-        }
-        let event: JournalAppend =
-            serde_json::from_slice(payload).context("invalid session journal event")?;
+        let parsed = (|| -> Result<JournalAppend> {
+            let split = line
+                .iter()
+                .rposition(|b| *b == b'\t')
+                .context("corrupt session journal: missing checksum")?;
+            let (payload, trailer) = line.split_at(split);
+            let saved_checksum = std::str::from_utf8(&trailer[1..])
+                .ok()
+                .and_then(|value| u64::from_str_radix(value, 16).ok())
+                .context("corrupt session journal checksum")?;
+            if checksum(payload) != saved_checksum {
+                bail!("corrupt session journal: checksum mismatch");
+            }
+            serde_json::from_slice(payload).context("invalid session journal event")
+        })();
+        let event = match parsed {
+            Ok(event) => event,
+            Err(error) => {
+                // Only the final complete record may be a torn append. Earlier
+                // corruption is not safe to ignore.
+                if contents[complete_bytes..].contains(&b'\n') {
+                    return Err(error);
+                }
+                complete_bytes = line_start;
+                break;
+            }
+        };
         if event.generation != generation {
             // A checkpoint from /clear can commit before the old journal is
             // truncated. Never replay another generation.
@@ -569,6 +583,9 @@ impl SessionStore {
         if cursor.poisoned {
             bail!("session persistence previously failed; restart Kroma to recover before saving");
         }
+        // A shorter snapshot must never share the old generation: old journal
+        // records beyond its tail would otherwise look like a corrupt replay.
+        let fresh_generation = fresh_generation || messages.len() < cursor.message_count;
         if fresh_generation {
             let generation = new_generation();
             // Commit generation only after the snapshot is durable.
@@ -1304,5 +1321,70 @@ mod tests {
         assert_eq!(history[4].tool_call_id.as_deref(), Some("call_3"));
         assert!(history[4].content.as_deref().unwrap().contains("unknown"));
         assert!(!recover_pending_calls(&mut history));
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn torn_final_wal_record_is_discarded_and_does_not_poison_load() {
+        let dir = env::temp_dir().join(format!("kroma-torn-wal-{}", new_generation()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        let store = SessionStore::open_at(path.clone(), &dir).unwrap();
+        let state = CompactionState::default();
+        let mut messages = vec![Message::new("system", "system")];
+        store.save(&messages, &state).unwrap();
+        messages.push(Message::new("user", "durable"));
+        store.append(&messages, &state).unwrap();
+        let journal = journal_name(&path);
+        let mut bytes = fs::read(&journal).unwrap();
+        let tab = bytes.iter().rposition(|byte| *byte == b'\t').unwrap();
+        let trailer = tab + 1;
+        bytes[trailer] = if bytes[trailer] == b'0' { b'1' } else { b'0' };
+        fs::write(&journal, &bytes).unwrap();
+        drop(store);
+
+        let reopened = SessionStore::open_at(path.clone(), &dir).unwrap();
+        let loaded = reopened.load().unwrap().unwrap();
+        assert_eq!(
+            loaded.messages.len(),
+            1,
+            "torn final record is not replayed"
+        );
+        assert_eq!(fs::metadata(&journal).unwrap().len(), 0);
+        let mut next = loaded.messages;
+        next.push(Message::new("user", "after recovery"));
+        reopened.append(&next, &state).unwrap();
+        drop(reopened);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saving_a_shorter_history_starts_a_fresh_generation() {
+        let dir = env::temp_dir().join(format!("kroma-short-save-{}", new_generation()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        let store = SessionStore::open_at(path.clone(), &dir).unwrap();
+        let state = CompactionState::default();
+        let mut messages = vec![
+            Message::new("system", "system"),
+            Message::new("user", "old one"),
+            Message::new("assistant", "old answer"),
+        ];
+        store.save(&messages, &state).unwrap();
+        messages.push(Message::new("user", "old tail"));
+        store.append(&messages, &state).unwrap();
+
+        let short = messages[..2].to_vec();
+        store.save(&short, &state).unwrap();
+        assert_eq!(fs::metadata(journal_name(&path)).unwrap().len(), 0);
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[1].content.as_deref(), Some("old one"));
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

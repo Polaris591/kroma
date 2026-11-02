@@ -1,5 +1,5 @@
 "use strict";
-const {WebError, httpUrl, download} = require("./http");
+const {WebError, httpUrl, download, assertPublicTarget} = require("./http");
 const {extractPage, plainText, entities} = require("./page");
 const DEFAULTS = Object.freeze({provider: "auto", max_results: 6, max_chars: 12000, timeout_ms: 15000,
   search_priority: Object.freeze(["parallel", "you", "exa", "tavily"]), search_attempt_timeout_ms: 8000});
@@ -379,8 +379,11 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0) {
 }
 
 async function fetchFirecrawl(url, settings, timeout) {
+  // One deadline: the target check and the API call share the request budget.
+  const signal = AbortSignal.timeout(timeout);
+  await assertPublicTarget(url, signal);
   const response = await download(firecrawlUrl(settings, "scrape").href, {
-    timeout, bytes: 1500000, types: ["application/json"], method: "POST", allowPrivateNetwork: true,
+    timeout, signal, bytes: 1500000, types: ["application/json"], method: "POST", allowPrivateNetwork: true,
     headers: {Authorization: "Bearer " + apiKey("firecrawl", settings), "Content-Type": "application/json"},
     body: JSON.stringify({url: url.href, formats: ["markdown"], onlyMainContent: true,
       ...(settings.firecrawl_fresh_scrape === true || settings.firecrawl_fresh_scrape === "true" ? {maxAge: 0} : {})})

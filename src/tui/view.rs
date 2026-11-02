@@ -2,8 +2,18 @@
 mod chrome;
 #[path = "inspector.rs"]
 mod inspector;
+#[path = "messages.rs"]
+mod messages;
 #[path = "navigation.rs"]
 mod navigation;
+#[path = "palette.rs"]
+mod palette;
+#[path = "plain.rs"]
+mod plain;
+#[path = "semantic.rs"]
+mod semantic;
+#[path = "tool_records.rs"]
+mod tool_records;
 #[path = "transcript.rs"]
 mod transcript;
 #[path = "transcript_panel.rs"]
@@ -98,6 +108,16 @@ fn wrap_document_with_preformatted(
     preformatted: &[usize],
     reading_rows: &[usize],
 ) -> (Text<'static>, Vec<usize>) {
+    wrap_document_with_reading_limit(text, width, preformatted, reading_rows, 100)
+}
+
+fn wrap_document_with_reading_limit(
+    text: Text<'static>,
+    width: usize,
+    preformatted: &[usize],
+    reading_rows: &[usize],
+    reading_limit: usize,
+) -> (Text<'static>, Vec<usize>) {
     let width = width.max(1);
     let mut rows = Vec::new();
     // Keep a stable source-line identity for every visual row. The absolute
@@ -105,7 +125,7 @@ fn wrap_document_with_preformatted(
     let mut source_lines = Vec::new();
     for (source_index, line) in text.lines.into_iter().enumerate() {
         let width = if reading_rows.binary_search(&source_index).is_ok() {
-            width.min(100)
+            width.min(reading_limit.max(1))
         } else {
             width
         };
@@ -265,6 +285,11 @@ fn markdown_link_regions(wrapped: &Text<'_>, targets: &[(String, String)]) -> Ve
     regions
 }
 
+/// Terminal-background gutter outside the right edge of plain message
+/// surfaces. Text stops at the surface edge; this visible gutter separates the
+/// surface from the scrollbar and keeps the safety margin legible.
+pub(super) const PLAIN_RIGHT_GUTTER: u16 = 3;
+
 /// The TUI occupies the terminal width. Comfortable mode limits only prose
 /// wrapping, never the header, tool timeline, history viewport, or composer.
 /// Leaving the entire app in a 160-cell island made maximized terminals feel
@@ -342,11 +367,17 @@ type HistoryDocument = (
 #[derive(Clone, Copy)]
 enum Surface {
     Raised,
+    Message,
+    ToolRecord,
 }
 
 #[derive(Clone)]
 enum Decor {
     Surface(Surface),
+    Role {
+        label: &'static str,
+        color: Color,
+    },
     CodeLabel(markdown::CodeBlock),
     Group(String),
     Inspect(String),
@@ -703,6 +734,7 @@ pub(super) enum TaskOutcome {
 }
 
 pub struct UiState {
+    plain_style: bool,
     pub(super) taskbar_enabled: bool,
     pub(super) ui_sender: Option<UnboundedSender<UiEvent>>,
     navigation_turn: Option<usize>,
@@ -871,6 +903,9 @@ impl UiState {
     }
 
     fn active_colors(&self) -> Theme {
+        if self.plain_style {
+            return self.plain_colors();
+        }
         let mut colors = self.themes.colors;
         for (slot, color) in &self.plugin_colors {
             match slot.as_str() {
@@ -900,8 +935,16 @@ impl UiState {
         self.history_cache = None;
     }
 
-    pub fn new(model: String, session: String, themes: ThemeStore, messages: &[Message]) -> Self {
+    /// Low-level legacy initializer retained for historical rendering regressions.
+    /// The interactive host uses `new_default`, which selects A / Plain.
+    pub(super) fn new(
+        model: String,
+        session: String,
+        themes: ThemeStore,
+        messages: &[Message],
+    ) -> Self {
         let mut result = Self {
+            plain_style: false,
             taskbar_enabled: false,
             ui_sender: None,
             navigation_turn: None,
@@ -1089,7 +1132,8 @@ impl UiState {
             "正在浏览历史 · Ctrl+End 返回最新",
         );
         let latest = if let Some(index) = self.navigation_turn {
-            let number = self.entries[..=index.min(self.entries.len().saturating_sub(1))]
+            let end = index.saturating_add(1).min(self.entries.len());
+            let number = self.entries[..end]
                 .iter()
                 .filter(|entry| matches!(entry.kind, Kind::User))
                 .count();
@@ -1235,6 +1279,9 @@ impl UiState {
     /// One quiet footer. Usage and cache readings are secondary to the
     /// conversation. Detailed usage stays in /usage, not in a second status row.
     fn footer_line(&self, colors: Theme, width: usize) -> Line<'static> {
+        if self.plain_style {
+            return self.plain_footer_line(colors, width);
+        }
         let language = self.preferences.language;
         let context = self
             .compact_context()
@@ -1681,11 +1728,15 @@ impl UiState {
                     matches!(entry.kind, Kind::Tool) && entry.title.ends_with(" · running")
                 })
                 .map(|entry| {
-                    format!(
-                        "{} {}",
-                        self.preferences.language.text("Running", "正在运行"),
+                    if self.plain_style {
                         self.tool_summary(entry)
-                    )
+                    } else {
+                        format!(
+                            "{} {}",
+                            self.preferences.language.text("Running", "正在运行"),
+                            self.tool_summary(entry)
+                        )
+                    }
                 })
                 .unwrap_or_else(|| phase.to_owned())
         } else {
@@ -1695,6 +1746,9 @@ impl UiState {
     }
 
     fn activity_line(&self, colors: Theme) -> Line<'static> {
+        if self.plain_style {
+            return self.plain_activity_line(colors);
+        }
         if !self.running {
             // The outcome marker matches the transcript markers above, so a
             // finished turn is recognisable without reading the words.
@@ -1817,6 +1871,7 @@ impl UiState {
             "COMMAND" => language.text(title, "命令结果"),
             "QUEUE" => language.text(title, "任务队列"),
             "ERROR" => language.text(title, "错误"),
+            "DIFF" => language.text("Diff", "差异"),
             "CANCELLED" => language.text(title, "已取消"),
             _ => title,
         }
@@ -2004,6 +2059,8 @@ impl UiState {
         self.apec_usage = crate::usage::UsageMeter::default();
         self.info_session.clear();
         self.entries.clear();
+        self.navigation_turn = None;
+        self.pending_scroll_turn = None;
         self.expanded_tool_calls.clear();
         self.expanded_tool_groups.clear();
         self.session_title = None;
@@ -2290,13 +2347,13 @@ impl UiState {
             self.scroll_from_bottom
                 .saturating_sub(amount.unsigned_abs())
         };
-        if self.scroll_from_bottom == 0 {
+        // A short transcript has no scrollback. Do not enter history-browsing
+        // mode merely because a PageUp was pressed at the bottom.
+        self.scroll_from_bottom = self.scroll_from_bottom.min(self.history_max_scroll);
+        if self.scroll_from_bottom == 0 || self.history_max_scroll == 0 {
             self.scroll_anchor = None;
         } else {
-            self.scroll_anchor = Some(
-                self.history_max_scroll
-                    .saturating_sub(self.scroll_from_bottom.min(self.history_max_scroll)),
-            );
+            self.scroll_anchor = Some(self.history_max_scroll - self.scroll_from_bottom);
         }
         if amount > 0
             && self.history_visible < self.entries.len()
@@ -2777,9 +2834,13 @@ impl UiState {
         let visible = visible.into_iter().rev().collect::<Vec<_>>();
         let mut hidden_until = 0;
         let mut previous_was_tool = false;
+        let mut plain_assistant_start: Option<usize> = None;
         for (index, entry) in visible.iter().enumerate() {
             if index < hidden_until {
                 continue;
+            }
+            if self.plain_style && matches!(entry.kind, Kind::User | Kind::Info) {
+                self.close_plain_assistant(&mut lines, &mut decor, &mut plain_assistant_start);
             }
             if previous_was_tool && !matches!(entry.kind, Kind::Tool) {
                 lines.push(Line::default());
@@ -2796,22 +2857,44 @@ impl UiState {
                             self.entries.len().saturating_sub(self.history_visible) + index,
                         ),
                     ));
+                    if self.plain_style {
+                        lines.push(Line::default());
+                        decor.push((
+                            lines.len(),
+                            Decor::Role {
+                                label: self.preferences.language.text("YOU", "你"),
+                                color: self.message_colors().user_rail,
+                            },
+                        ));
+                        lines.push(Line::default());
+                    }
+                    let body_start = lines.len();
                     for line in entry.body.lines() {
                         lines.push(body_line(Line::from(Span::styled(
                             line.to_owned(),
                             Style::default().fg(theme.text),
                         ))));
                     }
-                    reading_rows.extend(block_start..lines.len());
-                    decor.push((
-                        block_start,
-                        Decor::Gutter {
-                            column: 1,
-                            glyph: "▎",
-                            color: theme.user,
-                            first_only: true,
-                        },
-                    ));
+                    reading_rows.extend(body_start..lines.len());
+                    if !self.plain_style {
+                        decor.push((
+                            block_start,
+                            Decor::Gutter {
+                                column: 1,
+                                glyph: "▎",
+                                color: theme.user,
+                                first_only: true,
+                            },
+                        ));
+                    } else {
+                        lines.push(Line::default());
+                        self.decorate_message(
+                            block_start,
+                            lines.len(),
+                            messages::MessageRole::User,
+                            &mut decor,
+                        );
+                    }
                     lines.push(Line::default());
                 }
                 Kind::Assistant => {
@@ -2828,18 +2911,33 @@ impl UiState {
                         }
                         continue;
                     }
-                    decor.push((
-                        lines.len(),
-                        Decor::Gutter {
-                            column: 1,
-                            glyph: "◆",
-                            color: theme.accent,
-                            first_only: true,
-                        },
-                    ));
+                    if self.plain_style {
+                        self.begin_plain_assistant(
+                            &mut lines,
+                            &mut decor,
+                            &mut plain_assistant_start,
+                        );
+                        if lines.last().is_some_and(|line| !line.spans.is_empty()) {
+                            lines.push(Line::default());
+                        }
+                    } else {
+                        decor.push((
+                            lines.len(),
+                            Decor::Gutter {
+                                column: 1,
+                                glyph: "◆",
+                                color: theme.accent,
+                                first_only: true,
+                            },
+                        ));
+                    }
+                    let body_start = lines.len();
                     if !entry.body.is_empty() {
-                        let prose = width.saturating_sub(5);
-                        let document = markdown::render_document(&entry.body, theme, prose);
+                        let prose = width.saturating_sub(if self.plain_style { 4 } else { 5 });
+                        let mut document = markdown::render_document(&entry.body, theme, prose);
+                        if self.plain_style {
+                            self.color_plain_diff_blocks(&mut document, theme);
+                        }
                         for block in &document.blocks {
                             let mut block = block.clone();
                             block.row += lines.len();
@@ -2891,9 +2989,24 @@ impl UiState {
                             lines.push(body_line(line));
                         }
                     }
-                    lines.push(Line::default());
+                    if !self.plain_style
+                        || lines.len() == body_start
+                        || lines.last().is_some_and(|line| !line.spans.is_empty())
+                    {
+                        lines.push(Line::default());
+                    }
                 }
                 Kind::Tool => {
+                    if self.plain_style {
+                        self.begin_plain_assistant(
+                            &mut lines,
+                            &mut decor,
+                            &mut plain_assistant_start,
+                        );
+                        if lines.last().is_some_and(|line| !line.spans.is_empty()) {
+                            lines.push(Line::default());
+                        }
+                    }
                     let end = visible[index..]
                         .iter()
                         .position(|next| !matches!(next.kind, Kind::Tool | Kind::Reasoning))
@@ -2929,8 +3042,13 @@ impl UiState {
                     );
                     let base = lines.len();
                     if width >= inspector::MIN_ACTION_WIDTH {
+                        let inspect = if self.plain_style {
+                            &card.inspect
+                        } else {
+                            &card.rows
+                        };
                         decor.extend(
-                            card.rows
+                            inspect
                                 .iter()
                                 .map(|(row, id)| (base + row, Decor::Inspect(id.clone()))),
                         );
@@ -2941,17 +3059,35 @@ impl UiState {
                             .into_iter()
                             .map(|(row, id)| (base + row, Decor::Group(id))),
                     );
+                    for (start, end) in card.blocks {
+                        decor.extend(
+                            (start..end)
+                                .map(|row| (base + row, Decor::Surface(Surface::ToolRecord))),
+                        );
+                    }
                     preformatted_rows.extend(card.preformatted.into_iter().map(|row| base + row));
-                    decor.extend(
-                        (0..card.lines.len())
-                            .map(|row| (base + row, Decor::Surface(Surface::Raised))),
-                    );
+                    if !self.plain_style {
+                        decor.extend(
+                            (0..card.lines.len())
+                                .map(|row| (base + row, Decor::Surface(Surface::Raised))),
+                        );
+                    }
                     lines.extend(card.lines);
                     lines.push(Line::default());
                     hidden_until = end;
                     previous_was_tool = false;
                 }
                 Kind::Reasoning => {
+                    if self.plain_style {
+                        self.begin_plain_assistant(
+                            &mut lines,
+                            &mut decor,
+                            &mut plain_assistant_start,
+                        );
+                        if lines.last().is_some_and(|line| !line.spans.is_empty()) {
+                            lines.push(Line::default());
+                        }
+                    }
                     self.append_reasoning(
                         entry,
                         theme,
@@ -2974,7 +3110,13 @@ impl UiState {
                             if is_error { "✕" } else { "·" },
                             self.info_title(&entry.title)
                         ),
-                        role_style(if is_error { theme.error } else { theme.muted }),
+                        role_style(if is_error && self.plain_style {
+                            self.semantic_colors().error
+                        } else if is_error {
+                            theme.error
+                        } else {
+                            theme.muted
+                        }),
                     )));
                     for line in entry.body.lines() {
                         let localized;
@@ -3010,7 +3152,10 @@ impl UiState {
                         } else {
                             Style::default().fg(theme.text)
                         };
-                        if is_error {
+                        if self.plain_style && entry.title == "DIFF" {
+                            preformatted_rows.push(lines.len());
+                            lines.push(body_line(Line::from(self.plain_diff_spans(line, theme))));
+                        } else if is_error {
                             lines.push(body_line(Line::from(vec![
                                 Span::styled("│ ", Style::default().fg(theme.error)),
                                 Span::styled(line.to_owned(), style),
@@ -3022,6 +3167,9 @@ impl UiState {
                     lines.push(Line::default());
                 }
             }
+        }
+        if self.plain_style {
+            self.close_plain_assistant(&mut lines, &mut decor, &mut plain_assistant_start);
         }
         for (row, line) in lines.iter().enumerate() {
             if let Some(span) = line.spans.get(1) {
@@ -3067,7 +3215,10 @@ impl UiState {
         self.editor
             .localize_attachment_labels(self.preferences.language);
         let colors = self.active_colors();
+        let message_colors = self.message_colors();
         let full_area = frame.area();
+        let previous_history_area = self.selection_area;
+        let previous_editor_area = self.editor_area;
         if full_area.width < 20 || full_area.height < 8 {
             self.editor_area = Rect::default();
             // Some SSH/PTY hosts initially report 0x0 before the first
@@ -3077,6 +3228,10 @@ impl UiState {
             self.scrollbar_area = Rect::default();
             self.visible_links.clear();
             self.mouse_release();
+            self.clear_editor_selection();
+            self.selection_start = None;
+            self.selection_end = None;
+            self.selection_rows.clear();
             if full_area.width > 0 && full_area.height > 0 {
                 frame.render_widget(
                     Paragraph::new(
@@ -3093,26 +3248,41 @@ impl UiState {
             Block::default().style(Style::default().bg(colors.background)),
             full_area,
         );
-        let area = reading_area(full_area, self.full_width_prose());
-        let header_rows = self
-            .plugin_layout
-            .as_ref()
-            .and_then(|layout| layout.header_rows)
-            .unwrap_or(if area.height < 20 { 1 } else { 2 })
-            .min(area.height.saturating_sub(5));
-        let composer_max = self
-            .plugin_layout
-            .as_ref()
-            .and_then(|layout| layout.composer_max_rows)
-            .unwrap_or(10)
-            .min(area.height.saturating_sub(header_rows + 2).max(3));
-        let editor_rows = self.editor.display_rows(area.width.saturating_sub(6));
-        let composer_height = editor_rows.saturating_add(2).clamp(3, composer_max);
+        let area = reading_area(full_area, self.plain_style || self.full_width_prose());
+        let header_rows = if self.plain_style {
+            u16::from(area.height >= 20) * 2
+        } else {
+            self.plugin_layout
+                .as_ref()
+                .and_then(|layout| layout.header_rows)
+                .unwrap_or(if area.height < 20 { 1 } else { 2 })
+                .min(area.height.saturating_sub(5))
+        };
         // The model's activity follows the conversation itself instead of
         // living in a fixed bar away from its latest output. Only history
         // navigation needs a separate row above the editable composer.
         let show_navigation =
             (self.scroll_anchor.is_some() || self.navigation_turn.is_some()) && area.height >= 10;
+        let editor_inset = if self.plain_style { 2 } else { 1 };
+        let composer_padding = editor_inset + 1;
+        let composer_min = composer_padding + 1;
+        let composer_max = self
+            .plugin_layout
+            .as_ref()
+            .and_then(|layout| layout.composer_max_rows)
+            .unwrap_or(if self.plain_style { 11 } else { 10 })
+            .max(composer_min)
+            .min(
+                area.height
+                    .saturating_sub(
+                        header_rows + 2 + u16::from(self.plain_style && show_navigation),
+                    )
+                    .max(composer_min),
+            );
+        let editor_rows = self.editor.display_rows(area.width.saturating_sub(6));
+        let composer_height = editor_rows
+            .saturating_add(composer_padding)
+            .clamp(composer_min, composer_max);
         let layout = Layout::vertical([
             // A blank row separates the session heading from the first turn.
             Constraint::Length(header_rows),
@@ -3123,19 +3293,29 @@ impl UiState {
         ])
         .split(area);
         let header_line = Rect::new(layout[0].x, layout[0].y, layout[0].width, 1);
-        self.draw_header(frame, header_line, colors);
+        if !self.plain_style {
+            self.draw_header(frame, header_line, colors);
+        }
         let history_slot = Rect::new(
             layout[1].x,
             layout[1].y,
             layout[1].width.saturating_sub(1),
             layout[1].height,
         );
-        if self.selection_area.width > 0 && self.selection_area.width != history_slot.width {
+        // The surface and its text stop before the right gutter, leaving a
+        // terminal-background strip next to the scrollbar.
+        let content_width = history_slot.width.saturating_sub(if self.plain_style {
+            PLAIN_RIGHT_GUTTER
+        } else {
+            0
+        });
+        if previous_history_area.width > 0 && previous_history_area.width != history_slot.width {
             // Selection offsets refer to *wrapped display cells*, not raw
             // grapheme indices. Reflow invalidates them. Clear the selection
             // rather than copy unrelated text after a terminal resize.
             self.selection_start = None;
             self.selection_end = None;
+            self.selection_rows.clear();
             self.mouse_release();
         }
         self.viewport_height = history_slot.height;
@@ -3180,16 +3360,17 @@ impl UiState {
                 preformatted_rows,
                 raw_decor,
                 reading_rows,
-            ) = self.history_document(colors, usize::from(history_slot.width));
-            let (mut text, source_lines) = wrap_document_with_preformatted(
+            ) = self.history_document(colors, usize::from(content_width));
+            let (mut text, source_lines) = wrap_document_with_reading_limit(
                 raw,
-                usize::from(history_slot.width),
+                usize::from(content_width),
                 &preformatted_rows,
-                if self.full_width_prose() {
+                if self.plain_style || self.full_width_prose() {
                     &[]
                 } else {
                     &reading_rows
                 },
+                if self.plain_style { usize::MAX } else { 100 },
             );
             let mut link_regions = markdown_link_regions(&text, &targets);
             let mut valid_paths = HashMap::<String, bool>::new();
@@ -3369,7 +3550,7 @@ impl UiState {
                 }
             }
             let anchored = anchor.saturating_add(prepend).min(max_scroll);
-            self.scroll_anchor = Some(anchored);
+            self.scroll_anchor = (max_scroll > 0).then_some(anchored);
             self.scroll_from_bottom = max_scroll.saturating_sub(anchored);
         } else {
             self.prepend_rows_before = None;
@@ -3434,20 +3615,65 @@ impl UiState {
             Style::default().fg(colors.text).bg(colors.background),
         );
         let decorations = &self.history_cache.as_ref().unwrap().decor;
+        // Message surfaces first, then nested surfaces. A turn's rail is added
+        // after its tool records, so paint order must not let it cover them.
         for (row, item) in decorations
             .iter()
             .filter(|(row, _)| (start_row..end_row).contains(row))
         {
-            if let Decor::Surface(Surface::Raised) = item {
+            if matches!(item, Decor::Surface(Surface::Message)) {
+                let y = history.y + (row - start_row) as u16;
                 buffer.set_style(
-                    Rect::new(
-                        history.x,
-                        history.y + (row - start_row) as u16,
-                        history.width,
-                        1,
-                    ),
-                    Style::default().bg(colors.input_surface()),
+                    self.message_surface_area(history, y),
+                    Style::default().bg(message_colors.surface),
                 );
+            }
+        }
+        for (row, item) in decorations
+            .iter()
+            .filter(|(row, _)| (start_row..end_row).contains(row))
+        {
+            let y = history.y + (row - start_row) as u16;
+            match item {
+                Decor::Surface(Surface::Raised) => {
+                    let inset = if self.plain_style {
+                        4.min(history.width)
+                    } else {
+                        0
+                    };
+                    let gutter = if self.plain_style {
+                        PLAIN_RIGHT_GUTTER
+                    } else {
+                        0
+                    };
+                    buffer.set_style(
+                        Rect::new(
+                            history.x + inset,
+                            y,
+                            history.width.saturating_sub(inset + gutter),
+                            1,
+                        ),
+                        Style::default().bg(colors.input_surface()),
+                    );
+                }
+                Decor::Surface(Surface::ToolRecord) => {
+                    let inset = 2.min(history.width);
+                    let gutter = if self.plain_style {
+                        PLAIN_RIGHT_GUTTER
+                    } else {
+                        0
+                    };
+                    buffer.set_style(
+                        Rect::new(
+                            history.x + inset,
+                            y,
+                            history.width.saturating_sub(inset + gutter),
+                            1,
+                        ),
+                        Style::default().bg(colors.surface),
+                    );
+                }
+                _ => {}
             }
         }
         for (row, line) in viewport_lines.iter().enumerate() {
@@ -3472,6 +3698,14 @@ impl UiState {
                     }
                 }
             }
+            if let Decor::Role { label, color } = item {
+                buffer.set_string(
+                    history.x.saturating_add(4),
+                    history.y + (row - start_row) as u16,
+                    ellipsize_cells(label, usize::from(history.width.saturating_sub(4))),
+                    Style::default().fg(*color).add_modifier(Modifier::BOLD),
+                );
+            }
         }
         for (row, item) in decorations
             .iter()
@@ -3480,8 +3714,13 @@ impl UiState {
             if let Decor::CodeLabel(block) = item {
                 let label = self.code_label(block, history.width);
                 let size = UnicodeWidthStr::width(label.as_str()) as u16;
+                let margin = if self.plain_style {
+                    PLAIN_RIGHT_GUTTER
+                } else {
+                    1
+                };
                 buffer.set_string(
-                    history.right().saturating_sub(size + 1),
+                    history.right().saturating_sub(size + margin),
                     history.y + (row - start_row) as u16,
                     label,
                     Style::default().fg(
@@ -3504,8 +3743,13 @@ impl UiState {
             if let Decor::Inspect(_) = item {
                 let label = self.inspection_label();
                 let width = UnicodeWidthStr::width(label) as u16;
+                let margin = if self.plain_style {
+                    PLAIN_RIGHT_GUTTER
+                } else {
+                    1
+                };
                 buffer.set_string(
-                    history.right().saturating_sub(width + 1),
+                    history.right().saturating_sub(width + margin),
                     history.y + (row - start_row) as u16,
                     label,
                     Style::default().fg(colors.accent_text),
@@ -3521,16 +3765,52 @@ impl UiState {
                 frame.render_widget(
                     Paragraph::new(self.activity_line(colors)),
                     Rect::new(
-                        history.x.saturating_add(2),
+                        history
+                            .x
+                            .saturating_add(if self.plain_style { 3 } else { 2 }),
                         history.y + (tail - start_row) as u16,
-                        history.width.saturating_sub(4),
+                        history
+                            .width
+                            .saturating_sub(if self.plain_style { 6 } else { 4 }),
                         1,
                     ),
                 );
+                if self.plain_style {
+                    // After a user message the status starts a new assistant
+                    // block: leave the separator row as terminal background.
+                    // Once an assistant turn has content, bridge the row above
+                    // so its rail stays continuous through the activity tail.
+                    let new_block = self
+                        .entries
+                        .last()
+                        .is_some_and(|entry| matches!(entry.kind, Kind::User | Kind::Info));
+                    let first = if new_block {
+                        tail
+                    } else {
+                        tail.saturating_sub(1)
+                    };
+                    for row in first..=tail {
+                        if !(start_row..end_row).contains(&row) {
+                            continue;
+                        }
+                        let y = history.y + (row - start_row) as u16;
+                        frame.buffer_mut().set_style(
+                            self.message_surface_area(history, y),
+                            Style::default().bg(message_colors.surface),
+                        );
+                        if let Some(cell) = frame.buffer_mut().cell_mut((history.x + 1, y)) {
+                            cell.set_symbol("▎").set_fg(message_colors.assistant_rail);
+                        }
+                    }
+                }
             }
         }
         if self.home {
-            self.draw_welcome_details(frame, history_slot, colors);
+            if self.plain_style {
+                self.draw_plain_welcome(frame, history_slot, colors);
+            } else {
+                self.draw_welcome_details(frame, history_slot, colors);
+            }
         }
         for link in &self.visible_links {
             let hovered = self
@@ -3540,8 +3820,16 @@ impl UiState {
                 if let Some(cell) = frame.buffer_mut().cell_mut((x, link.y)) {
                     let style = if hovered {
                         Style::default()
-                            .fg(colors.accent_text)
+                            .fg(if self.plain_style {
+                                self.semantic_colors().link
+                            } else {
+                                colors.accent_text
+                            })
                             .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+                    } else if self.plain_style {
+                        Style::default()
+                            .fg(colors.muted)
+                            .add_modifier(Modifier::UNDERLINED)
                     } else {
                         Style::default().add_modifier(Modifier::UNDERLINED)
                     };
@@ -3618,7 +3906,11 @@ impl UiState {
             colors.border
         };
         let mut block = Block::default()
-            .style(Style::default().bg(colors.surface))
+            .style(Style::default().bg(if self.plain_style {
+                colors.background
+            } else {
+                colors.surface
+            }))
             .borders(Borders::TOP)
             .border_style(Style::default().fg(border));
         if self.attach_mode {
@@ -3632,10 +3924,13 @@ impl UiState {
         frame.render_widget(block, composer);
         let editor_inner = Rect::new(
             composer.x.saturating_add(4),
-            composer.y.saturating_add(1),
+            composer.y.saturating_add(editor_inset),
             composer.width.saturating_sub(6),
-            editor_rows.min(composer.height.saturating_sub(2)),
+            editor_rows.min(composer.height.saturating_sub(composer_padding)),
         );
+        if previous_editor_area != Rect::default() && previous_editor_area != editor_inner {
+            self.clear_editor_selection();
+        }
         self.editor_area = editor_inner;
         let (text, cx, cy) = self
             .editor
@@ -3650,6 +3945,8 @@ impl UiState {
                 self.attach_path.clone()
             })
             .style(Style::default().fg(colors.text))
+        } else if self.editor.text().is_empty() && self.plain_style {
+            Paragraph::new("")
         } else if self.editor.text().is_empty() {
             let hint = if self.running {
                 self.preferences.language.text(
@@ -3674,7 +3971,7 @@ impl UiState {
             ),
             Rect::new(
                 composer.x.saturating_add(2),
-                composer.y.saturating_add(1),
+                composer.y.saturating_add(editor_inset),
                 1,
                 1,
             ),
@@ -3729,7 +4026,9 @@ impl UiState {
             1,
         );
         let hovered = self.hover_pointer.and_then(|(x, y)| self.link_at(x, y));
-        let footer = if !self.notification.is_empty() {
+        let footer = if !self.notification.is_empty() && self.plain_style {
+            self.plain_notification_line(colors, status_area.width as usize)
+        } else if !self.notification.is_empty() {
             Line::from(Span::styled(
                 excerpt(&self.notification, usize::from(status_area.width)),
                 Style::default().fg(match self.notification_level {
@@ -7243,3 +7542,92 @@ mod redesign_snapshots;
 #[cfg(test)]
 #[path = "graphite_tests.rs"]
 mod graphite_tests;
+
+#[cfg(test)]
+#[path = "plain_tests.rs"]
+mod plain_tests;
+
+#[cfg(test)]
+#[path = "semantic_tests.rs"]
+mod semantic_tests;
+
+#[cfg(test)]
+#[path = "message_tests.rs"]
+mod message_tests;
+
+#[cfg(test)]
+#[path = "tool_record_tests.rs"]
+mod tool_record_tests;
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn state() -> UiState {
+        UiState::new(
+            "mock".into(),
+            "hardening".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[Message::new("system", "root")],
+        )
+    }
+
+    #[test]
+    fn navigation_status_is_safe_after_home_clears_entries() {
+        let mut ui = state();
+        ui.navigation_turn = Some(0);
+        ui.enter_home();
+        assert!(ui.navigation_turn.is_none());
+        assert!(ui.pending_scroll_turn.is_none());
+        let _ = ui.navigation_status();
+    }
+
+    #[test]
+    fn scrolling_a_short_transcript_does_not_enter_browse_mode() {
+        let mut ui = state();
+        ui.history_max_scroll = 0;
+        ui.scroll(20);
+        assert!(ui.scroll_anchor.is_none());
+        assert_eq!(ui.scroll_from_bottom, 0);
+    }
+
+    #[test]
+    fn resize_clears_editor_selection_without_touching_the_draft() {
+        let mut ui = state();
+        ui.editor.paste("keep this draft");
+        let mut wide = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        wide.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(ui.start_editor_selection(ui.editor_area.x + 1, ui.editor_area.y));
+        assert!(ui.editor_selection.is_some());
+        let mut narrow = Terminal::new(TestBackend::new(45, 24)).unwrap();
+        narrow.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(ui.editor_selection.is_none());
+        assert_eq!(ui.editor.text(), "keep this draft");
+    }
+
+    #[test]
+    fn tiny_terminal_clears_history_selection_instead_of_restoring_it() {
+        let mut ui = UiState::new(
+            "mock".into(),
+            "hardening".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[
+                Message::new("assistant", "one"),
+                Message::new("assistant", "two"),
+            ],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        ui.select_start(ui.selection_area.x + 2, ui.selection_area.y);
+        ui.select_drag(ui.selection_area.x + 5, ui.selection_area.y);
+        assert!(ui.selected_text().is_some());
+        let mut tiny = Terminal::new(TestBackend::new(12, 6)).unwrap();
+        tiny.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(ui.selection_start.is_none());
+        assert!(ui.selection_end.is_none());
+        let mut normal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        normal.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(ui.selected_text().is_none());
+    }
+}

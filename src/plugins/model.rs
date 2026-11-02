@@ -588,6 +588,31 @@ impl ModelBackend for PluginModelHooks {
             .generate_checkpoint(messages, tools, instruction, output_tokens)
     }
 
+    // Checkpoints deliberately skip the request Hooks: ContextPolicy already
+    // projected this source prefix, and the inner provider must receive its own
+    // budget contracts instead of the trait defaults.
+    fn generate_checkpoint_with_ceiling<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        instruction: &'a str,
+        output_tokens: usize,
+        max_completion_tokens: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        self.inner.generate_checkpoint_with_ceiling(
+            messages,
+            tools,
+            instruction,
+            output_tokens,
+            max_completion_tokens,
+        )
+    }
+
+    fn checkpoint_output_ceiling(&self, output_tokens: usize, output_reserve: usize) -> usize {
+        self.inner
+            .checkpoint_output_ceiling(output_tokens, output_reserve)
+    }
+
     fn generate_short_text<'a>(
         &'a self,
         system: &'a str,

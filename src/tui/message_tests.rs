@@ -1,0 +1,616 @@
+//! Message identity stays aligned through wrapping, streaming and selection.
+use super::*;
+use messages::MessageRole;
+use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+fn ui() -> UiState {
+    UiState::new_default(
+        "model-x".into(),
+        "message-test".into(),
+        ThemeStore::load_at(None).unwrap(),
+        &[],
+    )
+}
+fn draw(ui: &mut UiState, width: u16, height: u16) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| ui.draw(frame)).unwrap();
+    terminal.backend().buffer().clone()
+}
+fn rails(ui: &UiState, role: MessageRole) -> Vec<usize> {
+    let p = ui.message_colors();
+    let expected = match role {
+        MessageRole::User => p.user_rail,
+        MessageRole::Assistant => p.assistant_rail,
+    };
+    let mut rows=ui.history_cache.as_ref().unwrap().decor.iter().filter_map(|(row,item)| {
+        matches!(item,Decor::Gutter {column:1,glyph:"▎",color,first_only:false} if *color==expected).then_some(*row)
+    }).collect::<Vec<_>>();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+fn visible_y(ui: &UiState, row: usize) -> Option<u16> {
+    (row >= ui.history_top_row && row < ui.history_top_row + usize::from(ui.selection_area.height))
+        .then(|| ui.selection_area.y + (row - ui.history_top_row) as u16)
+}
+fn luminance(color: Color) -> f64 {
+    let Color::Rgb(r, g, b) = color else {
+        panic!("RGB required")
+    };
+    let f = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+}
+fn contrast(a: Color, b: Color) -> f64 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+#[test]
+fn both_speakers_use_the_same_rail_glyph_and_text_column() {
+    let mut ui = ui();
+    ui.add_user("user aligned");
+    ui.event(UiEvent::Text("assistant aligned".into()));
+    ui.finish_task();
+    let buffer = draw(&mut ui, 120, 40);
+    for role in [MessageRole::User, MessageRole::Assistant] {
+        for row in rails(&ui, role) {
+            let y = visible_y(&ui, row).unwrap();
+            assert_eq!(
+                buffer.cell((ui.selection_area.x + 1, y)).unwrap().symbol(),
+                "▎"
+            );
+        }
+    }
+    for word in ["user aligned", "assistant aligned"] {
+        let row = ui
+            .history_cache
+            .as_ref()
+            .unwrap()
+            .text
+            .lines
+            .iter()
+            .position(|line| line.to_string().contains(word))
+            .unwrap();
+        let y = visible_y(&ui, row).unwrap();
+        assert_eq!(
+            buffer.cell((ui.selection_area.x + 4, y)).unwrap().symbol(),
+            &word[..1]
+        );
+    }
+}
+
+#[test]
+fn surface_has_one_padding_row_each_side_and_a_continuous_rail() {
+    let mut ui = ui();
+    ui.add_user("hello user");
+    ui.event(UiEvent::Text("hello assistant".into()));
+    ui.finish_task();
+    let buffer = draw(&mut ui, 120, 40);
+    let rows = rails(&ui, MessageRole::User);
+    assert_eq!(rows.len(), 4);
+    assert!(rows.windows(2).all(|p| p[1] == p[0] + 1));
+    let cache = ui.history_cache.as_ref().unwrap();
+    assert!(cache.text.lines[rows[0]].spans.is_empty());
+    assert!(cache.text.lines[*rows.last().unwrap()].spans.is_empty());
+    for &row in &rows {
+        let y = visible_y(&ui, row).unwrap();
+        let area = ui.message_surface_area(ui.selection_area, y);
+        for x in area.x..area.right() {
+            assert_eq!(buffer.cell((x, y)).unwrap().bg, ui.message_colors().surface);
+        }
+        assert_eq!(
+            buffer.cell((area.x, y)).unwrap().fg,
+            ui.message_colors().user_rail
+        );
+    }
+    let gap = rows.last().unwrap() + 1;
+    let y = visible_y(&ui, gap).unwrap();
+    assert_eq!(
+        buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
+        ui.active_colors().background
+    );
+    assert_eq!(rails(&ui, MessageRole::Assistant)[0], gap + 1);
+}
+
+#[test]
+fn assistant_rail_covers_paragraphs_code_and_all_soft_wraps() {
+    let mut ui = ui();
+    ui.add_user("Review");
+    ui.event(UiEvent::Text(format!("{}\n\n- first item\n- second item\n\n```rust\nlet value = 42;\n\nprintln!(\"中文🙂\");\n```","Long reply 中文🙂 ".repeat(18))));
+    ui.finish_task();
+    let buffer = draw(&mut ui, 40, 65);
+    let rows = rails(&ui, MessageRole::Assistant);
+    assert!(rows.len() > 10);
+    assert!(rows.windows(2).all(|p| p[1] == p[0] + 1));
+    for row in rows {
+        if let Some(y) = visible_y(&ui, row) {
+            let cell = buffer.cell((ui.selection_area.x + 1, y)).unwrap();
+            assert_eq!(cell.symbol(), "▎");
+            assert_eq!(cell.fg, ui.message_colors().assistant_rail);
+            assert_eq!(cell.bg, ui.message_colors().surface);
+        }
+    }
+    assert_ne!(
+        ui.message_colors().assistant_rail,
+        ui.message_colors().user_rail
+    );
+    assert_ne!(
+        ui.message_colors().assistant_rail,
+        ui.semantic_colors().success
+    );
+}
+
+#[test]
+fn user_background_and_rails_follow_unicode_wraps_after_resize() {
+    let mut ui = ui();
+    let original = "中文🙂 e\u{301} text ".repeat(25).trim_end().to_owned();
+    ui.add_user(&original);
+    ui.event(UiEvent::Text("Reply".into()));
+    ui.finish_task();
+    draw(&mut ui, 120, 50);
+    let wide = rails(&ui, MessageRole::User).len();
+    let buffer = draw(&mut ui, 40, 65);
+    let rows = rails(&ui, MessageRole::User);
+    assert!(rows.len() > wide);
+    for row in rows {
+        let y = visible_y(&ui, row).unwrap();
+        let area = ui.message_surface_area(ui.selection_area, y);
+        assert_eq!(
+            buffer.cell((area.x, y)).unwrap().bg,
+            ui.message_colors().surface
+        );
+        assert_eq!(
+            buffer.cell((area.right(), y)).unwrap().bg,
+            ui.active_colors().background
+        );
+    }
+    assert_eq!(ui.entries[0].body, original);
+}
+
+#[test]
+fn role_decoration_does_not_pollute_copy_links_or_code_source() {
+    let mut ui = ui();
+    ui.add_user("hello 中文🙂");
+    let code = "\tlet value = 42;\n\n";
+    ui.event(UiEvent::Text(format!(
+        "See [docs](https://example.org/messages).\n\n```rust\n{code}```"
+    )));
+    ui.finish_task();
+    draw(&mut ui, 100, 45);
+    assert!(ui
+        .visible_links
+        .iter()
+        .any(|l| l.target == "https://example.org/messages"));
+    let cache = ui.history_cache.as_ref().unwrap();
+    assert!(cache
+        .decor
+        .iter()
+        .any(|(_, d)| matches!(d,Decor::CodeLabel(b) if b.raw==code)));
+    ui.selection_start = Some((0, 0));
+    ui.selection_end = Some((cache.text.lines.len() - 1, 99));
+    let copied = ui.selected_text().unwrap();
+    assert!(copied.contains("hello 中文🙂") && copied.contains("let value = 42;"));
+    assert!(
+        !copied.contains('▎')
+            && !copied.contains('│')
+            && !copied.contains("YOU")
+            && !copied.contains("KROMA")
+    );
+}
+
+#[test]
+fn streaming_extends_rails_without_moving_pinned_history() {
+    let mut ui = ui();
+    ui.add_user("Long stream");
+    ui.event(UiEvent::Text(
+        (0..120)
+            .map(|i| format!("line-{i:03} stable reply\n"))
+            .collect(),
+    ));
+    draw(&mut ui, 80, 24);
+    ui.scroll(20);
+    draw(&mut ui, 80, 24);
+    let anchor = ui.scroll_anchor;
+    let top = ui.selection_rows[0].clone();
+    let count = rails(&ui, MessageRole::Assistant).len();
+    ui.event(UiEvent::Text("new streamed row\n".repeat(6)));
+    draw(&mut ui, 80, 24);
+    assert_eq!(ui.scroll_anchor, anchor);
+    assert_eq!(ui.selection_rows[0], top);
+    assert!(rails(&ui, MessageRole::Assistant).len() > count);
+    ui.scroll_to_bottom();
+    let buffer = draw(&mut ui, 80, 24);
+    for row in rails(&ui, MessageRole::Assistant) {
+        if let Some(y) = visible_y(&ui, row) {
+            assert_eq!(
+                buffer.cell((ui.selection_area.x + 1, y)).unwrap().symbol(),
+                "▎"
+            );
+        }
+    }
+}
+
+#[test]
+fn message_surfaces_leave_a_visible_terminal_right_gutter() {
+    for width in [40, 80, 160] {
+        let mut ui = ui();
+        ui.add_user("Short request");
+        ui.event(UiEvent::Text("Short reply".into()));
+        ui.finish_task();
+        let buffer = draw(&mut ui, width, 40);
+        for role in [MessageRole::User, MessageRole::Assistant] {
+            for row in rails(&ui, role) {
+                let y = visible_y(&ui, row).unwrap();
+                let area = ui.message_surface_area(ui.selection_area, y);
+                assert_eq!(area.width, ui.selection_area.width - 1 - PLAIN_RIGHT_GUTTER);
+                assert_eq!(area.right(), ui.selection_area.right() - PLAIN_RIGHT_GUTTER);
+                for x in area.x..area.right() {
+                    assert_eq!(buffer.cell((x, y)).unwrap().bg, ui.message_colors().surface);
+                }
+                for x in area.right()..ui.selection_area.right() {
+                    assert_eq!(
+                        buffer.cell((x, y)).unwrap().bg,
+                        ui.active_colors().background
+                    );
+                }
+            }
+        }
+        for x in 0..width {
+            assert_eq!(
+                buffer.cell((x, 39)).unwrap().bg,
+                ui.active_colors().background
+            );
+        }
+        let before = ui.message_surface_area(ui.selection_area, ui.selection_area.y);
+        ui.apply_preferences(super::super::preferences::Preferences {
+            full_width: true,
+            ..ui.preferences
+        });
+        draw(&mut ui, width, 40);
+        assert_eq!(
+            ui.message_surface_area(ui.selection_area, ui.selection_area.y),
+            before
+        );
+    }
+}
+
+#[test]
+fn message_colours_are_readable_and_native_mono_is_respected() {
+    for preset in ["dark", "light"] {
+        let mut ui = ui();
+        ui.themes.select(preset).unwrap();
+        let p = ui.message_colors();
+        let b = ui.active_colors();
+        assert!(contrast(b.text, p.surface) >= 4.5);
+        assert!(contrast(b.faint, p.surface) >= 4.5);
+        assert!(contrast(p.user_rail, p.surface) >= 3.0);
+        assert!(contrast(p.assistant_rail, p.surface) >= 3.0);
+        if preset == "dark" {
+            assert!(luminance(p.surface) > luminance(b.background));
+        }
+    }
+    let mut ui = ui();
+    ui.themes.select("mono").unwrap();
+    ui.add_user("Native message");
+    ui.event(UiEvent::Text("Native reply".into()));
+    ui.finish_task();
+    for c in draw(&mut ui, 80, 30).content() {
+        assert_eq!(c.fg, Color::Reset);
+        assert_eq!(c.bg, Color::Reset);
+    }
+}
+
+#[test]
+fn small_windows_and_editor_geometry_remain_safe() {
+    for (w, h) in [(20, 8), (40, 16), (80, 24)] {
+        let mut ui = ui();
+        ui.add_user(&"long user 中文🙂 ".repeat(20));
+        ui.event(UiEvent::Text("assistant text ".repeat(30)));
+        ui.editor.paste("unsent draft");
+        draw(&mut ui, w, h);
+        assert!(ui.editor_area.right() <= w && ui.editor_area.bottom() <= h);
+        assert!(
+            ui.message_surface_area(ui.selection_area, ui.selection_area.y)
+                .right()
+                <= ui.selection_area.right()
+        );
+        assert_eq!(ui.editor.text(), "unsent draft");
+    }
+}
+
+#[test]
+fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
+    let mut ui = ui();
+    ui.add_user("Inspect the project");
+    ui.event(UiEvent::Text("I will inspect the files.".into()));
+    ui.event(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "tool".into(),
+        args: "ls".into(),
+    });
+    ui.event(UiEvent::ToolFinished {
+        id: "tool".into(),
+        result: "exit: 0\nsrc".into(),
+        failed: false,
+    });
+    ui.event(UiEvent::Text("The source directory is present.".into()));
+    ui.finish_task();
+    draw(&mut ui, 120, 50);
+    let (labels, rows, tool_header, body) = {
+        let cache = ui.history_cache.as_ref().unwrap();
+        let labels = cache
+            .decor
+            .iter()
+            .filter(|(_, item)| matches!(item, Decor::Role { label: "KROMA", .. }))
+            .count();
+        let body = cache
+            .text
+            .lines
+            .iter()
+            .position(|line| line.to_string().contains("I will inspect"))
+            .unwrap();
+        (
+            labels,
+            rails(&ui, MessageRole::Assistant),
+            cache.tool_rows[0].0,
+            body,
+        )
+    };
+    assert_eq!(labels, 1, "one assistant turn has one KROMA label");
+    assert!(
+        rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "rail is continuous"
+    );
+    assert!(
+        rows.contains(&tool_header),
+        "tool record sits inside the assistant rail"
+    );
+    let tool_row = ui.selection_area.y + (tool_header - ui.history_top_row) as u16;
+    let body_cell = ui.selection_area.y + (body - ui.history_top_row) as u16;
+    let buffer = draw(&mut ui, 120, 50);
+    assert_eq!(
+        buffer
+            .cell((ui.selection_area.x + 1, tool_row))
+            .unwrap()
+            .symbol(),
+        "▎"
+    );
+    assert_eq!(
+        buffer.cell((ui.selection_area.x + 1, tool_row)).unwrap().fg,
+        ui.message_colors().assistant_rail
+    );
+    // Message prose and the tool state marker share the body indent.
+    assert_eq!(
+        buffer
+            .cell((ui.selection_area.x + 4, body_cell))
+            .unwrap()
+            .symbol(),
+        "I"
+    );
+    assert_eq!(
+        buffer
+            .cell((ui.selection_area.x + 4, tool_row))
+            .unwrap()
+            .symbol(),
+        "✓"
+    );
+}
+
+#[test]
+fn identity_colours_are_distinct_from_execution_state_colours() {
+    let mut ui = ui();
+    let p = ui.message_colors();
+    let s = ui.semantic_colors();
+    assert_ne!(p.user_rail, s.running);
+    assert_ne!(p.assistant_rail, s.success);
+    assert_ne!(p.user_rail, p.assistant_rail);
+    for preset in ["dark", "light"] {
+        ui.themes.select(preset).unwrap();
+        let p = ui.message_colors();
+        let base = ui.active_colors();
+        assert!(contrast(p.user_rail, base.surface) >= 4.5);
+        assert!(contrast(p.assistant_rail, base.surface) >= 4.5);
+    }
+}
+
+#[test]
+fn completion_status_is_painted_inside_the_assistant_rail() {
+    let mut ui = ui();
+    ui.add_user("Run a tool");
+    ui.event(UiEvent::Text("Starting the check.".into()));
+    ui.event(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "live".into(),
+        args: "cargo test".into(),
+    });
+    ui.running = true;
+    let buffer = draw(&mut ui, 100, 40);
+    let cache = ui.history_cache.as_ref().unwrap();
+    let tail = cache.text.lines.len().saturating_sub(2);
+    for row in [tail.saturating_sub(1), tail] {
+        let y = ui.selection_area.y + (row - ui.history_top_row) as u16;
+        assert_eq!(
+            buffer.cell((ui.selection_area.x + 1, y)).unwrap().symbol(),
+            "▎"
+        );
+        assert_eq!(
+            buffer.cell((ui.selection_area.x + 1, y)).unwrap().fg,
+            ui.message_colors().assistant_rail
+        );
+        assert_eq!(
+            buffer.cell((ui.selection_area.x + 2, y)).unwrap().bg,
+            ui.message_colors().surface
+        );
+    }
+}
+
+#[test]
+fn consecutive_turns_are_separated_by_a_terminal_background_row() {
+    let mut ui = ui();
+    ui.add_user("First question");
+    ui.event(UiEvent::Text("First answer".into()));
+    ui.finish_task();
+    ui.add_user("Second question");
+    ui.event(UiEvent::Text("Second answer".into()));
+    ui.finish_task();
+    draw(&mut ui, 100, 50);
+    let user_rows = rails(&ui, MessageRole::User);
+    let assistant_rows = rails(&ui, MessageRole::Assistant);
+    let second_user = user_rows
+        .windows(2)
+        .find(|pair| pair[1] > pair[0] + 1)
+        .map(|pair| pair[1])
+        .unwrap();
+    let last_assistant = *assistant_rows
+        .iter()
+        .filter(|row| **row < second_user)
+        .max()
+        .unwrap();
+    let boundary = last_assistant + 1;
+    assert!(boundary < second_user);
+    let buffer = draw(&mut ui, 100, 50);
+    let y = ui.selection_area.y + (boundary - ui.history_top_row) as u16;
+    assert_eq!(
+        buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
+        ui.active_colors().background
+    );
+    assert_eq!(
+        buffer.cell((ui.selection_area.x + 1, y)).unwrap().symbol(),
+        " "
+    );
+    let cache = ui.history_cache.as_ref().unwrap();
+    assert!(cache.text.lines[boundary].spans.is_empty());
+    assert!(!cache.decor.iter().any(|(row, item)| *row == boundary
+        && matches!(
+            item,
+            Decor::Surface(Surface::Message) | Decor::Gutter { column: 1, .. }
+        )));
+}
+
+#[test]
+fn plain_content_stops_before_a_terminal_right_gutter() {
+    let mut ui = ui();
+    ui.add_user(&"long user request with ascii text ".repeat(20));
+    ui.event(UiEvent::Text(
+        "long assistant answer with ascii text ".repeat(40),
+    ));
+    ui.finish_task();
+    let buffer = draw(&mut ui, 100, 50);
+    let history = ui.selection_area;
+    let cache = ui.history_cache.as_ref().unwrap();
+    let mut checked = 0;
+    for (row, item) in &cache.decor {
+        if !matches!(item, Decor::Surface(Surface::Message))
+            || *row < ui.history_top_row
+            || *row >= ui.history_top_row + usize::from(history.height)
+        {
+            continue;
+        }
+        let y = history.y + (*row - ui.history_top_row) as u16;
+        let surface = ui.message_surface_area(history, y);
+        assert_eq!(surface.right(), history.right() - PLAIN_RIGHT_GUTTER);
+        for x in surface.right()..history.right() {
+            assert_eq!(
+                buffer.cell((x, y)).unwrap().bg,
+                ui.active_colors().background,
+                "the right gutter must be terminal background at {x},{y}"
+            );
+            assert_eq!(
+                buffer.cell((x, y)).unwrap().symbol(),
+                " ",
+                "content must not enter the right gutter at {x},{y}"
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 4);
+}
+
+#[test]
+fn plain_code_copy_label_stays_left_of_the_terminal_gutter() {
+    let mut ui = ui();
+    ui.add_user("Show code");
+    ui.event(UiEvent::Text("```rust\nfn main() {}\n```".into()));
+    ui.finish_task();
+    draw(&mut ui, 100, 40);
+    let cache = ui.history_cache.as_ref().unwrap();
+    let (row, block) = cache
+        .decor
+        .iter()
+        .find_map(|(row, item)| match item {
+            Decor::CodeLabel(block) => Some((*row, block)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(row >= ui.history_top_row);
+    let y = ui.selection_area.y + (row - ui.history_top_row) as u16;
+    let label = ui.code_label(block, ui.selection_area.width);
+    let size = UnicodeWidthStr::width(label.as_str()) as u16;
+    let end = ui.selection_area.right() - PLAIN_RIGHT_GUTTER;
+    assert!(ui.code_at(end - size, y).is_some());
+    assert!(ui.code_at(end, y).is_none());
+}
+
+#[test]
+fn connecting_after_a_user_turn_starts_its_own_assistant_block() {
+    let mut ui = ui();
+    ui.add_user("你好");
+    ui.event(UiEvent::ModelStarted);
+    ui.running = true;
+    ui.phase = "waiting";
+    ui.received_model_output = false;
+    ui.phase_since = Some(std::time::Instant::now());
+    let buffer = draw(&mut ui, 100, 30);
+    let history = ui.selection_area;
+    let status_y = (history.y..history.bottom())
+        .find(|&y| {
+            (history.x..history.right())
+                .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+                .contains("Connecting")
+        })
+        .expect("activity line should be visible");
+
+    // The row above the activity is the terminal-background separator, not
+    // part of the user message surface.
+    assert_eq!(
+        buffer.cell((history.x + 1, status_y - 1)).unwrap().bg,
+        ui.active_colors().background
+    );
+    // The activity is a new assistant block with its own cyan rail.
+    assert_eq!(
+        buffer.cell((history.x + 1, status_y)).unwrap().symbol(),
+        "▎"
+    );
+    assert_eq!(
+        buffer.cell((history.x + 1, status_y)).unwrap().fg,
+        ui.message_colors().assistant_rail
+    );
+    assert_eq!(
+        buffer.cell((history.x + 1, status_y)).unwrap().bg,
+        ui.message_colors().surface
+    );
+    // The last decorated user row ends before the separator.
+    let last_user = ui
+        .history_cache
+        .as_ref()
+        .unwrap()
+        .decor
+        .iter()
+        .filter_map(|(row, item)| matches!(item, Decor::Surface(Surface::Message)).then_some(*row))
+        .max()
+        .unwrap();
+    let last_user_y = history.y + (last_user - ui.history_top_row) as u16;
+    assert!(last_user_y + 1 < status_y);
+    assert_eq!(
+        buffer.cell((history.x + 1, last_user_y)).unwrap().fg,
+        ui.message_colors().user_rail
+    );
+}

@@ -40,6 +40,27 @@ async fn read_limited_text(response: reqwest::Response, limit: usize) -> Result<
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
+/// Error bodies are diagnostic only. Keep the HTTP status/Retry-After even
+/// when a gateway returns a large HTML page; truncate the body instead of
+/// turning a classified 4xx/5xx into an untyped read failure.
+async fn read_limited_error(response: reqwest::Response, limit: usize) -> Result<String> {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::with_capacity(limit.min(4096));
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("model error response body failed")?;
+        let remaining = limit.saturating_sub(body.len());
+        if remaining == 0 {
+            break;
+        }
+        let take = chunk.len().min(remaining);
+        body.extend_from_slice(&chunk[..take]);
+        if take < chunk.len() {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApiProtocol {
     Chat,
@@ -1539,9 +1560,12 @@ impl ModelClient {
                     .await
                     .context("text-generation model request failed")?;
                 let status = response.status();
-                let body = read_limited_text(response, MAX_APEC_RESPONSE_BYTES)
-                    .await
-                    .context("failed to read text-generation response")?;
+                let body = if status.is_success() {
+                    read_limited_text(response, MAX_APEC_RESPONSE_BYTES).await
+                } else {
+                    read_limited_error(response, MAX_ERROR_BODY_BYTES).await
+                }
+                .context("failed to read text-generation response")?;
                 if !status.is_success() {
                     let excerpt: String = body.chars().take(500).collect();
                     bail!("text-generation model returned HTTP {status}: {excerpt}");
@@ -1843,7 +1867,7 @@ impl ModelClient {
             let retry_after = parse_retry_after(&response);
             let text = tokio::time::timeout(
                 self.stream_idle_timeout,
-                read_limited_text(response, MAX_ERROR_BODY_BYTES),
+                read_limited_error(response, MAX_ERROR_BODY_BYTES),
             )
             .await
             .context("model error response body idle timeout")?

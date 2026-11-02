@@ -126,6 +126,27 @@ mod tests {
         assert_eq!(indexed(Color::Reset), Color::Reset);
     }
     #[test]
+    fn vivid_semantic_and_role_colours_keep_chroma_in_the_256_colour_fallback() {
+        for color in [
+            Color::Rgb(122, 162, 247),
+            Color::Rgb(134, 217, 154),
+            Color::Rgb(229, 181, 103),
+            Color::Rgb(240, 120, 134),
+            Color::Rgb(101, 199, 173),
+        ] {
+            let Color::Indexed(index) = indexed(color) else {
+                panic!("indexed fallback expected")
+            };
+            assert!((16..232).contains(&index));
+            let cube = index - 16;
+            let (r, g, b) = (cube / 36, (cube % 36) / 6, cube % 6);
+            assert!(
+                r != g || g != b,
+                "semantic colour collapsed to gray: {color:?}"
+            );
+        }
+    }
+    #[test]
     fn progress_only_targets_windows_terminal_and_clears_on_exit() {
         let mut feedback = Feedback {
             windows_terminal: false,

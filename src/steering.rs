@@ -71,6 +71,15 @@ impl TaskInput {
         inbox.steering = pending;
     }
 
+    /// Close a failed task before its terminal event. Any steering accepted
+    /// for the failed turn is discarded atomically, and late steers fail
+    /// immediately instead of being cleared silently by the guard drop.
+    pub(crate) fn seal(&self) {
+        let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
+        inbox.active = false;
+        inbox.steering.clear();
+    }
+
     /// Atomically seal a completed task. Once sealed, a late steering input
     /// is rejected rather than silently dropped during shutdown.
     pub(crate) fn finish_if_no_steering(&self) -> bool {
@@ -155,5 +164,21 @@ mod tests {
         );
         assert!(inbox.finish_if_no_steering());
         assert!(inbox.steer("late").is_err());
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn sealing_a_failed_task_rejects_and_clears_steering_atomically() {
+        let inbox = TaskInput::default();
+        let _active = inbox.start().unwrap();
+        inbox.steer("do not carry this into the next task").unwrap();
+        inbox.seal();
+        assert_eq!(inbox.pending_steering(), 0);
+        assert!(inbox.steer("late").is_err());
+        assert!(inbox.finish_if_no_steering());
     }
 }

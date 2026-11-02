@@ -5,8 +5,12 @@ use super::*;
 pub(super) struct ToolCard {
     pub lines: Vec<Line<'static>>,
     pub rows: Vec<(usize, String)>,
+    /// Header rows that expose the read-only snapshot panel. Plain limits
+    /// this to failures and unknown results; legacy retains every record.
+    pub inspect: Vec<(usize, String)>,
     pub preformatted: Vec<usize>,
     pub groups: Vec<(usize, String)>,
+    pub blocks: Vec<(usize, usize)>,
 }
 
 impl UiState {
@@ -58,16 +62,31 @@ impl UiState {
             Some(label) => format!("{label} · {summary}"),
             None => summary,
         };
+        let (label, color) = if self.plain_style {
+            self.semantic_step_label(marker)
+        } else {
+            ("", color)
+        };
+        let state_text = if self.plain_style {
+            format!("{marker} {label} ")
+        } else {
+            format!("{marker} ")
+        };
+        let extra = if self.plain_style {
+            UnicodeWidthStr::width(label) + 1
+        } else {
+            0
+        };
         let command = compact_line(
             &summary,
-            width.saturating_sub(6 + UnicodeWidthStr::width(elapsed.as_str())),
+            width.saturating_sub(6 + extra + UnicodeWidthStr::width(elapsed.as_str())),
         );
         if let Some(id) = entry.call_id.as_ref() {
             tool_rows.push((lines.len(), id.clone()));
         }
         lines.push(Line::from(vec![
             Span::styled(format!("  {caret} "), Style::default().fg(theme.faint)),
-            Span::styled(format!("{marker} "), Style::default().fg(color)),
+            Span::styled(state_text, Style::default().fg(color)),
             Span::styled(
                 command,
                 Style::default().fg(if entry.failed || status == "running" {
@@ -161,10 +180,13 @@ impl UiState {
                 let mut tab_column = 0;
                 let output = markdown::expand_tabs(output, &mut tab_column);
                 preformatted_rows.push(lines.len());
-                lines.push(body_line(Line::from(vec![
-                    Span::styled("│ ", Style::default().fg(theme.border)),
-                    Span::styled(output, output_style),
-                ])));
+                let mut spans = vec![Span::styled("│ ", Style::default().fg(theme.border))];
+                if self.plain_style && diff {
+                    spans.extend(self.plain_diff_spans(&output, theme));
+                } else {
+                    spans.push(Span::styled(output, output_style));
+                }
+                lines.push(body_line(Line::from(spans)));
             }
         }
     }
@@ -207,17 +229,26 @@ impl UiState {
                 .or_else(|| entry.started.map(|start| start.elapsed()))
                 .map(|duration| format!(" · {:.1}s", duration.as_secs_f64()))
                 .unwrap_or_default();
-            lines.push(Line::from(vec![
-                Span::styled("  ◇  ", Style::default().fg(theme.faint)),
+            let notice = Line::from(vec![
+                Span::styled("◇ ", Style::default().fg(theme.faint)),
                 Span::styled(heading, Style::default().fg(theme.muted)),
                 Span::styled(format!("{hint}{elapsed}"), Style::default().fg(theme.faint)),
-            ]));
+            ]);
+            lines.push(if self.plain_style {
+                body_line(notice)
+            } else {
+                Line::from(vec![
+                    Span::styled("  ◇  ", Style::default().fg(theme.faint)),
+                    Span::styled(heading, Style::default().fg(theme.muted)),
+                    Span::styled(format!("{hint}{elapsed}"), Style::default().fg(theme.faint)),
+                ])
+            });
             *reasoning_notice_shown = true;
             lines.push(Line::default());
         }
         if self.reasoning_expanded {
-            let prose = width.saturating_sub(5);
-            let prose = if self.full_width_prose() {
+            let prose = width.saturating_sub(if self.plain_style { 4 } else { 5 });
+            let prose = if self.plain_style || self.full_width_prose() {
                 prose
             } else {
                 super::super::tool_display::prose_width(prose)
@@ -252,7 +283,7 @@ impl UiState {
     }
 }
 
-fn interrupted(entry: &Entry) -> bool {
+pub(super) fn interrupted(entry: &Entry) -> bool {
     entry
         .details
         .contains("Session interrupted. Tool result is unknown;")
@@ -280,6 +311,9 @@ impl UiState {
     }
 
     pub(super) fn tool_card(&self, tools: &[&Entry], theme: Theme, width: usize) -> ToolCard {
+        if self.plain_style {
+            return self.plain_tool_records(tools, theme, width);
+        }
         let mut card = ToolCard::default();
         let Some(first) = tools.first() else {
             return card;
@@ -295,9 +329,10 @@ impl UiState {
             .iter()
             .any(|e| interrupted(e) || super::super::tool_display::has_diagnostic(&e.details));
         let expanded = self.tools_expanded || self.expanded_tool_groups.contains(key);
-        let show = expanded || running || tools.len() == 1;
+        let show = expanded || (running && !self.plain_style) || tools.len() == 1;
         let any_important = tools.iter().any(|entry| {
             entry.failed
+                || (self.plain_style && entry.title.ends_with(" · running"))
                 || interrupted(entry)
                 || super::super::tool_display::has_diagnostic(&entry.details)
                 || entry
@@ -318,6 +353,22 @@ impl UiState {
             } else {
                 ("✓", theme.success)
             };
+            let (label, ink) = if self.plain_style {
+                self.semantic_step_label(glyph)
+            } else {
+                ("", ink)
+            };
+            let state_text = if self.plain_style {
+                format!("{glyph} {label} ")
+            } else {
+                format!("{glyph} ")
+            };
+            let extra = if self.plain_style {
+                UnicodeWidthStr::width(label) + 1
+            } else {
+                0
+            };
+            let group_width = width.saturating_sub(extra);
             let duration = tools.iter().filter_map(|e| e.duration).sum::<Duration>();
             let elapsed = if tools.iter().any(|e| e.duration.is_some()) {
                 format!(" · {:.1}s", duration.as_secs_f64())
@@ -328,7 +379,17 @@ impl UiState {
             let step_word = language.text("steps", "步");
             let (summary, suffix) = if children_visible {
                 let failed_count = tools.iter().filter(|e| e.failed && !interrupted(e)).count();
-                let title = if running {
+                let title = if self.plain_style {
+                    if failed_count > 0 {
+                        format!(
+                            "{} {step_word} · {failed_count} {}",
+                            tools.len(),
+                            language.text("failed", "步失败")
+                        )
+                    } else {
+                        format!("{} {step_word}", tools.len())
+                    }
+                } else if running {
                     format!(
                         "{} {} {step_word}",
                         language.text("Running", "正在执行"),
@@ -350,7 +411,7 @@ impl UiState {
                 };
                 let summary = compact_line(
                     &title,
-                    width.saturating_sub(6 + UnicodeWidthStr::width(elapsed.as_str())),
+                    group_width.saturating_sub(6 + UnicodeWidthStr::width(elapsed.as_str())),
                 );
                 (summary, elapsed)
             } else {
@@ -358,7 +419,7 @@ impl UiState {
                 let suffix = format!(" · {} {step_word}{elapsed}", tools.len());
                 let summary = compact_line(
                     &self.tool_summary(caption),
-                    width.saturating_sub(6 + UnicodeWidthStr::width(suffix.as_str())),
+                    group_width.saturating_sub(6 + UnicodeWidthStr::width(suffix.as_str())),
                 );
                 (summary, suffix)
             };
@@ -368,7 +429,7 @@ impl UiState {
                     format!("  {} ", if expanded { "▾" } else { "▸" }),
                     Style::default().fg(theme.faint),
                 ),
-                Span::styled(format!("{glyph} "), Style::default().fg(ink)),
+                Span::styled(state_text, Style::default().fg(ink)),
                 Span::styled(
                     summary,
                     Style::default().fg(if running || failed {
@@ -384,6 +445,7 @@ impl UiState {
         let limit = if tools.len() > 12 { tools.len() - 8 } else { 0 };
         for (index, entry) in tools.iter().enumerate() {
             let important = entry.failed
+                || (self.plain_style && entry.title.ends_with(" · running"))
                 || interrupted(entry)
                 || super::super::tool_display::has_diagnostic(&entry.details)
                 || entry

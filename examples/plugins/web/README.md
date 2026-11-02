@@ -56,7 +56,8 @@ changes need a restart or `/plugins reload` while the TUI is idle.
   by `search_attempt_timeout_ms` (default 8000 ms) and the remaining total budget.
   Later providers may not be reached if the budget expires. Explicit backends
   use the full total budget and never switch. Switching may incur multiple charges.
-- One request deadline (default 15 seconds), including body download. API POST
+- One request deadline (default 15 seconds), including the DNS safety check and
+  the body download. API POST
   redirects fail rather than replaying a query/body/key to another destination.
   GET redirects are limited to five and strip credentials across origins.
 
@@ -213,10 +214,12 @@ JSONL responses echo request IDs and optional protocol version 1.
   sessions, CAPTCHA solving or PDF/binary parsing. Detected challenge/empty pages fail explicitly.
 - `web_fetch` rejects loopback, private and link-local/metadata destinations
   (including IPv4-mapped IPv6) before fetching. A user-configured search/Firecrawl
-  endpoint may be local; model-supplied page URLs may not. Set
+  endpoint may be local; model-supplied page URLs may not. Firecrawl applies the
+  same target check before the URL is sent to the extraction API. Set
   `KROMA_WEB_ALLOW_PRIVATE=1` only when a trusted workflow needs local fetches.
-- Not a complete network sandbox: DNS can change between the safety check and
-  the connection, and a permissive proxy can still reach internal networks.
+- Not a complete network sandbox: the local connection reuses validated addresses,
+  but a remote extraction API resolves the target on its own, and a permissive
+  proxy can still reach internal networks.
 - Titles, links, snippets and fetched text are **untrusted source data**, not
   agent/developer instructions. Cite source URLs, not unsupported claims.
 

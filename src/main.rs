@@ -322,13 +322,19 @@ async fn main() -> Result<()> {
             let command_future = commands.execute_async(input, &mut agent, &input_handle);
             tokio::pin!(command_future);
             tokio::select! {
-                result = &mut command_future => result,
+                result = &mut command_future => Some(result),
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
-                    eprintln!("[command] Command cancelled");
-                    continue;
+                    None
                 }
             }
+        };
+        let Some(command_result) = command_result else {
+            if input.trim_start().starts_with("/compact") {
+                agent.cancel_compaction();
+            }
+            eprintln!("[command] Command cancelled");
+            continue;
         };
         match command_result {
             Ok(Some(reply)) => {
@@ -411,12 +417,18 @@ async fn drive_task(
     let result = {
         let mut task = Box::pin(agent.run(input, on_text));
         loop {
+            // `biased` ordering is load-bearing: the task future must be polled
+            // before stdin. Agent::run activates the steering inbox on its first
+            // poll, so polling stdin first would let already-buffered piped input
+            // (for example `/steer <text>`) reach TaskInput::steer before any
+            // task is active, and that instruction would be rejected and lost.
             tokio::select! {
                 biased;
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
                     break None;
                 }
+                result = &mut task => break Some(result),
                 next = async {
                     match lines.as_mut() {
                         Some(lines) => lines.next_line().await,
@@ -426,7 +438,6 @@ async fn drive_task(
                     Some(text) => handle_running_input(&input_handle, text.trim()),
                     None => stdin_closed = true,
                 },
-                result = &mut task => break Some(result),
             }
         }
     };
@@ -490,7 +501,7 @@ fn handle_running_input(handle: &TaskInput, text: &str) {
 }
 
 fn print_help() {
-    println!("Interactive TTY: default Ratatui TUI. --no-tui (or --cli): original line CLI. F2: switch theme; /theme reload: reread ~/.kroma/theme.toml.");
+    println!("Interactive TTY: default A / Plain TUI with full-width shared message backgrounds, continuous role rails and S2 semantic colours. --no-tui (or --cli): original line CLI. F2: switch base theme; /theme reload: reread ~/.kroma/theme.toml.");
     println!(
         "Kroma v0.4\n\nUsage:\n  kroma [task text]\n  kroma              Interactive session\n  kroma config set <name>  Save API settings (key is entered privately)\n  kroma plugins list       List installed plugins (no model connection needed)\n  kroma plugins install <dir>  Install local plugin directory (disabled)\n  kroma plugins check <dir>    Validate a plugin and run a bounded protocol smoke test\n  kroma plugins enable <id>   Enable for next startup\n  kroma plugins disable <id>  Disable for next startup\n  kroma plugins set <id> <key> <value>  Set plugin configuration\n  kroma plugins config <id>  Show plugin settings\n  kroma config list        List saved profiles\n  kroma config use <name>  Switch the default profile\n  kroma config show        Show effective settings and model limit sources without secrets\n  kroma diagnostics [--output <new-dir>]  Write a local-only allowlisted diagnostics bundle\n  kroma recover-context [session-id]  Reset unavailable custom context memory while preserving raw history
   kroma trust-project [--revoke]  Approve or revoke this project's .kroma/mcp.json\n\nControls:\n  Ctrl+C             Cancel active model request or shell task\n  /new               Start a separate saved conversation\n  /sessions          List saved conversations for this workdir\n  /resume <id>       Switch to a saved conversation (or default)\n  /clear             Clear only the active conversation\n  /exit              Quit\n\nOptional environment:\n  KROMA_MODEL                  Model ID (required without a saved profile)\n  KROMA_BASE_URL               OpenAI-compatible API base\n  KROMA_API_KEY                API key, overrides the selected profile\n  KROMA_PROVIDER_PROFILE       Select a saved profile by name\n  KROMA_CONFIG_FILE            Use an alternate JSON profiles path\n  KROMA_WORKDIR                Shell working directory (default current directory)\n  KROMA_PLUGIN_DIR             Override user plugin directory\n  KROMA_PLUGIN_TRY             Load one plugin directory for this run only\n  KROMA_SESSION_FILE           Override default session JSON path (named sessions share its directory)\n  KROMA_DEEPSEEK_THINKING      enabled, high or max; opt-in for DeepSeek-compatible endpoints\n  KROMA_PROFILE                Set to 1 for extra task profiling\n  KROMA_CONTEXT_WINDOW         Model context size in tokens (default 128000)\n  KROMA_OUTPUT_RESERVE_TOKENS  Tokens reserved for response (default min(4096, context/8))

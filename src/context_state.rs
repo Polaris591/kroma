@@ -75,6 +75,28 @@ impl CompactionState {
         if self.consumed_until < 1 || self.consumed_until > messages.len() {
             bail!("invalid consumed tool boundary");
         }
+        if self.covered_until > self.consumed_until {
+            bail!("compaction coverage cannot exceed consumed tool boundary");
+        }
+        // A checkpoint must end after the complete tool-call/result group.
+        // Validation is the load-path guard for the same invariant used when
+        // selecting a new boundary.
+        let previous = &messages[self.covered_until - 1];
+        if previous.role == "assistant"
+            && previous
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            bail!("compaction boundary splits an assistant tool call from its results");
+        }
+        if previous.role == "tool"
+            && messages
+                .get(self.covered_until)
+                .is_some_and(|message| message.role == "tool")
+        {
+            bail!("compaction boundary splits a parallel tool-result group");
+        }
         let mut end = 1;
         for segment in &self.summaries {
             if segment.text.trim().is_empty()
@@ -192,5 +214,61 @@ mod tests {
                 ..
             }) if strategy == "test.counter"
         ));
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::protocol::{FunctionCall, ToolCall};
+
+    fn tool_call() -> ToolCall {
+        ToolCall {
+            id: "call-1".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "shell".into(),
+                arguments: "{}".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn validation_rejects_coverage_beyond_consumed_boundary() {
+        let messages = vec![
+            Message::new("system", "system"),
+            Message::new("assistant", "answer"),
+        ];
+        let state = CompactionState {
+            summaries: vec![SummarySegment {
+                until: 2,
+                text: "checkpoint".into(),
+            }],
+            covered_until: 2,
+            consumed_until: 1,
+            ..CompactionState::default()
+        };
+        assert!(state.validate(&messages).is_err());
+    }
+
+    #[test]
+    fn validation_rejects_a_boundary_inside_a_tool_group() {
+        let mut assistant = Message::new("assistant", "");
+        assistant.tool_calls = Some(vec![tool_call()]);
+        let messages = vec![
+            Message::new("system", "system"),
+            assistant,
+            Message::tool("call-1".into(), "result".into()),
+        ];
+        let state = CompactionState {
+            summaries: vec![SummarySegment {
+                until: 2,
+                text: "checkpoint".into(),
+            }],
+            covered_until: 2,
+            consumed_until: 3,
+            ..CompactionState::default()
+        };
+        assert!(state.validate(&messages).is_err());
     }
 }

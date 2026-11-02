@@ -146,28 +146,33 @@ Global/project `AGENTS.md` are loaded as before. When the task explicitly
 references a nested project file, the applicable ancestor `AGENTS.md` files
 are also loaded, without scanning and injecting unrelated directories.
 
-### Graphite visual design
+### Plain visual design
 
-Kroma uses a graphite workspace, paper-white text and restrained blue/rose
-identity markers. Comfortable mode centres a 112-column workspace; prose is
-limited to 96 content cells while code and aligned tables may use the wider
-column. Wide mode still uses the terminal width. User messages have a short
-rose marker rather than a raised, bold message block; Kroma answers retain a
-blue mark without repeated role headings. The input dock has a subtle surface
-and one top divider. Commands, model profiles, sessions and files unfold
-immediately above it, with keyboard and mouse selection.
+Kroma uses a near-black or silver-white workspace with paper-neutral text and
+vivid semantic state colours. Both speakers share one neutral-gray message
+surface spanning the transcript width; prose wraps inside that surface instead
+of a fixed reading column. The surface stops three cells before the scrollbar,
+leaving a visible terminal-background gutter as the right safety margin. User
+messages use a violet rail and Kroma replies a cyan rail. One
+assistant turn has one `KROMA` label, and its rail continues through all text,
+reasoning, tool records and the completion status. The open input dock has one
+top divider and preserves the editor/IME geometry.
 
-Dark and light text/status tokens meet 4.5:1 contrast on all three base
-surfaces; selected picker text and tinted diffs have separate contrast tests.
-Mono respects the terminal's native foreground/background. The original
-three-wedge Logo is sampled at a compact size. Recent sessions are clickable
-by their actual ID; startup still opens home rather than silently resuming.
+Dark and light text/status tokens meet 4.5:1 contrast on the base, message and
+overlay surfaces; role rails meet 3:1. Selected picker text and tinted diffs
+have separate contrast tests. Mono respects the terminal's native
+foreground/background. Recent sessions are clickable by their actual ID;
+startup still opens home rather than silently resuming.
 
-Adjacent calls retain expandable step records and visible failure diagnostics.
-Use **/inspect** to browse calls, or **[view]** on a step in wider terminals,
-for a bounded, read-only command/output snapshot above the input. Esc closes
-inspection without changing the draft or reading position. **Ctrl+T** retains
-searchable full history and **Ctrl+O** retains in-place details. Inspecting a
+Every tool invocation keeps an individual record. Successful calls are one
+quiet line: semantic marker, effective command segments (shell `cd`/separator
+`echo` scaffolding removed) or tool name/arguments. Running, failed and
+diagnostic calls add a colored state word and a bounded output preview. Click
+the state marker (or use **Ctrl+O** for all calls) to expand that call's exact
+full Command/Output,
+while failure and unknown records also expose **[view]** for a read-only
+snapshot. **Ctrl+O**
+expands all details, **Ctrl+T** retains searchable full history. Inspecting a
 call never reruns it. Normal answers end quietly; execution records and failed
 or cancelled tasks retain their relevant status and real available duration.
 
@@ -183,6 +188,12 @@ the one-shot interface, and redirected/non-TTY input does not activate TUI.
 The UI reuses the same Agent Loop, Shell/MCP tools and session WAL, with no
 RPC server or UI plugin runtime. Ratatui 0.29 / Crossterm 0.28 preserve the
 project's Rust 1.85 toolchain; Cargo.lock pins the compatible dependency set.
+
+**A / Plain is now the default:** run `kroma` directly for the neutral,
+single-column interface with an open composer and **S2 semantic colours**. No preview launcher or
+`KROMA_TUI_STYLE` environment variable is required. Existing conversations,
+model settings and task execution semantics are unchanged. See
+[the style notes](reviews/tui-plain-study/README.md).
 
 The default interface supports streamed assistant text, formatted Markdown,
 compact Shell/MCP tool calls with expandable results (failed tools show the
@@ -203,18 +214,25 @@ sessions and the existing slash commands. Shortcuts:
   selection active while the viewport moves.
 - **Command index:** type `/` or run `/commands` to see commands with descriptions and argument hints. Up/Down selects; **Tab** (or Enter in this completion list) inserts the command without executing it. Type arguments, then Enter to run; Esc closes the list without clearing the draft.
 - **Interface language:** `/language zh` switches UI chrome, hints, help and command descriptions to Chinese; `/language en` switches to English; `/language` toggles. Model answers, tool output and upstream diagnostics are not translated. The default is English.
-- **Reading layout:** `/layout comfortable` centres a 112-column workspace on wide terminals and keeps prose within 96 content cells. Code and tables can use the wider column. `/layout wide` uses the available terminal width. Language and layout are saved in `~/.kroma/ui.toml`.
-- **Tool records:** adjacent calls share a step card keyed by its first call.
-  All-success groups collapse to one summary. Active calls expand with a live
-  tail; failures and warning/unknown results are always explained without
-  interaction. Click a group header to toggle steps, then a step's chevron to
-  disclose Command/Output; **Ctrl+O** discloses details globally. Groups longer
-  than 12 show the latest 8 steps plus a hidden-step hint, while retaining
-  failures and warnings. Reasoning remains one folded notice per turn and does
-  not split groups. Recovered interrupted tools use a yellow ⊘, not a red ✕.
-  Cancellation appears once in the completion row; saved model-facing notices
-  are localized for display without changing the WAL.
-- **Task status:** a subtle branded indicator follows the latest transcript entry while Kroma is thinking, using tools or streaming output. Execution/failure/cancellation and available elapsed time appear at the end of that turn, not in a floating status bar. Ordinary answers need no completion banner. When browsing older history, a separate navigation hint gives the return-to-latest shortcut and unseen update count without moving the reader.
+- **Reading layout:** Plain always uses the available workspace width for prose, code, tables and tools. The old `/layout comfortable|wide` preference remains accepted and saved for compatibility, but does not narrow Plain's message text. Language remains saved in `~/.kroma/ui.toml`.
+- **Tool records:** every invocation has its own record. Adjacent calls are
+  never merged into a group or a hidden-step count. Successful calls are one
+  quiet line with the semantic marker and effective command segments; generic
+  categories and "Done" are not repeated for every call, and shell `cd`/echo
+  scaffolding is removed from that line but kept when expanded. Successful
+  records carry no disclosure badge; the command is clipped before the right
+  safety margin so the tool block keeps a clean edge. Active, failed and
+  diagnostic records add a colored state word, meaningful elapsed time and a
+  bounded preview. Click the state marker to disclose that call's full
+  Command/Output; **Ctrl+O** discloses all details. Long
+  output folds inside that call only; raw results remain unchanged. Terminal
+  escape sequences are stripped for display, and remaining control bytes are
+  shown as visible placeholders rather than emitted to the terminal. Reasoning remains one folded notice per turn and
+  does not split records. Recovered interrupted tools use ⊘ rather than the
+  known-failure ✕; symbols and diagnostic text distinguish outcomes without
+  relying on colour alone. Cancellation appears once in the completion row;
+  saved model-facing notices are localized for display without changing the WAL.
+- **Task status:** a quiet S2 state prefix follows the latest transcript entry while Kroma is thinking, using tools or streaming output. The symbol and short state word use a muted semantic colour; commands, logs and elapsed time remain neutral. Execution/failure/cancellation and available elapsed time appear at the end of that turn, not in a floating status bar. Ordinary answers need no completion banner. When browsing older history, a separate navigation hint gives the return-to-latest shortcut and unseen update count without moving the reader.
 - **Ctrl+P** opens the searchable picker; **Tab** changes its category among
   commands, model profiles, sessions, and files. Type to filter, Up/Down to
   select, Enter to confirm, Esc to dismiss without deleting an unsent draft.
@@ -229,15 +247,20 @@ sessions and the existing slash commands. Shortcuts:
 - **F2** cycles dark/light/mono themes; `/theme dark`, `/theme light`,
   `/theme mono` select a theme immediately, and `/theme reload` rereads the
   on-disk theme. `/help` shows the TUI command summary.
-- The compact footer keeps **model**, **thinking level** and **Context**
-  visible at 80 columns. Context uses the total model window; 70–89% is warning
-  yellow and ≥90% is error red. A leading ~ is an estimate and — means unknown,
-  never a fabricated zero. **/usage** retains full token and cache details,
-  including the latest coding request; background titles and summaries cannot
-  overwrite coding metrics. Plugin statuses fit in wide footers and are also
-  available through /usage. **Shift+Tab** cycles thinking, or use /think high.
-- Model output streams as it arrives, with a subtle cursor and a branded
+- The single-row footer puts **model** and **thinking level** on the left,
+  **Context used/capacity** and the latest foreground **cache hit rate** on the
+  right. Long names and labels shorten before values are lost. Context uses the
+  total model window; only the reading uses warning colour at 70–89% and error
+  colour at 90% or above. Cache, model and thinking metadata stay neutral.
+  A leading ~ is an estimate and — means unknown, never a fabricated zero.
+  **/usage** retains full token, cache and plugin-status details; background
+  titles and summaries cannot overwrite coding metrics. **Shift+Tab** cycles
+  thinking, or use /think high.
+- Model output streams as it arrives, with a subtle cursor and a quiet
   activity indicator at the end of the transcript while the model is working.
+  A connecting/waiting status after a user turn starts its own assistant row,
+  separated by one terminal-background line and carrying the cyan Kroma rail;
+  activity after assistant content stays attached to that turn.
   Reasoning stays collapsed with one summary per user turn rather than one
   repeated banner after every tool call; Ctrl+R shows every reasoning segment.
   Reasoning interleaved with a tool group is collected immediately before its card. Completion reconciles the entry without duplication.
@@ -251,11 +274,19 @@ sessions and the existing slash commands. Shortcuts:
   While a task runs, submitted text steers it,
   `/steer text` explicitly steers, and `/queue task` adds a follow-up.
   **Ctrl+Q** quits when idle; `/exit` is also supported.
-- **Session chrome:** the two-row heading keeps session identity on the left
-  and project/branch/dirty state on the right; status survives narrow layouts.
-  The divider-only input dock preserves the editor/IME geometry. Home keeps the compact logo,
-  full working directory and up to three recent sessions when height permits.
-  Command pickers and plugin panels use a distinct overlay surface.
+- **Session chrome:** no persistent conversation heading or nested message
+  boxes. Both user messages and Kroma replies share the same slightly raised
+  neutral-gray surface across the transcript width, ending three cells before
+  the scrollbar to leave a visible terminal-background gutter. User messages
+  keep one blank padding row above and below and use a full-height violet rail. One Kroma turn has one cyan rail and one `KROMA` label, continuing
+  through wrapped text, paragraph gaps, code, reasoning, tool records and its
+  completion status. A terminal-background row separates consecutive turns, so
+  a new user message cannot look like part of the previous Kroma surface. Role
+  labels use the same identity colour but remain separate from execution-state
+  colours. Session identity stays in the terminal title. The open composer has one divider and preserves the
+  editor/IME geometry. Empty input has no placeholder text. Home keeps a simple
+  wordmark, working directory and up to three recent sessions when height permits.
+  Command pickers and plugin panels use a distinct neutral overlay surface.
 - **Git observations:** branch/dirty status and successful per-turn change
   summaries run asynchronously outside rendering, with 1.5-second command
   deadlines. A missing baseline, timeout or non-repository means no summary,
@@ -313,27 +344,24 @@ sessions and the existing slash commands. Shortcuts:
   clipboard data; this is generic desktop clipboard support, not a custom
   upload or remote clipboard service.
 
-The TUI `Context` status shows the latest request's share of the total context
-window (e.g. `Context 20%`), not cumulative session usage. `/usage` retains the
-full `100k / 500k` measurement and separate request totals. Estimates carry a `~`
+The TUI `Context` status shows the latest request's input against the total
+context window (e.g. `Context 100k/500k`), not cumulative session usage. `/usage`
+retains the detailed measurements and separate request totals. Estimates carry a `~`
 marker; unknown usage is shown as `—` or `unreported`, never zero. Output reserves
 still reduce the internal input/compaction budget, but do not reduce the
 displayed window or percentage base.
 
-The first theme change writes `~/.kroma/theme.toml`. AI can edit this file
-directly, then run `/theme reload` without recompiling Kroma. For example:
-
-```toml
-preset = "dark"
-accent = "#7ec6ec"
-user = "#a2deb4"
-border = "#434e63"
-```
-
-Supported optional color keys are `accent`, `text`, `muted`, `border`,
-`background`, `user`, `tool`, and `code`, using six-digit `#RRGGBB` values.
-If the file is absent, Kroma uses its built-in dark theme without creating
-files. No widget/plugin/layout SDK is needed for theme changes.
+The first manual theme change writes `~/.kroma/theme.toml`; merely starting
+Plain does not create or rewrite it. The `dark` preset is near-black grayscale,
+`light` is silver-white grayscale, and `mono` respects native terminal colours.
+`/theme reload` rereads the selected preset. Former per-colour overrides and
+plugin colours remain stored for compatibility but are not applied by Plain,
+so old accent settings cannot recolour the base interface. S2 uses vivid,
+high-contrast blue for active state, green for confirmed success, amber for
+warnings/unknown results and red for failures. Links turn blue only on hover; diff colour is
+limited to addition/removal markers, not entire code lines. Native `mono`
+keeps terminal colours and all state symbols/words. See the
+[semantic-colour specification](reviews/tui-semantic-colors/README.md).
 
 Offline UI checks: `cargo test --locked` and (on Linux/macOS)
 `cargo build --release --locked && python3 benchmarks/tui_pty_smoke.py`.
@@ -414,13 +442,19 @@ Use `${ENV_NAME}` placeholders to resolve credentials from the environment.
 Host secret variables (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, cloud and
 provider credentials, database passwords, cookies, and `KROMA_*`) are stripped
 from local stdio children. Project configs are disabled until approved with
-`kroma trust-project`; approval is bound to the project path and the exact
-config bytes, so editing the file requires approval again. Approval and revoke
-operations share a cross-process lock, so concurrent writers cannot lose an
-update or revive a revoked project. Config reads stop one byte past the 1 MiB
-limit, so an oversized untrusted project file cannot allocate its full size
-before it is rejected. Project configs may only expand non-secret `MCP_*` and
-basic path environment variables; credential-shaped names are rejected. Set `KROMA_TRUST_PROJECT_MCP=1` to approve for one run.
+`kroma trust-project`; approval is bound to the project path, the exact config
+bytes, expanded `command`/`args`/`env` values, a project-contained working
+directory, the bytes of the local entry files and (within a bounded 256-file /
+32 MiB scope) the JS/TS modules they reach through explicit relative imports.
+Editing any of those files requires approval again;
+unreferenced `node_modules` trees are not walked. This format changed in v0.4,
+so re-run `kroma trust-project` after upgrading. Approval and revoke operations
+share a cross-process lock, so concurrent writers cannot lose an update or
+revive a revoked project. Config reads stop one byte past the 1 MiB limit, so
+an oversized untrusted project file cannot allocate its full size before it is
+rejected. Project configs may only expand non-secret `MCP_*` and basic path
+environment variables; credential-shaped names are rejected. Set
+`KROMA_TRUST_PROJECT_MCP=1` to approve for one run.
 
 The default MCP protocol version is `2025-11-25` and uses the standard
 initialize/initialized handshake. To use the newer stateless MCP API, set
@@ -428,8 +462,9 @@ initialize/initialized handshake. To use the newer stateless MCP API, set
 are supported, including JSON/SSE responses, tool-list pagination and tool
 calls. Tools are named `mcp__<server>__<tool>`; a server that fails to start
 or list its tools is skipped with a warning rather than disabling Shell.
-MCP calls have a 120-second timeout; configs, stdio/SSE frames, HTTP bodies,
-tool results and images have explicit size limits.
+MCP control/startup requests have a 120-second timeout. Tool calls have no
+arbitrary hard deadline and run until the Agent task is cancelled; configs,
+stdio/SSE frames, HTTP bodies, tool results and images have explicit size limits.
 MCP resources, prompts, sampling, elicitation, and OAuth discovery are not
 implemented. Local/remote MCP servers may execute arbitrary operations
 under their configured credentials; only connect servers you intend to use.
@@ -443,8 +478,9 @@ Agent Skills are discovered at Kroma startup from these directories:
 
 Later directories override earlier ones for the same skill name. The
 `SKILL.md` must contain YAML frontmatter with `name` (matching the folder)
-and `description`. Kroma inserts **only** this metadata into its system
-prompt and registers a `load_skill` tool. The model should invoke the tool
+and a single-line `description` (no control characters), and is limited to
+1 MiB. Kroma inserts **only** this metadata into its system prompt and
+registers a `load_skill` tool. The model should invoke the tool
 for a relevant task before using the full instructions. The tool reads the
 current SKILL.md body and returns its directory, so referenced
 `references/`, `scripts/` and `assets/` files can be read through Shell

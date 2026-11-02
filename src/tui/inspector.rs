@@ -92,9 +92,13 @@ impl UiState {
             return None;
         }
         let width = UnicodeWidthStr::width(self.inspection_label()) as u16;
-        if column < self.selection_area.right().saturating_sub(width + 1)
-            || column >= self.selection_area.right().saturating_sub(1)
-        {
+        let margin = if self.plain_style {
+            PLAIN_RIGHT_GUTTER
+        } else {
+            1
+        };
+        let end = self.selection_area.right().saturating_sub(margin);
+        if column < end.saturating_sub(width) || column >= end {
             return None;
         }
         let wrapped = self.history_top_row + usize::from(row - self.selection_area.y);

@@ -1115,7 +1115,12 @@ impl Compression {
         next.consumed_until = next.consumed_until.max(boundary);
         next.cleared_tools.retain(|&index| index >= boundary);
         next.revision = next.revision.saturating_add(1);
-        PersistedContext::Builtin(next.clone()).validate(messages)?;
+        if let Err(error) = PersistedContext::Builtin(next.clone()).validate(messages) {
+            self.failed_this_turn = true;
+            return Err(
+                error.context("checkpoint state validation failed; original history preserved")
+            );
+        }
 
         let before = self.tokens(&self.view(messages));
         let after = self.tokens(&self.view_with_state(messages, &next));
@@ -1123,7 +1128,10 @@ impl Compression {
             self.failed_this_turn = true;
             bail!("checkpoint did not reduce the projected context; original history preserved");
         }
-        store.commit(&PersistedContext::Builtin(next.clone()))?;
+        if let Err(error) = store.commit(&PersistedContext::Builtin(next.clone())) {
+            self.failed_this_turn = true;
+            return Err(error.context("checkpoint commit failed; original history preserved"));
+        }
         self.state = next;
         self.measured = None;
         self.failed_this_turn = false;

@@ -101,6 +101,32 @@ test("timeouts include a useful error code without leaking URL secrets", async (
   });
 });
 
+test("the request deadline also bounds the DNS safety lookup", async () => {
+  const dns = require("node:dns");
+  const realLookup = dns.promises.lookup;
+  const allow = process.env.KROMA_WEB_ALLOW_PRIVATE;
+  delete process.env.KROMA_WEB_ALLOW_PRIVATE;
+  let lookups = 0;
+  dns.promises.lookup = () => {
+    lookups++;
+    return new Promise(resolve => setTimeout(() => resolve([{address: "203.0.113.10", family: 4}]), 400));
+  };
+  try {
+    const started = Date.now();
+    await assert.rejects(download("https://slow.example.org/page", {timeout: 40}), error => {
+      assert.equal(error.code, "TIMEOUT");
+      assert.match(error.message, /DNS safety check/);
+      return true;
+    });
+    assert.ok(Date.now() - started < 300, "the lookup must not outlive the request deadline");
+    assert.equal(lookups, 1);
+  } finally {
+    dns.promises.lookup = realLookup;
+    if (allow === undefined) delete process.env.KROMA_WEB_ALLOW_PRIVATE;
+    else process.env.KROMA_WEB_ALLOW_PRIVATE = allow;
+  }
+});
+
 test("HTTP and unsupported-content errors cancel the unused response body", async () => {
   let cancellations = 0;
   const body = () => new ReadableStream({cancel() { cancellations++; }});
@@ -206,4 +232,129 @@ test("HTTP transport sends JSON POST bodies through a real local connection", {t
   });
   assert.deepEqual(received, {method: "POST", key: "local-test-key", type: "application/json", body: {query: "中文 query"}});
   assert.deepEqual(JSON.parse(response.text), {results: []});
+});
+
+test("real-socket DNS rebinding cannot redirect the connection to a private address", {timeout: 5000}, async t => {
+  const {createServer} = require("node:http");
+  const dns = require("node:dns");
+  let hits = 0;
+  const server = createServer((req, res) => { hits++; res.end("LOCAL_ONLY_MARKER"); });
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+
+  // First answer (validation) is public; every later answer is the local server.
+  // A transport that resolves again after validation is therefore rebound.
+  const hostname = "rebind.example.test";
+  let lookups = 0;
+  const answer = () => {
+    lookups++;
+    return lookups === 1
+      ? [{address: "203.0.113.10", family: 4}]
+      : [{address: "127.0.0.1", family: 4}];
+  };
+  const realLookup = dns.lookup;
+  const realPromiseLookup = dns.promises.lookup;
+  dns.lookup = function(host, options, callback) {
+    if (typeof options === "function") { callback = options; options = {}; }
+    if (host !== hostname) return realLookup.call(dns, host, options, callback);
+    const records = answer();
+    process.nextTick(() => options?.all ? callback(null, records)
+      : callback(null, records[0].address, records[0].family));
+  };
+  dns.promises.lookup = async (host, options) => {
+    if (host !== hostname) return realPromiseLookup.call(dns.promises, host, options);
+    return answer();
+  };
+  t.after(() => { dns.lookup = realLookup; dns.promises.lookup = realPromiseLookup; });
+
+  await download(`http://${hostname}:${port}/secret`, {
+    allowPrivateNetwork: false, timeout: 500
+  }).catch(error => {
+    assert.ok(["TIMEOUT", "NETWORK_ERROR"].includes(error.code), `unexpected error ${error.code}`);
+  });
+  assert.equal(hits, 0, "the local server must never be reached after rebinding");
+  assert.equal(lookups, 1, "the connection must reuse the validated address, not resolve again");
+});
+
+test("real network path follows redirects, cancels bodies and strips credentials across origins", {timeout: 5000}, async t => {
+  const {createServer} = require("node:http");
+  let credential;
+  const destination = createServer((req, res) => {
+    credential = req.headers.authorization;
+    res.writeHead(200, {"content-type": "text/plain"});
+    res.end("FINAL_BODY");
+  });
+  const source = createServer((req, res) => {
+    if (req.url === "/start") {
+      res.writeHead(302, {location: "/next"});
+      res.end("ignored");
+      return;
+    }
+    res.writeHead(302, {location: `http://127.0.0.1:${destination.address().port}/final`});
+    res.end("ignored");
+  });
+  t.after(() => {
+    source.closeAllConnections(); source.close();
+    destination.closeAllConnections(); destination.close();
+  });
+  await new Promise(resolve => destination.listen(0, "127.0.0.1", resolve));
+  await new Promise(resolve => source.listen(0, "127.0.0.1", resolve));
+
+  const response = await download(`http://127.0.0.1:${source.address().port}/start`, {
+    allowPrivateNetwork: true, headers: {Authorization: "Bearer secret"}
+  });
+  assert.equal(response.text, "FINAL_BODY");
+  assert.equal(response.url, `http://127.0.0.1:${destination.address().port}/final`);
+  assert.equal(credential, undefined, "credentials must not cross the redirect origin");
+});
+
+test("proxy CONNECT uses the validated address and keeps the request Host header", {timeout: 5000}, async t => {
+  const {createServer} = require("node:http");
+  const dns = require("node:dns");
+  const hostname = "proxy-target.example.test";
+  let authority, hostHeader, lookups = 0;
+  const proxy = createServer();
+  proxy.on("connect", (req, socket) => {
+    authority = req.url;
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    let buffered = "";
+    socket.on("data", chunk => {
+      buffered += chunk.toString("latin1");
+      if (!buffered.includes("\r\n\r\n")) return;
+      hostHeader = /host: ([^\r\n]+)/i.exec(buffered)?.[1];
+      socket.end("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\nConnection: close\r\n\r\nPROXIED!");
+    });
+  });
+  t.after(() => proxy.close());
+
+  const realPromiseLookup = dns.promises.lookup;
+  const realLookup = dns.lookup;
+  dns.promises.lookup = async (host, options) => host === hostname
+    ? [{address: "203.0.113.10", family: 4}] : realPromiseLookup.call(dns.promises, host, options);
+  dns.lookup = function(host, options, callback) {
+    if (typeof options === "function") { callback = options; options = {}; }
+    if (host !== hostname) return realLookup.call(dns, host, options, callback);
+    lookups++;
+    process.nextTick(() => callback(null, "127.0.0.1", 4));
+  };
+  const env = {...process.env};
+  t.after(() => {
+    dns.promises.lookup = realPromiseLookup;
+    dns.lookup = realLookup;
+    for (const key of ["KROMA_WEB_PROXY_READY", "HTTP_PROXY", "NO_PROXY"]) {
+      if (env[key] === undefined) delete process.env[key]; else process.env[key] = env[key];
+    }
+  });
+
+  await new Promise(resolve => proxy.listen(0, "127.0.0.1", resolve));
+  process.env.KROMA_WEB_PROXY_READY = "1";
+  process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.address().port}`;
+  delete process.env.NO_PROXY;
+
+  const response = await download(`http://${hostname}/page`, {allowPrivateNetwork: false, timeout: 3000});
+  assert.equal(response.text, "PROXIED!");
+  assert.equal(authority, "203.0.113.10:80", "CONNECT must target the validated address");
+  assert.equal(hostHeader, hostname, "the proxy must still see the original hostname");
+  assert.equal(lookups, 0, "the tunnel must not re-resolve the target hostname");
 });

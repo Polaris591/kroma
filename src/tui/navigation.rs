@@ -72,10 +72,14 @@ impl UiState {
                 let size = UnicodeWidthStr::width(label.as_str())
                     .min(self.selection_area.width.saturating_sub(2) as usize)
                     as u16;
-                (*line == wrapped
-                    && column >= self.selection_area.right().saturating_sub(size + 1)
-                    && column < self.selection_area.right().saturating_sub(1))
-                .then_some(block.raw.as_str())
+                let margin = if self.plain_style {
+                    PLAIN_RIGHT_GUTTER
+                } else {
+                    1
+                };
+                let end = self.selection_area.right().saturating_sub(margin);
+                (*line == wrapped && column >= end.saturating_sub(size) && column < end)
+                    .then_some(block.raw.as_str())
             })
     }
     pub(super) fn code_label(&self, block: &markdown::CodeBlock, width: u16) -> String {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applySnapshot, historyPageBelongsTo, isActiveTask } from './snapshot';
+import { applySnapshot, createOperationGuard, historyPageBelongsTo, isActiveTask } from './snapshot';
 import type { Bootstrap, SessionSnapshot } from './api';
 
 const snapshot = (id: string, input = 1): SessionSnapshot => ({
@@ -31,6 +31,19 @@ const bootstrap = (): Bootstrap => ({
   mcp_project: {configured: false, trusted: false},
 });
 
+const bootstrapFor = (project: string, sessionId: string): Bootstrap => ({
+  ...bootstrap(),
+  project,
+  snapshot: snapshot(sessionId),
+  sessions: [{id: sessionId, name: null, recent: true}],
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(r => { resolve = r; });
+  return {promise, resolve};
+}
+
 describe('desktop task completion snapshots', () => {
   it('updates the transcript and usage without replacing bootstrap data', () => {
     const before = bootstrap();
@@ -58,5 +71,67 @@ describe('desktop task completion snapshots', () => {
     expect(historyPageBelongsTo('A', 'B', 4, 4)).toBe(false);
     expect(historyPageBelongsTo('B', 'B', 3, 4)).toBe(false);
     expect(historyPageBelongsTo('B', undefined, 4, 4)).toBe(false);
+  });
+});
+
+describe('desktop whole-bootstrap operations', () => {
+  it('drops a refresh that resolves after a session switch', async () => {
+    const guard = createOperationGuard();
+    let visible = bootstrapFor('/project-A', 'session-A');
+
+    // The refresh is issued for session A but has not answered yet.
+    const refreshing = deferred<Bootstrap>();
+    const refreshPending = guard.settleBootstrap(guard.begin(), refreshing.promise);
+
+    const switched = await guard.settleBootstrap(
+      guard.begin(), Promise.resolve(bootstrapFor('/project-A', 'session-B')));
+    if (switched) visible = switched;
+
+    // The stale bootstrap now answers with the old session.
+    refreshing.resolve(bootstrapFor('/project-A', 'session-A'));
+    const stale = await refreshPending;
+    if (stale) visible = stale;
+
+    expect(stale).toBeNull();
+    expect(visible.snapshot?.session_id).toBe('session-B');
+  });
+
+  it('drops a bootstrap that resolves after a project switch', async () => {
+    const guard = createOperationGuard();
+    let visible = bootstrapFor('/project-A', 'session-A');
+
+    const refreshing = deferred<Bootstrap>();
+    const refreshPending = guard.settleBootstrap(guard.begin(), refreshing.promise);
+
+    const chosen = await guard.settleBootstrap(
+      guard.begin(), Promise.resolve(bootstrapFor('/project-B', 'session-A')));
+    if (chosen) visible = chosen;
+
+    refreshing.resolve(bootstrapFor('/project-A', 'session-A'));
+    const stale = await refreshPending;
+    if (stale) visible = stale;
+
+    expect(stale).toBeNull();
+    expect(visible.project).toBe('/project-B');
+  });
+
+  it('installs the newest bootstrap and never lets a passive reader win', async () => {
+    const guard = createOperationGuard();
+
+    // A rename is a passive reader: it must not supersede a newer switch.
+    const renaming = deferred<Bootstrap>();
+    const renamePending = guard.settleBootstrap(guard.current(), renaming.promise);
+    const switched = await guard.settleBootstrap(
+      guard.begin(), Promise.resolve(bootstrapFor('/project-B', 'session-B')));
+    renaming.resolve(bootstrapFor('/project-A', 'session-A'));
+
+    expect(switched?.snapshot?.session_id).toBe('session-B');
+    expect(await renamePending).toBeNull();
+
+    // The current operation still installs its own result.
+    const current = await guard.settleBootstrap(
+      guard.begin(), Promise.resolve(bootstrapFor('/project-A', 'session-A')));
+    expect(current?.snapshot?.session_id).toBe('session-A');
+    expect(current?.project).toBe('/project-A');
   });
 });

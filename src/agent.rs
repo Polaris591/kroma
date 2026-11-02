@@ -61,6 +61,9 @@ pub struct Agent {
     context_factory: Arc<dyn ContextFactory>,
     context_budget: ContextConfig,
     task_input: TaskInput,
+    /// A `run_with_attachments` future exists. It is cleared on normal return;
+    /// leaving it set after a dropped future is what makes `cancel` meaningful.
+    task_active: bool,
     usage: UsageMeter,
     model_report: Option<ModelReport>,
     cache_trace: Option<CacheTrace>,
@@ -314,6 +317,7 @@ impl Agent {
             context_factory,
             context_budget,
             task_input: TaskInput::default(),
+            task_active: false,
             usage: UsageMeter::default(),
             model_report: None,
             cache_trace: CacheTrace::from_env(),
@@ -354,6 +358,7 @@ impl Agent {
         self.compression = new_compression;
         self.context_budget = budget;
         self.messages = fresh;
+        self.task_active = false;
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::SessionCleared {
                 id: self.session_id(),
@@ -464,6 +469,25 @@ impl Agent {
             }
         }
         result
+    }
+
+    /// Settle an explicitly cancelled `/compact` future. The command future
+    /// can be dropped without calling `cancel()` (there is no user turn or
+    /// tool batch to finalize), so its checkpoint usage must be taken here
+    /// instead of leaking into the next task.
+    pub fn cancel_compaction(&mut self) {
+        let usage = self.compression.take_usage();
+        self.compression.abort();
+        if usage.requests > 0 {
+            if let Some(events) = &self.events {
+                events.on_event(RuntimeEvent::CompactionUsage {
+                    requests: usage.requests,
+                    input_tokens: usage.input,
+                    output_tokens: usage.output,
+                    cached_tokens: usage.cached,
+                });
+            }
+        }
     }
 
     pub fn workdir(&self) -> &std::path::Path {
@@ -622,6 +646,7 @@ impl Agent {
         self.session = next;
         self.messages = messages;
         self.compression = compression;
+        self.task_active = false;
         self.sync_session_context();
         self.catalog.remember_active(self.session_id())?;
         if let Some(events) = &self.events {
@@ -748,6 +773,7 @@ impl Agent {
         self.compression.abort();
         self.messages = shortened;
         self.compression = next_compression;
+        self.task_active = false;
         self.sync_session_context();
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::SessionRewound {
@@ -811,6 +837,7 @@ impl Agent {
         self.session = next;
         self.compression = context;
         self.messages = self.prompt.initial_history(&self.workdir);
+        self.task_active = false;
         self.sync_session_context();
         Ok(())
     }
@@ -857,6 +884,7 @@ impl Agent {
         self.messages = messages;
         self.compression = next_compression;
         self.context_budget = next_budget;
+        self.task_active = false;
         self.sync_session_context();
         self.catalog.remember_active(self.session_id())?;
         if let Some(events) = &self.events {
@@ -876,11 +904,14 @@ impl Agent {
     /// Called after the currently executing future has been dropped.
     /// Never replay commands interrupted partway through execution.
     pub fn cancel(&mut self) -> Result<()> {
-        self.compression.abort();
-        // An already completed checkpoint still cost tokens even when the
-        // subsequent foreground request is cancelled. Settle it here instead
-        // of carrying it into the next task or discarding it on session exit.
+        if !self.task_active {
+            return Ok(());
+        }
+        self.task_active = false;
+        // Take the checkpoint usage before aborting; a custom policy may clear
+        // its transient accounting in `abort`.
         let checkpoint = self.compression.take_usage();
+        self.compression.abort();
         if checkpoint.requests > 0 {
             crate::runtime_log!(
                 "[usage] cancelled task checkpoint: {} request(s) | input: {} | output: {} | cached: {}",
@@ -936,6 +967,7 @@ impl Agent {
         on_text: &mut (impl FnMut(&str) + Send),
     ) -> Result<String> {
         let _active = self.task_input.start()?;
+        self.task_active = true;
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::TaskStarted);
         }
@@ -946,7 +978,14 @@ impl Agent {
         let result = self
             .run_inner(user_input, attachments, on_text, &mut stats)
             .await;
+        // Reached only when the future was not dropped; a dropped future
+        // leaves this set so the host's `cancel` can finish the turn.
+        self.task_active = false;
         if result.is_err() {
+            // Early failures (context budget, prompt/attachment errors) must
+            // still leave a durable boundary after the user turn.
+            self.ensure_failed_turn_boundary();
+            self.task_input.seal();
             // Abandon unconsumed plugin lifecycle notifications. Built-in
             // checkpoints are synchronous and have nothing left to cancel.
             self.compression.task_failed();
@@ -1006,6 +1045,11 @@ impl Agent {
         if let Err(error) = self.catalog.remember_active(self.session_id()) {
             crate::runtime_log!("[session] unable to record recent conversation: {error:#}");
         }
+        // The task's attachments are immutable and steering messages are
+        // explicitly excluded by the projection. Read small inline logs once,
+        // not once per tool round.
+        let inline_log_tokens =
+            crate::attachments::inline_log_extra_bytes(&self.messages)?.div_ceil(3);
 
         // Tools and prompt contributions cannot change during one run.
         // Calculate the extra budget once, rather than rebuilding the tool
@@ -1041,9 +1085,7 @@ impl Agent {
                     &self.messages,
                     self.model.accepts_images(),
                 ))
-                .saturating_add(
-                    crate::attachments::inline_log_extra_bytes(&self.messages)?.div_ceil(3),
-                );
+                .saturating_add(inline_log_tokens);
             let prepare_started = Instant::now();
             let mut view = self
                 .compression
@@ -1291,6 +1333,12 @@ impl Agent {
             }
 
             if calls.is_empty() {
+                // Seal only when this model turn truly ends the task. A
+                // steering message that arrived during streaming gets another
+                // turn, and finalization runs exactly once at the real boundary.
+                if !self.task_input.finish_if_no_steering() {
+                    continue;
+                }
                 let finish_started = Instant::now();
                 if let Err(error) = self
                     .compression
@@ -1307,11 +1355,6 @@ impl Agent {
                     );
                 }
                 stats.apec_finalize_time += finish_started.elapsed();
-                // Steering accepted during streaming or finalization should
-                // get another model turn, not be silently lost at completion.
-                if !self.task_input.finish_if_no_steering() {
-                    continue;
-                }
                 // The completed turn is already durable in the append journal.
                 // Avoid rewriting the entire transcript at every task boundary.
                 return Ok(text.unwrap_or_default());
@@ -1401,6 +1444,28 @@ impl Agent {
                     });
                 }
             }
+        }
+    }
+
+    fn ensure_failed_turn_boundary(&mut self) {
+        if !self
+            .messages
+            .last()
+            .is_some_and(|message| matches!(message.role.as_str(), "user" | "tool"))
+            || self.session.ensure_writable().is_err()
+        {
+            return;
+        }
+        self.messages.push(Message::new(
+            "assistant",
+            "[Kroma failed before completing this turn. The request was not completed; prior durable tool results are preserved and unfinished work has not been verified.]",
+        ));
+        if let Err(error) = self
+            .session
+            .append(&self.messages, &self.compression.state())
+        {
+            self.messages.pop();
+            crate::runtime_log!("[session] failed to save failure boundary: {error:#}");
         }
     }
 
@@ -2005,5 +2070,81 @@ mod tests {
         assert_eq!(stats.calls, 2);
         assert_eq!(stats.input, None);
         assert_eq!(stats.cached, None);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn cancel_without_an_active_task_does_not_mutate_history() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-cancel-noop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let catalog = SessionCatalog::from_default(dir.join("default.json"))?;
+        let model = ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())?;
+        let mut agent = Agent::with_catalog(model, dir.clone(), catalog)?;
+        let before = serde_json::to_vec(agent.messages())?;
+        agent.cancel()?;
+        assert_eq!(serde_json::to_vec(agent.messages())?, before);
+        drop(agent);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod failure_boundary_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn early_attachment_failure_leaves_a_durable_assistant_boundary() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-failure-boundary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let catalog = SessionCatalog::from_default(dir.join("default.json"))?;
+        let model = ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())?;
+        let mut agent = Agent::with_catalog(model, dir.clone(), catalog)?;
+        let attachment = serde_json::json!({
+            "type":"kroma_attachment",
+            "kind":"log",
+            "name":"missing.log",
+            "path":dir.join("missing.log").display().to_string(),
+            "bytes":16
+        });
+        let error = agent
+            .run_with_attachments("inspect the missing log", &[attachment], &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("attachment missing"));
+        assert!(agent
+            .messages()
+            .last()
+            .is_some_and(|message| message.role == "assistant"
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("failed before completing this turn"))));
+        drop(agent);
+        let saved = SessionStore::open_at(dir.join("default.json"), &dir)?
+            .load()?
+            .expect("session exists");
+        assert!(saved
+            .messages
+            .last()
+            .is_some_and(|message| message.role == "assistant"));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 }

@@ -9,7 +9,7 @@
   } from '@lucide/svelte';
   import { api, type Bootstrap, type DesktopEvent, type StreamEnvelope, type Message, type ProfileInput } from './lib/api';
   import { compactCount, cachePercentage } from './lib/format';
-  import { applySnapshot, historyPageBelongsTo, isActiveTask } from './lib/snapshot';
+  import { applySnapshot, createOperationGuard, historyPageBelongsTo, isActiveTask } from './lib/snapshot';
   import MessageView from './components/MessageView.svelte';
   import Markdown from './components/Markdown.svelte';
   import SettingsView from './components/SettingsView.svelte';
@@ -40,6 +40,10 @@
   let rename = false;
   let newTitle = '';
   let taskGeneration = 0;
+  // Token owner for operations that install a whole bootstrap. A late response
+  // from a superseded operation must not overwrite the project or session the
+  // user is looking at now.
+  const bootstrapGuard = createOperationGuard();
 
   $: snapshot = data?.snapshot ?? null;
   $: history = [...olderMessages, ...(snapshot?.messages ?? [])].filter(m => m.role !== 'system');
@@ -51,10 +55,23 @@
 
   function showError(e: unknown) { error = e instanceof Error ? e.message : String(e); }
   function toast(message: string) { notice = message; }
-  async function refresh() { data = await api.bootstrap(); syncHistoryState(); }
+  async function refresh() {
+    // The first bootstrap belongs to initialize(); a refresh during load would
+    // supersede it and skip the initial connect. Never supersede a busy
+    // project/session operation either: its finally block owns `busy`.
+    if (!initialized || busy || running) return;
+    const generation = bootstrapGuard.begin();
+    const next = await bootstrapGuard.settleBootstrap(generation, api.bootstrap());
+    if (!next) return;
+    data = next;
+    syncHistoryState();
+  }
   async function initialize() {
+    const generation = bootstrapGuard.begin();
     try {
-      data = await api.bootstrap();
+      const next = await bootstrapGuard.settleBootstrap(generation, api.bootstrap());
+      if (!next) return;
+      data = next;
       if (data.profiles.profiles.length || data.plugins.some(p => p.enabled && p.has_model)) {
         await doConnect();
       } else tab = 'settings';
@@ -100,69 +117,102 @@
   async function doConnect(name?: string) {
     if (busy || running) return;
     taskGeneration += 1;
+    const generation = bootstrapGuard.begin();
     busy = true; error = ''; notice = '';
     try {
-      data = await api.connect(name);
+      const next = await bootstrapGuard.settleBootstrap(generation, api.connect(name));
+      if (!next) return;
+      data = next;
       syncHistoryState();
       running = false; stream = ''; thinking = ''; activeTools = [];
       tab = 'chat'; await scrollDown();
     } catch (e) { showError(e); }
-    finally { busy = false; }
+    finally { if (bootstrapGuard.isCurrent(generation)) busy = false; }
   }
   async function approveProjectMcp() {
     if (busy || running) return;
     taskGeneration += 1;
+    const generation = bootstrapGuard.begin();
     busy = true; error = ''; notice = '';
     try {
       await api.trustProjectMcp();
+      if (!bootstrapGuard.isCurrent(generation)) return;
       // Rebuild the runtime so the newly trusted tools are registered.
-      data = await api.connect(data?.profiles.active ?? undefined);
+      const next = await bootstrapGuard.settleBootstrap(
+        generation, api.connect(data?.profiles.active ?? undefined));
+      if (!next) return;
+      data = next;
       syncHistoryState();
       mcpDismissed = false;
       toast('项目 MCP 配置已批准，工具已重新加载');
     } catch (e) { showError(e); }
-    finally { busy = false; }
+    finally { if (bootstrapGuard.isCurrent(generation)) busy = false; }
   }
   async function chooseProject() {
     if (busy || running) return;
+    // Serialize the dialog and the subsequent connection. Without this, two
+    // overlapping dialogs could install project B while doConnect still owns
+    // project A (busy was not set until after the dialog resolved).
+    busy = true; error = '';
+    const generation = bootstrapGuard.begin();
     try {
       const path = await open({directory: true, multiple: false, title: '选择工作目录'});
+      if (!bootstrapGuard.isCurrent(generation)) return;
       if (typeof path === 'string') {
         taskGeneration += 1;
-        data = await api.openProject(path);
+        const next = await bootstrapGuard.settleBootstrap(generation, api.openProject(path));
+        if (!next) return;
+        data = next;
         syncHistoryState();
         stream = ''; thinking = ''; activeTools = [];
+        // Release this owner before doConnect starts the next operation.
+        busy = false;
         if (data.profiles.profiles.length) await doConnect();
         else tab = 'settings';
       }
     } catch (e) {showError(e)}
+    finally { if (bootstrapGuard.isCurrent(generation)) busy = false; }
   }
   async function switchSession(id: string) {
     if (running || busy) return;
     taskGeneration += 1;
+    const generation = bootstrapGuard.begin();
     busy = true; error = '';
     try {
-      data = await api.switchSession(id);
+      const next = await bootstrapGuard.settleBootstrap(generation, api.switchSession(id));
+      if (!next) return;
+      data = next;
       syncHistoryState();
       stream = ''; thinking = ''; activeTools = [];
       tab = 'chat'; await scrollDown();
     } catch(e) {showError(e)}
-    finally {busy = false}
+    finally { if (bootstrapGuard.isCurrent(generation)) busy = false; }
   }
   async function newSession() {
     if (running || busy) return;
     taskGeneration += 1;
+    const generation = bootstrapGuard.begin();
     busy = true; error = '';
     try {
-      data = await api.newSession();
+      const next = await bootstrapGuard.settleBootstrap(generation, api.newSession());
+      if (!next) return;
+      data = next;
       syncHistoryState();
       stream = ''; thinking = ''; activeTools = []; attached = []; prompt = '';
       tab = 'chat'; await scrollDown();
     } catch(e) {showError(e)}
-    finally {busy = false}
+    finally { if (bootstrapGuard.isCurrent(generation)) busy = false; }
   }
   async function saveTitle() {
-    try { data = await api.renameSession(newTitle); rename = false; }
+    // A rename installs a full bootstrap too. Take the current token instead of
+    // starting a new operation, so a slow rename cannot restore a project or
+    // session the user has already left, and cannot cancel a newer switch.
+    const generation = bootstrapGuard.current();
+    try {
+      const next = await bootstrapGuard.settleBootstrap(generation, api.renameSession(newTitle));
+      if (!next) return;
+      data = next; rename = false;
+    }
     catch (e) { showError(e) }
   }
   function addPaths(paths: string[]) { attached = [...new Set([...attached, ...paths])].slice(0, 8); }
