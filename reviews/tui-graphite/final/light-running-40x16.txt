@@ -7,10 +7,10 @@
      • Preserved input and links        
      • Verified Unicode selection       
                                         
+                                        
+                                        
    ▲▲▲  Waiting for model · 0s          
-                                        
-                                        
  ────────────────────────────────────── 
-   › Steer this task, or /queue anoth   
+   › Enter queues the next task; /ste   
                                         
    test-model · high · Context —        

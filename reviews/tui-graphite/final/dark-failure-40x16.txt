@@ -8,8 +8,8 @@
      …                                  
      … Another 2 successful steps       
                                         
-   ✕  Task failed · see error above     
                                         
+   ✕  Task failed · see error above ·   
  ────────────────────────────────────── 
    › Describe a task, or / for comman   
                                         

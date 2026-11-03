@@ -110,13 +110,16 @@ fn surface_has_one_padding_row_each_side_and_a_continuous_rail() {
             ui.message_colors().user_rail
         );
     }
+    // Two terminal-background rows separate a user turn from the reply.
     let gap = rows.last().unwrap() + 1;
-    let y = visible_y(&ui, gap).unwrap();
-    assert_eq!(
-        buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
-        ui.active_colors().background
-    );
-    assert_eq!(rails(&ui, MessageRole::Assistant)[0], gap + 1);
+    for row in [gap, gap + 1] {
+        let y = visible_y(&ui, row).unwrap();
+        assert_eq!(
+            buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
+            ui.active_colors().background
+        );
+    }
+    assert_eq!(rails(&ui, MessageRole::Assistant)[0], gap + 2);
 }
 
 #[test]
@@ -421,7 +424,7 @@ fn identity_colours_are_distinct_from_execution_state_colours() {
 }
 
 #[test]
-fn completion_status_is_painted_inside_the_assistant_rail() {
+fn completion_status_is_pinned_plain_text_above_the_composer() {
     let mut ui = ui();
     ui.add_user("Run a tool");
     ui.event(UiEvent::Text("Starting the check.".into()));
@@ -432,23 +435,27 @@ fn completion_status_is_painted_inside_the_assistant_rail() {
     });
     ui.running = true;
     let buffer = draw(&mut ui, 100, 40);
-    let cache = ui.history_cache.as_ref().unwrap();
-    let tail = cache.text.lines.len().saturating_sub(2);
-    for row in [tail.saturating_sub(1), tail] {
-        let y = ui.selection_area.y + (row - ui.history_top_row) as u16;
-        assert_eq!(
-            buffer.cell((ui.selection_area.x + 1, y)).unwrap().symbol(),
-            "▎"
-        );
-        assert_eq!(
-            buffer.cell((ui.selection_area.x + 1, y)).unwrap().fg,
-            ui.message_colors().assistant_rail
-        );
-        assert_eq!(
-            buffer.cell((ui.selection_area.x + 2, y)).unwrap().bg,
-            ui.message_colors().surface
-        );
-    }
+    let y = (0..40u16)
+        .find(|&y| {
+            (0..100u16)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+                .contains("Running")
+        })
+        .expect("pinned status row");
+    // The status is plain text: no message surface and no rail.
+    assert_eq!(
+        buffer.cell((0, y)).unwrap().bg,
+        ui.active_colors().background
+    );
+    assert_ne!(buffer.cell((0, y)).unwrap().symbol(), "▎");
+    let text = (0..100u16)
+        .map(|x| buffer.cell((x, y)).unwrap().symbol())
+        .collect::<String>();
+    assert!(
+        text.contains("Running") || text.contains("执行中"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -569,42 +576,32 @@ fn connecting_after_a_user_turn_starts_its_own_assistant_block() {
     ui.phase_since = Some(std::time::Instant::now());
     let buffer = draw(&mut ui, 100, 30);
     let history = ui.selection_area;
-    let status_y = (history.y..history.bottom())
+    let status_y = (0..30u16)
         .find(|&y| {
-            (history.x..history.right())
+            (0..100u16)
                 .map(|x| buffer.cell((x, y)).unwrap().symbol())
                 .collect::<String>()
                 .contains("Connecting")
         })
         .expect("activity line should be visible");
 
-    // The row above the activity is the terminal-background separator, not
-    // part of the user message surface.
+    // The pinned activity is plain text on the terminal background.
     assert_eq!(
-        buffer.cell((history.x + 1, status_y - 1)).unwrap().bg,
+        buffer.cell((0, status_y)).unwrap().bg,
         ui.active_colors().background
     );
-    // The activity is a new assistant block with its own cyan rail.
-    assert_eq!(
-        buffer.cell((history.x + 1, status_y)).unwrap().symbol(),
-        "▎"
-    );
-    assert_eq!(
-        buffer.cell((history.x + 1, status_y)).unwrap().fg,
-        ui.message_colors().assistant_rail
-    );
-    assert_eq!(
-        buffer.cell((history.x + 1, status_y)).unwrap().bg,
-        ui.message_colors().surface
-    );
     // The last decorated user row ends before the separator.
+    // The status strip owns the last surface row; the user block ends before it.
+    let tail = u16::MAX as usize;
     let last_user = ui
         .history_cache
         .as_ref()
         .unwrap()
         .decor
         .iter()
-        .filter_map(|(row, item)| matches!(item, Decor::Surface(Surface::Message)).then_some(*row))
+        .filter_map(|(row, item)| {
+            (matches!(item, Decor::Surface(Surface::Message)) && *row < tail).then_some(*row)
+        })
         .max()
         .unwrap();
     let last_user_y = history.y + (last_user - ui.history_top_row) as u16;
@@ -612,5 +609,67 @@ fn connecting_after_a_user_turn_starts_its_own_assistant_block() {
     assert_eq!(
         buffer.cell((history.x + 1, last_user_y)).unwrap().fg,
         ui.message_colors().user_rail
+    );
+}
+
+#[test]
+fn plain_prose_uses_semantic_colours_for_headings_and_inline_code() {
+    let mut ui = ui();
+    ui.add_user("q");
+    ui.event(UiEvent::Text("# 标题\n\n正文 `代码`\n".into()));
+    let semantic = ui.semantic_colors();
+    let document = ui.history_document(ui.active_colors(), 80);
+    let mut heading = false;
+    let mut code = false;
+    for line in &document.0.lines {
+        for span in &line.spans {
+            if span.content.contains("标题") && span.style.fg == Some(semantic.link) {
+                heading = true;
+            }
+            if span.content.contains("代码") && span.style.fg == Some(semantic.warning) {
+                code = true;
+            }
+        }
+    }
+    assert!(heading, "heading must use the semantic link tone");
+    assert!(code, "inline code must use the semantic warning tone");
+}
+
+#[test]
+fn cancelled_notice_sits_directly_under_its_turn() {
+    let mut ui = ui();
+    ui.add_user("你好");
+    ui.entries.push(Entry::new(
+        Kind::Assistant,
+        "Kroma",
+        format!(
+            "{} Incomplete commands may have had side effects.]",
+            crate::agent::TASK_CANCELLED_PREFIX
+        ),
+    ));
+    ui.add_user("下一个问题");
+    draw(&mut ui, 100, 24);
+    let cache = ui.history_cache.as_ref().unwrap();
+    let notice = cache
+        .text
+        .lines
+        .iter()
+        .position(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("已取消") || span.content.contains("Cancelled"))
+        })
+        .expect("cancellation notice");
+    assert!(
+        cache
+            .decor
+            .iter()
+            .any(|(row, decor)| *row == notice - 1
+                && matches!(decor, Decor::Surface(Surface::Message))),
+        "no blank separator between the cancelled turn and its notice"
+    );
+    assert!(
+        cache.text.lines[notice + 1].spans.is_empty(),
+        "the next turn keeps its separator"
     );
 }

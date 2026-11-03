@@ -135,7 +135,7 @@ fn successful_calls_are_not_hidden_when_another_call_fails() {
 }
 
 #[test]
-fn live_preview_shows_the_latest_three_lines_without_losing_the_record() {
+fn live_preview_shows_the_latest_lines_without_losing_the_record() {
     let mut ui = ui();
     ui.event(UiEvent::ToolStarted {
         name: "shell".into(),
@@ -145,11 +145,11 @@ fn live_preview_shows_the_latest_three_lines_without_losing_the_record() {
     ui.event(UiEvent::ToolOutput {
         id: "live".into(),
         stream: "stdout".into(),
-        chunk: "old-1\nold-2\ncurrent-3\ncurrent-4\ncurrent-5\n".into(),
+        chunk: "old-1\nold-2\ncurrent-3\ncurrent-4\ncurrent-5\ncurrent-6\ncurrent-7\ncurrent-8\ncurrent-9\ncurrent-10\n".into(),
     });
     let card = ui.tool_card(&entries(&ui), ui.active_colors(), 100);
     let text = card_text(&card);
-    assert!(text.contains("Running") && text.contains("current-3") && text.contains("current-5"));
+    assert!(text.contains("Running") && text.contains("current-3") && text.contains("current-10"));
     assert!(!text.contains("old-1") && !text.contains("old-2"));
     assert_eq!(card.rows.len(), 1);
 }

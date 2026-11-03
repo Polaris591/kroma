@@ -87,10 +87,20 @@ impl TerminalScreen {
         state.taskbar_enabled = self.feedback.windows_terminal;
         self.feedback
             .update(&mut io::stdout(), &state.terminal_title(), state.running)?;
+        let cursor_was_hidden = state.hide_hardware_cursor;
+        state.hide_hardware_cursor = false;
         self.terminal.draw(|frame| {
             state.draw(frame);
             self.feedback.reduce_palette(frame.buffer_mut());
         })?;
+        if state.hide_hardware_cursor {
+            // Keep the position for IME composition, drop the blinking caret:
+            // the composer paints its own block.
+            let _ = execute!(io::stdout(), crossterm::cursor::Hide);
+        } else if cursor_was_hidden {
+            // The composer stopped drawing; return the caret the terminal owns.
+            let _ = execute!(io::stdout(), crossterm::cursor::Show);
+        }
         Ok(())
     }
 
@@ -152,7 +162,8 @@ impl Drop for TerminalScreen {
             DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen,
-            SetTitle("Kroma")
+            SetTitle("Kroma"),
+            crossterm::cursor::Show
         );
     }
 }
@@ -1093,13 +1104,19 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
     if input == "/pending" || input == "/queue list" {
         state.info("QUEUE", crate::commands::pending_text(task));
     } else if input == "/queue clear" {
-        state.note(format!(
-            "Cleared {} follow-up task(s)",
-            task.clear_followups()
-        ));
+        let cleared = task.clear_followups();
+        state.queued.clear();
+        state.note(format!("Cleared {cleared} follow-up task(s)"));
     } else if let Some(queued) = input.strip_prefix("/queue ") {
         match task.queue_followup(queued) {
-            Ok(position) => state.note(format!("Follow-up task queued at #{position}")),
+            Ok(position) => {
+                state.queued = task.queued();
+                let preview: String = queued.chars().take(40).collect();
+                state.note(state.preferences.language.text(
+                    format!("Queued #{position}: {preview}").as_str(),
+                    format!("已排队 #{position}：{preview}").as_str(),
+                ));
+            }
             Err(error) => state.note_with_level(
                 view::NoticeLevel::Error,
                 format!(
@@ -1108,12 +1125,7 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
                 ),
             ),
         }
-    } else if input.starts_with('/') && !input.starts_with("/steer ") {
-        state.note(state.preferences.language.text(
-            "During a task: type steering text, /steer text, or /queue task; Ctrl+C cancels",
-            "任务执行中可输入引导文字、/steer 指令或 /queue 后续任务；Ctrl+C 取消",
-        ));
-    } else {
+    } else if input.starts_with("/steer ") {
         let instruction = input.strip_prefix("/steer ").unwrap_or(&input);
         match task.steer(instruction) {
             Ok(()) => state.note(state.preferences.language.text(
@@ -1128,6 +1140,31 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
                         .preferences
                         .language
                         .text("Steering error", "引导指令错误")
+                ),
+            ),
+        }
+    } else if input.starts_with('/') {
+        state.note(state.preferences.language.text(
+            "During a task: Enter queues, /steer text redirects, /pending lists; Ctrl+C cancels",
+            "任务执行中：回车排队，/steer 引导，/pending 查看，Ctrl+C 取消",
+        ));
+    } else {
+        // Safe default: a message typed while running becomes the next task.
+        // Redirecting the running task is explicit via /steer.
+        match task.queue_followup(&input) {
+            Ok(position) => {
+                state.queued = task.queued();
+                let preview: String = input.chars().take(40).collect();
+                state.note(state.preferences.language.text(
+                    format!("Queued #{position}: {preview}").as_str(),
+                    format!("已排队 #{position}：{preview}").as_str(),
+                ));
+            }
+            Err(error) => state.note_with_level(
+                view::NoticeLevel::Error,
+                format!(
+                    "{}: {error:#}",
+                    state.preferences.language.text("Queue error", "队列错误")
                 ),
             ),
         }

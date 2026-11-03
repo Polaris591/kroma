@@ -8,9 +8,9 @@
    ▸ ◌ Run · echo step-2                
      ↳ test unicode_copy ... ok         
                                         
-   ▲▲▲  Running Run · echo step-2 ·     
                                         
+   ▲▲▲  Running Run · echo step-2 · 0   
  ────────────────────────────────────── 
-   › Steer this task, or /queue anoth   
+   › Enter queues the next task; /ste   
                                         
    test-model · high · Context —        

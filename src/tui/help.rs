@@ -27,7 +27,7 @@ Ctrl+Z / Ctrl+Y undoes/redoes draft edits; Ctrl+G opens the external editor.
 Alt+V pastes clipboard media/text; fallback attachment path closes with Esc.
 With a selection Ctrl+C copies first; otherwise clears/cancels/quits.
 Esc only closes popups/path input, never cancels an Agent task or clears a draft.
-While running: Enter steers; /queue task queues; only Ctrl+C cancels.
+While running: Enter queues; /steer text redirects; only Ctrl+C cancels.
 Ctrl+Q quits when idle; /exit also exits.
 /history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo
 /theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]
@@ -57,7 +57,7 @@ Ctrl+Z / Ctrl+Y 撤销/重做草稿；Ctrl+G 使用外部编辑器。
 Alt+V 粘贴图片或文本；附件路径输入用 Esc 关闭。
 有选区时 Ctrl+C 优先复制，否则清空草稿、取消任务或退出。
 Esc 只关闭弹层或路径输入，不取消 Agent 任务、不清空草稿。
-运行中 Enter 发送引导；/queue task 排队；只有 Ctrl+C 取消任务。
+运行中 Enter 排队；/steer 文本发送引导；只有 Ctrl+C 取消任务。
 空闲时 Ctrl+Q 退出；也可使用 /exit。
 /history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo
 /theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]

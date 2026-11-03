@@ -8,17 +8,17 @@
      • Preserved input and links                                                
      • Verified Unicode selection                                               
                                                                                 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
    ▲▲▲  Waiting for model · 0s                                                  
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
  ────────────────────────────────────────────────────────────────────────────── 
-   › Steer this task, or /queue another…                                        
+   › Enter queues the next task; /steer redirects…                              
                                                                                 
    test-model · Think high · Context —                                          

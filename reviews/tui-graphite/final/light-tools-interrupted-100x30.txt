@@ -8,22 +8,22 @@
      ⊘ Interrupted · result unknown (will not rerun automatically)                                  
      … Another 2 successful steps                                                                   
                                                                                                     
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
    ·  Execution finished · 35.3s                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
  ────────────────────────────────────────────────────────────────────────────────────────────────── 
    › Describe a task, or / for commands…                                                            
                                                                                                     

@@ -40,7 +40,10 @@ impl UiState {
                 .map_or(0, |start| start.elapsed().as_secs());
             let details = format!(" · {elapsed}s");
             let mut spans = vec![
-                Span::styled(format!("◌ {label}"), Style::default().fg(p.running)),
+                Span::styled(
+                    format!("{} {label}", self.activity_glyph()),
+                    Style::default().fg(p.running),
+                ),
                 Span::styled(details, Style::default().fg(colors.muted)),
             ];
             if self.last_output.elapsed() >= Duration::from_secs(8) {

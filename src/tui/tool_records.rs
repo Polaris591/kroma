@@ -415,7 +415,7 @@ impl UiState {
         if !running && !entry.failed && !warning {
             return;
         }
-        let limit = if running { 3 } else { 2 };
+        let limit = if running { 8 } else { 2 };
         let source = entry
             .details
             .lines()

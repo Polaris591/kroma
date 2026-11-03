@@ -9,16 +9,16 @@
    ▸ ◌ Run · echo step-2                                               [view]   
      ↳ test unicode_copy ... ok                                                 
                                                                                 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
    ▲▲▲  Running Run · echo step-2 · 0s                                          
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
  ────────────────────────────────────────────────────────────────────────────── 
-   › Steer this task, or /queue another…                                        
+   › Enter queues the next task; /steer redirects…                              
                                                                                 
    test-model · Think high · Context —                                          

@@ -51,6 +51,9 @@ impl UiState {
         if start.is_some() {
             return;
         }
+        // Keep the same two terminal-background rows that close a turn, so a
+        // user message and the reply are separated by the same gap.
+        lines.push(Line::default());
         let block_start = lines.len();
         lines.push(Line::default());
         decor.push((
@@ -79,8 +82,9 @@ impl UiState {
             lines.push(Line::default());
         }
         self.decorate_message(block_start, lines.len(), MessageRole::Assistant, decor);
-        // A terminal-background row keeps consecutive turns from merging into
-        // one long surface. It deliberately has no rail or message tint.
+        // Two terminal-background rows keep consecutive turns from merging
+        // into one long surface and give each block room to breathe.
+        lines.push(Line::default());
         lines.push(Line::default());
     }
 

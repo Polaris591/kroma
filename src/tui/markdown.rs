@@ -184,7 +184,33 @@ pub(super) struct Document {
     pub blocks: Vec<CodeBlock>,
 }
 
+/// Semantic colours for prose structure. Plain keeps the chrome grayscale
+/// while headings and inline code still carry meaning.
+#[derive(Clone, Copy)]
+pub(super) struct ProseColors {
+    pub heading: ratatui::style::Color,
+    pub code: ratatui::style::Color,
+}
+
+impl ProseColors {
+    pub(super) fn from_theme(theme: Theme) -> Self {
+        Self {
+            heading: theme.accent,
+            code: theme.warning,
+        }
+    }
+}
+
 pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Document {
+    render_document_with(source, theme, width, ProseColors::from_theme(theme))
+}
+
+pub(super) fn render_document_with(
+    source: &str,
+    theme: Theme,
+    width: usize,
+    prose: ProseColors,
+) -> Document {
     let mut lines = Vec::new();
     let mut link_spans = Vec::new();
     let mut preformatted_rows = Vec::new();
@@ -195,7 +221,7 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
     let body_fg = if theme.background == ratatui::style::Color::Reset {
         theme.text
     } else {
-        Theme::blend(theme.text, theme.muted, 0.74)
+        Theme::blend(theme.text, theme.muted, 0.35)
     };
     let mut styles = vec![Style::default().fg(body_fg)];
     let mut lists: Vec<ListState> = Vec::new();
@@ -265,8 +291,12 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
                         pulldown_cmark::HeadingLevel::H2 => "▸ ",
                         _ => "▍ ",
                     };
-                    spans.push(Span::styled(marker, Style::default().fg(theme.accent)));
-                    styles.push(Style::default().fg(theme.text).add_modifier(Modifier::BOLD));
+                    spans.push(Span::styled(marker, Style::default().fg(prose.heading)));
+                    styles.push(
+                        Style::default()
+                            .fg(prose.heading)
+                            .add_modifier(Modifier::BOLD),
+                    );
                 }
                 Tag::Paragraph => {
                     if let Some(top) = lists.first_mut() {
@@ -496,7 +526,9 @@ pub(super) fn render_document(source: &str, theme: Theme, width: usize) -> Docum
                 } else if theme.background == ratatui::style::Color::Reset {
                     Style::default().fg(theme.code).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme.accent_text).bg(theme.surface)
+                    // Amber reads as "verbatim" against prose without adding a
+                    // palette field that every theme would have to carry.
+                    Style::default().fg(prose.code).bg(theme.surface)
                 };
                 spans.push(Span::styled(value.into_string(), style));
             }

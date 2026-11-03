@@ -1,10 +1,6 @@
 //! The default Plain style is exercised through the real renderer, not HTML mocks.
 use super::*;
-use ratatui::{
-    backend::{Backend, TestBackend},
-    buffer::Buffer,
-    Terminal,
-};
+use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
 fn ui() -> UiState {
     let mut ui = UiState::new_default(
@@ -198,20 +194,31 @@ fn plain_composer_has_one_divider_and_no_raised_surface_or_empty_placeholder() {
     ui.add_user("hello");
     let buffer = draw(&mut ui, 80, 24);
     let rendered = text(&buffer);
-    assert!(!rendered.contains("Describe a task") && !rendered.contains("Steer this task"));
+    assert!(
+        !rendered.contains("Describe a task") && !rendered.contains("Enter queues the next task")
+    );
     assert!(!rendered.contains('┌') && !rendered.contains('└'));
     assert!(rendered.contains('─') && rendered.contains('›'));
     assert_eq!(ui.editor_area.height, 1);
+    // The caret is a software block on the first cell; the rest of the
+    // composer keeps the terminal background.
     assert_eq!(
         buffer
             .cell((ui.editor_area.x, ui.editor_area.y))
+            .unwrap()
+            .bg,
+        ui.active_colors().text
+    );
+    assert_eq!(
+        buffer
+            .cell((ui.editor_area.right() - 1, ui.editor_area.y))
             .unwrap()
             .bg,
         ui.active_colors().background
     );
     assert_eq!(ui.editor_area.y, 21);
     ui.running = true;
-    assert!(!text(&draw(&mut ui, 80, 24)).contains("Steer this task"));
+    assert!(!text(&draw(&mut ui, 80, 24)).contains("Enter queues the next task"));
 }
 
 #[test]
@@ -229,10 +236,16 @@ fn plain_hardware_cursor_stays_in_the_real_unicode_editor_geometry() {
         terminal.draw(|frame| ui.draw(frame)).unwrap();
         let area = ui.editor_area;
         let (_, x, y) = ui.editor.viewport(area.width, area.height);
-        let cursor = terminal.backend_mut().get_cursor_position().unwrap();
-        assert_eq!(cursor.x, area.x + x.min(area.width - 1));
-        assert_eq!(cursor.y, area.y + y.min(area.height - 1));
-        assert!(cursor.y < 23);
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((
+                area.x + x.min(area.width - 1),
+                area.y + y.min(area.height - 1),
+            ))
+            .unwrap();
+        assert_eq!(cell.bg, ui.active_colors().text);
+        assert!(area.y + y.min(area.height - 1) < 23);
         assert!(area.height <= 8);
     }
 }
@@ -372,7 +385,7 @@ fn plain_history_remains_pinned_while_streaming_and_survives_resize() {
             .collect(),
     ));
     draw(&mut ui, 80, 24);
-    ui.scroll(20);
+    ui.scroll_anchor = Some(3);
     draw(&mut ui, 80, 24);
     let anchor = ui.scroll_anchor;
     let top = ui.selection_rows[0].clone();
