@@ -5,8 +5,9 @@ Minimal AI agent harness written in Rust. This is a **new, independent project**
 Kroma supports Chat Completions, Responses and Anthropic Messages; streaming
 model/tool execution; a built-in Shell tool with optional MCP tools and
 on-demand Agent Skills; saved chat history; and lazy single-pass context compaction.
-It has an optional process-plugin host (tools, prompts, context/model strategies, commands, lifecycle hooks), but no web UI. Interactive terminals use
-a lightweight Rust TUI by default; scripts and one-shot commands remain CLI.
+It has an optional process-plugin host (tools, prompts, context/model strategies, commands, lifecycle hooks). Interactive terminals use
+a lightweight Rust TUI by default; scripts and one-shot commands remain CLI. An optional Tauri + Svelte
+desktop host lives in `desktop/` and is built by `.github/workflows/desktop.yml`.
 
 ## Terminal UI (Ratatui)
 
@@ -113,9 +114,11 @@ Plugin processes inherit the host environment by default, because the shipped
 web example reads provider keys from it. Set `KROMA_PLUGIN_ISOLATE_ENV=1` to
 remove credential-shaped variables from plugin children. Non-streaming plugin
 tools have no artificial deadline by default; set
-`KROMA_PLUGIN_TOOL_TIMEOUT_SECS` to a positive value for automation. Hook and
-ordinary plugin calls retain their 120-second limit, and cancellation always
-terminates the plugin process tree.
+`KROMA_PLUGIN_TOOL_TIMEOUT_SECS` to a positive value for automation. A tool may
+declare `timeout_secs`, and the smaller of that and the global value wins; the
+same total deadline covers streaming tools, and progress frames never extend
+it. Hook and ordinary plugin calls retain their 120-second limit, and
+cancellation always terminates the plugin process tree.
 
 The **V1 plugin host** exposes tools, Prompt/Hook rewriting, process-backed
 model Providers (including streaming tools/reasoning and image-reference

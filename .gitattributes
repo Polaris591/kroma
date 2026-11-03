@@ -1,0 +1,14 @@
+# One line-ending policy for the whole repository: LF in the object database
+# and in the working tree, except Windows scripts that must stay CRLF.
+# Icons and preview binaries are never normalised or diffed as text.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.dll binary

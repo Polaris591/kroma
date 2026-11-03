@@ -8,6 +8,13 @@ fn git(args: &[&str]) -> Option<String> {
     Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
 }
 
+// Review snapshots, benchmark scripts and long-form reports are tracked, but
+// they cannot change the compiled artifact. Watching them would rebuild the
+// crate whenever a screenshot or a report is edited.
+fn watched(path: &str) -> bool {
+    !path.starts_with("reviews/") && !path.starts_with("benchmarks/") && !path.starts_with("docs/")
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     // Git's HEAD may be a worktree file, not .git/HEAD. Track both the
@@ -35,7 +42,7 @@ fn main() {
                 .filter(|raw| !raw.is_empty())
             {
                 if let Ok(path) = std::str::from_utf8(raw) {
-                    if !path.contains('\n') {
+                    if !path.contains('\n') && watched(path) {
                         println!("cargo:rerun-if-changed={path}");
                     }
                 }

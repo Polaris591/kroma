@@ -13,3 +13,8 @@ __pycache__/
 *.log
 # Environment-specific Cargo source mirror; not part of project config
 /.cargo/config.toml
+
+# Generated review artifacts: screenshots and exported HTML studies are
+# reproducible locally and never belong to a source commit.
+/reviews/**/*.html
+/reviews/**/*.png

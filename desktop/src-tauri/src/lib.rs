@@ -686,4 +686,31 @@ mod tests {
         assert_eq!(saved.api_key.as_deref(), Some("old-key"));
         assert_eq!(saved.context_window, Some(200_000));
     }
+    fn idle_host(project: PathBuf) -> Host {
+        Host {
+            project,
+            generation: 0,
+            connect_epoch: 0,
+            runtime: None,
+            events: Arc::new(DesktopEvents::default()),
+            cancel: None,
+            task_input: None,
+        }
+    }
+
+    #[test]
+    fn a_running_task_blocks_session_and_plugin_changes() {
+        let project = std::env::temp_dir();
+        let mut host = idle_host(project);
+        assert!(
+            require_idle(&host).is_ok(),
+            "an idle host accepts the change"
+        );
+        let (cancel, _receiver) = watch::channel(false);
+        host.cancel = Some(cancel);
+        assert!(
+            require_idle(&host).is_err(),
+            "switching sessions or plugins while a task runs must be refused"
+        );
+    }
 }

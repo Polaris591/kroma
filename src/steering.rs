@@ -23,7 +23,7 @@ pub(crate) struct ActiveTask(TaskInput);
 
 impl Drop for ActiveTask {
     fn drop(&mut self) {
-        let mut inbox = self.0.inner.lock().unwrap();
+        let mut inbox = self.0.inner.lock().expect("steering inbox lock poisoned");
         inbox.active = false;
         // A cancelled/failed task must not leak instructions into a new task.
         inbox.steering.clear();
@@ -32,7 +32,7 @@ impl Drop for ActiveTask {
 
 impl TaskInput {
     pub(crate) fn start(&self) -> Result<ActiveTask> {
-        let mut inbox = self.inner.lock().unwrap();
+        let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
         if inbox.active {
             bail!("another Kroma task is still active");
         }
@@ -47,7 +47,7 @@ impl TaskInput {
         if text.trim().is_empty() {
             bail!("steering instruction cannot be empty");
         }
-        let mut inbox = self.inner.lock().unwrap();
+        let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
         if !inbox.active {
             bail!("no active task to steer");
         }
@@ -66,7 +66,7 @@ impl TaskInput {
     }
 
     pub(crate) fn restore_steering(&self, mut pending: VecDeque<String>) {
-        let mut inbox = self.inner.lock().unwrap();
+        let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
         pending.append(&mut inbox.steering);
         inbox.steering = pending;
     }
@@ -83,7 +83,7 @@ impl TaskInput {
     /// Atomically seal a completed task. Once sealed, a late steering input
     /// is rejected rather than silently dropped during shutdown.
     pub(crate) fn finish_if_no_steering(&self) -> bool {
-        let mut inbox = self.inner.lock().unwrap();
+        let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
         if !inbox.steering.is_empty() {
             return false;
         }
@@ -92,7 +92,11 @@ impl TaskInput {
     }
 
     pub fn pending_steering(&self) -> usize {
-        self.inner.lock().unwrap().steering.len()
+        self.inner
+            .lock()
+            .expect("steering inbox lock poisoned")
+            .steering
+            .len()
     }
 
     /// Queue a new task to be run by the CLI/host after the current task.
@@ -102,7 +106,7 @@ impl TaskInput {
         if text.trim().is_empty() {
             bail!("queued task cannot be empty");
         }
-        let mut inbox = self.inner.lock().unwrap();
+        let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
         inbox.followups.push_back(text);
         Ok(inbox.followups.len())
     }
@@ -110,7 +114,7 @@ impl TaskInput {
     pub fn queued(&self) -> Vec<String> {
         self.inner
             .lock()
-            .unwrap()
+            .expect("steering inbox lock poisoned")
             .followups
             .iter()
             .cloned()
@@ -118,11 +122,15 @@ impl TaskInput {
     }
 
     pub fn take_followup(&self) -> Option<String> {
-        self.inner.lock().unwrap().followups.pop_front()
+        self.inner
+            .lock()
+            .expect("steering inbox lock poisoned")
+            .followups
+            .pop_front()
     }
 
     pub fn clear_followups(&self) -> usize {
-        let mut inbox = self.inner.lock().unwrap();
+        let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
         let count = inbox.followups.len();
         inbox.followups.clear();
         count
