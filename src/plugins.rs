@@ -49,6 +49,16 @@ fn plugin_tool_timeout() -> Option<Duration> {
     optional_seconds_env("KROMA_PLUGIN_TOOL_TIMEOUT_SECS")
 }
 
+/// The smaller of the manifest declaration and the administrator limit.
+/// `None` keeps the documented unlimited behavior for ordinary plugin tools.
+fn effective_tool_timeout(declared: Option<u64>, global: Option<Duration>) -> Option<Duration> {
+    let declared = declared.map(Duration::from_secs);
+    match (declared, global) {
+        (Some(declared), Some(global)) => Some(declared.min(global)),
+        (declared, global) => declared.or(global),
+    }
+}
+
 fn optional_seconds_env(name: &str) -> Option<Duration> {
     let Ok(raw) = env::var(name) else {
         return None;
@@ -220,6 +230,11 @@ pub struct PluginToolSpec {
     pub description: String,
     #[serde(default)]
     pub streaming: bool,
+    /// Optional whole-call deadline for this tool, enforced by the host for
+    /// streaming and non-streaming calls alike. A global
+    /// `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` value caps it when smaller.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub replace: bool,
     #[serde(default = "empty_parameters")]
@@ -309,6 +324,16 @@ impl PluginManifest {
             }
             if !names.insert(tool.name.clone()) {
                 bail!("plugin '{}' declares tool '{}' twice", self.id, tool.name);
+            }
+            if tool
+                .timeout_secs
+                .is_some_and(|secs| !(1..=86_400).contains(&secs))
+            {
+                bail!(
+                    "plugin '{}' tool '{}' has an invalid timeout_secs; use 1..=86400",
+                    self.id,
+                    tool.name
+                );
             }
         }
         names.clear();
@@ -571,6 +596,12 @@ struct PluginState {
     enabled: BTreeSet<String>,
     #[serde(default)]
     enabled_projects: BTreeSet<String>,
+    /// Content approved for each enabled project plugin, keyed like
+    /// `enabled_projects`. Approval is bound to the exact manifest and local
+    /// script bytes, so a repository cannot gain code execution later by
+    /// editing a plugin after somebody enabled it.
+    #[serde(default)]
+    project_fingerprints: BTreeMap<String, String>,
     #[serde(default)]
     settings: BTreeMap<String, BTreeMap<String, toml::Value>>,
     #[serde(default)]
@@ -606,6 +637,30 @@ impl PluginState {
         }
         Ok(())
     }
+}
+
+fn mix_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash = (*hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+    }
+}
+
+/// Bind a project plugin approval to the bytes that will actually run: the
+/// manifest plus every local script the worker tracks. The worker scan is
+/// already bounded, so this stays O(plugin code) rather than O(repository).
+fn plugin_content_fingerprint(directory: &Path, worker: &PluginWorker) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    mix_bytes(
+        &mut hash,
+        &fs::read(directory.join("plugin.toml")).unwrap_or_default(),
+    );
+    let mut entrypoints: Vec<_> = worker.entrypoints.iter().collect();
+    entrypoints.sort_by(|left, right| left.0.cmp(&right.0));
+    for (path, fingerprint, _) in entrypoints {
+        mix_bytes(&mut hash, path.to_string_lossy().as_bytes());
+        mix_bytes(&mut hash, &fingerprint.to_le_bytes());
+    }
+    format!("{hash:016x}")
 }
 
 #[derive(Clone)]
@@ -795,10 +850,6 @@ impl PluginCatalog {
                                 manifest.id
                             ))
                         };
-                        let enabled = match &project_key {
-                            Some(key) => state.enabled_projects.contains(key),
-                            None => state.enabled.contains(&manifest.id),
-                        };
                         let mut settings = manifest.settings.clone();
                         settings.extend(
                             match &project_key {
@@ -823,6 +874,24 @@ impl PluginCatalog {
                             serde_json::to_value(settings)?,
                             data_root.join(&manifest.id),
                         ));
+                        let approved_content = project_key
+                            .as_ref()
+                            .map(|_| plugin_content_fingerprint(&dir, &worker));
+                        let enabled = match &project_key {
+                            Some(key) => {
+                                let approved = state.enabled_projects.contains(key);
+                                let unchanged = approved_content.as_deref()
+                                    == state.project_fingerprints.get(key).map(String::as_str);
+                                if approved && !unchanged {
+                                    warnings.push(format!(
+                                        "project plugin '{}' changed since it was approved; run `kroma plugins enable {}` again to approve the current code",
+                                        manifest.id, manifest.id
+                                    ));
+                                }
+                                approved && unchanged
+                            }
+                            None => state.enabled.contains(&manifest.id),
+                        };
                         let event_worker =
                             (!manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
                         plugins.push(Plugin {
@@ -1045,6 +1114,7 @@ impl PluginCatalog {
             if let Ok(directory) = project_dir.canonicalize() {
                 let key = format!("{}::{id}", directory.display());
                 found |= state.enabled_projects.remove(&key);
+                state.project_fingerprints.remove(&key);
             }
             if found {
                 state.save(&self.state_path)?;
@@ -1054,15 +1124,24 @@ impl PluginCatalog {
             }
         }
         let plugin = plugin.ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
-        let enabled_set = match &plugin.project_key {
-            Some(_) => &mut state.enabled_projects,
-            None => &mut state.enabled,
-        };
-        let key = plugin.project_key.as_deref().unwrap_or(id);
+        let key = plugin.project_key.as_deref().unwrap_or(id).to_owned();
+        let approved_content = plugin
+            .project_key
+            .as_ref()
+            .map(|_| plugin_content_fingerprint(&plugin.worker.directory, &plugin.worker));
         if enabled {
-            enabled_set.insert(key.to_owned());
+            if plugin.project_key.is_some() {
+                state.enabled_projects.insert(key.clone());
+            } else {
+                state.enabled.insert(key.clone());
+            }
+            if let Some(content) = approved_content {
+                state.project_fingerprints.insert(key, content);
+            }
         } else {
-            enabled_set.remove(key);
+            state.enabled_projects.remove(&key);
+            state.enabled.remove(&key);
+            state.project_fingerprints.remove(&key);
         }
         state.save(&self.state_path)?;
         Ok(format!(
@@ -1437,6 +1516,8 @@ impl PluginCatalog {
                     description: tool.description.clone(),
                     parameters: tool.parameters.clone(),
                     streaming: tool.streaming,
+                    timeout: effective_tool_timeout(tool.timeout_secs, plugin_tool_timeout()),
+                    data_dir: plugin.worker.data_dir.clone(),
                     worker: plugin.worker.clone(),
                 };
                 let result = if tool.replace {
@@ -2022,6 +2103,8 @@ struct PluginToolAdapter {
     description: String,
     parameters: Value,
     streaming: bool,
+    timeout: Option<Duration>,
+    data_dir: PathBuf,
     worker: Arc<PluginWorker>,
 }
 
@@ -2042,6 +2125,8 @@ impl Tool for PluginToolAdapter {
         let worker = self.worker.clone();
         let name = self.name.clone();
         let streaming = self.streaming;
+        let timeout = self.timeout;
+        let data_dir = self.data_dir.clone();
         let workdir = context.workdir.to_path_buf();
         let archive = context.archive.to_path_buf();
         let call_id = call.id.clone();
@@ -2054,54 +2139,108 @@ impl Tool for PluginToolAdapter {
             };
             let payload = json!({"type":if streaming {"tool_stream"} else {"tool"},
                 "name":name, "arguments":arguments, "workdir":workdir,
-                "archive":archive, "call_id":call_id});
+                "archive":archive, "call_id":call_id.clone()});
             if streaming {
                 let mut stream = worker.start_stream(payload);
-                let mut completed = None;
-                while let Some(frame) = stream.next().await {
-                    match frame["event"].as_str() {
-                        Some("output_delta") => {
-                            let channel = frame["stream"].as_str().unwrap_or("stdout");
-                            let delta = frame["delta"].as_str().unwrap_or("");
-                            if let Some(output) = context.on_output {
-                                output(channel, delta);
+                let consumed = async {
+                    let mut completed = None;
+                    let mut failure = None;
+                    while let Some(frame) = stream.next().await {
+                        match frame["event"].as_str() {
+                            Some("output_delta") => {
+                                let channel = frame["stream"].as_str().unwrap_or("stdout");
+                                let delta = frame["delta"].as_str().unwrap_or("");
+                                if let Some(output) = context.on_output {
+                                    output(channel, delta);
+                                }
+                            }
+                            Some("complete") => {
+                                completed = Some(serde_json::from_value::<PluginResponse>(
+                                    frame["result"].clone(),
+                                ));
+                                break;
+                            }
+                            Some("error") => {
+                                failure = Some(ToolResult::error(
+                                    frame["message"].as_str().unwrap_or("plugin stream failed"),
+                                ));
+                                break;
+                            }
+                            _ => {
+                                failure =
+                                    Some(ToolResult::error("unsupported plugin tool stream frame"));
+                                break;
                             }
                         }
-                        Some("complete") => {
-                            completed = Some(serde_json::from_value::<PluginResponse>(
-                                frame["result"].clone(),
-                            ));
-                            break;
-                        }
-                        Some("error") => {
-                            return ToolResult::error(
-                                frame["message"].as_str().unwrap_or("plugin stream failed"),
-                            );
-                        }
-                        _ => return ToolResult::error("unsupported plugin tool stream frame"),
                     }
+                    // Join the worker before discarding it: the process lock is
+                    // released here, so teardown stays off the async hot path.
+                    (stream.finish().await, completed, failure)
+                };
+                // The total deadline covers waiting, streaming and progress
+                // frames alike: heartbeats never extend it.
+                let (finished, completed, failure) = match timeout {
+                    None => consumed.await,
+                    Some(limit) => match tokio::time::timeout(limit, consumed).await {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            worker.discard_process_async();
+                            return tool_timeout_error(&name, limit, &data_dir, &call_id);
+                        }
+                    },
+                };
+                // A fatal stream outcome discards the worker; a normal result,
+                // including a task-level is_error, keeps it reusable.
+                if let Some(result) = failure {
+                    worker.discard_process();
+                    return result;
                 }
-                return match stream.finish().await {
-                    Err(error) => ToolResult::error(format!("plugin stream failed: {error:#}")),
+                return match finished {
+                    Err(error) => {
+                        worker.discard_process();
+                        ToolResult::error(format!("plugin stream failed: {error:#}"))
+                    }
                     Ok(()) => match completed {
                         Some(Ok(reply)) if !reply.is_error => ToolResult::ok(reply.content),
                         Some(Ok(reply)) => ToolResult::error(reply.content),
                         Some(Err(error)) => {
+                            worker.discard_process();
                             ToolResult::error(format!("invalid tool completion: {error:#}"))
                         }
-                        None => ToolResult::error("plugin stream ended without completion"),
+                        None => {
+                            worker.discard_process();
+                            ToolResult::error("plugin stream ended without completion")
+                        }
                     },
                 };
             }
             // Tool calls can legitimately exceed two minutes (e.g. a coding
-            // subagent). Cancellation still tears down the worker via guard.
-            match worker.invoke_async_tool(payload).await {
+            // subagent). The adapter owns the declared deadline; dropping the
+            // future still tears down the worker via its guard.
+            let reply = match timeout {
+                None => worker.invoke_async_tool(payload).await,
+                Some(limit) => {
+                    match tokio::time::timeout(limit, worker.invoke_async_tool(payload)).await {
+                        Ok(reply) => reply,
+                        Err(_) => return tool_timeout_error(&name, limit, &data_dir, &call_id),
+                    }
+                }
+            };
+            match reply {
                 Ok(response) if !response.is_error => ToolResult::ok(response.content),
                 Ok(response) => ToolResult::error(response.content),
                 Err(error) => ToolResult::error(format!("plugin execution failed: {error:#}")),
             }
         })
     }
+}
+
+fn tool_timeout_error(name: &str, limit: Duration, data_dir: &Path, call_id: &str) -> ToolResult {
+    ToolResult::error(format!(
+        "plugin tool '{name}' (call {call_id}) timed out after {}s; no result was returned, late output is discarded, and partial side effects may remain under {}",
+        limit.as_secs(),
+        data_dir.display()
+    ))
 }
 
 struct PluginToolHooks {
@@ -2505,9 +2644,11 @@ impl PluginWorker {
             .await
     }
 
+    /// Ordinary plugin tools are unbounded here: the tool adapter applies the
+    /// manifest or administrator deadline so streaming and non-streaming calls
+    /// share one rule.
     async fn invoke_async_tool(self: &Arc<Self>, message: Value) -> Result<PluginResponse> {
-        self.invoke_async_with_timeout(message, plugin_tool_timeout())
-            .await
+        self.invoke_async_with_timeout(message, None).await
     }
 
     async fn invoke_async_timeout(
@@ -2546,6 +2687,29 @@ impl PluginWorker {
         let response = outcome??;
         guard.armed = false;
         Ok(response)
+    }
+
+    /// Drop the current child so the next call starts a fresh worker. A
+    /// fatal stream outcome means the process state can no longer be trusted.
+    /// Only call this when no request holds the process lock.
+    ///
+    /// Dropping a `PluginProcess` runs the blocking whole-tree teardown, so the
+    /// detached process is released on its own thread, never on the caller.
+    fn discard_process(&self) {
+        let Ok(mut process) = self.process.lock() else {
+            return;
+        };
+        let Some(detached) = process.take() else {
+            return;
+        };
+        std::thread::spawn(move || drop(detached));
+    }
+
+    /// For paths that drop a request mid-flight: wait for the process lock on a
+    /// separate thread so the async caller is never blocked.
+    fn discard_process_async(self: &Arc<Self>) {
+        let worker = self.clone();
+        std::thread::spawn(move || worker.discard_process());
     }
 
     fn cancel_active_request(&self) {
@@ -2979,12 +3143,43 @@ base_url = "https://example.com""#,
             name: "hi".into(),
             description: "hello".into(),
             streaming: false,
+            timeout_secs: None,
             replace: false,
             parameters: empty_parameters(),
         });
         assert!(valid.validate().is_err());
         valid.command = Some("node".into());
         assert!(valid.validate().is_ok());
+        for invalid in [Some(0), Some(86_401)] {
+            valid.tools[0].timeout_secs = invalid;
+            assert!(valid.validate().is_err(), "timeout_secs={invalid:?}");
+        }
+        valid.tools[0].timeout_secs = Some(600);
+        assert!(valid.validate().is_ok());
+    }
+
+    #[test]
+    fn tool_deadline_is_the_smaller_of_manifest_and_administrator_limit() {
+        use std::time::Duration;
+        assert_eq!(effective_tool_timeout(None, None), None);
+        assert_eq!(
+            effective_tool_timeout(Some(600), None),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            effective_tool_timeout(None, Some(Duration::from_secs(30))),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            effective_tool_timeout(Some(600), Some(Duration::from_secs(30))),
+            Some(Duration::from_secs(30)),
+            "the administrator limit caps a larger manifest declaration"
+        );
+        assert_eq!(
+            effective_tool_timeout(Some(10), Some(Duration::from_secs(30))),
+            Some(Duration::from_secs(10)),
+            "a shorter manifest declaration still wins"
+        );
     }
 
     fn test_root(label: &str) -> PathBuf {

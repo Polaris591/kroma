@@ -62,8 +62,9 @@ Launch Kroma with the Exa/Brave key in its environment; environment changes need
 a restart. Plugin processes inherit the host environment by default so this
 example can read its provider key. Set `KROMA_PLUGIN_ISOLATE_ENV=1` to remove
 credential-shaped variables from plugin children when a plugin should use saved
-settings instead. `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` optionally caps a
-non-streaming plugin tool call; unset preserves the unlimited default.
+settings instead. `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` optionally caps any plugin
+tool call, and a manifest `timeout_secs` adds a per-tool deadline; the smaller
+of the two wins. Unset preserves the unlimited default for non-streaming tools.
 SearXNG must enable JSON search. Mwmbl, Bing RSS and DuckDuckGo HTML/Lite
 are keyless best-effort engines with unequal ranking quality; see the web plugin
 guide for the measured results on one network. Configure at least one keyed
@@ -108,17 +109,19 @@ checked separately using the [live acceptance set](web/evaluation.md).
 | `model-process` | Enable in a test-only project | Model backend implemented in a separate executable, with custom wire protocol (single final response) |
 | `model-stream` | Enable in a test-only project | Incremental text/reasoning/tool argument fragments, thinking levels, usage and cancellation |
 | `model-hook` | Enable and send a message | Request projection rewrite without mutating session history |
-| `subagents` | Ask for `subagent_run` or `subagent_parallel` | Runs separate Kroma processes/sessions, parallel task dispatch |
+| `subagents` | Let the model call `subagent` | Delegated tasks in separate sessions and working directories, bounded parallel queue, per-task evidence |
 | `memory` | `/remember text`, `/memories`, `/forgetnote 1` | Optional cross-session local notes, injected into model request projection |
 | `status` | `/plugins view status` | Declarative TUI footer label and an information panel |
 
 To try another plugin, run
 `kroma plugins install examples/plugins/<directory>`, then
 `kroma plugins enable <id>` and either restart or use `/plugins reload` while idle for tool/Prompt/command/UI/event changes. Only enable the plugins you intend
-to use. `subagents` uses `kroma --print` to start child agents; the Kroma
-binary must be available on PATH, or configure `kroma_bin` as an absolute path.
-It reuses your configured model provider, so running multiple agents incurs
-the corresponding model calls and token costs.
+to use. `subagents` starts child agents with `kroma --json`; the Kroma binary
+must be available on PATH, or configure `kroma_bin` as an absolute path. Each
+task gets its own session, working directory and evidence directory, and the
+host stops the whole batch at the declared `timeout_secs`. It reuses your
+configured model provider, so running multiple agents incurs the corresponding
+model calls and token costs.
 
 The `memory` plugin stores notes in its installed directory as
 `memory.json`, and does not use an AI model to decide what to remember. Notes
@@ -225,8 +228,9 @@ The basic fields:
 - `replace_prompt`: replace the base system Prompt; all plugins still add
   the built-in execution guidance unless they change it explicitly.
 - `[[tools]]`: `name`, `description`, JSON-style `[tools.parameters]`,
-  optional `replace = true` to replace an existing named tool, and optional
-  `streaming = true` to enable live output frames (`tool_stream`).
+  optional `replace = true` to replace an existing named tool, optional
+  `streaming = true` to enable live output frames (`tool_stream`), and
+  optional `timeout_secs` (1..=86400) for a host-enforced whole-call deadline.
 - `[[commands]]`: slash command `name` and optional `description`.
 - `hooks = ["before_tool_call", "after_tool_result", "before_model_request"]`:
   synchronous modifying hooks (each opt-in).
@@ -327,7 +331,10 @@ correlated JSONL frames (`protocol_version = 1`, matching `request_id`):
 
 `output_delta` is UI-only live progress; the final `complete.result.content`
 is the tool result persisted in the transcript. A terminal `error` frame with
-`message` is also supported. Cancellation terminates the process worker.
+`message` is also supported; it is fatal, so the host discards that worker and
+the next call starts a fresh process. A `complete` result with
+`is_error = true` is an ordinary task failure and keeps the worker reusable.
+Cancellation terminates the process worker.
 Legacy single-response tool plugins keep the original `tool` request.
 
 Modifying hooks:

@@ -1453,6 +1453,370 @@ process.stdout.write(JSON.stringify({content:"recovered"})+"\n");}});"#,
 }
 
 #[tokio::test]
+async fn a_fatal_error_replaces_the_worker_but_a_task_failure_does_not() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("restart");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        r#"id='restart'
+name='Restart'
+command='node'
+args=['main.js']
+[[tools]]
+name='restart'
+description='Test worker replacement'
+streaming=true
+timeout_secs=10
+"#,
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"const fs=require("node:fs"),path=require("node:path");
+fs.writeFileSync(path.join(__dirname,"worker.pid"),String(process.pid));
+require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+const r=JSON.parse(line);const frame=f=>process.stdout.write(JSON.stringify({protocol_version:1,request_id:r.request_id,...f})+String.fromCharCode(10));
+if(r.arguments?.fatal){frame({event:"error",message:"worker is unusable"});return;}
+if(r.arguments?.fail){frame({event:"complete",result:{content:"task failed",is_error:true}});return;}
+frame({event:"complete",result:{content:"ok",is_error:false}});});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("restart", true)?;
+    let loaded = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    loaded.contribute(&mut tools, &mut prompt);
+    let ctx = ToolContext {
+        workdir: temp.path(),
+        archive: temp.path(),
+        on_output: None,
+    };
+    let call = |arguments: &str, id: &str| ToolCall {
+        id: id.into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "restart".into(),
+            arguments: arguments.into(),
+        },
+    };
+    let pid_file = dir.join("worker.pid");
+    let first = tools.execute(&call(r#"{"ok":true}"#, "a"), ctx).await;
+    assert!(!first.is_error, "{}", first.content);
+    let pid_one: u32 = fs::read_to_string(&pid_file)?.trim().parse()?;
+
+    let failure = tools.execute(&call(r#"{"fail":true}"#, "b"), ctx).await;
+    assert!(failure.is_error, "a task failure is reported as an error");
+    let pid_two: u32 = fs::read_to_string(&pid_file)?.trim().parse()?;
+    assert_eq!(
+        pid_two, pid_one,
+        "an ordinary task failure reuses the worker"
+    );
+
+    let fatal = tools.execute(&call(r#"{"fatal":true}"#, "c"), ctx).await;
+    assert!(fatal.is_error);
+    assert!(
+        fatal.content.contains("worker is unusable"),
+        "{}",
+        fatal.content
+    );
+
+    let third = tokio::time::timeout(
+        Duration::from_secs(10),
+        tools.execute(&call(r#"{"ok":true}"#, "d"), ctx),
+    )
+    .await?;
+    assert!(!third.is_error, "{}", third.content);
+    let pid_three: u32 = fs::read_to_string(&pid_file)?.trim().parse()?;
+    assert_ne!(pid_three, pid_one, "a fatal error must replace the worker");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_deadline_tears_down_descendants_of_the_plugin_worker() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("tree");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        r#"id='tree'
+name='Tree teardown'
+command='node'
+args=['main.js']
+[[tools]]
+name='tree'
+description='Test descendant teardown'
+timeout_secs=5
+"#,
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"const {spawn}=require("node:child_process");
+const fs=require("node:fs");
+const path=require("node:path");
+require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+  const r=JSON.parse(line);
+  if(!r.arguments?.stall){process.stdout.write(JSON.stringify({content:"recovered"})+String.fromCharCode(10));return;}
+  const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});
+  fs.writeFileSync(path.join(__dirname,"grandchild.pid"),String(child.pid));
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("tree", true)?;
+    let loaded = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    loaded.contribute(&mut tools, &mut prompt);
+    let call = ToolCall {
+        id: "c".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "tree".into(),
+            arguments: r#"{"stall":true}"#.into(),
+        },
+    };
+    let ctx = ToolContext {
+        workdir: temp.path(),
+        archive: temp.path(),
+        on_output: None,
+    };
+    let failed = tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx)).await?;
+    assert!(failed.is_error);
+    let pid: u32 = fs::read_to_string(dir.join("grandchild.pid"))?
+        .trim()
+        .parse()?;
+    // A zombie on Linux has exited but may linger until reaped.
+    let probe = r#"const fs=require("fs");const p=Number(process.argv[1]);try{process.kill(p,0)}catch{console.log("gone");process.exit(0)}try{const s=fs.readFileSync("/proc/"+p+"/stat","utf8");const st=s.slice(s.lastIndexOf(")")+2)[0];if(st==="Z"){console.log("gone");process.exit(0)}}catch{console.log("gone");process.exit(0)}console.log("alive")"#;
+    let mut gone = false;
+    for _ in 0..50 {
+        let output = Command::new("node")
+            .args(["-e", probe, &pid.to_string()])
+            .output()?;
+        if String::from_utf8_lossy(&output.stdout).trim() == "gone" {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        gone,
+        "a descendant of the plugin worker survived the deadline"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fatal_stream_error_discards_the_worker_and_the_next_call_recovers() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("streamerror");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        r#"id='streamerror'
+name='Stream error'
+command='node'
+args=['main.js']
+[[tools]]
+name='streamerror'
+description='Test fatal stream error'
+streaming=true
+timeout_secs=5
+"#,
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin})
+.on("line",line=>{const r=JSON.parse(line);const frame=f=>process.stdout.write(JSON.stringify({protocol_version:1,request_id:r.request_id,...f})+String.fromCharCode(10));
+if(!r.arguments?.fatal){frame({event:"complete",result:{content:"recovered"}});return;}
+frame({event:"error",message:"worker is unusable"});});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("streamerror", true)?;
+    let loaded = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    loaded.contribute(&mut tools, &mut prompt);
+    let mut call = ToolCall {
+        id: "c".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "streamerror".into(),
+            arguments: r#"{"fatal":true}"#.into(),
+        },
+    };
+    let ctx = ToolContext {
+        workdir: temp.path(),
+        archive: temp.path(),
+        on_output: None,
+    };
+    let failed = tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx)).await?;
+    assert!(failed.is_error);
+    assert!(
+        failed.content.contains("worker is unusable"),
+        "{}",
+        failed.content
+    );
+    call.function.arguments = r#"{"fatal":false}"#.into();
+    let recovered =
+        tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx)).await?;
+    assert!(!recovered.is_error, "{}", recovered.content);
+    assert_eq!(recovered.content, "recovered");
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_plugin_tool_deadline_bounds_a_stuck_call_and_recovers() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("deadline");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        r#"id='deadline'
+name='Deadline'
+command='node'
+args=['main.js']
+[[tools]]
+name='deadline'
+description='Test declared deadline'
+timeout_secs=5
+"#,
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin})
+.on("line",line=>{let r=JSON.parse(line);if(!r.arguments?.stall){
+process.stdout.write(JSON.stringify({content:"recovered"})+String.fromCharCode(10));}});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("deadline", true)?;
+    let loaded = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    loaded.contribute(&mut tools, &mut prompt);
+    let mut call = ToolCall {
+        id: "c".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "deadline".into(),
+            arguments: r#"{"stall":true}"#.into(),
+        },
+    };
+    let ctx = ToolContext {
+        workdir: temp.path(),
+        archive: temp.path(),
+        on_output: None,
+    };
+    let started = std::time::Instant::now();
+    let failed = tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx))
+        .await
+        .context("the declared deadline must end the call")?;
+    assert!(failed.is_error);
+    assert!(
+        failed
+            .content
+            .contains("plugin tool 'deadline' (call c) timed out after 5s"),
+        "{}",
+        failed.content
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+    call.function.arguments = r#"{"stall":false}"#.into();
+    let recovered =
+        tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx)).await?;
+    assert!(!recovered.is_error, "{}", recovered.content);
+    assert_eq!(recovered.content, "recovered");
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_tool_deadline_ignores_progress_heartbeats() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("streamdeadline");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        r#"id='streamdeadline'
+name='Stream deadline'
+command='node'
+args=['main.js']
+[[tools]]
+name='streamdeadline'
+description='Test streaming deadline'
+streaming=true
+timeout_secs=5
+"#,
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin})
+.on("line",line=>{const r=JSON.parse(line);const frame=f=>process.stdout.write(JSON.stringify({protocol_version:1,request_id:r.request_id,...f})+String.fromCharCode(10));
+if(!r.arguments?.stall){frame({event:"complete",result:{content:"recovered"}});return;}
+setInterval(()=>frame({event:"output_delta",stream:"stdout",delta:"."}),50);});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("streamdeadline", true)?;
+    let loaded = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    loaded.contribute(&mut tools, &mut prompt);
+    let mut call = ToolCall {
+        id: "c".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "streamdeadline".into(),
+            arguments: r#"{"stall":true}"#.into(),
+        },
+    };
+    let ctx = ToolContext {
+        workdir: temp.path(),
+        archive: temp.path(),
+        on_output: None,
+    };
+    let started = std::time::Instant::now();
+    let failed = tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx))
+        .await
+        .context("heartbeats must not extend the streaming deadline")?;
+    assert!(failed.is_error);
+    assert!(
+        failed
+            .content
+            .contains("plugin tool 'streamdeadline' (call c) timed out after 5s"),
+        "{}",
+        failed.content
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+    call.function.arguments = r#"{"stall":false}"#.into();
+    let recovered =
+        tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx)).await?;
+    assert!(!recovered.is_error, "{}", recovered.content);
+    assert_eq!(recovered.content, "recovered");
+    Ok(())
+}
+
+#[tokio::test]
 async fn web_tools_roundtrip_through_kroma_to_local_http_server() -> Result<()> {
     // The fixture intentionally listens on loopback; production defaults to
     // rejecting private-network fetches. The plugin child inherits this flag.
@@ -3109,16 +3473,19 @@ require('node:readline').createInterface({input:process.stdin}).on('line',()=>{
         .context("event subscription missing")?;
     sink.on_event(kroma::events::RuntimeEvent::TaskStarted);
     let marker = dir.join("worker.pid");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // The file exists before its contents are written, so a single read can
+    // observe an empty file. Poll until the PID parses instead.
+    let pid: u32 = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if marker.exists() {
-                break;
+            if let Ok(text) = fs::read_to_string(&marker) {
+                if let Ok(pid) = text.trim().parse() {
+                    break pid;
+                }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await?;
-    let pid: u32 = fs::read_to_string(marker)?.parse()?;
     let started = std::time::Instant::now();
     drop(sink);
     assert!(
@@ -3146,5 +3513,66 @@ require('node:readline').createInterface({input:process.stdin}).on('line',()=>{
         exited,
         "stalled event worker {pid} survived subscription unload"
     );
+    Ok(())
+}
+
+/// Approval for a project plugin binds to the plugin bytes, not to its path.
+/// A checked-in plugin that changes after somebody enabled it must not run
+/// the new code on the next start without a fresh approval.
+#[test]
+fn a_project_plugin_needs_a_new_approval_after_its_code_changes() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("project");
+    let root = temp.path().join("plugins");
+    let project = workdir.join(".kroma/plugins/drift");
+    fs::create_dir_all(&project)?;
+    fs::write(
+        project.join("plugin.toml"),
+        "id='drift'\nname='Drift'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='drift_tool'\ndescription='Approval test'\n",
+    )?;
+    let entry = project.join("main.js");
+    fs::write(&entry, "process.stdin.resume();\n")?;
+    let state = temp.path().join("plugins.toml");
+    let load = || PluginCatalog::discover_at(root.clone(), state.clone(), &workdir);
+    let registered = |catalog: PluginCatalog| -> Result<(bool, Vec<String>)> {
+        let mut registry = ToolRegistry::builtin();
+        let warnings = catalog.contribute(&mut registry, &mut PromptComposer::default());
+        let present = registry
+            .definitions()
+            .iter()
+            .any(|definition| definition["function"]["name"] == "drift_tool");
+        Ok((present, warnings))
+    };
+
+    let (present, _) = registered(load()?)?;
+    assert!(!present, "a project plugin starts disabled");
+
+    load()?.set_enabled("drift", true)?;
+    let (present, warnings) = registered(load()?)?;
+    assert!(
+        present,
+        "an approved project plugin contributes its tool: {warnings:?}"
+    );
+
+    // A repository update replaces the code that was approved.
+    fs::write(&entry, "process.stdin.resume();require('node:fs');\n")?;
+    let drifted = load()?;
+    let discovery_warnings = drifted.warnings.clone();
+    let (present, warnings) = registered(drifted)?;
+    assert!(
+        !present,
+        "changed plugin code must not run without a new approval: {warnings:?}"
+    );
+    assert!(
+        discovery_warnings
+            .iter()
+            .any(|warning| warning.contains("changed since it was approved")),
+        "the refusal is explained: {discovery_warnings:?}"
+    );
+
+    // Re-enabling approves the current bytes again.
+    load()?.set_enabled("drift", true)?;
+    let (present, warnings) = registered(load()?)?;
+    assert!(present, "re-approval restores the plugin: {warnings:?}");
     Ok(())
 }
