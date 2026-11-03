@@ -11,11 +11,44 @@ use std::{
     env,
     io::{self, IsTerminal, Write},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, Lines, Stdin};
 
 type InputLines = Lines<BufReader<Stdin>>;
+
+/// Set when SIGTERM asked Kroma to stop. The CLI finishes the current turn
+/// (cancelling it like Ctrl+C) and then exits instead of returning to the prompt.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// `kill` must stop the same way Ctrl+C does. The listener is created once and
+/// shared, so a signal delivered between two waits is never lost, and installing
+/// it never leaves the process alive with a handler nobody polls.
+async fn terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::sync::{Mutex, OnceCell};
+        static LISTENER: OnceCell<Option<Mutex<tokio::signal::unix::Signal>>> =
+            OnceCell::const_new();
+        let listener = LISTENER
+            .get_or_init(|| async { signal(SignalKind::terminate()).ok().map(Mutex::new) })
+            .await;
+        match listener {
+            Some(listener) => {
+                let mut guard = listener.lock().await;
+                guard.recv().await;
+            }
+            // Without a handler the default terminate disposition stays.
+            None => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    std::future::pending::<()>().await;
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -246,6 +279,9 @@ async fn main() -> Result<()> {
     let input_handle = agent.task_input();
     let mut run_followups = false;
     loop {
+        if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            break;
+        }
         let queued = if run_followups {
             input_handle.take_followup()
         } else {
@@ -272,6 +308,10 @@ async fn main() -> Result<()> {
                     println!();
                     continue;
                 },
+                _ = terminate_signal() => {
+                    println!();
+                    break;
+                }
             }
         };
         let input = input.trim();
@@ -310,6 +350,10 @@ async fn main() -> Result<()> {
             let outcome = tokio::select! {
                 result = &mut shell => Some(result),
                 signal = tokio::signal::ctrl_c() => { signal?; None },
+                _ = terminate_signal() => {
+                    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+                    None
+                },
             };
             match outcome {
                 Some(Ok(output)) => println!("{}", serde_json::to_string_pretty(&output)?),
@@ -325,6 +369,10 @@ async fn main() -> Result<()> {
                 result = &mut command_future => Some(result),
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
+                    None
+                }
+                _ = terminate_signal() => {
+                    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
                     None
                 }
             }
@@ -428,6 +476,11 @@ async fn drive_task(
                     signal?;
                     break None;
                 }
+                _ = terminate_signal() => {
+                    eprintln!("[task] Stopped by SIGTERM.");
+                    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+                    break None;
+                }
                 result = &mut task => break Some(result),
                 next = async {
                     match lines.as_mut() {
@@ -444,7 +497,9 @@ async fn drive_task(
     match result {
         Some(result) => result.map(Some),
         None => {
-            agent.cancel()?;
+            if let Err(error) = agent.cancel() {
+                eprintln!("[task] Cancelled, but the session could not record it: {error:#}");
+            }
             Ok(None)
         }
     }

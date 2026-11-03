@@ -13,7 +13,7 @@ use crate::{
     prompt::PromptComposer,
     protocol::Message,
     provider::{Completion, ModelClient},
-    session::{recover_pending_calls, SessionStore},
+    session::{recover_pending_calls_with, InterruptedCall, SessionStore},
     sessions::SessionCatalog,
     shell,
     steering::TaskInput,
@@ -64,9 +64,20 @@ pub struct Agent {
     /// A `run_with_attachments` future exists. It is cleared on normal return;
     /// leaving it set after a dropped future is what makes `cancel` meaningful.
     task_active: bool,
+    /// The tool call currently executing and when it started. A cancelled turn
+    /// uses it to say how long the interrupted command may have been running.
+    active_tool: Option<ActiveTool>,
     usage: UsageMeter,
     model_report: Option<ModelReport>,
     cache_trace: Option<CacheTrace>,
+}
+
+/// The tool call Kroma dispatched but has not yet recorded a result for.
+#[derive(Debug, Clone)]
+struct ActiveTool {
+    id: String,
+    name: String,
+    started: Instant,
 }
 
 /// Completed conversation checkpoints. A checkpoint is the message prefix
@@ -318,6 +329,7 @@ impl Agent {
             context_budget,
             task_input: TaskInput::default(),
             task_active: false,
+            active_tool: None,
             usage: UsageMeter::default(),
             model_report: None,
             cache_trace: CacheTrace::from_env(),
@@ -931,7 +943,12 @@ impl Agent {
         }
         self.session.ensure_writable()?;
         let before = self.messages.len();
-        recover_pending_calls(&mut self.messages);
+        let interrupted = self.active_tool.take().map(|tool| InterruptedCall {
+            id: tool.id,
+            name: tool.name,
+            elapsed: tool.started.elapsed(),
+        });
+        recover_pending_calls_with(&mut self.messages, interrupted.as_ref());
         // Cancellation can fill several missing batched tool results. Persist
         // every synthesized "unknown" in order before the cancel note.
         for end in before + 1..=self.messages.len() {
@@ -1381,6 +1398,11 @@ impl Agent {
                     );
                 }
                 let tool_started = Instant::now();
+                self.active_tool = Some(ActiveTool {
+                    id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    started: tool_started,
+                });
                 let observer = self.events.clone();
                 let output_event = |stream: &str, chunk: &str| {
                     if let Some(events) = &observer {
@@ -1405,6 +1427,7 @@ impl Agent {
                         },
                     )
                     .await;
+                self.active_tool = None;
                 stats.tool_time += tool_started.elapsed();
                 stats.tools += 1;
                 if stats.profile {

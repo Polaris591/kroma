@@ -1293,12 +1293,28 @@ async fn execute_task(
             false
         }
         None => {
-            agent.cancel()?;
-            let message = state.preferences.language.text(
-                "Task cancelled; unconfirmed commands are not replayed",
-                "任务已取消；结果未确认的命令不会自动重跑",
-            );
-            task_notice = Some(("CANCELLED", message.to_owned()));
+            // A cancel that cannot be persisted must not become a hard exit:
+            // the turn still finishes and the storage failure is shown here.
+            match agent.cancel() {
+                Ok(()) => {
+                    let message = state.preferences.language.text(
+                        "Task cancelled; unconfirmed commands are not replayed",
+                        "任务已取消；结果未确认的命令不会自动重跑",
+                    );
+                    task_notice = Some(("CANCELLED", message.to_owned()));
+                }
+                Err(error) => {
+                    let message = format!(
+                        "{}: {error:#}",
+                        state.preferences.language.text(
+                            "Cancelled, but the session could not record it",
+                            "已取消，但会话无法记录"
+                        )
+                    );
+                    state.note_with_level(view::NoticeLevel::Error, &message);
+                    task_notice = Some(("CANCELLED", message));
+                }
+            }
             false
         }
     };

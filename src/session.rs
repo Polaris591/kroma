@@ -708,7 +708,29 @@ fn sync_parent(path: &Path) -> Result<()> {
 
 // An interrupted process must never replay a tool call whose side effects may
 // already have happened. Tell the model the result is unknown instead.
+/// A tool call that was still executing when its turn was cancelled. The
+/// elapsed time is the only evidence Kroma has about what may have happened.
+pub struct InterruptedCall {
+    pub id: String,
+    pub name: String,
+    pub elapsed: std::time::Duration,
+}
+
+/// The sentence every interrupted result starts with. Hosts classify an
+/// unknown outcome by this prefix, so both forms must keep it.
+const INTERRUPTED_PREFIX: &str = "Session interrupted. Tool result is unknown;";
+
 pub fn recover_pending_calls(messages: &mut Vec<Message>) -> bool {
+    recover_pending_calls_with(messages, None)
+}
+
+/// Mark every tool call that never received a result. `interrupted` adds the
+/// running time of the call that was actually executing when the turn ended,
+/// so the next model turn can tell "never started" from "ran for a while".
+pub fn recover_pending_calls_with(
+    messages: &mut Vec<Message>,
+    interrupted: Option<&InterruptedCall>,
+) -> bool {
     let Some(index) = messages.iter().rposition(|msg| msg.role != "tool") else {
         return false;
     };
@@ -720,16 +742,27 @@ pub fn recover_pending_calls(messages: &mut Vec<Message>) -> bool {
     };
     let mut recovered = false;
     for call in calls {
-        if !messages[index + 1..]
+        if messages[index + 1..]
             .iter()
             .any(|msg| msg.tool_call_id.as_deref() == Some(call.id.as_str()))
         {
-            messages.push(Message::tool(
-                call.id,
-                "{\"error\":\"Session interrupted. Tool result is unknown; do not assume the command succeeded or automatically repeat it.\"}".to_owned(),
-            ));
-            recovered = true;
+            continue;
         }
+        let detail = match interrupted.filter(|active| active.id == call.id) {
+            Some(active) => format!(
+                "{INTERRUPTED_PREFIX} '{}' had been running for {:.1}s when the turn was cancelled. Do not assume it succeeded and do not repeat it automatically.",
+                active.name,
+                active.elapsed.as_secs_f64()
+            ),
+            None => format!(
+                "{INTERRUPTED_PREFIX} do not assume the command succeeded or automatically repeat it."
+            ),
+        };
+        messages.push(Message::tool(
+            call.id,
+            serde_json::json!({ "error": detail }).to_string(),
+        ));
+        recovered = true;
     }
     recovered
 }
