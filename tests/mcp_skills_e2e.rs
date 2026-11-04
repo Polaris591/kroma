@@ -427,7 +427,21 @@ async fn project_mcp_config_is_inert_until_explicitly_trusted_windows() -> Resul
         "explicitly trusted project MCP did not run"
     );
     drop(tools);
-    fs::remove_dir_all(dir)?;
+    // Termination is requested on drop; Windows can retain the child's cwd
+    // briefly. Wait for actual handle release, not a fixed scheduling delay.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => break,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(32 | 33 | 145))
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
