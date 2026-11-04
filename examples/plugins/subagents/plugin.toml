@@ -12,6 +12,13 @@ Each subtask runs as its own Kroma process with a separate session, so give it t
 [settings]
 max_parallel = 3
 max_output_chars = 12000
+task_timeout_secs = 300
+# Model for every child process, exactly as the endpoint names it. Empty or
+# removed means "inherit the parent conversation's model and profile".
+# Change it with `kroma plugins set subagents model <id>`.
+model = "deepseek-v4.1-flash"
+# DeepSeek thinking tier: off, enabled, high or max. Empty inherits the parent.
+thinking = "max"
 
 [[tools]]
 name = "subagent"

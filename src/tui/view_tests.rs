@@ -313,7 +313,7 @@ fn header_separation_and_role_body_columns_are_consistent() {
 
 #[test]
 fn context_checkpoint_has_visible_activity_and_returns_to_connecting() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = super::super::event_queue::channel();
     crate::events::EventSink::on_event(&UiSink(tx), RuntimeEvent::CompactionStarted);
     let mut ui = UiState::new(
         "test".into(),
@@ -2621,7 +2621,7 @@ fn context_display_uses_total_window_not_reserved_input_budget() {
     state.configure_status(500_000, Some("high".into()));
     assert_eq!(state.context_display(), "Ctx — / 500k");
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = super::super::event_queue::channel();
     let sink = UiSink(tx);
     sink.on_event(RuntimeEvent::ContextPrepared {
         messages: 2,
@@ -3447,4 +3447,58 @@ fn completion_row_reports_the_outcome_and_how_long_the_turn_took() {
             .any(|row| row.contains('⊘') && row.contains("8.3s")),
         "cancellation keeps its marker and duration"
     );
+}
+
+#[test]
+fn overloaded_live_view_recovers_complete_tool_results_from_authoritative_history() {
+    let (tx, mut rx) = super::super::event_queue::channel();
+    let mut ui = UiState::new(
+        "test".into(),
+        "default".into(),
+        ThemeStore::load_at(None).unwrap(),
+        &[],
+    );
+    tx.send(UiEvent::TaskStarted).unwrap();
+    tx.send(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "call-1".into(),
+        args: "echo hello".into(),
+    })
+    .unwrap();
+    tx.send(UiEvent::Text("x".repeat(3 * 1024 * 1024))).unwrap();
+    tx.send(UiEvent::ToolFinished {
+        id: "call-1".into(),
+        result: "hello".into(),
+        failed: false,
+    })
+    .unwrap();
+    tx.send(UiEvent::TaskFinished).unwrap();
+    while let Ok(event) = rx.try_recv() {
+        ui.event(event);
+    }
+    assert!(!ui.running);
+    assert!(ui.notification.contains("Live updates paused"));
+    let mut assistant = Message::new("assistant", "");
+    assistant.tool_calls = Some(vec![crate::protocol::ToolCall {
+        id: "call-1".into(),
+        kind: "function".into(),
+        function: crate::protocol::FunctionCall {
+            name: "shell".into(),
+            arguments: r#"{"command":"echo hello"}"#.into(),
+        },
+    }]);
+    ui.load_history(&[
+        Message::new("user", "test"),
+        assistant,
+        Message::tool_with_status("call-1".into(), "hello".into(), false),
+        Message::new("assistant", "完整回复🦀"),
+    ]);
+    let tool = ui
+        .entries
+        .iter()
+        .find(|entry| entry.call_id.as_deref() == Some("call-1"))
+        .unwrap();
+    assert!(!tool.title.contains("running"));
+    assert_eq!(tool.details, "hello");
+    assert!(ui.entries.iter().any(|entry| entry.body == "完整回复🦀"));
 }

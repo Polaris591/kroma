@@ -186,6 +186,14 @@ impl UsageMeter {
         )
     }
 
+    /// Merge batches without losing unknown counters or the latest request.
+    pub(crate) fn absorb(&mut self, other: &Self) {
+        self.merge(other);
+        if other.calls != 0 {
+            self.last = other.last.clone();
+        }
+    }
+
     fn merge(&mut self, other: &Self) {
         self.calls = self.calls.saturating_add(other.calls);
         self.input = self.input.saturating_add(other.input);

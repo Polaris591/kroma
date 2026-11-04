@@ -89,42 +89,109 @@ pub fn suggestions(workdir: &Path, prefix: &str) -> Result<Vec<String>> {
     Ok(found)
 }
 
-pub fn git_diff(workdir: &Path) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .arg("diff")
-        .arg("--no-ext-diff")
-        .arg("HEAD")
+/// Bytes of `git diff` read before the command is reported as truncated.
+const MAX_DIFF_BYTES: usize = 96 * 1024;
+/// Bytes of `git` diagnostics kept for error reporting.
+const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
+/// Characters shown inline; the full read stays bounded separately.
+const MAX_DIFF_DISPLAY_CHARS: usize = 12_000;
+/// A read-only observation must not hang the host forever.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run one read-only git command with bounded pipes and a deadline. Dropping
+/// the caller kills the child instead of leaving git behind a closed command,
+/// and a chatty stderr can never block stdout.
+async fn run_git(workdir: &Path, args: &[&str]) -> Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut command = tokio::process::Command::new("git");
+    command
+        .args(args)
         .current_dir(workdir)
-        .output()
-        .context("running git diff")?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr));
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().context("running git")?;
+    let mut stdout = child.stdout.take().context("git stdout unavailable")?;
+    let mut stderr = child.stderr.take().context("git stderr unavailable")?;
+    let mut out_reader = (&mut stdout).take(MAX_DIFF_BYTES as u64 + 1);
+    let mut err_reader = (&mut stderr).take(MAX_GIT_STDERR_BYTES as u64);
+    let read = async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let (out_result, err_result) = tokio::join!(
+            out_reader.read_to_end(&mut out),
+            err_reader.read_to_end(&mut err),
+        );
+        out_result?;
+        err_result?;
+        Ok::<(Vec<u8>, Vec<u8>), std::io::Error>((out, err))
+    };
+    let (out, err) = match tokio::time::timeout(GIT_TIMEOUT, read).await {
+        Ok(result) => result.context("reading git output")?,
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            bail!(
+                "git {} did not finish within {} seconds",
+                args.join(" "),
+                GIT_TIMEOUT.as_secs()
+            );
+        }
+    };
+    let truncated = out.len() > MAX_DIFF_BYTES;
+    let mut text = String::from_utf8_lossy(&out[..out.len().min(MAX_DIFF_BYTES)]).into_owned();
+    let status = if truncated {
+        // Stop git rather than wait for a writer blocked on an unread pipe.
+        let _ = child.start_kill();
+        None
+    } else {
+        Some(child.wait().await.context("waiting for git")?)
+    };
+    if let Some(status) = status {
+        if !status.success() {
+            bail!("{}", String::from_utf8_lossy(&err).trim().to_owned());
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let new_files = std::process::Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(workdir)
-        .output()
-        .context("listing untracked files")?;
-    if !new_files.status.success() {
-        bail!("{}", String::from_utf8_lossy(&new_files.stderr));
+    if truncated {
+        text.push_str(&format!(
+            "\n[... git output truncated at {MAX_DIFF_BYTES} bytes ...]"
+        ));
     }
-    let untracked = String::from_utf8_lossy(&new_files.stdout);
+    Ok(text)
+}
+
+/// Describe the working tree without blocking the host: a slow repository or a
+/// stuck git process ends in a clear message instead of a frozen interface.
+pub async fn git_diff(workdir: &Path) -> Result<String> {
+    // A repository without commits has no HEAD; compare the worktree instead
+    // of failing every /diff in a freshly initialized project.
+    let has_head = run_git(workdir, &["rev-parse", "--verify", "HEAD"])
+        .await
+        .is_ok();
+    let diff = if has_head {
+        run_git(workdir, &["diff", "--no-ext-diff", "HEAD"]).await?
+    } else {
+        run_git(workdir, &["diff", "--no-ext-diff"]).await?
+    };
+    let untracked = run_git(workdir, &["ls-files", "--others", "--exclude-standard"]).await?;
     let mut summary = String::new();
-    if !untracked.is_empty() {
+    if !untracked.trim().is_empty() {
         summary.push_str("Untracked files (not in git diff):\n");
         summary.push_str(&untracked);
     }
-    if !text.is_empty() {
-        summary.push_str(&text);
+    summary.push_str(&diff);
+    let summary = summary.trim_end();
+    if summary.is_empty() {
+        return Ok("No file differences.".into());
     }
-    Ok(if summary.is_empty() {
-        "No file differences.".into()
+    Ok(if summary.chars().count() > MAX_DIFF_DISPLAY_CHARS {
+        let shown: String = summary.chars().take(MAX_DIFF_DISPLAY_CHARS).collect();
+        format!("{shown}\n[... truncated for display ...]")
     } else {
-        summary.chars().take(12_000).collect()
+        summary.to_owned()
     })
 }
-
 pub fn export_session(
     messages: &[crate::protocol::Message],
     workdir: &Path,
@@ -160,6 +227,46 @@ pub fn export_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-convenience-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn git_diff_reports_untracked_files_asynchronously() {
+        let dir = scratch("diff");
+        let initialized = std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(&dir)
+            .status();
+        if initialized.map(|status| !status.success()).unwrap_or(true) {
+            fs::remove_dir_all(&dir).ok();
+            return;
+        }
+        fs::write(dir.join("new-file.txt"), "hello\n").unwrap();
+        let diff = git_diff(&dir).await.expect("diff");
+        assert!(diff.contains("Untracked files"), "{diff}");
+        assert!(diff.contains("new-file.txt"), "{diff}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn git_diff_outside_a_repository_reports_the_git_error() {
+        let dir = scratch("no-repo");
+        let error = git_diff(&dir).await.expect_err("git must refuse");
+        assert!(!format!("{error:#}").trim().is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn file_references_keep_newlines_and_missing_names_unchanged() -> Result<()> {
         let root = std::env::temp_dir().join(format!("kroma-file-ref-{}", std::process::id()));

@@ -21,9 +21,10 @@ use windows_sys::Win32::{
             CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
         },
         JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+            JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+            TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         },
         Threading::{OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME},
     },
@@ -48,18 +49,38 @@ pub(crate) struct ChildTreeGuard {
 /// every handle and terminates contained descendants.
 static DISARMED_JOBS: OnceLock<Mutex<Vec<OwnedHandle>>> = OnceLock::new();
 
+/// Running processes inside a job. `Some(0)` proves the job is finished and its
+/// handle can be released; `None` means the query failed and the handle must be
+/// kept, because guessing would terminate background work.
+fn active_processes(job: &OwnedHandle) -> Option<u32> {
+    let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut returned = 0u32;
+    // SAFETY: `job` is a live owned handle and the buffer matches the declared
+    // information class and length.
+    let queried = unsafe {
+        QueryInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectBasicAccountingInformation,
+            (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+            &mut returned,
+        )
+    };
+    (queried != 0).then_some(info.ActiveProcesses)
+}
+
 fn retain_disarmed_job(job: OwnedHandle) {
-    const MAX_RETAINED_JOBS: usize = 128;
     let jobs = DISARMED_JOBS.get_or_init(|| Mutex::new(Vec::new()));
-    if let Ok(mut jobs) = jobs.lock() {
-        jobs.push(job);
-        if jobs.len() > MAX_RETAINED_JOBS {
-            // Dropping the oldest job ends only very old background work.
-            // This bounds handle growth without changing the newest command's
-            // lifecycle.
-            jobs.remove(0);
-        }
-    }
+    let Ok(mut jobs) = jobs.lock() else {
+        // A poisoned registry cannot be trusted; dropping the handle enforces
+        // the documented force-kill behavior instead of leaking it.
+        return;
+    };
+    // Release handles for jobs whose background work has finished. A job that
+    // still contains a running process is kept until Kroma exits: closing it
+    // would terminate a background task the user started.
+    jobs.retain(|held| active_processes(held) != Some(0));
+    jobs.push(job);
 }
 
 impl ChildTreeGuard {
@@ -317,6 +338,38 @@ mod tests {
     /// A successfully completed shell may intentionally start a background
     /// process. Disarming must clear kill-on-close, not just skip the explicit
     /// termination call.
+    /// Handle cleanup must never terminate a background task the user started:
+    /// only a job with no running process may be released.
+    #[tokio::test]
+    async fn a_job_with_a_running_child_is_never_reported_finished() {
+        let mut command = tokio::process::Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, guard) = ChildTreeGuard::spawn(&mut command).unwrap();
+        let job = guard.job.as_ref().expect("an armed guard owns its job");
+        assert!(
+            active_processes(job).is_some_and(|active| active >= 1),
+            "a running child must keep the job out of the finished set"
+        );
+        let _ = child.start_kill();
+        let mut released = false;
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if active_processes(job) == Some(0) {
+                released = true;
+                break;
+            }
+        }
+        assert!(released, "a terminated child must release its job");
+    }
+
     #[tokio::test]
     async fn successful_shell_can_leave_a_background_descendant() {
         let dir = scratch("background");

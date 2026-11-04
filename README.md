@@ -139,6 +139,12 @@ Failed/cancelled external context work preserves WAL history, while
 context-overflow errors can request a single recovery retry and report usage.
 Event subscribers have separate bounded queues.
 
+Project plugins under `.kroma/plugins` stay disabled until `kroma plugins enable <id>`
+binds an approval to the manifest and to every tracked code file by content, so
+editing a script — including a non-JavaScript entry such as a Python file —
+requires approval again. A listing shows the requested state, the actual state
+and the reason a requested plugin did not load.
+
 The host deliberately does not expose raw terminal widgets, unrestricted
 process sandboxing, or an alternate Agent Loop. Official subagents, tournament
 judging and memory implementations are separate optional-plugin work, not part
@@ -275,7 +281,9 @@ sessions and the existing slash commands. Shortcuts:
 - **Ctrl+C** cancels an active task. While idle it clears the draft (including
   pending attachments); pressing it again when the input is empty exits TUI.
   While a task runs, submitted text steers it,
-  `/steer text` explicitly steers, and `/queue task` adds a follow-up.
+  `/steer text` explicitly steers, and `/queue task` adds a follow-up. Only the
+  terminal host runs queued follow-ups; the desktop host reports that it has no
+  queue consumer instead of accepting a task it would never start.
   **Ctrl+Q** quits when idle; `/exit` is also supported.
 - **Session chrome:** no persistent conversation heading or nested message
   boxes. Both user messages and Kroma replies share the same slightly raised
@@ -406,10 +414,10 @@ messages. Branches are regular named sessions, visible via `/sessions`.
 
 Only conversation state is forked/rewound: commands, edited files, Git
 commits, detached processes and external MCP side effects are **not**
-reverted. Use Git for source changes. Derived compaction context starts fresh
-from the original preserved transcript after a branch or rewind; it is
-reconstructed on subsequent requests instead of copying summary indexes
-from an abandoned future. This keeps session history readable without a
+reverted. Use Git for source changes. A branch or rewind drops summaries and
+tool-preview indexes that describe discarded messages, and keeps the confirmed
+"already answered" prefix that survived, so a long branch can still checkpoint
+instead of failing on its context limit. This keeps session history readable without a
 new database or an additional agent checkpointing service.
 
 Offline regression tests: `cargo test --test session_branches`.
@@ -449,6 +457,8 @@ from local stdio children. Project configs are disabled until approved with
 bytes, expanded `command`/`args`/`env` values, a project-contained working
 directory, the bytes of the local entry files and (within a bounded 256-file /
 32 MiB scope) the JS/TS modules they reach through explicit relative imports.
+Every referenced module is read and scanned in full, so a relative import
+written after a large prefix is covered too.
 Editing any of those files requires approval again;
 unreferenced `node_modules` trees are not walked. This format changed in v0.4,
 so re-run `kroma trust-project` after upgrading. Approval and revoke operations
@@ -998,7 +1008,7 @@ Commands: `/new`, `/sessions`, `/resume <id>`, `/clear` (active session only), `
   messages automatically; use `/resume` or `kroma --continue` to restore them.
 - To pick another default history file, set `KROMA_SESSION_FILE=/path/to/conversation.json`. New sessions are stored alongside that file; `/clear` replaces only the active saved conversation with a fresh one.
 - On Unix, newly created history files are private (`0600`). If the process dies during a tool call, Kroma records the missing result as unknown on reopening, without automatically repeating a potentially destructive command.
-- History is stored as JSON checkpoint plus a checksummed, append-only journal without pruning. The checkpoint may lag the latest turn until the next compaction checkpoint. Only one Kroma process may open a given session at a time (an adjacent lock file enforces this). Session metadata (model choice, names, most recent session) is updated under an adjacent cross-process lock, so concurrent writers cannot lose an update. Session checkpoints, profile files and session metadata are replaced through `src/atomic_file.rs`: `rename` on Unix and `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` on Windows, since a plain `rename` fails on Windows when the target exists.
+- History is stored as JSON checkpoint plus a checksummed, append-only journal without pruning. The checkpoint may lag the latest turn until the next compaction checkpoint. Only one Kroma process may open a given session at a time (an adjacent lock file enforces this). Session metadata (model choice, names, most recent session) is updated under an adjacent cross-process lock, so concurrent writers cannot lose an update. Profile edits are applied through a cross-process locked read-modify-write (`Profiles::update`), so two Kroma processes changing different profiles cannot overwrite each other. Session checkpoints, profile files and session metadata are replaced through `src/atomic_file.rs`: `rename` on Unix and `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` on Windows, since a plain `rename` fails on Windows when the target exists.
 
 ## Execution contract
 
@@ -1007,7 +1017,7 @@ Commands: `/new`, `/sessions`, `/resume <id>`, `/clear` (active session only), `
 3. If the model returns `tool_calls`, Kroma executes each `shell(command)` call in order and appends the result with its `tool_call_id`.
 4. Kroma sends the updated history to the model, repeating until it receives a normal assistant response. There is no artificial Agent Loop step limit.
 
-Each shell result reports `exit_code`, `stdout`, and `stderr`. Shell commands have no artificial timeout or output limit by default; `KROMA_SHELL_TIMEOUT_SECS` sets an optional per-command wall-clock deadline for unattended automation (`0` or unset means unlimited). Failed commands are reported back to the model, which decides whether to retry or correct the task. Streaming model HTTP requests have a 20-second connection-establishment timeout and a 300-second idle timeout (for response headers or a gap between streamed network chunks), **not** a 120-second total-request deadline. Before receiving any stream data, transport timeouts, connect errors, and transient HTTP 429/502/503/504 may be retried up to 3 additional times. Numeric `Retry-After` values are honored up to 10 seconds; longer or unparseable server wait instructions are not silently overridden. Permanent HTTP failures (such as 401) return immediately. Partially delivered streams are never retried to avoid duplicate output or tool execution. Provider-reported usage survives an SSE error event or a connection failure after `message_start`. Separate non-streaming checkpoint requests retain a 120-second request deadline and honor the same catalog output cap as coding requests. Task summaries now include a `task_status` marker on completion, failure and Ctrl+C cancellation; incomplete provider usage remains unknown rather than zero.
+Each shell result reports `exit_code`, `stdout`, and `stderr`. Shell commands have no artificial timeout or output limit by default; `KROMA_SHELL_TIMEOUT_SECS` sets an optional per-command wall-clock deadline for unattended automation (`0` or unset means unlimited). Failed commands are reported back to the model, which decides whether to retry or correct the task. Streaming model HTTP requests have a 20-second connection-establishment timeout and a 300-second idle timeout (for response headers or a gap between streamed network chunks), **not** a 120-second total-request deadline. Before the response body carries any protocol event, transient transport failures (timeouts, refused or reset connections, and a body that ends before its declared length) and transient HTTP 429/502/503/504 may be retried up to 3 additional times. A body that delivered only SSE keepalive comments has not started a response and may still be retried. Numeric `Retry-After` values are honored up to 10 seconds; longer or unparseable server wait instructions are not silently overridden. Permanent HTTP failures (such as 401), TLS verification errors, malformed payloads and internal size limits return immediately. Once any `data:` event arrives, including a start event that may carry billed usage, the request is never replayed, so duplicate output, tool execution and double billing stay impossible. Provider-reported usage survives an SSE error event or a connection failure after `message_start`. Separate non-streaming checkpoint requests retain a 120-second request deadline and honor the same catalog output cap as coding requests. Task summaries now include a `task_status` marker on completion, failure and Ctrl+C cancellation; incomplete provider usage remains unknown rather than zero.
 
 **Security:** `shell` executes arbitrary commands with the permissions of the Kroma process. The working directory is **not** a sandbox. Use a container or a restricted account for untrusted tasks, and never run this prototype with elevated privileges against important data. Very large command output is truncated inline and written to private capture files, so it can still consume disk; a hanging command may run indefinitely until the user cancels it or an optional `KROMA_SHELL_TIMEOUT_SECS` deadline expires. On Unix, cancellation terminates the shell process group; independently detached descendants can survive. On Windows, cancellation terminates the job object, which contains every descendant created through the shell. A successfully completed command may leave background descendants running; Kroma retains their job handle until Kroma exits, then the OS closes it and terminates them. Force-killing Kroma also terminates contained descendants.
 

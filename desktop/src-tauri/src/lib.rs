@@ -296,18 +296,21 @@ async fn save_profile(
 ) -> std::result::Result<Value, String> {
     with_host(state, move |host| {
         require_idle(host)?;
-        let mut profiles = Profiles::load()?;
-        let old = profiles
-            .profiles
-            .get(&profile.name)
-            .cloned()
-            .unwrap_or_default();
         let name = profile.name.clone();
-        profiles
-            .profiles
-            .insert(name.clone(), merge_profile_input(old, profile));
-        profiles.active = Some(name);
-        profiles.save()?;
+        let merged = {
+            let profiles = Profiles::load()?;
+            let old = profiles
+                .profiles
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
+            merge_profile_input(old, profile)
+        };
+        Profiles::update(|profiles| {
+            profiles.profiles.insert(name.clone(), merged);
+            profiles.active = Some(name.clone());
+            Ok(())
+        })?;
         profile_list()
     })
     .await
@@ -405,13 +408,14 @@ fn queue_followup(
     state: State<'_, DesktopState>,
     text: String,
 ) -> std::result::Result<usize, String> {
-    let host = state.0.lock().map_err(ui_error)?;
-    let handle = host
-        .task_input
-        .as_ref()
-        .context("No model task available")
-        .map_err(ui_error)?;
-    handle.queue_followup(text).map_err(ui_error)
+    // The desktop host has no follow-up consumer: nothing would ever run a
+    // queued task. Say so instead of accepting work that silently never runs;
+    // steering the active task or sending the text when it finishes both work.
+    let _ = (state, text);
+    Err(
+        "Queued follow-up tasks are not supported by the desktop host; steer the running task or send this text when it finishes."
+            .to_owned(),
+    )
 }
 
 #[tauri::command]

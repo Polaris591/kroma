@@ -73,7 +73,6 @@ export const api = {
   renameSession: (title: string) => invoke<Bootstrap>('rename_session', {title}),
   cancel: () => invoke<void>('cancel_task'),
   steer: (text: string) => invoke<void>('steer_task', {text}),
-  queue: (text: string) => invoke<number>('queue_followup', {text}),
   trustProjectMcp: () => invoke<{path: string; trusted: boolean}>('trust_project_mcp'),
   pluginAction: (action: string, id?: string, path?: string, key?: string, value?: unknown) =>
     invoke<{message: string; warning?: string; restart_required: boolean; plugins: PluginSummary[]}>(

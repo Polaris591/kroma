@@ -13,7 +13,8 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 // exports them (for example a subagent running this suite) must not change
 // every test outcome.
 const INHERITED = {};
-for (const name of ["KROMA_SUBAGENT_DEPTH", "KROMA_PLUGIN_TOOL_TIMEOUT_SECS"]) {
+for (const name of ["KROMA_SUBAGENT_DEPTH", "KROMA_PLUGIN_TOOL_TIMEOUT_SECS", "KROMA_MODEL",
+  "KROMA_DEEPSEEK_THINKING"]) {
   INHERITED[name] = process.env[name];
 }
 beforeEach(() => {
@@ -347,7 +348,7 @@ test("progress is best-effort and never changes the outcome", async () => {
     const response = await run;
     assert.equal(response.status, "completed");
     assert.ok(seen.length > 0);
-    assert.ok(seen[0].startsWith("▷ [1/1] started"), seen[0]);
+    assert.equal(seen[0], "▷ [1/1] a");
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -357,6 +358,7 @@ test("limits stay small and documented", () => {
   assert.equal(LIMITS.tasks, 8);
   assert.equal(LIMITS.maxParallel, 3);
   assert.equal(LIMITS.outputChars, 12000);
+  assert.equal(LIMITS.taskTimeoutSecs, 300);
   assert.equal(LIMITS.frameBytes, 2 * 1024 * 1024);
   // The child CLI inlines piped stdin only up to 16 KiB.
   assert.equal(LIMITS.taskBytes, 16 * 1024);
@@ -559,7 +561,7 @@ test("an extended-length workdir is normalized before use", async () => {
   }
 });
 
-test("progress reports running count, elapsed, limit and rolling tokens", async () => {
+test("progress shows per-task state, elapsed, the limit and rolling tokens", async () => {
   const dir = workspace();
   const h = harness();
   const seen = [];
@@ -574,15 +576,16 @@ test("progress reports running count, elapsed, limit and rolling tokens", async 
     ]});
     const response = await run;
     assert.equal(response.status, "completed");
-    const beat = seen.find(line => line.includes("running"));
+    const beat = seen.find(line => line.startsWith("1▶"));
     assert.ok(beat, JSON.stringify(seen));
-    assert.ok(beat.startsWith("0/1 done · 1 running · "), beat);
     assert.ok(beat.endsWith("s/600s · in 0 / out 0"), beat);
-    const done = seen.find(line => line.startsWith("✓ [1/1] "));
-    assert.ok(done.startsWith("✓ [1/1] "), done);
-    assert.ok(done.endsWith("s · in 5.2k / out 300"), done);
-    assert.ok(seen.at(-1).startsWith("✓ 1/1 done · "), seen.at(-1));
-    assert.ok(seen.at(-1).endsWith("s · in 5.2k / out 300"), seen.at(-1));
+    const done = seen.filter(line => line.startsWith("✓ [1/1] ")).at(-1);
+    assert.ok(done.includes("s · in 5.2k / out 300"), done);
+    assert.ok(done.endsWith('· "ok"'), done);
+    // The last two rows are the summary and the per-task answers.
+    assert.ok(seen.at(-2).startsWith("✓ 1/1 done · "), seen.at(-2));
+    assert.ok(seen.at(-2).endsWith("s · in 5.2k / out 300"), seen.at(-2));
+    assert.equal(seen.at(-1), '1 "ok"');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -593,6 +596,7 @@ test("the advertised limits match the manifest", () => {
   assert.ok(manifest.includes("timeout_secs = " + LIMITS.timeoutSecs), manifest);
   assert.ok(manifest.includes("max_parallel = " + LIMITS.maxParallel), manifest);
   assert.ok(manifest.includes("max_output_chars = " + LIMITS.outputChars), manifest);
+  assert.ok(manifest.includes("task_timeout_secs = " + LIMITS.taskTimeoutSecs), manifest);
 });
 
 test("a JSON line that is not an object is a protocol fault, not a crash", async () => {
@@ -766,12 +770,196 @@ test("progress names the deadline the host will enforce", async () => {
     await new Promise(resolve => setTimeout(resolve, 40));
     h.calls[0].finish({frames: [{type: "result", text: "ok"}]});
     await run;
-    const beat = seen.find(line => line.includes("running"));
+    const beat = seen.find(line => line.startsWith("1▶"));
     assert.ok(beat, JSON.stringify(seen));
     assert.ok(beat.endsWith("/120s · in 0 / out 0"), beat);
   } finally {
     if (previous === undefined) delete process.env.KROMA_PLUGIN_TOOL_TIMEOUT_SECS;
     else process.env.KROMA_PLUGIN_TOOL_TIMEOUT_SECS = previous;
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("live progress shows a roster row, one row per running task and the answers", async () => {
+  const dir = workspace();
+  const h = harness();
+  const seen = [];
+  const push = frame => h.calls[0].child.stdout.emit("data", Buffer.from(JSON.stringify(frame) + String.fromCharCode(10)));
+  try {
+    const run = runBatch(batch([{task: "count\nfiles"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir,
+        heartbeatMs: 10, onProgress: text => seen.push(text)});
+    await new Promise(resolve => setTimeout(resolve, 20));
+    push({type: "model_started", request: 1});
+    push({type: "tool_started", name: "shell", id: "t1"});
+    await new Promise(resolve => setTimeout(resolve, 40));
+    push({type: "tool_finished", name: "shell", id: "t1", is_error: false});
+    push({type: "model_finished", input: 100, output: 10, cached: 0, reasoning_tokens: 0});
+    h.calls[0].finish({frames: [{type: "result", text: "done\nand dusted"}]});
+    const response = await run;
+    assert.equal(response.status, "completed");
+    assert.ok(seen.includes("▷ [1/1] count files"), JSON.stringify(seen));
+    assert.ok(seen.some(line => line.startsWith("1▶ · ")), JSON.stringify(seen));
+    const live = seen.find(line => line.startsWith("[1/1] ") && line.includes("▶ shell "));
+    assert.ok(live, JSON.stringify(seen));
+    assert.ok(live.endsWith(" tok"), live);
+    assert.ok(seen.at(-2).startsWith("✓ 1/1 done · "), seen.at(-2));
+    assert.equal(seen.at(-1), '1 "done and dusted"');
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+test("a configured model is handed to every child process", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(
+      batch([{task: "a"}, {task: "b"}],
+        {workdir: dir, config: {model: "deepseek-v4.1-flash", thinking: "max"}}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    const settled = run.then(() => null, error => error);
+    assert.equal(h.calls.length, 2);
+    for (const call of h.calls) {
+      assert.equal(call.options.env.KROMA_MODEL, "deepseek-v4.1-flash");
+      assert.equal(call.options.env.KROMA_DEEPSEEK_THINKING, "max");
+    }
+    h.calls[0].finish({frames: [{type: "result", text: "one"}]});
+    h.calls[1].finish({frames: [{type: "result", text: "two"}]});
+    assert.equal(await settled, null);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("without a configured model the child inherits the parent profile", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(batch([{task: "a"}], {workdir: dir}), {
+      spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    const settled = run.then(() => null, error => error);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].options.env.KROMA_MODEL, undefined);
+    assert.equal(h.calls[0].options.env.KROMA_DEEPSEEK_THINKING, undefined);
+    h.calls[0].finish({frames: [{type: "result", text: "one"}]});
+    assert.equal(await settled, null);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a malformed thinking tier is refused before any child starts", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    await assert.rejects(
+      runBatch(batch([{task: "a"}], {workdir: dir, config: {thinking: "turbo"}}),
+        {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir}),
+      {code: "CONFIG_ERROR", message: /thinking must be/});
+    assert.equal(h.calls.length, 0);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a malformed model is refused before any child starts", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    await assert.rejects(
+      runBatch(batch([{task: "a"}], {workdir: dir, config: {model: "a\u0007b"}}),
+        {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir}),
+      {code: "CONFIG_ERROR"});
+    assert.equal(h.calls.length, 0);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a timed-out task fails with CHILD_TIMEOUT while siblings and queued tasks still finish", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(
+      batch([{task: "fast-1"}, {task: "stuck"}, {task: "queued-3"}],
+        {workdir: dir, config: {max_parallel: 2}}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir, taskTimeoutMs: 30},
+    );
+    assert.equal(h.calls.length, 2);
+    h.calls[0].finish({frames: [{type: "result", text: "first done"}]});
+    await tick();
+    await tick();
+    assert.equal(h.calls.length, 3, "the third task starts once the first finishes");
+    h.calls[2].finish({frames: [{type: "result", text: "third done"}]});
+    const response = await run;
+    assert.equal(response.status, "partial");
+    assert.equal(response.results[0].status, "completed");
+    assert.equal(response.results[0].output, "first done");
+    assert.equal(response.results[1].status, "failed");
+    assert.equal(response.results[1].error.code, "CHILD_TIMEOUT");
+    assert.match(response.results[1].error.message, /child timed out after 30ms/);
+    assert.equal(response.results[2].status, "completed");
+    assert.equal(response.results[2].output, "third done");
+    const state = JSON.parse(fs.readFileSync(path.join(response.results[1].artifacts, "state.json"), "utf8"));
+    assert.equal(state.status, "failed");
+    assert.equal(state.code, "CHILD_TIMEOUT");
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("batch timeout stops stragglers before the host deadline and preserves completed results", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(
+      batch([{task: "done"}, {task: "hanging"}, {task: "waiting"}],
+        {workdir: dir, config: {max_parallel: 1}}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir, batchTimeoutMs: 35},
+    );
+    h.calls[0].finish({frames: [{type: "result", text: "saved output"}]});
+    const response = await run;
+    assert.equal(response.status, "partial");
+    assert.equal(response.results[0].status, "completed");
+    assert.equal(response.results[0].output, "saved output");
+    assert.equal(response.results[1].status, "failed");
+    assert.equal(response.results[1].error.code, "CHILD_TIMEOUT");
+    assert.match(response.results[1].error.message, /batch timed out after 35ms/);
+    assert.equal(response.results[2].status, "not_started");
+    assert.equal(response.results[2].error.code, "CHILD_TIMEOUT");
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a timed-out child that ignores termination still resolves after the grace period", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(
+      batch([{task: "unstoppable"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: () => {}, dataDir: dir, taskTimeoutMs: 15, killGraceMs: 10},
+    );
+    const response = await run;
+    assert.equal(response.status, "failed");
+    assert.equal(response.results[0].status, "failed");
+    assert.equal(response.results[0].error.code, "CHILD_TIMEOUT");
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a malformed task_timeout_secs is refused before any child starts", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    await assert.rejects(
+      runBatch(batch([{task: "a"}], {workdir: dir, config: {task_timeout_secs: 601}}),
+        {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir}),
+      {code: "CONFIG_ERROR", message: /task_timeout_secs must be an integer/},
+    );
+    assert.equal(h.calls.length, 0);
+  } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
 });

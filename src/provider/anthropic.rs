@@ -441,6 +441,7 @@ impl Stream {
                             .context("incomplete Anthropic tool input")?;
                         value.to_string()
                     };
+                    crate::provider::validate_tool_call(&id, &name, &arguments)?;
                     native_blocks.push(json!({"type":"tool_use","id":id,"name":name,
                         "input":serde_json::from_str::<Value>(&arguments)?}));
                     calls.push(ToolCall {
@@ -689,6 +690,36 @@ mod tests {
         );
         assert_eq!(request["messages"][1]["content"][1]["type"], "tool_use");
         assert_eq!(request["messages"][2]["content"][0]["tool_use_id"], "tool1");
+    }
+
+    #[test]
+    fn anthropic_rejects_invalid_tool_calls_before_execution() {
+        for (id, name, input) in [
+            ("", "shell", "{}"),
+            ("tool1", "", "{}"),
+            ("tool1", "shell", "[]"),
+        ] {
+            let mut stream = Stream::default();
+            let events = [
+                json!({"type":"message_start","message":{"usage":{"input_tokens":8}}}),
+                json!({"type":"content_block_start","index":0,
+                    "content_block":{"type":"tool_use","id":id,"name":name,"input":{}}}),
+                json!({"type":"content_block_delta","index":0,
+                    "delta":{"type":"input_json_delta","partial_json":input}}),
+                json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},
+                    "usage":{"output_tokens":9}}),
+                json!({"type":"message_stop"}),
+            ];
+            for event in events {
+                stream
+                    .apply_with_reasoning(&event.to_string(), &mut |_| {}, &mut |_| {})
+                    .unwrap();
+            }
+            assert!(
+                stream.finish().is_err(),
+                "id={id:?} name={name:?} input={input}"
+            );
+        }
     }
 
     #[test]

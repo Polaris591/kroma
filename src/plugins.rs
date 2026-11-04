@@ -639,28 +639,34 @@ impl PluginState {
     }
 }
 
-fn mix_bytes(hash: &mut u64, bytes: &[u8]) {
-    for byte in bytes {
-        *hash = (*hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
-    }
+/// Length-prefixed fields keep "ab"+"c" from hashing like "a"+"bc".
+fn push_approval_field(material: &mut Vec<u8>, bytes: &[u8]) {
+    material.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    material.extend_from_slice(bytes);
 }
 
 /// Bind a project plugin approval to the bytes that will actually run: the
 /// manifest plus every local script the worker tracks. The worker scan is
 /// already bounded, so this stays O(plugin code) rather than O(repository).
-fn plugin_content_fingerprint(directory: &Path, worker: &PluginWorker) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    mix_bytes(
-        &mut hash,
-        &fs::read(directory.join("plugin.toml")).unwrap_or_default(),
-    );
+/// This is an approval boundary, not a change detector, so it never falls back
+/// to a file length or modification time and fails closed when a tracked file
+/// could not be read.
+fn plugin_content_fingerprint(directory: &Path, worker: &PluginWorker) -> Result<String> {
+    let manifest = fs::read(directory.join("plugin.toml"))
+        .context("reading the plugin manifest for approval")?;
+    let mut material = Vec::new();
+    push_approval_field(&mut material, b"kroma-project-plugin-approval-v2");
+    push_approval_field(&mut material, &manifest);
     let mut entrypoints: Vec<_> = worker.entrypoints.iter().collect();
     entrypoints.sort_by(|left, right| left.0.cmp(&right.0));
-    for (path, fingerprint, _) in entrypoints {
-        mix_bytes(&mut hash, path.to_string_lossy().as_bytes());
-        mix_bytes(&mut hash, &fingerprint.to_le_bytes());
+    for (path, digest, _) in entrypoints {
+        let digest = digest
+            .as_deref()
+            .with_context(|| format!("cannot read {} for approval", path.display()))?;
+        push_approval_field(&mut material, path.to_string_lossy().as_bytes());
+        push_approval_field(&mut material, digest.as_bytes());
     }
-    format!("{hash:016x}")
+    Ok(crate::mcp::content_digest(&material))
 }
 
 #[derive(Clone)]
@@ -679,7 +685,12 @@ pub struct PluginCatalog {
 #[derive(Clone)]
 struct Plugin {
     manifest: PluginManifest,
+    /// What this process actually runs: the user's choice survived approval.
     enabled: bool,
+    /// Persisted user choice, which an approval check may still block.
+    requested: bool,
+    /// Why a requested plugin is not loaded; shown by the GUI and CLI.
+    blocked: Option<String>,
     /// None for user-global plugins; project plugins have a full path key.
     project_key: Option<String>,
     /// Explicit `KROMA_PLUGIN_TRY` plugin: not backed by plugins.toml state.
@@ -689,6 +700,18 @@ struct Plugin {
 }
 
 impl Plugin {
+    /// Whether persisted state still asks for this plugin, independent of
+    /// whether its current code passed the approval check.
+    fn requests(&self, state: &PluginState) -> bool {
+        if self.transient {
+            return self.enabled;
+        }
+        match &self.project_key {
+            Some(key) => state.enabled_projects.contains(key),
+            None => state.enabled.contains(&self.manifest.id),
+        }
+    }
+
     fn has_model_hook(&self) -> bool {
         self.manifest
             .hooks
@@ -703,15 +726,6 @@ impl Plugin {
                 || self.has_model_hook())
     }
 
-    fn is_enabled(&self, state: &PluginState) -> bool {
-        if self.transient {
-            return self.enabled;
-        }
-        match &self.project_key {
-            Some(key) => state.enabled_projects.contains(key),
-            None => state.enabled.contains(&self.manifest.id),
-        }
-    }
     fn config_overrides<'a>(
         &self,
         state: &'a PluginState,
@@ -877,26 +891,45 @@ impl PluginCatalog {
                         let approved_content = project_key
                             .as_ref()
                             .map(|_| plugin_content_fingerprint(&dir, &worker));
-                        let enabled = match &project_key {
-                            Some(key) => {
-                                let approved = state.enabled_projects.contains(key);
-                                let unchanged = approved_content.as_deref()
-                                    == state.project_fingerprints.get(key).map(String::as_str);
-                                if approved && !unchanged {
-                                    warnings.push(format!(
-                                        "project plugin '{}' changed since it was approved; run `kroma plugins enable {}` again to approve the current code",
-                                        manifest.id, manifest.id
-                                    ));
-                                }
-                                approved && unchanged
-                            }
+                        let requested = match &project_key {
+                            Some(key) => state.enabled_projects.contains(key),
                             None => state.enabled.contains(&manifest.id),
                         };
+                        let blocked = match (&project_key, &approved_content) {
+                            (Some(key), Some(content)) => {
+                                // Fail closed: an unreadable file or a
+                                // missing approval must never compare equal.
+                                let unchanged = match (content, state.project_fingerprints.get(key))
+                                {
+                                    (Ok(content), Some(approved)) => content == approved,
+                                    _ => false,
+                                };
+                                if requested && !unchanged {
+                                    let reason = match content {
+                                        Ok(_) => "code changed since it was approved".to_owned(),
+                                        Err(error) => format!("cannot verify its code: {error:#}"),
+                                    };
+                                    warnings.push(format!(
+                                        "project plugin '{}' is not loaded: {reason}; run `kroma plugins enable {}` again to approve the current code",
+                                        manifest.id, manifest.id
+                                    ));
+                                    Some(reason)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        // `enabled` is what actually runs, so a listing can never
+                        // claim a plugin is active while its code is unapproved.
+                        let enabled = requested && blocked.is_none();
                         let event_worker =
                             (!manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
                         plugins.push(Plugin {
                             manifest,
                             enabled,
+                            requested,
+                            blocked,
                             project_key,
                             transient: false,
                             worker,
@@ -953,6 +986,8 @@ impl PluginCatalog {
             plugins.push(Plugin {
                 manifest,
                 enabled: true,
+                requested: true,
+                blocked: None,
                 project_key: None,
                 transient: true,
                 worker,
@@ -1024,7 +1059,9 @@ impl PluginCatalog {
                     "name": plugin.manifest.name,
                     "version": plugin.manifest.version,
                     "description": plugin.manifest.description,
-                    "enabled": plugin.is_enabled(&state),
+                    "enabled": plugin.enabled,
+                    "requested": plugin.requested,
+                    "blocked": plugin.blocked,
                     "project": plugin.project_key.is_some(),
                     "transient": plugin.transient,
                     "api_version": plugin.manifest.api_version,
@@ -1062,7 +1099,7 @@ impl PluginCatalog {
         let state = PluginState::load(&self.state_path).unwrap_or_default();
         let mut lines = Vec::new();
         for plugin in &self.plugins {
-            let active = plugin.is_enabled(&state);
+            let active = plugin.requests(&state);
             let restart = if active != plugin.enabled {
                 " (reload or restart to apply)"
             } else {
@@ -1125,10 +1162,13 @@ impl PluginCatalog {
         }
         let plugin = plugin.ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         let key = plugin.project_key.as_deref().unwrap_or(id).to_owned();
-        let approved_content = plugin
-            .project_key
-            .as_ref()
-            .map(|_| plugin_content_fingerprint(&plugin.worker.directory, &plugin.worker));
+        let approved_content = match plugin.project_key {
+            Some(_) => Some(plugin_content_fingerprint(
+                &plugin.worker.directory,
+                &plugin.worker,
+            )?),
+            None => None,
+        };
         if enabled {
             if plugin.project_key.is_some() {
                 state.enabled_projects.insert(key.clone());
@@ -1395,7 +1435,7 @@ impl PluginCatalog {
             let found = next.plugins.iter().any(|plugin| {
                 plugin.manifest.id == old.manifest.id && plugin.project_key == old.project_key
             });
-            if !found && old.is_enabled(&desired) {
+            if !found && old.requests(&desired) {
                 bail!(
                     "enabled plugin '{}' is missing or invalid; fix it or disable it first",
                     old.manifest.id
@@ -2492,7 +2532,8 @@ struct PluginWorker {
     settings: Value,
     // Track owned script dependencies (including imported helpers), never
     // recursively fingerprint external node_modules. Unchanged workers stay warm.
-    entrypoints: Vec<(PathBuf, u64, Option<SystemTime>)>,
+    // Each tracked file binds approval to content, never to a size or mtime.
+    entrypoints: Vec<(PathBuf, Option<String>, Option<SystemTime>)>,
     process: Mutex<Option<PluginProcess>>,
     next_request: AtomicU64,
     active: Mutex<Option<(u64, u32)>>,
@@ -2533,6 +2574,8 @@ impl PluginWorker {
         // twice. Discovery must stay cheap even for a disabled plugin.
         const MAX_SCAN_ENTRIES: usize = 20_000;
         const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+        // Explicit command/args entries are hashed too, so bound that read.
+        const MAX_EXPLICIT_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
         let mut visited = std::collections::BTreeSet::new();
         let mut scanned_entries = 0usize;
         let mut scanned_bytes = 0u64;
@@ -2578,12 +2621,16 @@ impl PluginWorker {
                         }
                         // Detect edits even when mtime granularity is coarse
                         // and a dependency is replaced with the same length.
-                        let bytes = fs::read(&path).unwrap_or_default();
-                        scanned_bytes = scanned_bytes.saturating_add(bytes.len() as u64);
-                        let fingerprint = bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
-                            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-                        });
-                        entrypoints.push((path, fingerprint, info.modified().ok()));
+                        // An unreadable file records no digest, which keeps the
+                        // plugin unapproved instead of silently trusted.
+                        let digest = match fs::read(&path) {
+                            Ok(bytes) => {
+                                scanned_bytes = scanned_bytes.saturating_add(bytes.len() as u64);
+                                Some(crate::mcp::content_digest(&bytes))
+                            }
+                            Err(_) => None,
+                        };
+                        entrypoints.push((path, digest, info.modified().ok()));
                     }
                 }
             }
@@ -2609,7 +2656,14 @@ impl PluginWorker {
             }
             if let Ok(info) = fs::metadata(&path) {
                 if info.is_file() {
-                    entrypoints.push((path, info.len(), info.modified().ok()));
+                    // A non-JavaScript entry (a Python, PowerShell or shell
+                    // script) is executable code too, so approval covers its
+                    // bytes rather than its length or modification time.
+                    let digest = (info.len() <= MAX_EXPLICIT_ENTRY_BYTES)
+                        .then(|| fs::read(&path).ok())
+                        .flatten()
+                        .map(|bytes| crate::mcp::content_digest(&bytes));
+                    entrypoints.push((path, digest, info.modified().ok()));
                 }
             }
         }
@@ -3193,6 +3247,89 @@ base_url = "https://example.com""#,
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn an_approval_without_a_stored_fingerprint_does_not_load() {
+        let root = test_root("stale-approval");
+        let plugins = root.join("plugins");
+        let project = root.join("project");
+        let dir = project.join(".kroma").join("plugins").join("legacy");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            "id='legacy'\nname='Legacy'\nprompt='legacy audit'\ncommand='python'\nargs=['main.py']\n",
+        )
+        .unwrap();
+        fs::write(dir.join("main.py"), "print(1)\n").unwrap();
+        // State written by an older version: enabled, but no content fingerprint.
+        let key = format!(
+            "{}::legacy",
+            dir.parent().unwrap().canonicalize().unwrap().display()
+        );
+        let state = root.join("plugins.toml");
+        // A TOML literal string keeps Windows path separators intact.
+        fs::write(
+            &state,
+            format!(
+                "enabled_projects = ['{key}']
+"
+            ),
+        )
+        .unwrap();
+        let catalog = PluginCatalog::discover_at(plugins, state, &project).unwrap();
+        assert!(!catalog.plugins[0].enabled, "unverified code must not load");
+        assert!(catalog.plugins[0].requested);
+        assert!(catalog.plugins[0].blocked.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_plugin_approval_is_bound_to_non_script_entry_bytes() {
+        let root = test_root("approval-bytes");
+        let plugins = root.join("plugins");
+        let project = root.join("project");
+        let dir = project.join(".kroma").join("plugins").join("scripted");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            "id='scripted'\nname='Scripted'\nprompt='scripted audit'\ncommand='python'\nargs=['main.py']\n",
+        )
+        .unwrap();
+        fs::write(dir.join("main.py"), "print(1)\n").unwrap();
+        let state = root.join("plugins.toml");
+        let catalog = PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
+        catalog.set_enabled("scripted", true).unwrap();
+        let approved =
+            PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
+        assert!(approved.plugins[0].enabled, "approved code must run");
+        // Same size, different bytes: approval must not survive on a length.
+        fs::write(dir.join("main.py"), "print(2)\n").unwrap();
+        let changed = PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
+        assert!(!changed.plugins[0].enabled);
+        assert!(changed.plugins[0].requested);
+        let summaries = changed.summaries().unwrap();
+        assert_eq!(
+            summaries[0]["enabled"], false,
+            "a listing must never claim blocked code runs"
+        );
+        assert_eq!(summaries[0]["requested"], true);
+        assert!(summaries[0]["blocked"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("changed")));
+        // Approving again accepts the new bytes, and a manifest edit blocks it.
+        changed.set_enabled("scripted", true).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            "id='scripted'\nname='Renamed'\nprompt='scripted audit'\ncommand='python'\nargs=['main.py']\n",
+        )
+        .unwrap();
+        let manifest_changed = PluginCatalog::discover_at(plugins, state, &project).unwrap();
+        assert!(!manifest_changed.plugins[0].enabled);
+        assert!(manifest_changed.plugins[0].requested);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

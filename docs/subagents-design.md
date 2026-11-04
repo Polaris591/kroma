@@ -55,11 +55,22 @@ timeout: dependent work is a second call, and context is written into the task.
 
 ## Progress
 
-The streaming tool card is the only live surface. Every five seconds the batch
-emits `running · done/total · elapsed / limit · in / out`; each subtask adds a
-line when it starts and when it finishes. The host renders at most three lines
-of a running tool, so the card is a rolling tail, not a table. Tokens come from
-the child's own `model_finished` frames, so they are as fresh as the last model
+The streaming tool card is the only live surface, and it should show which task
+is doing what rather than replay every child event. Comparable harnesses render
+a row per agent (name, elapsed, current step, tokens) and keep the transcript for
+a drill-down, because an event log scrolls the useful state away; the host's
+eight-row window makes that choice sharper here. So the batch prints a
+positional roster (`1✓ 2▶ 3·`; `·` queued, `▶` running, `✓` completed, `✗`
+failed, `–` never started) with batch elapsed and tokens, then one row per
+running task: an 18-character label, task elapsed, the current activity (model
+turn, or the tool it is in with that tool's elapsed), its tokens, and a `quiet`
+marker once the child has been silent for 90 seconds. Task start and finish
+still print once; the finish row carries a 40-character answer preview. Every
+row is one of at most four per beat, so the eight-row window holds two complete
+beats, and the last two rows a batch emits are the summary and a 160-character
+line of per-task answers, because that is what the collapsed card keeps after
+the call. The evidence directory is the full record. Tokens come from the
+child's own `model_finished` frames, so they are as fresh as the last model
 turn; the limit is the manifest deadline capped by
 `KROMA_PLUGIN_TOOL_TIMEOUT_SECS`, so the card never promises more time than the
 host will grant, and a test keeps the manifest and the module in sync.
@@ -77,9 +88,11 @@ Unix the child Kroma receives `SIGINT` so its own cancellation path runs (that i
 what stops a Shell, which owns a separate process group), and `SIGKILL` follows
 after a bounded grace period. Windows uses `taskkill /T /F`.
 
-The plugin keeps no second total timer. If the host kills the worker, results
-that were not already final are unknown; the plugin never invents `timed_out`
-or `not_started` for them, and nothing is resumed or retried automatically.
+Each task is bounded by `task_timeout_secs` (default 300s) so one stuck child
+fails with `CHILD_TIMEOUT` and frees its slot without spoiling the batch. The
+batch also cuts off remaining stragglers just before the host deadline so
+completed results are returned in a `partial` response instead of being lost
+to a host worker kill. Nothing is resumed or retried automatically.
 Side effects that already happened are not undone.
 
 ## Result contract

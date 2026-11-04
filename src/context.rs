@@ -7,6 +7,9 @@ use crate::{
     context_state::PersistedContext,
     model::{ModelBackend, StreamFuture, SummaryResult},
     protocol::Message,
+    token_estimate::{
+        bytes_to_tokens, serialized_request_tokens, with_measured_margin, without_request_overhead,
+    },
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -214,13 +217,35 @@ pub trait ContextFactory: Send + Sync {
             return Ok(self.initial());
         }
         match state {
-            PersistedContext::Builtin(_) => Ok(PersistedContext::default()),
+            PersistedContext::Builtin(state) => Ok(PersistedContext::Builtin(
+                rewound_builtin_state(state, retained),
+            )),
             PersistedContext::External(custom) => bail!(
                 "context strategy '{}' cannot rewind to a partial conversation without implementing ContextFactory::branch_state; original history unchanged",
                 custom.strategy
             ),
         }
     }
+}
+
+/// State for a shortened copy of a conversation. Summaries and tool-preview
+/// indexes that describe discarded messages are dropped, but the confirmed
+/// "already answered" prefix that survived is kept: forgetting it leaves the
+/// built-in policy without any checkpoint boundary, so a long branch would fail
+/// on its context limit instead of compacting.
+fn rewound_builtin_state(state: &CompactionState, retained: &[Message]) -> CompactionState {
+    let limit = retained.len().max(1);
+    if state.covered_until > limit {
+        return CompactionState {
+            consumed_until: limit,
+            ..CompactionState::default()
+        };
+    }
+    let mut next = state.clone();
+    next.consumed_until = next.consumed_until.min(limit).max(next.covered_until);
+    next.cleared_tools
+        .retain(|&index| index < next.consumed_until);
+    next
 }
 
 #[derive(Default)]
@@ -356,12 +381,12 @@ impl ContextConfig {
         let inline_log_bytes = crate::attachments::inline_log_extra_bytes(view)?;
         // Images need their own allowance; raw WAL JSON only contains paths.
         // This is approximate and must not be mistaken for exact tokenizer use.
-        let estimated = message_bytes
-            .saturating_add(tool_bytes)
-            .saturating_add(inline_log_bytes)
-            .div_ceil(3)
-            .saturating_add(active_images.saturating_mul(crate::attachments::IMAGE_TOKEN_ALLOWANCE))
-            .saturating_add(256);
+        let estimated = serialized_request_tokens(
+            message_bytes
+                .saturating_add(tool_bytes)
+                .saturating_add(inline_log_bytes),
+        )
+        .saturating_add(active_images.saturating_mul(crate::attachments::IMAGE_TOKEN_ALLOWANCE));
         if estimated >= self.hard {
             bail!(
                 "complete model request exceeds the context input budget (about {} tokens, hard limit {}, output reserve {}); reduce injected prompt/tool schema or shorten the conversation",
@@ -411,6 +436,16 @@ pub struct CompactionUsage {
 }
 
 impl CompactionUsage {
+    /// A failed summary can still have billed earlier attempts. Missing
+    /// fields stay unknown instead of being reported as zero.
+    fn record_failed(&mut self, requests: usize, usage: &crate::model::Usage) {
+        let old = self.requests == 0;
+        self.requests += requests;
+        self.input = sum_known(self.input, usage.input, old);
+        self.output = sum_known(self.output, usage.output, old);
+        self.cached = sum_known(self.cached, usage.cached, old);
+    }
+
     fn record(&mut self, summary: &SummaryResult) {
         let old = self.requests == 0;
         self.requests += summary.requests;
@@ -663,10 +698,7 @@ impl Compression {
     }
 
     fn tokens_for_json_bytes(&self, bytes: usize) -> usize {
-        bytes
-            .div_ceil(3)
-            .saturating_add(256)
-            .saturating_add(self.request_extra_tokens)
+        serialized_request_tokens(bytes).saturating_add(self.request_extra_tokens)
     }
 
     /// Estimate the exact checkpoint source, including tool schemas and
@@ -676,12 +708,10 @@ impl Compression {
         let bytes = serde_json::to_vec(view).unwrap_or_default().len();
         let images = crate::attachments::active_image_tokens(view, model.accepts_images());
         let logs = crate::attachments::inline_log_extra_bytes(view)
-            .map(|bytes| bytes.div_ceil(3))
+            .map(bytes_to_tokens)
             .unwrap_or(0);
-        bytes
-            .div_ceil(3)
-            .saturating_add(256)
-            .saturating_add(self.request_tool_bytes.div_ceil(3))
+        serialized_request_tokens(bytes)
+            .saturating_add(bytes_to_tokens(self.request_tool_bytes))
             .saturating_add(images)
             .saturating_add(logs)
     }
@@ -799,8 +829,8 @@ impl Compression {
         // measured prefix with a bounded 25% margin over the 3-bytes/token
         // heuristic so a large appended tool result cannot silently carry the
         // request past the 90%-of-window trigger.
-        let base = added_bytes.div_ceil(3);
-        let incremental = base.saturating_add(base.div_ceil(4));
+        let base = bytes_to_tokens(added_bytes);
+        let incremental = with_measured_margin(base);
         let composed = (measured.input as usize).saturating_add(incremental);
         if self.prefix_matches(measured, view, extra_tokens) {
             composed
@@ -963,7 +993,7 @@ impl Compression {
                 continue;
             }
             last_safe = Some(boundary);
-            if largest_retained.is_none() && suffix_tokens.saturating_sub(256) <= retain {
+            if largest_retained.is_none() && without_request_overhead(suffix_tokens) <= retain {
                 // Smallest safe boundary that leaves at most the retention
                 // budget raw is the largest useful recent suffix.
                 largest_retained = Some(boundary);
@@ -1088,6 +1118,11 @@ impl Compression {
             Ok(result) => result,
             Err(error) => {
                 self.failed_this_turn = true;
+                // The provider may already have billed earlier attempts of this
+                // summary. Record what it reported before failing the request.
+                if let Some((usage, requests)) = crate::provider::failed_summary_usage(&error) {
+                    self.usage.record_failed(requests, usage);
+                }
                 crate::runtime_log!("[compact] checkpoint request failed: {error:#}");
                 return Err(error);
             }
@@ -1483,7 +1518,7 @@ fn same_message(left: &Message, right: &Message) -> bool {
 #[cfg(test)]
 fn rough_tokens(messages: &[Message]) -> usize {
     let payload = serde_json::to_vec(messages).unwrap_or_default();
-    payload.len().div_ceil(3).saturating_add(256)
+    serialized_request_tokens(payload.len())
 }
 
 /// Number of estimated tokens for each *raw* suffix, exactly matching
@@ -1491,7 +1526,7 @@ fn rough_tokens(messages: &[Message]) -> usize {
 fn raw_suffix_tokens(messages: &[Message]) -> Vec<usize> {
     let mut result = vec![0; messages.len() + 1];
     let mut bytes = 2usize; // JSON array brackets
-    result[messages.len()] = bytes.div_ceil(3).saturating_add(256);
+    result[messages.len()] = serialized_request_tokens(bytes);
     for index in (0..messages.len()).rev() {
         bytes += serde_json::to_vec(&messages[index])
             .unwrap_or_default()
@@ -1499,7 +1534,7 @@ fn raw_suffix_tokens(messages: &[Message]) -> Vec<usize> {
         if index + 1 < messages.len() {
             bytes += 1; // array comma
         }
-        result[index] = bytes.div_ceil(3).saturating_add(256);
+        result[index] = serialized_request_tokens(bytes);
     }
     result
 }
@@ -2025,7 +2060,7 @@ mod tests {
         assert!(view.last().unwrap().content.as_deref() == Some("Ready to continue."));
         assert_tool_structure(&view);
         let retain = budget().retain_tokens();
-        let suffix = raw_suffix_tokens(&messages)[state.covered_until].saturating_sub(256);
+        let suffix = without_request_overhead(raw_suffix_tokens(&messages)[state.covered_until]);
         assert!(
             suffix <= retain,
             "recent raw history should fit the retention budget: {suffix} > {retain}"
@@ -2105,6 +2140,139 @@ mod tests {
             .content
             .as_deref()
             .is_some_and(|text| text.starts_with("FIRST_TASK")));
+        Ok(())
+    }
+
+    fn long_completed_turns(rounds: usize) -> Vec<Message> {
+        let mut messages = vec![Message::new("system", "coding agent")];
+        for round in 0..rounds {
+            messages.push(Message::new(
+                "user",
+                format!("TASK_{round} {}", "word ".repeat(250)),
+            ));
+            messages.push(Message::new("assistant", "done"));
+        }
+        messages
+    }
+
+    #[test]
+    fn rewinding_keeps_the_confirmed_consumed_prefix() {
+        let mut messages = long_completed_turns(12);
+        let kept = messages.len() - 1;
+        messages.push(Message::new("user", "abandoned future"));
+        let original = CompactionState {
+            consumed_until: kept - 1,
+            ..CompactionState::default()
+        };
+        let PersistedContext::Builtin(branch) = BuiltinContextFactory
+            .branch_state(
+                &PersistedContext::Builtin(original),
+                &messages,
+                &messages[..kept],
+                Path::new("source.json"),
+                Path::new("branch.json"),
+            )
+            .unwrap()
+        else {
+            panic!("a built-in branch must stay built-in");
+        };
+        assert_eq!(
+            branch.consumed_until,
+            kept - 1,
+            "messages the model already answered stay answered"
+        );
+        assert_eq!(branch.covered_until, 1);
+        assert!(branch.summaries.is_empty());
+    }
+
+    #[test]
+    fn rewinding_drops_derived_state_that_describes_discarded_messages() {
+        let messages = long_completed_turns(12);
+        let original = CompactionState {
+            summaries: vec![SummarySegment {
+                until: 6,
+                text: "earlier checkpoint".into(),
+            }],
+            covered_until: 6,
+            consumed_until: messages.len(),
+            cleared_tools: std::collections::BTreeSet::from([4]),
+            revision: 3,
+            ..CompactionState::default()
+        };
+        let PersistedContext::Builtin(branch) = BuiltinContextFactory
+            .branch_state(
+                &PersistedContext::Builtin(original.clone()),
+                &messages,
+                &messages[..4],
+                Path::new("source.json"),
+                Path::new("branch.json"),
+            )
+            .unwrap()
+        else {
+            panic!("a built-in branch must stay built-in");
+        };
+        assert_eq!(branch.covered_until, 1);
+        assert!(branch.summaries.is_empty());
+        assert_eq!(branch.consumed_until, 4);
+        assert!(branch.cleared_tools.is_empty());
+        assert_eq!(branch.revision, 0);
+        // A branch that still contains the checkpoint keeps it.
+        let PersistedContext::Builtin(kept) = BuiltinContextFactory
+            .branch_state(
+                &PersistedContext::Builtin(original),
+                &messages,
+                &messages[..8],
+                Path::new("source.json"),
+                Path::new("branch.json"),
+            )
+            .unwrap()
+        else {
+            panic!("a built-in branch must stay built-in");
+        };
+        assert_eq!(kept.covered_until, 6);
+        assert_eq!(kept.summaries.len(), 1);
+        assert_eq!(kept.consumed_until, 8);
+    }
+
+    #[tokio::test]
+    async fn a_rewound_long_branch_can_still_checkpoint() -> Result<()> {
+        let mut messages = long_completed_turns(14);
+        let kept = messages.len() - 1;
+        messages.push(Message::new("user", "abandoned future"));
+        let original = CompactionState {
+            consumed_until: kept - 1,
+            ..CompactionState::default()
+        };
+        let PersistedContext::Builtin(branch) = BuiltinContextFactory.branch_state(
+            &PersistedContext::Builtin(original),
+            &messages,
+            &messages[..kept],
+            Path::new("source.json"),
+            Path::new("branch.json"),
+        )?
+        else {
+            bail!("a built-in branch must stay built-in");
+        };
+        let mut context = Compression::new(
+            branch,
+            ContextConfig::with_output_reserve(8_192, 512)?,
+            Path::new("branch.json"),
+        );
+        let commit = RecordingCommit::default();
+        let model = Arc::new(TestModel::new([]));
+        context
+            .prepare(
+                &messages[..kept],
+                &(model.clone() as Arc<dyn ModelBackend>),
+                &commit,
+            )
+            .await?;
+        assert_eq!(
+            model.calls().len(),
+            1,
+            "a rewound branch must be able to checkpoint again"
+        );
+        assert_eq!(commit.count(), 1);
         Ok(())
     }
 
@@ -2904,6 +3072,25 @@ mod tests {
             "the new request ceiling must still leave the output reserve: {estimated}"
         );
         assert!(budget.hard_limit() + budget.output_reserve() <= budget.window());
+    }
+
+    #[test]
+    fn final_request_estimate_ceils_the_whole_payload_and_adds_one_fixed_overhead() {
+        let budget = budget();
+        let view = vec![
+            Message::new("system", "You are a coding agent."),
+            Message::new("user", "hello 你好"),
+        ];
+        let (_, message_bytes) = budget.validate_with_tool_bytes(&view, 0).unwrap();
+        let tool_bytes = 2;
+        let (estimated, bytes) = budget.validate_with_tool_bytes(&view, tool_bytes).unwrap();
+        assert_eq!(bytes, message_bytes);
+        assert_eq!(estimated, (message_bytes + tool_bytes).div_ceil(3) + 256);
+        assert_ne!(
+            estimated,
+            bytes_to_tokens(message_bytes) + 256 + bytes_to_tokens(tool_bytes) + 256,
+            "the fixed overhead belongs to the complete request, not to each part"
+        );
     }
 
     #[test]

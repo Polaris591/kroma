@@ -17,6 +17,7 @@ use crate::{
     sessions::SessionCatalog,
     shell,
     steering::TaskInput,
+    token_estimate::bytes_to_tokens,
     tools::{ToolContext, ToolRegistry},
     usage::UsageMeter,
 };
@@ -445,14 +446,14 @@ impl Agent {
         let extra_tokens = self
             .prompt
             .extra_estimated_tokens(&self.messages[0])
-            .saturating_add(serde_json::to_vec(&tools)?.len().div_ceil(3))
+            .saturating_add(bytes_to_tokens(serde_json::to_vec(&tools)?.len()))
             .saturating_add(crate::attachments::active_image_tokens(
                 &self.messages,
                 self.model.accepts_images(),
             ))
-            .saturating_add(
-                crate::attachments::inline_log_extra_bytes(&self.messages)?.div_ceil(3),
-            );
+            .saturating_add(bytes_to_tokens(crate::attachments::inline_log_extra_bytes(
+                &self.messages,
+            )?));
         let result = self
             .compression
             .compact(
@@ -1066,7 +1067,7 @@ impl Agent {
         // explicitly excluded by the projection. Read small inline logs once,
         // not once per tool round.
         let inline_log_tokens =
-            crate::attachments::inline_log_extra_bytes(&self.messages)?.div_ceil(3);
+            bytes_to_tokens(crate::attachments::inline_log_extra_bytes(&self.messages)?);
 
         // Tools and prompt contributions cannot change during one run.
         // Calculate the extra budget once, rather than rebuilding the tool
@@ -1087,7 +1088,7 @@ impl Agent {
         let base_extra_tokens = self
             .prompt
             .extra_estimated_tokens(&self.messages[0])
-            .saturating_add(tool_schema_bytes.div_ceil(3));
+            .saturating_add(bytes_to_tokens(tool_schema_bytes));
 
         let mut overflow_retries = 0;
         loop {

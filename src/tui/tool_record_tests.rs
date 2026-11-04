@@ -489,3 +489,105 @@ fn successful_rows_have_no_disclosure_badge_and_keep_right_padding() {
         assert!(line.width() <= width - 2);
     }
 }
+
+#[test]
+fn subagent_live_and_completed_records_render_clean_dashboard_not_raw_json() {
+    let mut ui = ui();
+    let raw_args = serde_json::json!({
+        "tasks": [
+            {"task": "检查 src/session.rs 恢复逻辑"},
+            {"task": "运行集成测试", "cwd": "../kroma-tests"}
+        ]
+    })
+    .to_string();
+    ui.event(UiEvent::ToolStarted {
+        name: "subagent".into(),
+        id: "sub-1".into(),
+        args: tool_arguments("subagent", &raw_args),
+    });
+    ui.event(UiEvent::ToolOutput {
+        id: "sub-1".into(),
+        stream: "stdout".into(),
+        chunk: concat!(
+            "▷ [1/2] 检查 src/session.rs 恢复逻辑
+",
+            "▷ [2/2] 运行集成测试
+",
+            "1▶ 2▶ · 5s/600s · in 0 / out 0
+",
+            "[1/2] 检查 src/session.rs… 0:05 ▶ model turn 1 · 0 tok
+",
+            "[2/2] 运行集成测试 0:05 ▶ starting · 0 tok
+",
+            "✓ [1/2]   8.2s · in 3.1k / out 90 · \"恢复逻辑正常\"
+",
+            "1✓ 2▶ · 10s/600s · in 3.1k / out 90
+",
+            "[2/2] 运行集成测试 0:10 ▶ shell 0:04 · 1.2k tok
+"
+        )
+        .into(),
+    });
+    let live_text = card_text(&ui.tool_card(&entries(&ui), ui.active_colors(), 120));
+    assert!(
+        !live_text.contains("{\"tasks\""),
+        "header must not dump raw JSON: {live_text}"
+    );
+    assert!(live_text.contains("检查 src/session.rs 恢复逻辑") && live_text.contains("运行集成测试"));
+    assert!(
+        live_text.contains("1✓ 2▶ · 10s/600s") && !live_text.contains("1▶ 2▶ · 5s/600s"),
+        "stale heartbeat status bar must be replaced in place: {live_text}"
+    );
+    assert!(
+        live_text.contains("✓ [1/2]") && !live_text.contains("0:05 ▶ model turn 1"),
+        "stale task beat must be replaced by latest task state: {live_text}"
+    );
+    assert!(live_text.contains("▶ [2/2] 运行集成测试 0:10 ▶ shell 0:04"));
+
+    let raw_result = serde_json::json!({
+        "schema_version": 1,
+        "run_id": "20260405-abcd1234",
+        "status": "partial",
+        "results": [
+            {
+                "index": 0,
+                "status": "completed",
+                "exit_code": 0,
+                "output": "恢复逻辑正常
+WAL 顺序已验证",
+                "output_truncated": false,
+                "duration_ms": 8200,
+                "usage": {"requests": 1, "input": 3100, "output": 90, "cached": 0, "reasoning": 0},
+                "artifacts": "/tmp/runs/0"
+            },
+            {
+                "index": 1,
+                "status": "failed",
+                "exit_code": null,
+                "error": {"code": "CHILD_TIMEOUT", "message": "child timed out after 300s"},
+                "duration_ms": 300000,
+                "usage": {"requests": 1, "input": 1200, "output": 20, "cached": 0, "reasoning": 0},
+                "artifacts": "/tmp/runs/1"
+            }
+        ]
+    })
+    .to_string();
+    ui.event(UiEvent::ToolFinished {
+        id: "sub-1".into(),
+        result: tool_result_details(&raw_result),
+        failed: true,
+    });
+    let collapsed = card_text(&ui.tool_card(&entries(&ui), ui.active_colors(), 120));
+    assert!(!collapsed.contains("\"schema_version\"") && !collapsed.contains("\"status\":"));
+    assert!(collapsed.contains("✓ [1/2] 8.2s · \"恢复逻辑正常 WAL 顺序已验证\""));
+    assert!(collapsed.contains("✗ [2/2] 300.0s · CHILD_TIMEOUT: child timed out after 300s"));
+
+    ui.toggle_all_tools();
+    let expanded = card_text(&ui.tool_card(&entries(&ui), ui.active_colors(), 120));
+    assert!(expanded.contains("[1/2] 检查 src/session.rs 恢复逻辑"));
+    assert!(expanded.contains("[2/2] 运行集成测试 (../kroma-tests)"));
+    assert!(expanded.contains("── [1/2] ✓ completed · 8.2s"));
+    assert!(expanded.contains("WAL 顺序已验证"));
+    assert!(expanded.contains("── [2/2] ✗ failed (CHILD_TIMEOUT) · 300.0s"));
+    assert!(expanded.contains("artifacts: /tmp/runs/1"));
+}

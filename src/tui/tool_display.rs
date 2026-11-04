@@ -45,7 +45,71 @@ fn node_write_target(command: &str) -> Option<&str> {
     (!target.is_empty() && target.len() <= 120 && !target.contains(['\r', '\n'])).then_some(target)
 }
 
+fn subagent_tasks(command: &str) -> Vec<String> {
+    let trimmed = command.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(tasks) = value.get("tasks").and_then(serde_json::Value::as_array) {
+                let extracted: Vec<String> = tasks
+                    .iter()
+                    .filter_map(|item| item.get("task").and_then(serde_json::Value::as_str))
+                    .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if !extracted.is_empty() {
+                    return extracted;
+                }
+            }
+        }
+    }
+    let lines: Vec<String> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|line| {
+            if let Some(rest) = line.strip_prefix('[') {
+                if let Some((inside, after)) = rest.split_once("] ") {
+                    if inside.contains('/') {
+                        return after.trim().to_owned();
+                    }
+                }
+            }
+            line.to_owned()
+        })
+        .collect();
+    lines
+}
+
+fn subagent_summary(command: &str, language: Language) -> Option<String> {
+    let tasks = subagent_tasks(command);
+    if tasks.is_empty() {
+        return None;
+    }
+    if tasks.len() == 1 {
+        return Some(format!("subagent · {}", first_line(&tasks[0], 64)));
+    }
+    let count = tasks.len();
+    let preview = tasks
+        .iter()
+        .enumerate()
+        .take(3)
+        .map(|(i, t)| format!("{}. {}", i + 1, first_line(t, 24)))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let suffix = if count > 3 { " …" } else { "" };
+    let label = match language {
+        Language::Zh => format!("{count} 个子任务"),
+        Language::En => format!("{count} tasks"),
+    };
+    Some(format!("subagent · {label} · {preview}{suffix}"))
+}
+
 pub(super) fn summary(name: &str, command: &str, language: Language) -> String {
+    if name == "subagent" {
+        if let Some(formatted) = subagent_summary(command, language) {
+            return formatted;
+        }
+    }
     if name != "shell" {
         return format!("{name} · {}", first_line(command, 64));
     }

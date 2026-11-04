@@ -39,5 +39,6 @@ mod catalog_file;
 mod history_tools;
 mod path_display;
 mod private_file;
+mod token_estimate;
 #[cfg(windows)]
 mod winsys;

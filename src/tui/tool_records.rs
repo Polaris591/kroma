@@ -234,6 +234,103 @@ fn compact_success_command(command: &str) -> String {
     }
 }
 
+fn subagent_task_tag(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("▷ ")
+        .or_else(|| trimmed.strip_prefix("✓ "))
+        .or_else(|| trimmed.strip_prefix("✗ "))
+        .or_else(|| trimmed.strip_prefix("▶ "))
+        .unwrap_or(trimmed);
+    let close = rest.strip_prefix('[')?.find(']')?;
+    let inside = &rest[1..1 + close];
+    let (left, right) = inside.split_once('/')?;
+    if !left.is_empty()
+        && !right.is_empty()
+        && left.bytes().all(|b| b.is_ascii_digit())
+        && right.bytes().all(|b| b.is_ascii_digit())
+    {
+        Some(&rest[..=close + 1])
+    } else {
+        None
+    }
+}
+
+fn subagent_live_preview(details: &str, limit: usize) -> Vec<String> {
+    let mut roster: Option<String> = None;
+    let mut tasks: Vec<(String, String)> = Vec::new();
+    for raw in details.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if raw.starts_with("[... earlier") {
+            continue;
+        }
+        if let Some(tag) = subagent_task_tag(raw) {
+            let formatted = if raw.starts_with('[') {
+                format!("▶ {raw}")
+            } else {
+                raw.to_owned()
+            };
+            if let Some((_, existing)) = tasks.iter_mut().find(|(t, _)| t == tag) {
+                *existing = formatted;
+            } else {
+                tasks.push((tag.to_owned(), formatted));
+            }
+        } else {
+            roster = Some(raw.to_owned());
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(r) = roster {
+        out.push(r);
+    }
+    for (_, line) in tasks {
+        if out.len() >= limit {
+            break;
+        }
+        out.push(line);
+    }
+    out
+}
+
+fn subagent_finished_preview(details: &str, limit: usize) -> (Vec<String>, bool) {
+    let mut has_sections = false;
+    let mut summary = Vec::new();
+    for line in details.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
+        if line.starts_with("── [") {
+            has_sections = true;
+            break;
+        }
+        if summary.len() < limit {
+            summary.push(line.to_owned());
+        } else {
+            has_sections = true;
+        }
+    }
+    (summary, has_sections)
+}
+
+fn subagent_preview_spans(line: &str, theme: Theme) -> Vec<Span<'static>> {
+    for (prefix, color) in [
+        ("✓ ", theme.success),
+        ("✗ ", theme.error),
+        ("▶ ", theme.accent),
+        ("▷ ", theme.accent),
+        ("△ ", theme.warning),
+        ("– ", theme.warning),
+    ] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return vec![
+                Span::styled("↳ ", Style::default().fg(theme.faint)),
+                Span::styled(prefix.to_owned(), Style::default().fg(color)),
+                Span::styled(rest.to_owned(), Style::default().fg(theme.muted)),
+            ];
+        }
+    }
+    vec![
+        Span::styled("↳ ", Style::default().fg(theme.faint)),
+        Span::styled(line.to_owned(), Style::default().fg(theme.muted)),
+    ]
+}
+
 impl UiState {
     pub(super) fn plain_tool_records(
         &self,
@@ -397,12 +494,31 @@ impl UiState {
             }
             let diff = name == "shell"
                 && (entry.body.contains("git diff") || entry.details.contains("diff --git "));
+            let has_subagent_sections = name == "subagent"
+                && entry.details.lines().any(|l| l.starts_with("── ["));
+            let mut in_sections = !has_subagent_sections;
             for output in entry.details.lines() {
+                if !in_sections {
+                    if output.starts_with("── [") {
+                        in_sections = true;
+                    } else {
+                        continue;
+                    }
+                }
                 let mut column = 0;
                 let output = visible_line(&markdown::expand_tabs(output, &mut column));
                 card.preformatted.push(card.lines.len());
                 let spans = if diff {
                     self.plain_diff_spans(&output, theme)
+                } else if name == "subagent" && output.starts_with("── [") {
+                    let fg = if output.contains("✗") {
+                        theme.error
+                    } else if output.contains("✓") {
+                        theme.success
+                    } else {
+                        theme.accent
+                    };
+                    vec![Span::styled(output, Style::default().fg(fg))]
                 } else {
                     vec![Span::styled(output, Style::default().fg(theme.code))]
                 };
@@ -412,10 +528,35 @@ impl UiState {
         }
         // Successful calls stay at two rows. Running, failed and diagnostic
         // calls expose a bounded preview of their existing captured output.
-        if !running && !entry.failed && !warning {
+        if !running && !entry.failed && !warning && name != "subagent" {
             return;
         }
         let limit = if running { 8 } else { 2 };
+        if name == "subagent" {
+            let (mut preview, omitted) = if running {
+                (subagent_live_preview(&entry.details, limit), false)
+            } else {
+                subagent_finished_preview(&entry.details, limit)
+            };
+            if running && preview.is_empty() {
+                preview.push(language.text("Waiting for subagents…", "正在启动子代理…").into());
+            }
+            let preview_len = preview.len();
+            for (index, line) in preview.into_iter().enumerate() {
+                let suffix = if omitted && index + 1 == preview_len && !running {
+                    " …"
+                } else {
+                    ""
+                };
+                let mut column = 0;
+                let line = markdown::expand_tabs(&line, &mut column);
+                let max = width.saturating_sub(6 + UnicodeWidthStr::width(suffix));
+                let clipped = format!("{}{suffix}", clip_line(&line, max));
+                card.preformatted.push(card.lines.len());
+                card.lines.push(body_line(Line::from(subagent_preview_spans(&clipped, theme))));
+            }
+            return;
+        }
         let source = entry
             .details
             .lines()
@@ -506,7 +647,13 @@ impl UiState {
     ) {
         let mut column = 0;
         let command = markdown::expand_tabs(command, &mut column);
-        let prefix = if name == "shell" { "$ " } else { "args: " };
+        let prefix = if name == "shell" {
+            "$ "
+        } else if name == "subagent" && command.starts_with('[') {
+            ""
+        } else {
+            "args: "
+        };
         let text = visible_line(&format!("{prefix}{command}"));
         let text = max.map_or_else(|| text.clone(), |max| clip_line(&text, max));
         card.preformatted.push(card.lines.len());

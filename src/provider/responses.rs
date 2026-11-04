@@ -217,8 +217,7 @@ impl Stream {
                         .as_str()
                         .context("Responses missing arguments")?
                         .to_owned();
-                    let _: Value = serde_json::from_str(&arguments)
-                        .context("incomplete Responses arguments")?;
+                    crate::provider::validate_tool_call(&id, &name, &arguments)?;
                     if !seen.insert(id.clone()) {
                         bail!("duplicate Responses call ID");
                     }
@@ -285,6 +284,42 @@ pub(super) fn parse_text(body: &str) -> Result<ApecTextAttempt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn responses_reject_non_object_tool_arguments() {
+        let mut stream = Stream::default();
+        let mut push = |value: Value| {
+            stream.apply(&value.to_string(), &mut |_| {}).unwrap();
+        };
+        push(json!({"type":"response.output_item.added","output_index":0,
+            "item":{"type":"function_call","call_id":"call_1","name":"shell","arguments":""}}));
+        push(json!({"type":"response.output_item.done","output_index":0,
+            "item":{"type":"function_call","call_id":"call_1","name":"shell","arguments":"[]"}}));
+        push(json!({"type":"response.completed","response":{"status":"completed"}}));
+        let error = stream
+            .finish()
+            .expect_err("array arguments must be refused");
+        assert!(
+            format!("{error:#}").contains("must be a JSON object"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn responses_reject_empty_call_id_or_name() {
+        for (id, name) in [("", "shell"), ("call_1", "")] {
+            let mut stream = Stream::default();
+            let mut push = |value: Value| {
+                stream.apply(&value.to_string(), &mut |_| {}).unwrap();
+            };
+            push(json!({"type":"response.output_item.added","output_index":0,
+                "item":{"type":"function_call","call_id":id,"name":name,"arguments":""}}));
+            push(json!({"type":"response.output_item.done","output_index":0,
+                "item":{"type":"function_call","call_id":id,"name":name,"arguments":"{}"}}));
+            push(json!({"type":"response.completed","response":{"status":"completed"}}));
+            assert!(stream.finish().is_err(), "id={id:?} name={name:?}");
+        }
+    }
 
     #[test]
     fn round_trip_tool_and_encrypted_reasoning() {

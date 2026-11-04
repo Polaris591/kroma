@@ -599,9 +599,13 @@ fn preview_new_bytes(
     let previous = *offset;
     let start = size.saturating_sub(4096).max(previous);
     file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::with_capacity((size - start) as usize);
-    file.read_to_end(&mut bytes)?;
-    *offset = size;
+    // Read only the snapshot we sized: the file can keep growing while this
+    // runs, and an unbounded read would both exceed the preview budget and
+    // advance the offset past bytes it never showed.
+    let limit = size.saturating_sub(start).min(4096);
+    let mut bytes = Vec::with_capacity(usize::try_from(limit).unwrap_or(0));
+    (&mut file).take(limit).read_to_end(&mut bytes)?;
+    *offset = start.saturating_add(bytes.len() as u64);
     let mut preview = String::new();
     if start > previous {
         preview.push_str("[... earlier live output omitted ...]\n");

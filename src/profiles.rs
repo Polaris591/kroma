@@ -168,6 +168,15 @@ fn valid_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+/// Respect explicit config symlinks (dotfile managers, shared config folders)
+/// rather than rejecting or replacing the link itself.
+fn resolve_profile_target(path: &Path) -> Result<PathBuf> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return fs::canonicalize(path).context("cannot follow Kroma config symlink");
+    }
+    Ok(path.to_path_buf())
+}
+
 impl Profiles {
     pub fn load() -> Result<Self> {
         Self::load_at(&config_path()?)
@@ -283,28 +292,21 @@ impl Profiles {
 
     pub fn save_at(&self, path: &Path) -> Result<()> {
         self.validate()?;
-        // Respect explicit config symlinks (dotfile managers, shared config
-        // folders) rather than rejecting or replacing the symlink itself.
-        let resolved = if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
-        {
-            Some(fs::canonicalize(path).context("cannot follow Kroma config symlink")?)
-        } else {
-            None
-        };
-        let path = resolved.as_deref().unwrap_or(path);
+        let path = resolve_profile_target(path)?;
         let parent = path
             .parent()
             .filter(|dir| !dir.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         #[cfg(unix)]
         let existed = parent.exists();
-        fs::create_dir_all(parent).context("failed to create Kroma config directory")?;
+        fs::create_dir_all(&parent).context("failed to create Kroma config directory")?;
         #[cfg(unix)]
         if !existed {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))?;
         }
-        if let Ok(meta) = fs::symlink_metadata(path) {
+        if let Ok(meta) = fs::symlink_metadata(&path) {
             if !meta.file_type().is_file() {
                 bail!("refusing to replace a non-regular Kroma profile file");
             }
@@ -337,11 +339,11 @@ impl Profiles {
             file.write_all(&data)?;
             file.sync_all()?;
             drop(file);
-            crate::atomic_file::replace(&temp, path)?;
+            crate::atomic_file::replace(&temp, &path)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::File::open(parent)?.sync_all()?;
+                fs::File::open(&parent)?.sync_all()?;
                 // The temporary file was created with 0600; rename preserves it.
                 debug_assert_eq!(fs::metadata(path)?.permissions().mode() & 0o077, 0);
             }
@@ -351,6 +353,22 @@ impl Profiles {
             let _ = fs::remove_file(temp);
         }
         save
+    }
+    /// Apply one change to the newest saved profiles under a cross-process
+    /// lock. Replacing the file with a whole in-memory snapshot would silently
+    /// drop an update made meanwhile by another Kroma process or host.
+    pub fn update(change: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        Self::update_at(&config_path()?, change)
+    }
+
+    pub fn update_at(path: &Path, change: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        let target = resolve_profile_target(path)?;
+        crate::catalog_file::update(&target, &target, || {
+            let mut profiles = Self::load_at(&target)?;
+            change(&mut profiles)?;
+            profiles.validate()?;
+            Ok(profiles)
+        })
     }
 }
 
@@ -571,12 +589,13 @@ pub fn cli(args: &[String]) -> Result<()> {
             Ok(())
         }
         [cmd, name] if cmd == "use" => {
-            let mut profiles = Profiles::load()?;
-            if !profiles.profiles.contains_key(name) {
-                bail!("unknown profile; use 'kroma config list'");
-            }
-            profiles.active = Some(name.clone());
-            profiles.save()?;
+            Profiles::update(|profiles| {
+                if !profiles.profiles.contains_key(name) {
+                    bail!("unknown profile; use 'kroma config list'");
+                }
+                profiles.active = Some(name.clone());
+                Ok(())
+            })?;
             println!("Active profile: {name} (takes effect on next Kroma launch)");
             Ok(())
         }
@@ -584,7 +603,7 @@ pub fn cli(args: &[String]) -> Result<()> {
             if !valid_name(name) {
                 bail!("invalid profile name");
             }
-            let mut profiles = Profiles::load()?;
+            let profiles = Profiles::load()?;
             let original = profiles.profiles.get(name).cloned().unwrap_or_default();
             let base_url = normalize_endpoint(&prompt_value(
                 "API base URL",
@@ -625,25 +644,27 @@ pub fn cli(args: &[String]) -> Result<()> {
                 Some(key) if key.is_empty() => None,
                 Some(key) => Some(key),
             };
-            profiles.profiles.insert(
-                name.clone(),
-                ProviderProfile {
-                    base_url,
-                    model,
-                    api_key,
-                    deepseek_thinking,
-                    api_protocol: Some(api_protocol),
-                    reasoning_effort: Some(reasoning_effort),
-                    context_window,
-                    max_output_tokens,
-                    thinking_levels,
-                    catalog_model,
-                },
-            );
-            if profiles.active.is_none() {
-                profiles.active = Some(name.clone());
-            }
-            profiles.save()?;
+            Profiles::update(|profiles| {
+                profiles.profiles.insert(
+                    name.clone(),
+                    ProviderProfile {
+                        base_url,
+                        model,
+                        api_key,
+                        deepseek_thinking,
+                        api_protocol: Some(api_protocol),
+                        reasoning_effort: Some(reasoning_effort),
+                        context_window,
+                        max_output_tokens,
+                        thinking_levels,
+                        catalog_model,
+                    },
+                );
+                if profiles.active.is_none() {
+                    profiles.active = Some(name.clone());
+                }
+                Ok(())
+            })?;
             println!("Saved profile '{name}' to private Kroma config. Key value not displayed.");
             Ok(())
         }
@@ -724,6 +745,47 @@ mod tests {
             },
         );
         profiles
+    }
+
+    #[test]
+    fn concurrent_profile_updates_do_not_drop_each_other() {
+        let dir = env::temp_dir().join(format!("kroma-profiles-race-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("profiles.json");
+        let profile = ProviderProfile {
+            base_url: "http://127.0.0.1/v1".into(),
+            model: "audit".into(),
+            ..Default::default()
+        };
+        Profiles::update_at(&path, |profiles| {
+            profiles.profiles.insert("a".into(), profile.clone());
+            Ok(())
+        })
+        .unwrap();
+        Profiles::update_at(&path, |profiles| {
+            profiles.profiles.insert("b".into(), profile.clone());
+            Ok(())
+        })
+        .unwrap();
+        let saved = Profiles::load_at(&path).unwrap();
+        assert_eq!(
+            saved.profiles.len(),
+            2,
+            "each transaction must keep the other writer's update"
+        );
+        assert!(saved.profiles.contains_key("a") && saved.profiles.contains_key("b"));
+        // Every transaction starts from the newest saved file, never a stale copy.
+        Profiles::update_at(&path, |profiles| {
+            assert_eq!(profiles.profiles.len(), 2);
+            profiles.active = Some("b".into());
+            Ok(())
+        })
+        .unwrap();
+        // A rejected change leaves the saved file untouched.
+        let before = fs::read(&path).unwrap();
+        assert!(Profiles::update_at(&path, |_| bail!("rejected")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

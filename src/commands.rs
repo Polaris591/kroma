@@ -288,11 +288,14 @@ impl CommandRegistry {
                     }),
             ))
         })?;
-        registry.register("/diff", |agent, _, args| {
-            require_no_args(args, "/diff")?;
-            Ok(CommandReply::text(crate::convenience::git_diff(
-                agent.workdir(),
-            )?))
+        registry.register_agent_async("/diff", |agent, _, args| {
+            Box::pin(async move {
+                require_no_args(args, "/diff")?;
+                let workdir = agent.workdir().to_path_buf();
+                Ok(CommandReply::text(
+                    crate::convenience::git_diff(&workdir).await?,
+                ))
+            })
         })?;
         registry.register("/export", |agent, _, args| {
             let name = if args.is_empty() {

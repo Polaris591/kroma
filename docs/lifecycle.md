@@ -97,3 +97,21 @@ append. Tool and model failures are not replayed into the next task.
   terminates the containing job; a successfully completed command may leave
   background descendants running until Kroma exits. These are explicit
   tradeoffs, not missing background cleanup.
+
+## TUI overload policy
+
+The TUI's synchronous event sink never waits for consumer capacity. Pending
+presentation is limited to 2,048 events; retained presentation and Git-status
+payloads share a 2 MiB budget (8 KiB reserved for the latest Git status).
+Foreground/compaction usage and lifecycle/context updates occupy a fixed
+number of additional aggregate slots, not one allocation per model request.
+If the presentation limit is reached, the UI warns and pauses further live
+transcript updates for that turn. The task keeps running, accounting and final
+idle state are retained, and the complete authoritative transcript reloads at
+turn end. This is not a Shell output quota or a change to WAL durability.
+
+Automatic titles use a separate 32-event reliable lane and at most 16 pending
+title tasks. A title task acquires capacity before making a model request;
+excess scheduling is skipped without incurring another request. An already
+started title request waits asynchronously for delivery, preserving its
+originating session ID even while foreground presentation is overloaded.

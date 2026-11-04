@@ -18,6 +18,8 @@ struct Pending {
     events: VecDeque<Value>,
     usage: Vec<Usage>,
     compaction: Vec<(usize, Usage)>,
+    /// Paint events discarded because the host did not drain fast enough.
+    dropped: usize,
 }
 
 /// One sink per runtime. Cheap synchronous writes from the model/tool threads;
@@ -25,30 +27,47 @@ struct Pending {
 #[derive(Default)]
 pub struct DesktopEvents {
     pending: Mutex<Pending>,
+    /// Serializes ledger flushes so batches stay in observation order.
+    flush: Mutex<()>,
 }
 impl DesktopEvents {
     pub fn drain(&self) -> Vec<Value> {
         let mut lock = self.pending.lock().expect("desktop event lock");
-        lock.events.drain(..).collect()
+        let dropped = std::mem::replace(&mut lock.dropped, 0);
+        let mut events: Vec<Value> = lock.events.drain(..).collect();
+        if dropped > 0 {
+            // Tell the host that paint events were lost and the durable
+            // transcript, not this stream, is authoritative.
+            events.insert(0, json!({"kind": "resync_required", "dropped": dropped}));
+        }
+        events
     }
 
     pub fn persist_usage(&self, catalog: &SessionCatalog, session: &str) -> Result<SessionUsage> {
-        let mut pending = self.pending.lock().expect("desktop event lock");
-        let usage = std::mem::take(&mut pending.usage);
-        let compaction = std::mem::take(&mut pending.compaction);
-        let changed = !usage.is_empty() || !compaction.is_empty();
-        drop(pending);
-        let mut saved = catalog.usage(session)?;
-        for measure in &usage {
-            saved.coding.record(Some(measure));
+        // One flush at a time so batches reach the ledger in observation order.
+        let _flush = self.flush.lock().expect("desktop usage flush lock");
+        let (usage, compaction) = {
+            let mut pending = self.pending.lock().expect("desktop event lock");
+            (
+                std::mem::take(&mut pending.usage),
+                std::mem::take(&mut pending.compaction),
+            )
+        };
+        match catalog.add_usage(session, &usage, &compaction) {
+            Ok(saved) => Ok(saved),
+            Err(error) => {
+                // Never delete measured usage that was not written. Restore the
+                // batch ahead of anything observed since the failed attempt.
+                let mut pending = self.pending.lock().expect("desktop event lock");
+                let mut restored_usage = usage;
+                restored_usage.append(&mut pending.usage);
+                pending.usage = restored_usage;
+                let mut restored_compaction = compaction;
+                restored_compaction.append(&mut pending.compaction);
+                pending.compaction = restored_compaction;
+                Err(error)
+            }
         }
-        for (requests, measure) in compaction {
-            saved.apec.record_batch(requests, Some(&measure));
-        }
-        if changed {
-            catalog.set_usage(session, saved.clone())?;
-        }
-        Ok(saved)
     }
 
     fn push(&self, event: Value) {
@@ -71,20 +90,24 @@ impl DesktopEvents {
                     }
                 }
             }
-            if state.events.len() >= MAX_PENDING {
-                // Drop only transient deltas; the host will resync from WAL
-                // on task completion. Never drop tool status or error events.
-                if let Some(index) = state.events.iter().position(|item| {
-                    matches!(
-                        item["kind"].as_str(),
-                        Some("text_delta" | "reasoning_delta" | "tool_output")
-                    )
-                }) {
-                    state.events.remove(index);
-                } else {
-                    return;
-                }
+        }
+        if state.events.len() >= MAX_PENDING {
+            // Drop a coalescible delta first: the host resyncs from WAL on
+            // task completion. If a stalled host leaves nothing to merge,
+            // the oldest paint event goes instead of growing without
+            // bound; the durable transcript remains authoritative.
+            let coalesced = state.events.iter().position(|item| {
+                matches!(
+                    item["kind"].as_str(),
+                    Some("text_delta" | "reasoning_delta" | "tool_output")
+                )
+            });
+            if let Some(index) = coalesced {
+                state.events.remove(index);
+            } else {
+                state.events.pop_front();
             }
+            state.dropped = state.dropped.saturating_add(1);
         }
         state.events.push_back(event);
     }
@@ -284,6 +307,25 @@ mod tests {
         assert_eq!(events[events.len() - 2]["kind"], "tool_started");
     }
     #[test]
+    fn a_stalled_host_cannot_grow_the_paint_queue_without_bound() {
+        let events = DesktopEvents::default();
+        for request in 0..600 {
+            events.on_event(RuntimeEvent::ModelStarted { request });
+        }
+        let drained = events.drain();
+        assert_eq!(
+            drained.len(),
+            MAX_PENDING + 1,
+            "the paint queue must stay bounded regardless of event kind"
+        );
+        assert_eq!(drained[0]["kind"], "resync_required");
+        assert_eq!(drained[0]["dropped"], 600 - MAX_PENDING);
+        assert_eq!(drained.last().unwrap()["request"], 599);
+        let empty = events.drain();
+        assert!(empty.is_empty(), "a drained queue reports nothing new");
+    }
+
+    #[test]
     fn output_frames_keep_channel_and_tool_identity() {
         let sink = DesktopEvents::default();
         sink.on_event(RuntimeEvent::ToolOutput {
@@ -304,5 +346,45 @@ mod tests {
         let events = sink.drain();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1]["text"], "warning!");
+    }
+    #[test]
+    fn a_failed_usage_write_keeps_the_batch_for_the_next_attempt() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-desktop-usage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let catalog = SessionCatalog::new(&dir)?;
+        std::fs::write(catalog.default_path(), "{}")?;
+        let events = DesktopEvents::default();
+        events.on_event(RuntimeEvent::ModelFinished {
+            request: 1,
+            tools: 0,
+            reasoning: None,
+            input_tokens: Some(123),
+            output_tokens: Some(4),
+            reasoning_tokens: None,
+            cached_tokens: Some(0),
+        });
+        let ledger = catalog.default_path().with_extension("usage.json");
+        std::fs::write(&ledger, b"not json")?;
+        assert!(
+            events.persist_usage(&catalog, "default").is_err(),
+            "a corrupt ledger must fail loudly"
+        );
+        std::fs::write(&ledger, b"{}")?;
+        let saved = events.persist_usage(&catalog, "default")?;
+        assert_eq!(
+            saved.coding.calls, 1,
+            "measured usage must survive a failed flush"
+        );
+        assert_eq!(saved.coding.input, 123);
+        let again = events.persist_usage(&catalog, "default")?;
+        assert_eq!(again.coding.calls, 1, "a flushed batch is never re-applied");
+        std::fs::remove_dir_all(dir).ok();
+        Ok(())
     }
 }

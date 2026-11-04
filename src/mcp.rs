@@ -30,9 +30,6 @@ const MAX_MCP_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_TRUST_CODE_FILES: usize = 256;
 const MAX_TRUST_CODE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TRUST_TOTAL_CODE_BYTES: u64 = 32 * 1024 * 1024;
-// Imports are usually written near the top of a module, so the module scan
-// reads only a bounded prefix of each already-hashed file.
-const MAX_TRUST_SOURCE_SCAN_BYTES: usize = 2 * 1024 * 1024;
 /// Modules that are hashed and scanned for local relative imports.
 const TRUST_JS_EXTENSIONS: [&str; 8] = ["js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts"];
 /// Resolution candidates for a relative import without an extension, and the
@@ -221,7 +218,8 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     output
 }
 
-fn fingerprint(bytes: &[u8]) -> String {
+/// Stable content digest used wherever an approval is bound to code bytes.
+pub(crate) fn content_digest(bytes: &[u8]) -> String {
     sha256(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -320,14 +318,16 @@ impl TrustCodeFiles {
     }
 }
 
-/// Conservative local-import discovery. Every simple string literal in the
-/// scanned prefix that starts with `./` or `../` is treated as a possible local
-/// dependency whatever the surrounding syntax is; string literals over-approximate
+/// Conservative local-import discovery. Every simple string literal in a module
+/// that starts with `./` or `../` is treated as a possible local dependency
+/// whatever the surrounding syntax is; string literals over-approximate
 /// `require`/`import` specifiers instead of parsing JavaScript, and the module
 /// itself is hashed either way. Template literals are skipped because a `$`
-/// value is only known at run time.
+/// value is only known at run time. The whole file is scanned: a dependency
+/// mentioned after any prefix limit would otherwise stay outside the approval
+/// that claims to cover it.
 fn local_module_specifiers(data: &[u8], path: &Path) -> Result<Vec<String>> {
-    let scanned = &data[..data.len().min(MAX_TRUST_SOURCE_SCAN_BYTES)];
+    let scanned = data;
     let mut specifiers = BTreeSet::new();
     let mut index = 0;
     while index < scanned.len() {
@@ -487,7 +487,7 @@ fn project_trust_fingerprint(workdir: &Path, config_bytes: &[u8]) -> Result<Stri
         push_trust_material(&mut material, path.to_string_lossy().as_bytes());
         push_trust_material(&mut material, data);
     }
-    Ok(fingerprint(&material))
+    Ok(content_digest(&material))
 }
 
 /// Read at most `limit + 1` bytes so an untrusted file cannot force a full
@@ -1789,7 +1789,7 @@ mod tests {
     #[test]
     fn fingerprint_is_sha256() {
         assert_eq!(
-            fingerprint(b"abc"),
+            content_digest(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
@@ -2426,6 +2426,25 @@ mod trust_hardening_tests {
         ));
         fs::create_dir_all(dir.join(".kroma"))?;
         Ok(dir)
+    }
+
+    /// A relative import written after any prefix limit is still executed code,
+    /// so it belongs to the approval that claims to cover local modules.
+    #[test]
+    fn project_trust_covers_imports_after_a_large_module_prefix() -> Result<()> {
+        let dir = scratch("late-import")?;
+        let config = br#"{"mcpServers":{"local":{"command":"node","args":["entry.js"]}}}"#;
+        fs::write(dir.join(".kroma/mcp.json"), config)?;
+        let mut entry = String::from("/*");
+        entry.push_str(&" ".repeat(3 * 1024 * 1024));
+        entry.push_str("*/\nrequire('./helper.js');\n");
+        fs::write(dir.join("entry.js"), entry)?;
+        fs::write(dir.join("helper.js"), "module.exports = 1;\n")?;
+        let approved = project_trust_fingerprint(&dir, config)?;
+        fs::write(dir.join("helper.js"), "module.exports = 2;\n")?;
+        assert_ne!(approved, project_trust_fingerprint(&dir, config)?);
+        fs::remove_dir_all(dir)?;
+        Ok(())
     }
 
     /// Literal-entry control: the directly named entry file is hashed.

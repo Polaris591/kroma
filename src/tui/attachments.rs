@@ -4,8 +4,7 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
-    env, fs,
-    io::Read,
+    env,
     path::{Path, PathBuf},
 };
 
@@ -69,9 +68,7 @@ impl Attachment {
         if stat.len() > MAX_FILE_BYTES {
             bail!("file is larger than 32 MiB");
         }
-        let mut file = fs::File::open(&full)?;
-        let mut bytes = Vec::with_capacity(stat.len() as usize);
-        file.read_to_end(&mut bytes)?;
+        let bytes = crate::attachments::read_bounded(&full, MAX_FILE_BYTES)?;
         if bytes.len() as u64 > MAX_FILE_BYTES {
             bail!("file changed during import");
         }
@@ -333,6 +330,7 @@ pub fn long_paste(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     #[test]
     fn logs_and_files_are_stored_as_compact_references() -> Result<()> {
         let workdir =

@@ -1,10 +1,13 @@
 //! Provider-neutral conversion of durable attachment references.
 //! Binary bytes are loaded only at request time, never saved inline in WAL.
 use crate::model::TaskImageCache;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::fs;
+use std::io::Read;
+use std::path::Path;
 
 pub(crate) const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_ACTIVE_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
@@ -162,10 +165,24 @@ fn inline_log(part: &Value) -> bool {
             .is_some_and(|bytes| bytes <= INLINE_LOG_BYTES)
 }
 
+/// Read at most `limit + 1` bytes from an opened file. A size check against
+/// metadata is not enough: the file can grow between `metadata` and `read`, and
+/// an unbounded read would allocate the whole growth before rejecting it.
+pub(crate) fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn inline_log_text(part: &Value, index: usize, total: usize) -> Result<String> {
     let path = part["path"].as_str().context("attachment missing path")?;
     let name = part["name"].as_str().unwrap_or("attachment");
-    let raw = std::fs::read(path).with_context(|| format!("attachment missing: {name}"))?;
+    let raw = read_bounded(Path::new(path), INLINE_LOG_BYTES)
+        .with_context(|| format!("attachment missing: {name}"))?;
+    if raw.len() as u64 > INLINE_LOG_BYTES {
+        bail!("attachment {name} grew past the inline limit; send it as a reference instead");
+    }
     let log = String::from_utf8(raw).context("attached text is not UTF-8")?;
     Ok(format!(
         "[Pasted text {name}, attachment #{}/{}]\n{log}",
@@ -224,7 +241,8 @@ pub(crate) fn inline_log_extra_bytes(messages: &[crate::protocol::Message]) -> R
 }
 
 fn encode_image(path: &str, name: &str) -> Result<String> {
-    let raw = std::fs::read(path).with_context(|| format!("attachment missing: {name}"))?;
+    let raw = read_bounded(Path::new(path), MAX_IMAGE_BYTES as u64)
+        .with_context(|| format!("attachment missing: {name}"))?;
     if raw.len() > MAX_IMAGE_BYTES {
         anyhow::bail!("image exceeds 8 MiB");
     }
@@ -480,6 +498,24 @@ mod tests {
         }
         assert_eq!(content("plain", &[], "chat")?, json!("plain"));
         fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_bounded_stops_one_byte_past_the_limit() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-read-bounded-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("payload.bin");
+        std::fs::write(&path, vec![b'x'; 64 * 1024])?;
+        assert_eq!(read_bounded(&path, 1024)?.len(), 1025);
+        assert_eq!(read_bounded(&path, 64 * 1024)?.len(), 64 * 1024);
+        std::fs::remove_dir_all(dir)?;
         Ok(())
     }
 

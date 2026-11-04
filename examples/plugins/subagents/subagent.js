@@ -20,12 +20,16 @@ const LIMITS = Object.freeze({
   stderrBytes: 256 * 1024,
   eventBytes: 2 * 1024 * 1024,
   evidenceChars: 2000,
+  taskTimeoutSecs: 300,
   timeoutSecs: 600,
 });
 
 // Time a cancelled child Kroma gets to run its own cancellation path before
 // the plugin escalates to SIGKILL.
 const DEFAULT_KILL_GRACE_MS = 2000;
+// A running task silent for this long is shown as quiet, so a stuck child
+// looks different from one that is thinking hard.
+const QUIET_MS = 90_000;
 
 class SubagentError extends Error {
   // fatal errors abort the whole batch and are reported as a stream error, so
@@ -163,7 +167,7 @@ function usageLine(usage) {
 
 function createTrace(eventsPath) {
   return {answer: null, results: 0, reported: null, fault: null, taskStatus: null, usage: emptyUsage(),
-    eventsPath, eventBytes: 0, eventsTruncated: false};
+    tools: new Map(), eventsPath, eventBytes: 0, eventsTruncated: false};
 }
 
 const EVIDENCE_EVENTS = new Set(["task_started", "model_started", "model_finished", "model_failed",
@@ -259,6 +263,51 @@ function progress(context, text) {
   }
 }
 
+// Task text and answers are multi-line: a card row must stay one short line.
+// A child model id is optional: no value means "inherit the parent's model
+// and profile". Control characters are refused because the value reaches a
+// child process environment.
+function optionalModel(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (text.length > 120) {
+    throw new SubagentError("CONFIG_ERROR", "model must be at most 120 characters");
+  }
+  if (/[\u0000-\u001f\u007f]/.test(text)) {
+    throw new SubagentError("CONFIG_ERROR", "model must not contain control characters");
+  }
+  return text;
+}
+
+// DeepSeek reasoning tiers understood by the host's KROMA_DEEPSEEK_THINKING.
+const THINKING_LEVELS = new Set(["off", "enabled", "high", "max"]);
+
+// Optional like the model: absent means "keep whatever the parent uses".
+function optionalThinking(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim().toLowerCase();
+  if (!text) return null;
+  if (!THINKING_LEVELS.has(text)) {
+    throw new SubagentError("CONFIG_ERROR", "thinking must be off, enabled, high or max");
+  }
+  return text;
+}
+
+function oneLine(text, max) {
+  const line = String(text ?? "").replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max)}…` : line;
+}
+
+function clock(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function formatTimeout(ms) {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`;
+}
+
 async function runTask(entry, context) {
   const dir = path.join(context.runDir, String(entry.index));
   const session = path.join(dir, "session.json");
@@ -266,6 +315,8 @@ async function runTask(entry, context) {
   const eventsPath = path.join(dir, "events.ndjson");
   const started = Date.now();
   const trace = createTrace(eventsPath);
+  trace.startedAt = started;
+  trace.label = entry.task;
   // Bounded tail of stderr, mirrored to stderr.log as it arrives.
   let stderr = Buffer.alloc(0);
   let finished = false;
@@ -286,7 +337,9 @@ async function runTask(entry, context) {
       error: {code: "ARCHIVE_ERROR", message: failure.message},
       duration_ms: 0, usage: usageReport(trace.usage)};
   }
-  progress(context, `▷ [${entry.index + 1}/${context.count}] started`);
+  context.run.status[entry.index] = "running";
+  context.run.live[entry.index] = trace;
+  progress(context, `▷ [${entry.index + 1}/${context.count}] ${oneLine(entry.task, 48)}`);
 
   function appendStderr(chunk) {
     stderr = Buffer.concat([stderr, chunk]);
@@ -311,6 +364,8 @@ async function runTask(entry, context) {
           KROMA_WORKDIR: entry.cwd,
           KROMA_SESSION_FILE: session,
           KROMA_SUBAGENT_DEPTH: String(context.depth),
+          ...(context.model ? {KROMA_MODEL: context.model} : {}),
+          ...(context.thinking ? {KROMA_DEEPSEEK_THINKING: context.thinking} : {}),
         },
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
@@ -322,6 +377,30 @@ async function runTask(entry, context) {
       return;
     }
     context.run.children.add(child);
+    let timedOut = null;
+    let closeTimer = null;
+
+    const armCloseFallback = outcome => {
+      if (closeTimer || finished) return;
+      closeTimer = setTimeout(() => {
+        child.stdout?.destroy?.();
+        child.stderr?.destroy?.();
+        finish(outcome);
+      }, context.killGraceMs + 100);
+    };
+
+    const failByTimeout = message => {
+      if (finished || trace.fault || timedOut) return;
+      timedOut = {status: "failed", code: "CHILD_TIMEOUT", exit_code: null, message};
+      context.run.terminate(child);
+      armCloseFallback(timedOut);
+    };
+
+    const taskTimer = setTimeout(
+      () => failByTimeout(`child timed out after ${formatTimeout(context.taskTimeoutMs)}`),
+      context.taskTimeoutMs,
+    );
+    context.run.timeouts.add(failByTimeout);
 
     const fault = error => {
       if (trace.fault) return;
@@ -353,6 +432,25 @@ async function runTask(entry, context) {
       }
       if (frame.type === "model_finished" || frame.type === "failed_request_usage") {
         recordUsage(context.run.usage, frame);
+      }
+      // Live state only: the heartbeat renders one row per running task, so
+      // every child event must not become a row of its own.
+      trace.lastEventAt = Date.now();
+      if (frame.type === "model_started") {
+        trace.phase = "model";
+        trace.turn = frame.request ?? trace.turn;
+      } else if (frame.type === "tool_started") {
+        const at = Date.now();
+        trace.tools.set(frame.id, {name: frame.name ?? "tool", at});
+        trace.tool = frame.name ?? "tool";
+        trace.toolStartedAt = at;
+        trace.phase = "tool";
+      } else if (frame.type === "tool_finished") {
+        trace.tools.delete(frame.id);
+        const pending = [...trace.tools.values()].at(-1);
+        trace.tool = pending ? pending.name : null;
+        trace.toolStartedAt = pending ? pending.at : 0;
+        trace.phase = pending ? "tool" : "model";
       }
       if (trace.results > 1) {
         fault(new SubagentError("CHILD_PROTOCOL", "child returned more than one final result", true));
@@ -394,7 +492,9 @@ async function runTask(entry, context) {
       if (pending.trim()) consume(pending);
       pending = "";
       if (trace.fault) finish({status: "failed", code: trace.fault.code, exit_code: null, message: trace.fault.message});
-      else if (context.run.aborted) finish({status: "failed", code: "BATCH_ABORTED", exit_code: null,
+      else if (timedOut) finish(timedOut);
+      else if (context.run.aborted) finish({status: "failed",
+        code: context.run.timedOut ? "CHILD_TIMEOUT" : "BATCH_ABORTED", exit_code: null,
         message: context.run.reason?.message ?? "batch aborted"});
       else if (signal) finish({status: "failed", code: "CHILD_SIGNAL", exit_code: null,
         message: `child was terminated by ${signal}`});
@@ -419,6 +519,9 @@ async function runTask(entry, context) {
     function finish(outcome) {
       if (finished) return;
       finished = true;
+      clearTimeout(taskTimer);
+      clearTimeout(closeTimer);
+      context.run.timeouts.delete(failByTimeout);
       context.run.children.delete(child);
       const answer = trace.answer ?? "";
       const clipped = clip(answer, context.maxOutput);
@@ -455,7 +558,11 @@ async function runTask(entry, context) {
       const mark = outcome.status === "completed" ? "✓" : "✗";
       const detail = outcome.status === "completed"
         ? usageLine(trace.usage) : (outcome.code ?? outcome.status);
-      progress(context, `${mark} [${entry.index + 1}/${context.count}] ${seconds}s · ${detail}`);
+      const preview = outcome.status === "completed" && answer.trim()
+        ? ` · "${oneLine(answer, 40)}"` : "";
+      context.run.status[entry.index] = outcome.status;
+      context.run.live[entry.index] = null;
+      progress(context, `${mark} [${entry.index + 1}/${context.count}] ${seconds}s · ${detail}${preview}`);
       resolve(result);
     }
   });
@@ -493,7 +600,17 @@ async function runBatch(request, options = {}) {
   const killGraceMs = integer(options.killGraceMs, "killGraceMs", 1, 60_000,
     DEFAULT_KILL_GRACE_MS);
   const deadlineSecs = hostDeadlineSecs();
+  const taskTimeoutSecs = integer(config.task_timeout_secs, "task_timeout_secs", 1,
+    LIMITS.timeoutSecs, LIMITS.taskTimeoutSecs);
+  const taskTimeoutMs = integer(options.taskTimeoutMs, "taskTimeoutMs", 1,
+    LIMITS.timeoutSecs * 1000, taskTimeoutSecs * 1000);
+  const deadlineMs = deadlineSecs * 1000;
+  const reserveMs = Math.min(Math.max(killGraceMs + 3000, 5000), Math.floor(deadlineMs / 2));
+  const batchTimeoutMs = integer(options.batchTimeoutMs, "batchTimeoutMs", 1,
+    deadlineMs, Math.max(1, deadlineMs - reserveMs));
   const executable = String(config.kroma_bin || process.env.KROMA_BIN || "kroma");
+  const model = optionalModel(config.model);
+  const thinking = optionalThinking(config.thinking);
   const entries = tasks(request, workdir);
   const rawDataDir = options.dataDir ?? request?.data_dir;
   const dataDir = rawDataDir ? localPath(rawDataDir) : null;
@@ -506,6 +623,7 @@ async function runBatch(request, options = {}) {
     writeFile(path.join(runDir, "request.json"), JSON.stringify({
       call_id: request?.call_id ?? null, archive: request?.archive ?? null, workdir,
       max_parallel: maxParallel, max_output_chars: maxOutput,
+      task_timeout_secs: taskTimeoutSecs, model, thinking,
       tasks: entries.map(entry => ({index: entry.index, task: entry.task, cwd: entry.cwd})),
     }, null, 2));
   } catch (error) {
@@ -513,7 +631,9 @@ async function runBatch(request, options = {}) {
   }
 
   const terminateChild = options.terminate ?? terminate;
-  const run = {aborted: false, reason: null, children: new Set(), usage: emptyUsage(),
+  const run = {aborted: false, timedOut: false, reason: null, children: new Set(),
+    timeouts: new Set(), usage: emptyUsage(),
+    status: entries.map(() => "queued"), live: entries.map(() => null),
     spawn: options.spawn ?? spawn, terminate: child => terminateChild(child, killGraceMs)};
   run.abort = error => {
     if (run.aborted) return;
@@ -521,43 +641,69 @@ async function runBatch(request, options = {}) {
     run.reason = error;
     for (const child of run.children) run.terminate(child);
   };
-  const context = {runDir, executable, maxOutput, count: entries.length, depth: depth + 1,
-    deadlineSecs, run, onProgress: options.onProgress};
+  run.timeout = message => {
+    if (run.aborted) return;
+    run.aborted = true;
+    run.timedOut = true;
+    run.reason = new SubagentError("CHILD_TIMEOUT", message, false);
+    for (const stop of [...run.timeouts]) stop(message);
+  };
+  const context = {runDir, executable, model, thinking, maxOutput, count: entries.length, depth: depth + 1,
+    deadlineSecs, taskTimeoutMs, killGraceMs, run, onProgress: options.onProgress};
 
   const results = new Array(entries.length);
   let next = 0;
-  let done = 0;
-  let started = 0;
   const startedAt = Date.now();
   // Live status for the tool card: what runs, how long, against which limit,
   // and what it has cost so far. Best effort, never part of the result.
-  const heartbeat = options.onProgress ? setInterval(() => {
+  const STATE = {queued: "·", running: "▶", completed: "✓", failed: "✗", not_started: "–"};
+  // One row per running task: task elapsed, current activity, tokens, quiet mark.
+  const liveRow = (index, live) => {
+    const now = Date.now();
+    const phase = live.tool
+      ? `${live.tool} ${clock(now - live.toolStartedAt)}`
+      : live.phase === "model" ? `model turn ${live.turn || 1}` : "starting";
+    const quiet = now - live.lastEventAt >= QUIET_MS
+      ? ` · quiet ${clock(now - live.lastEventAt)}` : "";
+    const report = usageReport(live.usage);
+    const tokens = (report.input ?? 0) + (report.output ?? 0);
+    return `[${index + 1}/${context.count}] ${oneLine(live.label, 18)} ${clock(now - live.startedAt)}`
+      + ` ▶ ${phase} · ${compactTokens(tokens)} tok${quiet}`;
+  };
+  const beat = () => {
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
-    progress(context, `${done}/${entries.length} done · ${started - done} running · `
-      + `${elapsed}s/${deadlineSecs}s · ${usageLine(run.usage)}`);
-  }, options.heartbeatMs ?? 5000) : null;
+    const strip = run.status.map((state, index) => `${index + 1}${STATE[state] ?? "?"}`).join(" ");
+    progress(context, `${strip} · ${elapsed}s/${deadlineSecs}s · ${usageLine(run.usage)}`);
+    const running = run.live.map((live, index) => ({live, index})).filter(item => item.live);
+    for (const {live, index} of running.slice(0, 3)) progress(context, liveRow(index, live));
+    if (running.length > 3) progress(context, `+${running.length - 3} running`);
+  };
+  const heartbeat = options.onProgress ? setInterval(beat, options.heartbeatMs ?? 5000) : null;
   heartbeat?.unref?.();
+  const batchTimer = setTimeout(
+    () => run.timeout(`batch timed out after ${formatTimeout(batchTimeoutMs)}`),
+    batchTimeoutMs,
+  );
 
   async function worker() {
     while (!run.aborted && next < entries.length) {
       const entry = entries[next++];
-      started++;
       results[entry.index] = await runTask(entry, context);
-      done++;
     }
   }
   try {
     await Promise.all(Array.from({length: Math.min(maxParallel, entries.length)}, worker));
   } finally {
     clearInterval(heartbeat);
+    clearTimeout(batchTimer);
   }
 
-  // Only batch.json shows this: a fatal fault rejects the tool call itself,
-  // so these entries record which tasks never began.
+  // Unstarted tasks occur when a fatal fault or batch deadline stops the queue.
   for (let index = 0; index < entries.length; index++) {
     if (!results[index]) {
-      results[index] = {index, status: "not_started", error: {
-        code: "BATCH_ABORTED",
+      run.status[index] = "not_started";
+      results[index] = {index, status: "not_started", exit_code: null, error: {
+        code: run.timedOut ? "CHILD_TIMEOUT" : "BATCH_ABORTED",
         message: run.reason?.message ?? "batch aborted",
       }};
     }
@@ -567,6 +713,12 @@ async function runBatch(request, options = {}) {
   const mark = status === "completed" ? "✓" : status === "partial" ? "△" : "✗";
   progress(context, `${mark} ${completed}/${results.length} done · `
     + `${((Date.now() - startedAt) / 1000).toFixed(1)}s · ${usageLine(run.usage)}`);
+  // The host keeps the last two rows after the call finishes: make them the
+  // summary and one line of answers, not whichever task happened to finish last.
+  const roster = results.map(result => `${result.index + 1} ${result.status === "completed"
+    ? `"${oneLine(result.output ?? "", 24)}"`
+    : `✗ ${result.error?.code ?? result.status}`}`).join(" · ");
+  progress(context, oneLine(roster, 160));
   const response = {schema_version: 1, run_id: id, status, results};
   try {
     writeFile(path.join(runDir, "batch.json"),

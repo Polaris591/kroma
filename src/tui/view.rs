@@ -26,6 +26,7 @@ mod transcript;
 mod transcript_panel;
 pub(super) use chrome::{display_session_title, NoticeLevel};
 
+use super::event_queue::EventSender;
 use super::{
     attachments::{Attachment, MAX_ATTACHMENTS},
     editor::Editor,
@@ -49,7 +50,6 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc::UnboundedSender;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -461,6 +461,9 @@ pub enum UiEvent {
         output: Option<u64>,
         cached: Option<u64>,
     },
+    UsageBatch(crate::usage::UsageMeter),
+    ApecUsageBatch(crate::usage::UsageMeter),
+    BacklogOverflow,
     Context {
         estimated: usize,
     },
@@ -487,7 +490,7 @@ pub enum UiEvent {
     TaskFinished,
 }
 
-pub struct UiSink(pub UnboundedSender<UiEvent>);
+pub struct UiSink(pub EventSender);
 
 impl crate::events::EventSink for UiSink {
     fn on_event(&self, event: RuntimeEvent<'_>) {
@@ -643,6 +646,9 @@ fn failure_summary(details: &str) -> String {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
+    if let Some(subagent_fail) = lines.iter().copied().find(|line| line.starts_with("✗ [") || line.starts_with("△ ")) {
+        return subagent_fail.to_owned();
+    }
     let exit = lines.iter().find_map(|line| line.strip_prefix("exit: "));
     let message = lines
         .iter()
@@ -687,13 +693,158 @@ fn tool_arguments(name: &str, raw: &str) -> String {
             .as_str()
             .map_or_else(|| raw.to_owned(), str::to_owned);
     }
+    if name == "subagent" {
+        if let Some(tasks) = value.get("tasks").and_then(Value::as_array) {
+            if !tasks.is_empty() {
+                let total = tasks.len();
+                return tasks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let task = item
+                            .get("task")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let cwd = item
+                            .get("cwd")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|c| !c.is_empty() && *c != ".");
+                        match cwd {
+                            Some(dir) => format!("[{}/{total}] {task} ({dir})", i + 1),
+                            None => format!("[{}/{total}] {task}", i + 1),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("
+");
+            }
+        }
+    }
     value.to_string()
+}
+
+fn subagent_result_details(value: &Value) -> Option<String> {
+    value.get("run_id")?.as_str()?;
+    let results = value.get("results")?.as_array()?;
+    if results.is_empty() {
+        return None;
+    }
+    let total = results.len();
+    let mut lines = Vec::new();
+    let mut one_liners = Vec::new();
+    let mut failed_liners = Vec::new();
+    let mut ok_count = 0usize;
+    let mut fail_count = 0usize;
+    let mut strip = Vec::with_capacity(total);
+
+    for (i, item) in results.iter().enumerate() {
+        let idx = i + 1;
+        let status = item.get("status").and_then(Value::as_str).unwrap_or("failed");
+        let secs = item
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| format!(" {:.1}s ·", ms as f64 / 1000.0))
+            .unwrap_or_default();
+        match status {
+            "completed" => {
+                ok_count += 1;
+                strip.push(format!("{idx}✓"));
+                let out = compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 72);
+                one_liners.push(format!("✓ [{idx}/{total}]{secs} \"{out}\""));
+            }
+            "not_started" => {
+                strip.push(format!("{idx}–"));
+                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("BATCH_ABORTED");
+                let line = format!("– [{idx}/{total}] not started ({code})");
+                failed_liners.push(line.clone());
+                one_liners.push(line);
+            }
+            _ => {
+                fail_count += 1;
+                strip.push(format!("{idx}✗"));
+                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("FAILED");
+                let msg = compact_line(item.pointer("/error/message").and_then(Value::as_str).unwrap_or("task failed"), 64);
+                let line = format!("✗ [{idx}/{total}]{secs} {code}: {msg}");
+                failed_liners.push(line.clone());
+                one_liners.push(line);
+            }
+        }
+    }
+
+    if total <= 2 {
+        lines.extend(one_liners);
+    } else {
+        let mark = if ok_count == total { "✓" } else if ok_count > 0 { "△" } else { "✗" };
+        let fail_note = if fail_count > 0 { format!(" · {fail_count} failed") } else { String::new() };
+        lines.push(format!("{mark} {ok_count}/{total} completed{fail_note} · {}", strip.join(" ")));
+        if !failed_liners.is_empty() {
+            lines.push(failed_liners.join(" · "));
+        } else {
+            let answers = results
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let out = compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 28);
+                    format!("{} \"{out}\"", i + 1)
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            lines.push(answers);
+        }
+    }
+
+    for (i, item) in results.iter().enumerate() {
+        let idx = i + 1;
+        let status = item.get("status").and_then(Value::as_str).unwrap_or("failed");
+        let secs = item
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| format!(" · {:.1}s", ms as f64 / 1000.0))
+            .unwrap_or_default();
+        match status {
+            "completed" => {
+                lines.push(format!("── [{idx}/{total}] ✓ completed{secs}"));
+                let out = item.get("output").and_then(Value::as_str).unwrap_or("").trim();
+                if !out.is_empty() {
+                    for line in out.lines() {
+                        lines.push(line.trim_end().to_owned());
+                    }
+                }
+            }
+            "not_started" => {
+                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("BATCH_ABORTED");
+                lines.push(format!("── [{idx}/{total}] – not started ({code})"));
+                if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
+                    lines.push(msg.trim().to_owned());
+                }
+            }
+            _ => {
+                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("FAILED");
+                lines.push(format!("── [{idx}/{total}] ✗ failed ({code}){secs}"));
+                if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
+                    lines.push(msg.trim().to_owned());
+                }
+                if let Some(art) = item.get("artifacts").and_then(Value::as_str) {
+                    lines.push(format!("artifacts: {art}"));
+                }
+            }
+        }
+    }
+    Some(lines.join("
+"))
 }
 
 fn tool_result_details(raw: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
         return raw.to_owned();
     };
+    if let Some(subagent) = subagent_result_details(&value) {
+        return subagent;
+    }
     if let Some(error) = value.get("error") {
         return error.as_str().unwrap_or(raw).to_owned();
     }
@@ -745,7 +896,7 @@ pub struct UiState {
     /// positioned for the IME but hidden so its blink cannot fight the block.
     pub(super) hide_hardware_cursor: bool,
     pub(super) taskbar_enabled: bool,
-    pub(super) ui_sender: Option<UnboundedSender<UiEvent>>,
+    pub(super) ui_sender: Option<EventSender>,
     navigation_turn: Option<usize>,
     pending_scroll_turn: Option<usize>,
     git_revision: u64,
@@ -1427,8 +1578,14 @@ impl UiState {
     }
 
     pub fn event(&mut self, event: UiEvent) {
-        let late_usage =
-            !self.running && matches!(&event, UiEvent::Usage { .. } | UiEvent::ApecUsage { .. });
+        let late_usage = !self.running
+            && matches!(
+                &event,
+                UiEvent::Usage { .. }
+                    | UiEvent::ApecUsage { .. }
+                    | UiEvent::UsageBatch(_)
+                    | UiEvent::ApecUsageBatch(_)
+            );
         if self.scroll_anchor.is_some()
             && matches!(
                 &event,
@@ -1446,6 +1603,9 @@ impl UiState {
         let unchanged_history = matches!(
             &event,
             UiEvent::Usage { .. }
+                | UiEvent::UsageBatch(_)
+                | UiEvent::ApecUsageBatch(_)
+                | UiEvent::BacklogOverflow
                 | UiEvent::TitleUsage { .. }
                 | UiEvent::ApecUsage { .. }
                 | UiEvent::Context { .. }
@@ -1541,6 +1701,14 @@ impl UiState {
                         total: None,
                     }),
                 );
+            }
+            UiEvent::UsageBatch(batch) => self.usage.absorb(&batch),
+            UiEvent::ApecUsageBatch(batch) => self.apec_usage.absorb(&batch),
+            UiEvent::BacklogOverflow => {
+                self.note_with_level(NoticeLevel::Warning, self.preferences.language.text(
+                    "Live updates paused: UI backlog limit reached. The complete transcript reloads at turn end.",
+                    "实时更新已暂停：界面队列达到上限。任务结束后将恢复完整记录。",
+                ));
             }
             UiEvent::TaskStarted => {
                 self.running = true;

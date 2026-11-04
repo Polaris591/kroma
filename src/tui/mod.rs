@@ -3,6 +3,7 @@
 mod attachments;
 mod command_catalog;
 mod editor;
+mod event_queue;
 mod gitinfo;
 mod help;
 mod highlight;
@@ -39,12 +40,12 @@ use crossterm::{
     },
 };
 use editor::EditAction;
+use event_queue::EventReceiver;
 use futures_util::StreamExt;
 use picker::{Action as PickerAction, Item as PickerItem, Kind as PickerKind, Picker};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, process::Command, sync::Arc};
 use theme::ThemeStore;
-use tokio::sync::mpsc::{self, UnboundedReceiver};
 use view::{UiEvent, UiSink, UiState};
 
 struct TerminalScreen {
@@ -1174,11 +1175,13 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
 /// Task completion can win the select race while ModelFinished events are
 /// still queued. Keep their usage/context samples, then reload the transcript
 /// from the authoritative Agent state instead of replaying stale deltas.
-fn drain_final_usage(state: &mut UiState, rx: &mut UnboundedReceiver<UiEvent>) {
+fn drain_final_usage(state: &mut UiState, rx: &mut EventReceiver) {
     while let Ok(event) = rx.try_recv() {
         if matches!(
             event,
             UiEvent::Usage { .. }
+                | UiEvent::UsageBatch(_)
+                | UiEvent::ApecUsageBatch(_)
                 | UiEvent::TitleUsage { .. }
                 | UiEvent::ApecUsage { .. }
                 | UiEvent::ActualInput(_)
@@ -1191,8 +1194,9 @@ fn drain_final_usage(state: &mut UiState, rx: &mut UnboundedReceiver<UiEvent>) {
 }
 
 /// Consume at most 127 extra live events after the first recv(). The queue
-/// remains ordered; the caller returns to select! before the next batch.
-fn drain_live_events(state: &mut UiState, rx: &mut UnboundedReceiver<UiEvent>) -> usize {
+/// keeps presentation order; accounting/status may be coalesced. The caller
+/// returns to select! before the next batch.
+fn drain_live_events(state: &mut UiState, rx: &mut EventReceiver) -> usize {
     let mut consumed = 0;
     for _ in 0..127 {
         match rx.try_recv() {
@@ -1219,7 +1223,7 @@ async fn execute_task(
     state: &mut UiState,
     screen: &mut TerminalScreen,
     input: &mut EventStream,
-    rx: &mut UnboundedReceiver<UiEvent>,
+    rx: &mut EventReceiver,
 ) -> Result<bool> {
     state.attachments = attachments.clone();
     state.add_user(prompt);
@@ -1475,7 +1479,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     let mut model_name = config.model.clone();
     let initial_profile = config.selected_profile.clone();
     let workdir = config.workdir.clone();
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = event_queue::channel();
     let observer = Arc::new(UiSink(tx.clone()));
     let mut model_handle: Option<Arc<dyn ModelBackend>> = None;
     let mut runtime = app::default_runtime_with(config, |components| {
@@ -2248,25 +2252,22 @@ mod tests {
     #[test]
     fn live_stream_batch_is_bounded_and_preserves_queued_event_order() {
         let (mut ui, _) = setup();
-        ui.configure_status(1000, None);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = event_queue::channel();
         for index in 1..=320 {
-            tx.send(UiEvent::ActualInput(index)).unwrap();
+            tx.send(UiEvent::Text(format!("{index},"))).unwrap();
         }
         assert_eq!(drain_live_events(&mut ui, &mut rx), 127);
-        assert_eq!(ui.context_display(), "Ctx 127 / 1.0k · 13%");
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Text(s)) if s == "128,"));
         assert_eq!(drain_live_events(&mut ui, &mut rx), 127);
-        assert_eq!(drain_live_events(&mut ui, &mut rx), 66);
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Text(s)) if s == "256,"));
+        assert_eq!(drain_live_events(&mut ui, &mut rx), 64);
         assert_eq!(drain_live_events(&mut ui, &mut rx), 0);
-        // The last update must survive. This test proves fairness without
-        // losing or reordering the measurable stream.
-        assert!(ui.context_display().contains("320"));
     }
 
     #[test]
     fn task_completion_drains_last_usage_without_replaying_transcript_deltas() {
         let (mut ui, _) = setup();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = event_queue::channel();
         tx.send(UiEvent::Text("stale stream".into())).unwrap();
         tx.send(UiEvent::Context { estimated: 1_100 }).unwrap();
         tx.send(UiEvent::Usage {

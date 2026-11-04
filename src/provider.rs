@@ -254,14 +254,87 @@ fn image_capability_rejection(error: &anyhow::Error) -> bool {
     mentions_image && is_unsupported
 }
 
-fn retry_delay(error: &anyhow::Error, retry_index: u32) -> Option<Duration> {
-    if is_timeout(error)
-        || error.chain().any(|cause| {
-            cause
-                .downcast_ref::<reqwest::Error>()
-                .is_some_and(reqwest::Error::is_connect)
+/// A failure worth another attempt on a fresh connection: a timeout, a
+/// refused or reset connection, or a response body that ended before its
+/// declared length. Everything else is a decision the caller has to see:
+/// redirect refusals, TLS verification, malformed payloads and our own
+/// resource limits are never retried as if they were a flaky network.
+/// Shared validation for a tool call returned by any provider. Each adapter
+/// keeps its own wire shape, but everything that reaches tool execution and the
+/// durable transcript must satisfy the same contract.
+pub(crate) fn validate_tool_call(id: &str, name: &str, arguments: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 256 {
+        bail!("model returned a tool call with an invalid id");
+    }
+    if name.trim().is_empty() || name.len() > 256 {
+        bail!("model returned a tool call with an invalid name");
+    }
+    let value: Value = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid JSON arguments in tool call {id}"))?;
+    if !value.is_object() {
+        bail!("tool call {id} arguments must be a JSON object");
+    }
+    Ok(())
+}
+
+fn is_transient_transport(error: &anyhow::Error) -> bool {
+    if is_timeout(error) {
+        return true;
+    }
+    error.chain().any(|cause| {
+        if let Some(request) = cause.downcast_ref::<reqwest::Error>() {
+            return !request.is_redirect()
+                && (request.is_timeout()
+                    || request.is_connect()
+                    || request.is_body()
+                    || request.is_decode());
+        }
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+            )
         })
-    {
+    })
+}
+
+/// A summary request that ultimately failed after the provider had already
+/// reported usage for an earlier attempt. The caller records that known cost
+/// instead of losing it; attempts without a measurement stay unknown.
+#[derive(Debug)]
+struct SummaryFailure {
+    cause: anyhow::Error,
+    usage: Usage,
+    requests: usize,
+}
+impl fmt::Display for SummaryFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "summary request failed after {} measured attempt(s)",
+            self.requests
+        )
+    }
+}
+impl std::error::Error for SummaryFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+
+/// Usage already reported by the provider for a summary that still failed.
+pub(crate) fn failed_summary_usage(error: &anyhow::Error) -> Option<(&Usage, usize)> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<SummaryFailure>())
+        .map(|failure| (&failure.usage, failure.requests))
+}
+
+fn retry_delay(error: &anyhow::Error, retry_index: u32) -> Option<Duration> {
+    if is_transient_transport(error) {
         return Some(Duration::from_millis(250 * u64::from(retry_index)));
     }
     let http = error
@@ -1385,12 +1458,14 @@ impl ModelClient {
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
     ) -> Result<Completion> {
-        // Only retry transport failures or transient HTTP statuses before
-        // any response body is received. Never replay a partial stream.
+        // Only retry while the response carried no protocol event at all.
+        // Heartbeat comments and other body bytes without a `data:` field are
+        // not generation progress; once the provider has started a response,
+        // a replay could duplicate output, tool calls, or billed work.
         let mut text_fallback: Option<Vec<Message>> = None;
         let mut usage_fallback = false;
         for attempt in 0..=5 {
-            let mut received_stream_data = false;
+            let mut received_protocol_data = false;
             crate::runtime_log!("[model] request attempt={} started", attempt + 1);
             match self
                 .complete_once(
@@ -1399,12 +1474,12 @@ impl ModelClient {
                     images,
                     on_text,
                     on_reasoning,
-                    &mut received_stream_data,
+                    &mut received_protocol_data,
                 )
                 .await
             {
                 Err(error)
-                    if !received_stream_data
+                    if !received_protocol_data
                         && self.protocol == ApiProtocol::Anthropic
                         && !self.anthropic_cache_rejected.load(Ordering::Relaxed)
                         && anthropic_cache_rejection(&error) =>
@@ -1416,7 +1491,7 @@ impl ModelClient {
                     crate::runtime_log!("[model] gateway rejected Anthropic cache_control; retrying without prompt caching");
                 }
                 Err(error)
-                    if !received_stream_data
+                    if !received_protocol_data
                         && self.protocol == ApiProtocol::Responses
                         && !self.reasoning_summary_rejected.load(Ordering::Relaxed)
                         && summary_capability_rejection(&error) =>
@@ -1426,7 +1501,7 @@ impl ModelClient {
                     crate::runtime_log!("[model] gateway rejected reasoning.summary; retrying without visible summaries");
                 }
                 Err(error)
-                    if !received_stream_data
+                    if !received_protocol_data
                         && !usage_fallback
                         && self.protocol == ApiProtocol::Chat
                         && rejected_request_field(&error, &["stream_options"]) =>
@@ -1436,7 +1511,7 @@ impl ModelClient {
                     crate::runtime_log!("[model] gateway rejected stream_options; retrying without usage streaming metadata");
                 }
                 Err(error)
-                    if !received_stream_data
+                    if !received_protocol_data
                         && text_fallback.is_none()
                         && messages.iter().any(|msg| {
                             msg.provider_items
@@ -1464,7 +1539,7 @@ impl ModelClient {
                 // Never replay a partially delivered stream: it could duplicate visible output.
                 Err(error)
                     if attempt < 3
-                        && !received_stream_data
+                        && !received_protocol_data
                         && retry_delay(&error, attempt + 1).is_some() =>
                 {
                     let delay = retry_delay(&error, attempt + 1).unwrap();
@@ -1537,6 +1612,8 @@ impl ModelClient {
         let mut elapsed = Duration::ZERO;
         let mut spent_usage: Option<Usage> = None;
         let mut usage_known = true;
+        // Attempts whose measurement is already inside `spent_usage`.
+        let mut measured_requests = 0usize;
         loop {
             // Checkpoints need hidden-reasoning headroom. A short session
             // title does not: cap the generation budget and never retry a
@@ -1617,6 +1694,7 @@ impl ModelClient {
                             requests,
                         });
                     }
+                    let measured = usage.is_some();
                     spent_usage = if requests == 1 {
                         usage
                     } else if usage_known {
@@ -1625,6 +1703,11 @@ impl ModelClient {
                         None
                     };
                     usage_known &= spent_usage.is_some();
+                    if spent_usage.is_some() {
+                        measured_requests += usize::from(measured);
+                    } else {
+                        measured_requests = 0;
+                    }
                     if truncations >= 3 {
                         bail!("checkpoint summary remained truncated after 4 completion budgets; original history preserved");
                     }
@@ -1639,7 +1722,18 @@ impl ModelClient {
                     usage_known = false;
                     crate::runtime_log!("[compact] request timed out; retrying ({timeouts}/3)");
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(match spent_usage {
+                        Some(usage) if measured_requests > 0 => {
+                            anyhow::Error::new(SummaryFailure {
+                                cause: error,
+                                usage,
+                                requests: measured_requests,
+                            })
+                        }
+                        _ => error,
+                    });
+                }
             }
         }
     }
@@ -1851,7 +1945,7 @@ impl ModelClient {
         images: Option<&TaskImageCache>,
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
-        received_stream_data: &mut bool,
+        received_protocol_data: &mut bool,
     ) -> Result<Completion> {
         let started = Instant::now();
         let payload = self.payload_with_images(messages, tools, None, images)?;
@@ -1909,10 +2003,12 @@ impl ModelClient {
                 if total_stream_bytes > MAX_STREAM_BYTES {
                     bail!("model stream exceeds the 64 MiB limit");
                 }
-                if !chunk.is_empty() {
-                    *received_stream_data = true;
-                }
                 let done = consume_sse_lines(&mut pending, &chunk, |line| {
+                    // Any complete `data:` field may have applied a protocol
+                    // event, including a start event that carries billed usage.
+                    if line.starts_with(b"data:") {
+                        *received_protocol_data = true;
+                    }
                     process_sse_line_with_reasoning(
                         line,
                         &mut data_lines,
@@ -1933,6 +2029,9 @@ impl ModelClient {
             }
             if !reached_end {
                 if !pending.is_empty() {
+                    if pending.starts_with(b"data:") {
+                        *received_protocol_data = true;
+                    }
                     process_sse_line_with_reasoning(
                         &pending,
                         &mut data_lines,
@@ -1958,6 +2057,16 @@ impl ModelClient {
             // SSE error events, idle timeouts and connection failures can
             // occur after the provider already reported input/output usage.
             return Err(with_reported_usage(error, result.reported_usage()));
+        }
+        if !reached_end && !*received_protocol_data {
+            // A response body that ends before the first protocol event is a
+            // truncated response, not an empty answer. Report it as a
+            // transport failure so the caller can retry safely.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "model stream ended before any response event",
+            )
+            .into());
         }
         if first_token.is_none() && result.received_delta() {
             first_token = Some(started.elapsed());
@@ -2894,6 +3003,203 @@ mod tests {
         assert_eq!(text, "recovered");
         assert_eq!(result.message.content.as_deref(), Some("recovered"));
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_summary_keeps_usage_reported_by_an_earlier_attempt() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_one_request(&mut stream);
+                let body = if attempt == 0 {
+                    "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"partial\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10}}"
+                } else {
+                    "{\"error\":{\"message\":\"audit rejected\"}}"
+                };
+                let status = if attempt == 0 {
+                    "200 OK"
+                } else {
+                    "401 Unauthorized"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let client = ModelClient::new(&format!("http://{addr}/v1"), None, "mock".into()).unwrap();
+        let messages = [
+            Message::new("system", "audit"),
+            Message::new("user", "checkpoint please"),
+        ];
+        let error = match client
+            .generate_checkpoint(&messages, &[], "checkpoint", 128)
+            .await
+        {
+            Ok(_) => panic!("a rejected summary must not look complete"),
+            Err(error) => error,
+        };
+        server.join().unwrap();
+        let (usage, requests) =
+            failed_summary_usage(&error).expect("earlier reported usage must survive the failure");
+        assert_eq!(requests, 1);
+        assert_eq!(usage.input, Some(100));
+        assert_eq!(usage.output, Some(10));
+    }
+
+    #[test]
+    fn transport_classification_separates_flaky_connections_from_refusals() {
+        let truncated: anyhow::Error =
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "ended early").into();
+        assert!(retry_delay(&truncated, 1).is_some());
+        let reset: anyhow::Error =
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset").into();
+        assert!(retry_delay(&reset, 1).is_some());
+        // Our own bounds and protocol failures are decisions, not a flaky link.
+        assert!(
+            retry_delay(&anyhow::anyhow!("model stream exceeds the 64 MiB limit"), 1).is_none()
+        );
+        assert!(retry_delay(&anyhow::anyhow!("SSE event exceeds the 2 MiB limit"), 1).is_none());
+        let unauthorized = ModelHttpError {
+            status: StatusCode::UNAUTHORIZED,
+            retry_after: None,
+            message: "denied".into(),
+        };
+        assert!(retry_delay(&anyhow::Error::new(unauthorized), 1).is_none());
+        let unavailable = ModelHttpError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            retry_after: None,
+            message: "later".into(),
+        };
+        assert!(retry_delay(&anyhow::Error::new(unavailable), 1).is_some());
+    }
+
+    const RECOVERED_STREAM: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    const PARTIAL_STREAM: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"part\"},\"finish_reason\":null}]}\n\n";
+
+    /// Read one complete request so the client is not blocked by an unread body.
+    fn read_one_request(stream: &mut std::net::TcpStream) {
+        use std::io::{BufRead, BufReader, Read};
+        let mut reader = BufReader::new(&*stream);
+        let mut body_size = 0usize;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            if header == "\r\n" {
+                break;
+            }
+            if let Some(size) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                body_size = size.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; body_size];
+        reader.read_exact(&mut body).unwrap();
+    }
+
+    /// Reply to the first attempt with a truncated body, then succeed.
+    async fn truncated_first_attempt(body: &str) -> (String, anyhow::Result<Completion>) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_owned();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_one_request(&mut stream);
+                if attempt == 0 {
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{body}").unwrap();
+                } else {
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{RECOVERED_STREAM}").unwrap();
+                }
+                stream.flush().unwrap();
+            }
+        });
+        let mut client =
+            ModelClient::new(&format!("http://{addr}/v1"), None, "mock".into()).unwrap();
+        client.stream_idle_timeout = Duration::from_secs(2);
+        let mut text = String::new();
+        let result = client
+            .complete(&[Message::new("user", "hello")], &mut |s| text.push_str(s))
+            .await;
+        server.join().unwrap();
+        (text, result)
+    }
+
+    #[tokio::test]
+    async fn a_body_truncated_before_any_event_is_retried_on_a_new_connection() {
+        let (text, result) = truncated_first_attempt("").await;
+        let completion = result.expect("an empty body before any event is retryable");
+        assert_eq!(text, "recovered");
+        assert_eq!(completion.message.content.as_deref(), Some("recovered"));
+    }
+
+    #[tokio::test]
+    async fn keepalive_comments_do_not_consume_the_safe_retry() {
+        let (text, result) = truncated_first_attempt(": keep-alive\n\n").await;
+        let _ = result.expect("a heartbeat is not generation progress");
+        assert_eq!(text, "recovered");
+    }
+
+    #[tokio::test]
+    async fn a_started_response_is_never_replayed_even_when_it_truncates() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            let mut idle_since: Option<Instant> = None;
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        requests += 1;
+                        read_one_request(&mut stream);
+                        stream.write_all(PARTIAL_STREAM.as_bytes()).unwrap();
+                        stream.flush().unwrap();
+                        idle_since = Some(Instant::now());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if idle_since
+                            .is_some_and(|since| since.elapsed() > Duration::from_millis(400))
+                        {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            requests
+        });
+        let mut client =
+            ModelClient::new(&format!("http://{addr}/v1"), None, "mock".into()).unwrap();
+        client.stream_idle_timeout = Duration::from_secs(2);
+        let mut text = String::new();
+        let error = match client
+            .complete(&[Message::new("user", "hello")], &mut |s| text.push_str(s))
+            .await
+        {
+            Ok(_) => panic!("a truncating response cannot look complete"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            text, "part",
+            "a partial answer must stay visible: {error:#}"
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            1,
+            "a response with protocol data must never be replayed"
+        );
     }
 
     #[test]

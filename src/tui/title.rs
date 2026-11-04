@@ -1,9 +1,9 @@
 //! One tool-free, bounded model request after the first completed turn.
 //! It does not delay the conversation or change the authoritative transcript.
+use super::event_queue::EventSender;
 use super::view::UiEvent;
 use crate::{model::ModelBackend, sessions::SessionCatalog};
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::mpsc::UnboundedSender;
 
 fn sanitize_title(raw: &str) -> Option<String> {
     let line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
@@ -31,14 +31,19 @@ pub(super) fn schedule(
     id: String,
     user_text: String,
     assistant_text: String,
-    sender: UnboundedSender<UiEvent>,
+    sender: EventSender,
 ) {
+    let Some(permit) = sender.title_permit(&id) else {
+        crate::runtime_log!("[session] automatic title skipped: queue unavailable or busy");
+        return;
+    };
+    // Bound task-owned strings before the model request or a reliable send.
+    let id = id.into_boxed_str().into_string();
+    let user_text = user_text.chars().take(160).collect::<String>();
+    let assistant_text = assistant_text.chars().take(120).collect::<String>();
     tokio::spawn(async move {
-        let prompt = format!(
-            "User: {}\nAssistant: {}",
-            user_text.chars().take(160).collect::<String>(),
-            assistant_text.chars().take(120).collect::<String>(),
-        );
+        let _permit = permit;
+        let prompt = format!("User: {user_text}\nAssistant: {assistant_text}");
         let system = "Name this coding assistant conversation in the user's language. Return only a short descriptive title, no explanation or Markdown.";
         let (title, usage, requests) = match tokio::time::timeout(
             Duration::from_secs(12),
@@ -52,20 +57,22 @@ pub(super) fn schedule(
         };
         // Count title generation as a separate API expense: it must never
         // become the "last coding request" or change Ctx/cache in the footer.
-        let _ = sender.send(UiEvent::TitleUsage {
-            session_id: id.clone(),
-            requests,
-            input: usage.as_ref().and_then(|u| u.input),
-            output: usage.as_ref().and_then(|u| u.output),
-            cached: usage.as_ref().and_then(|u| u.cached),
-            reasoning: usage.as_ref().and_then(|u| u.reasoning),
-        });
+        let _ = sender
+            .send_title(UiEvent::TitleUsage {
+                session_id: id.clone(),
+                requests,
+                input: usage.as_ref().and_then(|u| u.input),
+                output: usage.as_ref().and_then(|u| u.output),
+                cached: usage.as_ref().and_then(|u| u.cached),
+                reasoning: usage.as_ref().and_then(|u| u.reasoning),
+            })
+            .await;
         let title = title.unwrap_or_else(|| fallback_title(&user_text));
         match SessionCatalog::from_default(catalog_default)
             .and_then(|catalog| catalog.name_session_if_unnamed(&id, &title))
         {
             Ok(true) => {
-                let _ = sender.send(UiEvent::SessionTitleUpdated(id));
+                let _ = sender.send_title(UiEvent::SessionTitleUpdated(id)).await;
             }
             Ok(false) => {}
             Err(error) => crate::runtime_log!("[session] automatic title unavailable: {error:#}"),
@@ -140,7 +147,7 @@ mod tests {
         let (id, path) = catalog.new_path()?;
         std::fs::write(path, "{}")?;
         let count = Arc::new(AtomicUsize::new(0));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = super::super::event_queue::channel();
         schedule(
             Arc::new(TitleModel(count.clone())),
             catalog.default_path().to_path_buf(),

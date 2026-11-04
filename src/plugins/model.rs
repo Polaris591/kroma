@@ -44,6 +44,17 @@ fn process_model_error(reply: &PluginResponse, operation: &str) -> anyhow::Error
     }
 }
 
+/// Total text plus reasoning allowed for one streamed request. A bounded
+/// frame queue does not bound the assembled answer.
+const MAX_STREAM_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
+fn stream_text_within_limit(text: &str, reasoning: &str, next: &str) -> bool {
+    text.len()
+        .saturating_add(reasoning.len())
+        .saturating_add(next.len())
+        <= MAX_STREAM_TEXT_BYTES
+}
+
 fn validate_assistant_reply(message: &Message) -> Result<()> {
     if message.role != "assistant" || message.tool_call_id.is_some() {
         bail!("process model must return an assistant message without tool_call_id");
@@ -163,6 +174,7 @@ impl ProcessModelBackend {
         }));
         let mut text = String::new();
         let mut reasoning = String::new();
+
         let mut tool_fragments = ToolCallFragments::default();
         let mut first_token = None;
         while let Some(frame) = stream.next().await {
@@ -172,6 +184,9 @@ impl ProcessModelBackend {
                         .as_str()
                         .context("stream delta must be a string")?;
                     if !delta.is_empty() {
+                        if !stream_text_within_limit(&text, &reasoning, delta) {
+                            bail!("external model stream exceeds the 16 MiB text limit");
+                        }
                         first_token.get_or_insert_with(|| started.elapsed());
                         if frame["event"] == "text_delta" {
                             text.push_str(delta);
@@ -620,5 +635,25 @@ impl ModelBackend for PluginModelHooks {
         output_tokens: usize,
     ) -> ModelFuture<'a, TextResult> {
         self.inner.generate_short_text(system, text, output_tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streamed_text_total_is_bounded() {
+        assert!(stream_text_within_limit("a", "b", "c"));
+        assert!(!stream_text_within_limit(
+            &"x".repeat(MAX_STREAM_TEXT_BYTES),
+            "",
+            "y"
+        ));
+        assert!(!stream_text_within_limit(
+            "",
+            &"x".repeat(MAX_STREAM_TEXT_BYTES - 1),
+            "yy"
+        ));
     }
 }

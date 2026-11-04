@@ -105,6 +105,29 @@ impl SessionCatalog {
         Ok(self.usage_map()?.remove(id).unwrap_or_default())
     }
 
+    /// Apply observed usage to the newest ledger in one catalog transaction.
+    /// Reading the whole map and writing it back separately would let a
+    /// concurrent writer erase an update made between those two steps.
+    pub fn add_usage(
+        &self,
+        id: &str,
+        coding: &[crate::model::Usage],
+        compaction: &[(usize, crate::model::Usage)],
+    ) -> Result<SessionUsage> {
+        self.resolve(id)?;
+        crate::catalog_file::update_and_return(&self.default, &self.usage_path(), || {
+            let mut entries = self.usage_map()?;
+            let mut entry = entries.remove(id).unwrap_or_default();
+            for measure in coding {
+                entry.coding.record(Some(measure));
+            }
+            for (requests, measure) in compaction {
+                entry.apec.record_batch(*requests, Some(measure));
+            }
+            entries.insert(id.to_owned(), entry.clone());
+            Ok((entries, entry))
+        })
+    }
     pub fn set_usage(&self, id: &str, usage: SessionUsage) -> Result<()> {
         self.resolve(id)?;
         crate::catalog_file::update(&self.default, &self.usage_path(), || {
