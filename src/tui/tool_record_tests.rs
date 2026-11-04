@@ -533,7 +533,9 @@ fn subagent_live_and_completed_records_render_clean_dashboard_not_raw_json() {
         !live_text.contains("{\"tasks\""),
         "header must not dump raw JSON: {live_text}"
     );
-    assert!(live_text.contains("检查 src/session.rs 恢复逻辑") && live_text.contains("运行集成测试"));
+    assert!(
+        live_text.contains("检查 src/session.rs 恢复逻辑") && live_text.contains("运行集成测试")
+    );
     assert!(
         live_text.contains("1✓ 2▶ · 10s/600s") && !live_text.contains("1▶ 2▶ · 5s/600s"),
         "stale heartbeat status bar must be replaced in place: {live_text}"
@@ -554,7 +556,7 @@ fn subagent_live_and_completed_records_render_clean_dashboard_not_raw_json() {
                 "status": "completed",
                 "exit_code": 0,
                 "output": "恢复逻辑正常
-WAL 顺序已验证",
+    WAL 顺序已验证",
                 "output_truncated": false,
                 "duration_ms": 8200,
                 "usage": {"requests": 1, "input": 3100, "output": 90, "cached": 0, "reasoning": 0},

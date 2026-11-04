@@ -294,7 +294,11 @@ fn subagent_live_preview(details: &str, limit: usize) -> Vec<String> {
 fn subagent_finished_preview(details: &str, limit: usize) -> (Vec<String>, bool) {
     let mut has_sections = false;
     let mut summary = Vec::new();
-    for line in details.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
+    for line in details
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+    {
         if line.starts_with("── [") {
             has_sections = true;
             break;
@@ -494,8 +498,8 @@ impl UiState {
             }
             let diff = name == "shell"
                 && (entry.body.contains("git diff") || entry.details.contains("diff --git "));
-            let has_subagent_sections = name == "subagent"
-                && entry.details.lines().any(|l| l.starts_with("── ["));
+            let has_subagent_sections =
+                name == "subagent" && entry.details.lines().any(|l| l.starts_with("── ["));
             let mut in_sections = !has_subagent_sections;
             for output in entry.details.lines() {
                 if !in_sections {
@@ -539,7 +543,11 @@ impl UiState {
                 subagent_finished_preview(&entry.details, limit)
             };
             if running && preview.is_empty() {
-                preview.push(language.text("Waiting for subagents…", "正在启动子代理…").into());
+                preview.push(
+                    language
+                        .text("Waiting for subagents…", "正在启动子代理…")
+                        .into(),
+                );
             }
             let preview_len = preview.len();
             for (index, line) in preview.into_iter().enumerate() {
@@ -553,7 +561,9 @@ impl UiState {
                 let max = width.saturating_sub(6 + UnicodeWidthStr::width(suffix));
                 let clipped = format!("{}{suffix}", clip_line(&line, max));
                 card.preformatted.push(card.lines.len());
-                card.lines.push(body_line(Line::from(subagent_preview_spans(&clipped, theme))));
+                card.lines.push(body_line(Line::from(subagent_preview_spans(
+                    &clipped, theme,
+                ))));
             }
             return;
         }

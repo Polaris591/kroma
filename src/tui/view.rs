@@ -646,7 +646,11 @@ fn failure_summary(details: &str) -> String {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    if let Some(subagent_fail) = lines.iter().copied().find(|line| line.starts_with("✗ [") || line.starts_with("△ ")) {
+    if let Some(subagent_fail) = lines
+        .iter()
+        .copied()
+        .find(|line| line.starts_with("✗ [") || line.starts_with("△ "))
+    {
         return subagent_fail.to_owned();
     }
     let exit = lines.iter().find_map(|line| line.strip_prefix("exit: "));
@@ -719,8 +723,10 @@ fn tool_arguments(name: &str, raw: &str) -> String {
                         }
                     })
                     .collect::<Vec<_>>()
-                    .join("
-");
+                    .join(
+                        "
+",
+                    );
             }
         }
     }
@@ -743,7 +749,10 @@ fn subagent_result_details(value: &Value) -> Option<String> {
 
     for (i, item) in results.iter().enumerate() {
         let idx = i + 1;
-        let status = item.get("status").and_then(Value::as_str).unwrap_or("failed");
+        let status = item
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
         let secs = item
             .get("duration_ms")
             .and_then(Value::as_u64)
@@ -753,12 +762,16 @@ fn subagent_result_details(value: &Value) -> Option<String> {
             "completed" => {
                 ok_count += 1;
                 strip.push(format!("{idx}✓"));
-                let out = compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 72);
+                let out =
+                    compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 72);
                 one_liners.push(format!("✓ [{idx}/{total}]{secs} \"{out}\""));
             }
             "not_started" => {
                 strip.push(format!("{idx}–"));
-                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("BATCH_ABORTED");
+                let code = item
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("BATCH_ABORTED");
                 let line = format!("– [{idx}/{total}] not started ({code})");
                 failed_liners.push(line.clone());
                 one_liners.push(line);
@@ -766,8 +779,16 @@ fn subagent_result_details(value: &Value) -> Option<String> {
             _ => {
                 fail_count += 1;
                 strip.push(format!("{idx}✗"));
-                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("FAILED");
-                let msg = compact_line(item.pointer("/error/message").and_then(Value::as_str).unwrap_or("task failed"), 64);
+                let code = item
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("FAILED");
+                let msg = compact_line(
+                    item.pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("task failed"),
+                    64,
+                );
                 let line = format!("✗ [{idx}/{total}]{secs} {code}: {msg}");
                 failed_liners.push(line.clone());
                 one_liners.push(line);
@@ -778,9 +799,22 @@ fn subagent_result_details(value: &Value) -> Option<String> {
     if total <= 2 {
         lines.extend(one_liners);
     } else {
-        let mark = if ok_count == total { "✓" } else if ok_count > 0 { "△" } else { "✗" };
-        let fail_note = if fail_count > 0 { format!(" · {fail_count} failed") } else { String::new() };
-        lines.push(format!("{mark} {ok_count}/{total} completed{fail_note} · {}", strip.join(" ")));
+        let mark = if ok_count == total {
+            "✓"
+        } else if ok_count > 0 {
+            "△"
+        } else {
+            "✗"
+        };
+        let fail_note = if fail_count > 0 {
+            format!(" · {fail_count} failed")
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "{mark} {ok_count}/{total} completed{fail_note} · {}",
+            strip.join(" ")
+        ));
         if !failed_liners.is_empty() {
             lines.push(failed_liners.join(" · "));
         } else {
@@ -788,7 +822,8 @@ fn subagent_result_details(value: &Value) -> Option<String> {
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    let out = compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 28);
+                    let out =
+                        compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 28);
                     format!("{} \"{out}\"", i + 1)
                 })
                 .collect::<Vec<_>>()
@@ -799,7 +834,10 @@ fn subagent_result_details(value: &Value) -> Option<String> {
 
     for (i, item) in results.iter().enumerate() {
         let idx = i + 1;
-        let status = item.get("status").and_then(Value::as_str).unwrap_or("failed");
+        let status = item
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
         let secs = item
             .get("duration_ms")
             .and_then(Value::as_u64)
@@ -808,7 +846,11 @@ fn subagent_result_details(value: &Value) -> Option<String> {
         match status {
             "completed" => {
                 lines.push(format!("── [{idx}/{total}] ✓ completed{secs}"));
-                let out = item.get("output").and_then(Value::as_str).unwrap_or("").trim();
+                let out = item
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
                 if !out.is_empty() {
                     for line in out.lines() {
                         lines.push(line.trim_end().to_owned());
@@ -816,14 +858,20 @@ fn subagent_result_details(value: &Value) -> Option<String> {
                 }
             }
             "not_started" => {
-                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("BATCH_ABORTED");
+                let code = item
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("BATCH_ABORTED");
                 lines.push(format!("── [{idx}/{total}] – not started ({code})"));
                 if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
                     lines.push(msg.trim().to_owned());
                 }
             }
             _ => {
-                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("FAILED");
+                let code = item
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("FAILED");
                 lines.push(format!("── [{idx}/{total}] ✗ failed ({code}){secs}"));
                 if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
                     lines.push(msg.trim().to_owned());
@@ -834,8 +882,10 @@ fn subagent_result_details(value: &Value) -> Option<String> {
             }
         }
     }
-    Some(lines.join("
-"))
+    Some(lines.join(
+        "
+",
+    ))
 }
 
 fn tool_result_details(raw: &str) -> String {
