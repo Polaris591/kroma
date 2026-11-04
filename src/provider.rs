@@ -3161,6 +3161,12 @@ mod tests {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // BSD-derived systems make accepted sockets inherit
+                        // the listener's nonblocking mode, which breaks a plain
+                        // blocking read of the request.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted socket must become blocking");
                         requests += 1;
                         read_one_request(&mut stream);
                         stream.write_all(PARTIAL_STREAM.as_bytes()).unwrap();

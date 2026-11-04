@@ -357,7 +357,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir)?;
-        let catalog = SessionCatalog::new(&dir)?;
+        // Keep every byte inside the temp dir: `new` resolves the real HOME
+        // session file, which does not exist on a fresh CI runner.
+        let catalog = SessionCatalog::from_default(dir.join("default.json"))?;
         std::fs::write(catalog.default_path(), "{}")?;
         let events = DesktopEvents::default();
         events.on_event(RuntimeEvent::ModelFinished {
