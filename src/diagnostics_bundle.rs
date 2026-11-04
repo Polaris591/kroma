@@ -329,6 +329,7 @@ mod tests {
         Config {
             base_url: "https://api.deepseek.com".into(),
             api_key: Some("sk-test-DO-NOT-EMIT".into()),
+            api_key_env: None,
             model: "deepseek-flash".into(),
             workdir: env::temp_dir(),
             deepseek_thinking: None,

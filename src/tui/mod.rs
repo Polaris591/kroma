@@ -493,9 +493,18 @@ fn key_action(
         KeyCode::Char('c') if ctrl => {
             if state.editor.text().is_empty() && state.attachments.is_empty() && !state.attach_mode
             {
-                return InputAction::Quit;
+                let language = state.preferences.language;
+                state.note(
+                    language
+                        .text(
+                            "Nothing to cancel · Ctrl+Q quits",
+                            "没有可取消的任务 · Ctrl+Q 退出",
+                        )
+                        .to_owned(),
+                );
+                return InputAction::None;
             }
-            state.discard_draft();
+            state.clear_draft_undoable();
             return InputAction::None;
         }
         KeyCode::Char('q') if ctrl && !running => return InputAction::Quit,
@@ -577,6 +586,13 @@ fn key_action(
             return InputAction::None;
         }
         _ => {}
+    }
+    if ctrl
+        && key.code == KeyCode::Char('z')
+        && state.editor.text().is_empty()
+        && state.restore_cleared_draft()
+    {
+        return InputAction::None;
     }
     let previous_history = state.editor.history_index();
     match state.editor.key(key) {
@@ -1435,16 +1451,35 @@ fn plugin_shortcut_command(key: &KeyEvent, bindings: &[(char, String)]) -> Optio
         .map(|(_, command)| command.clone())
 }
 
+fn resolve_tui_target(
+    catalog: &crate::sessions::SessionCatalog,
+    resume_recent: bool,
+    name: Option<&str>,
+) -> Result<Option<String>> {
+    if resume_recent {
+        return catalog.recent();
+    }
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    match catalog.resolve_name(name) {
+        Ok(id) => Ok(Some(id)),
+        Err(error) if catalog.title_matches(name)? => Err(error),
+        Err(_) if catalog.path_for(name).is_ok() => Ok(Some(name.to_owned())),
+        Err(error) => Err(error),
+    }
+}
+
 /// Plain `kroma` shows the welcome screen. Explicit --continue restores the
 /// latest saved session; only the first real send creates a new conversation.
 pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<()> {
     let _quiet = TuiLogGuard::enter();
     let catalog = crate::sessions::SessionCatalog::new(&config.workdir)?;
-    let target_session = if resume_recent {
-        catalog.recent()?
-    } else {
-        None
-    };
+    let tui_name = std::env::var("KROMA_TUI_SESSION").ok();
+    let target_session = resolve_tui_target(&catalog, resume_recent, tui_name.as_deref())?;
+    if let Some(target) = target_session.as_deref() {
+        std::env::set_var("KROMA_SESSION_FILE", catalog.path_for(target)?);
+    }
     let show_home = target_session.is_none();
     let target_id = target_session.as_deref().unwrap_or("default");
     // Explicit environment/profile choices win over a previous TUI session.
@@ -1457,7 +1492,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     ]
     .iter()
     .all(|key| std::env::var_os(key).is_none());
-    let saved = if allow_restore && resume_recent && catalog.resolve(target_id).is_ok() {
+    let saved = if allow_restore && target_session.is_some() && catalog.resolve(target_id).is_ok() {
         catalog.model_choice(target_id)?
     } else {
         None
@@ -1506,7 +1541,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     plugin_warnings.extend(runtime.plugins.register_commands(&mut commands));
     let mut agent = runtime.agent;
     if let Some(target) = target_session.as_deref().filter(|id| *id != "default") {
-        agent.resume_session(target)?;
+        if catalog.resolve(target).is_ok() {
+            agent.resume_session(target)?;
+        }
     }
     let (themes, theme_warning) = match ThemeStore::load() {
         Ok(themes) => (themes, None),
@@ -1566,6 +1603,11 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
             ),
         ),
     }
+    if let Ok(value) = std::env::var("KROMA_LANG") {
+        if let Ok(language) = preferences::Language::parse(&value) {
+            state.preferences.language = language;
+        }
+    }
     state.model_catalog = Some(catalog);
     if !show_home {
         state.restore_usage()?;
@@ -1583,14 +1625,16 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     if let Some(warning) = theme_warning {
         state.note(warning);
     }
-    if !runtime.startup_warnings.is_empty() {
-        state.note(format!(
-            "{} MCP issue(s) · /tools for details",
-            runtime.startup_warnings.len()
-        ));
-    }
-    for warning in plugin_warnings {
-        state.note(format!("Plugin: {warning}"));
+    if std::env::var_os("KROMA_QUIET").is_none() {
+        if !runtime.startup_warnings.is_empty() {
+            state.note(format!(
+                "{} MCP issue(s) · /tools for details",
+                runtime.startup_warnings.len()
+            ));
+        }
+        for warning in plugin_warnings {
+            state.note(format!("Plugin: {warning}"));
+        }
     }
     let mut screen = TerminalScreen::enter()?;
     let mut input = EventStream::new();
@@ -2177,6 +2221,33 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
 #[cfg(test)]
 mod tests {
     #[test]
+    fn named_tui_targets_can_be_new_or_an_existing_default_title() {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-tui-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let catalog =
+            crate::sessions::SessionCatalog::from_default(root.join("project.json")).unwrap();
+        std::fs::write(catalog.default_path(), b"{}").unwrap();
+        assert_eq!(
+            resolve_tui_target(&catalog, false, Some("fresh-name")).unwrap(),
+            Some("fresh-name".to_owned())
+        );
+        catalog.name_session("default", "Agent loop").unwrap();
+        assert_eq!(
+            resolve_tui_target(&catalog, false, Some("Agent loop")).unwrap(),
+            Some("default".to_owned())
+        );
+        assert_eq!(resolve_tui_target(&catalog, false, None).unwrap(), None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn plugin_panel_captures_keys_without_clearing_the_unsent_draft() {
         let (mut ui, model) = setup();
         ui.editor.paste("unfinished draft");
@@ -2728,13 +2799,14 @@ mod tests {
     }
 
     #[test]
-    fn control_c_clears_draft_then_exits_or_cancels() {
+    fn control_c_never_quits_and_clears_a_draft_with_undo() {
         let (mut ui, model) = setup();
         let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(
             key_action(&mut ui, c, false, &model),
-            InputAction::Quit
+            InputAction::None
         ));
+        assert!(ui.notification.contains("Ctrl+Q"));
         ui.editor.paste("unsubmitted");
         assert!(matches!(
             key_action(&mut ui, c, false, &model),
@@ -2743,7 +2815,7 @@ mod tests {
         assert!(ui.editor.text().is_empty());
         assert!(matches!(
             key_action(&mut ui, c, false, &model),
-            InputAction::Quit
+            InputAction::None
         ));
         ui.editor.paste("steer");
         assert!(matches!(
@@ -2751,6 +2823,45 @@ mod tests {
             InputAction::Cancel
         ));
         assert_eq!(ui.editor.text(), "steer");
+    }
+
+    #[test]
+    fn ctrl_c_clears_but_keeps_attachments_for_ctrl_z() {
+        let (mut ui, model) = setup();
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-ctrl-c-undo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("draft.txt");
+        std::fs::write(&source, b"draft attachment").unwrap();
+        let item = Attachment::from_file(&source, &dir).unwrap();
+        let stored = item.path.clone();
+        ui.attach(item).unwrap();
+        ui.editor.paste("unsent");
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            key_action(&mut ui, ctrl_c, false, &model),
+            InputAction::None
+        ));
+        assert!(ui.editor.text().is_empty());
+        assert!(stored.exists(), "clearing must not delete the draft copy");
+        assert!(ui.attachments.is_empty());
+        let ctrl_z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            key_action(&mut ui, ctrl_z, false, &model),
+            InputAction::None
+        ));
+        assert!(ui.editor.text().ends_with("unsent"));
+        assert_eq!(ui.attachments.len(), 1);
+        assert_eq!(ui.attachments[0].path, stored);
+        ui.discard_draft();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(!stored.exists());
     }
 
     #[test]

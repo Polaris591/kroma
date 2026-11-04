@@ -1,13 +1,27 @@
 //! JSON Lines output for external scripts, built on the same runtime events
 //! as the TUI. No RPC server or second Agent implementation.
-use crate::events::{EventSink, RuntimeEvent};
+use crate::{
+    events::{EventSink, RuntimeEvent},
+    output::CliOutput,
+};
 use serde_json::json;
-use std::io::Write;
+use std::sync::Arc;
 
-pub struct JsonEvents;
+pub struct JsonEvents {
+    output: Arc<CliOutput>,
+}
+
+impl JsonEvents {
+    pub fn new(output: Arc<CliOutput>) -> Self {
+        Self { output }
+    }
+}
 
 impl EventSink for JsonEvents {
     fn on_event(&self, event: RuntimeEvent<'_>) {
+        if self.output.broken() {
+            return;
+        }
         let value = match event {
             RuntimeEvent::TaskStarted => json!({"type":"task_started"}),
             RuntimeEvent::CompactionStarted => json!({"type":"compaction_started"}),
@@ -79,9 +93,19 @@ impl EventSink for JsonEvents {
                 json!({"type":"session_rewound","id":id,"future":saved_future,"checkpoint":checkpoint})
             }
         };
-        println!("{value}");
-        // JSONL is a streaming interface: pipes must receive each event
-        // immediately, not only when the process exits.
-        let _ = std::io::stdout().flush();
+        let _ = self.output.line(&value.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_pipe_stops_emission_without_panicking() {
+        let output = CliOutput::new();
+        output.mark_broken();
+        let sink = JsonEvents::new(output);
+        sink.on_event(RuntimeEvent::TaskStarted);
     }
 }

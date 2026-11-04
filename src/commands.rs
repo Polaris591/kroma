@@ -364,6 +364,78 @@ impl CommandRegistry {
             )))
             })
         })?;
+        registry.register("/checkpoints", |agent, _, args| {
+            require_no_args(args, "/checkpoints")?;
+            let checkpoints = crate::checkpoints::list(agent.workdir(), agent.session_id())?;
+            if checkpoints.is_empty() {
+                return Ok(CommandReply::text(
+                    "No file snapshots yet. Kroma snapshots tracked Git worktrees before each task; this project is not one, or no task has run yet."
+                ));
+            }
+            let lines = checkpoints
+                .iter()
+                .enumerate()
+                .map(|(index, checkpoint)| {
+                    format!(
+                        "  [{}] {}  {}",
+                        index,
+                        &checkpoint.hash[..12],
+                        checkpoint.subject
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("
+");
+            Ok(CommandReply::text(format!(
+                "File snapshots for session {} (newest first):
+{lines}
+Use /restore-files <number>. Conversation history is unaffected; use /rewind for messages.",
+                agent.session_id()
+            )))
+        })?;
+        registry.register("/restore-files", |agent, _, args| {
+            let checkpoints = crate::checkpoints::list(agent.workdir(), agent.session_id())?;
+            if checkpoints.is_empty() {
+                bail!("no file snapshots yet for this project");
+            }
+            let index = parse_number(args, "/restore-files <number>")?;
+            let checkpoint = checkpoints.get(index).ok_or_else(|| {
+                anyhow::anyhow!("no snapshot [{index}]; use /checkpoints to list them")
+            })?;
+            let report =
+                crate::checkpoints::restore(agent.workdir(), agent.session_id(), &checkpoint.hash)?;
+            let mut text = format!(
+                "Restored files from snapshot [{}] ({}). Conversation history was not changed.",
+                index,
+                &checkpoint.hash[..12]
+            );
+            if report.restored > 0 {
+                text.push_str(&format!(
+                    "
+{} changed file(s) were rewritten.",
+                    report.restored
+                ));
+            }
+            if !report.removed.is_empty() {
+                text.push_str(&format!(
+                    "
+{} new file(s) were removed.",
+                    report.removed.len()
+                ));
+            }
+            if !report.remaining.is_empty() {
+                text.push_str(
+                    "
+Some new files could not be removed:
+",
+                );
+                text.push_str(&report.remaining.join(
+                    "
+",
+                ));
+            }
+            Ok(CommandReply::text(text))
+        })?;
         registry.register("/pending", |_, input, args| {
             require_no_args(args, "/pending")?;
             Ok(CommandReply::text(pending_text(input)))

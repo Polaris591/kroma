@@ -146,6 +146,18 @@ commands![
         "查看会话检查点"
     ),
     (
+        "/checkpoints",
+        "",
+        "List file snapshots (Git worktrees)",
+        "查看文件快照（Git 工作区）"
+    ),
+    (
+        "/restore-files",
+        "<number>",
+        "Restore files from a snapshot",
+        "从快照恢复文件"
+    ),
+    (
         "/fork",
         "<checkpoint>",
         "Branch from a checkpoint",

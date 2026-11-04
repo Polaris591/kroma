@@ -25,11 +25,13 @@ Git status and per-turn /diff summaries are best effort, never inferred as zero.
 Ctrl+Left/Right moves by word; Ctrl+W or Alt+Backspace deletes a word.
 Ctrl+Z / Ctrl+Y undoes/redoes draft edits; Ctrl+G opens the external editor.
 Alt+V pastes clipboard media/text; fallback attachment path closes with Esc.
-With a selection Ctrl+C copies first; otherwise clears/cancels/quits.
+With a selection Ctrl+C copies first; otherwise clears (Ctrl+Z restores) or cancels. Ctrl+Q quits.
 Esc only closes popups/path input, never cancels an Agent task or clears a draft.
 While running: Enter queues; /steer text redirects; only Ctrl+C cancels.
 Ctrl+Q quits when idle; /exit also exits.
 /history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo
+/checkpoints · /restore-files N（仅 Git 工作区；只恢复文件）
+/checkpoints · /restore-files N (Git worktrees; files only)
 /theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]
 /queue task · /skills · /tools
 Not included: approvals, sidebars, default split panes, card walls, complex animations or a new UI runtime.",
@@ -55,7 +57,7 @@ Git 状态与本轮 /diff 改动摘要尽力采集；未知不显示为零。
 Ctrl+左右方向键按词移动；Ctrl+W 或 Alt+Backspace 删除前一个词。
 Ctrl+Z / Ctrl+Y 撤销/重做草稿；Ctrl+G 使用外部编辑器。
 Alt+V 粘贴图片或文本；附件路径输入用 Esc 关闭。
-有选区时 Ctrl+C 优先复制，否则清空草稿、取消任务或退出。
+有选区时 Ctrl+C 优先复制；否则清空草稿（Ctrl+Z 可恢复）或取消任务。Ctrl+Q 退出。
 Esc 只关闭弹层或路径输入，不取消 Agent 任务、不清空草稿。
 运行中 Enter 排队；/steer 文本发送引导；只有 Ctrl+C 取消任务。
 空闲时 Ctrl+Q 退出；也可使用 /exit。

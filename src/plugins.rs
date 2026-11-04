@@ -2069,7 +2069,7 @@ impl PluginCatalog {
             [action, id, key] if action == "reset" => catalog.set_config(id, key, None)?,
             _ => bail!("Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
         };
-        println!("{output}");
+        crate::cli_println!("{output}");
         Ok(())
     }
 }

@@ -1004,7 +1004,7 @@ mod tests {
                 .append(&messages, &CompactionState::default())
                 .unwrap();
         }
-        println!(
+        crate::cli_println!(
             "session-io size={}B count=12 full_rewrite_ms={} wal_append_ms={} final_messages={}",
             original_size,
             full_rewrite_ms,

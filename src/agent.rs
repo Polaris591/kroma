@@ -71,6 +71,8 @@ pub struct Agent {
     usage: UsageMeter,
     model_report: Option<ModelReport>,
     cache_trace: Option<CacheTrace>,
+    checkpoints: bool,
+    checkpoint_turn: u64,
 }
 
 /// The tool call Kroma dispatched but has not yet recorded a result for.
@@ -334,6 +336,8 @@ impl Agent {
             usage: UsageMeter::default(),
             model_report: None,
             cache_trace: CacheTrace::from_env(),
+            checkpoints: false,
+            checkpoint_turn: 0,
         };
         agent.sync_session_context();
         if new_session && !defer_initial_save {
@@ -393,6 +397,11 @@ impl Agent {
         self.catalog
             .id_for_path(self.session.archive_path())
             .unwrap_or("unknown")
+    }
+
+    /// Enable automatic local file snapshots for this host.
+    pub fn enable_checkpoints(&mut self) {
+        self.checkpoints = std::env::var_os("KROMA_NO_CHECKPOINTS").is_none();
     }
 
     /// Read-only durable conversation for host renderers (CLI/TUI).
@@ -988,6 +997,23 @@ impl Agent {
         self.task_active = true;
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::TaskStarted);
+        }
+        if self.checkpoints {
+            self.checkpoint_turn = self.checkpoint_turn.saturating_add(1);
+            let workdir = self.workdir.clone();
+            let session = self.session_id().to_owned();
+            let turn = self.checkpoint_turn;
+            // Git inspection can be slow on a large worktree; keep it off the
+            // async runtime thread while still finishing before the task starts.
+            let snapshot = tokio::task::spawn_blocking(move || {
+                crate::checkpoints::snapshot(&workdir, &session, turn)
+            })
+            .await;
+            match snapshot {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => crate::runtime_log!("[checkpoints] snapshot skipped: {error:#}"),
+                Err(error) => crate::runtime_log!("[checkpoints] snapshot task failed: {error:#}"),
+            }
         }
         // Keep one tiny task-level usage guard. Both explicit failure and
         // normal completion report here; dropping this future on Ctrl+C

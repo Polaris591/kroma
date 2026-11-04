@@ -7,7 +7,7 @@
 use serde::Serialize;
 use std::fmt;
 
-pub const CATALOG_SCHEMA_VERSION: u32 = 2;
+pub const CATALOG_SCHEMA_VERSION: u32 = 4;
 
 /// Bump this when a record is added or corrected. The source and verification
 /// date stay attached to each record so a future update can be audited.
@@ -16,6 +16,8 @@ pub struct CatalogRecord {
     pub provider: &'static str,
     pub model: &'static str,
     pub context_window: Option<usize>,
+    /// Independent input-only ceiling, when documented separately from the window.
+    pub max_input_tokens: Option<usize>,
     pub max_output_tokens: Option<usize>,
     /// None means unknown; it is never treated as false.
     pub image_input: Option<bool>,
@@ -31,70 +33,8 @@ impl CatalogRecord {
     }
 }
 
-/// Only exact provider hosts are mapped. A lookalike host such as
-/// `api.deepseek.com.proxy.example` does not match.
-const RECORDS: &[CatalogRecord] = &[
-    CatalogRecord {
-        provider: "deepseek",
-        model: "deepseek-flash",
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(384_000),
-        image_input: Some(true),
-        thinking_levels: None,
-        source_url: "https://api-docs.deepseek.com/quick_start/pricing",
-        verified: "2026-10-31",
-    },
-    CatalogRecord {
-        provider: "deepseek",
-        model: "deepseek-v4-pro",
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(384_000),
-        image_input: Some(false),
-        thinking_levels: None,
-        source_url: "https://api-docs.deepseek.com/quick_start/pricing",
-        verified: "2026-10-31",
-    },
-    CatalogRecord {
-        provider: "anthropic",
-        model: "claude-opus-5-5",
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(128_000),
-        image_input: Some(true),
-        thinking_levels: None,
-        source_url: "https://platform.claude.com/docs/en/models/overview",
-        verified: "2026-10-31",
-    },
-    CatalogRecord {
-        provider: "anthropic",
-        model: "claude-sonnet-5-5",
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(128_000),
-        image_input: Some(true),
-        thinking_levels: None,
-        source_url: "https://platform.claude.com/docs/en/models/overview",
-        verified: "2026-10-31",
-    },
-    CatalogRecord {
-        provider: "anthropic",
-        model: "claude-haiku-5-5",
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(128_000),
-        image_input: Some(true),
-        thinking_levels: None,
-        source_url: "https://platform.claude.com/docs/en/models/overview",
-        verified: "2026-10-31",
-    },
-    CatalogRecord {
-        provider: "anthropic",
-        model: "claude-fable-5-1",
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(128_000),
-        image_input: Some(true),
-        thinking_levels: None,
-        source_url: "https://platform.claude.com/docs/en/models/overview",
-        verified: "2026-10-31",
-    },
-];
+mod records;
+use records::RECORDS;
 
 /// Provider identity comes from the exact official HTTPS endpoint, not the
 /// model name or a same-named local proxy.
@@ -109,6 +49,26 @@ pub fn provider_for_endpoint(base_url: &str) -> Option<&'static str> {
     match host.as_str() {
         "api.deepseek.com" => Some("deepseek"),
         "api.anthropic.com" => Some("anthropic"),
+        "api.openai.com" => Some("openai"),
+        "generativelanguage.googleapis.com" => Some("google"),
+        "api.x.ai" | "us.api.x.ai" => Some("xai"),
+        "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com" | "dashscope-us.aliyuncs.com" => {
+            Some("alibaba")
+        }
+        "api.moonshot.ai" => Some("moonshot"),
+        "api.z.ai" | "open.bigmodel.cn" => Some("zhipu"),
+        "api.minimax.io" => Some("minimax"),
+        "api.mistral.ai" => Some("mistral"),
+        "api.cohere.ai" => Some("cohere"),
+        "ark.cn-beijing.volces.com" => Some("bytedance"),
+        "api.nova.amazon.com" => Some("amazon"),
+        "integrate.api.nvidia.com" => Some("nvidia"),
+        "api.stepfun.com" => Some("stepfun"),
+        "api.xiaomimimo.com" => Some("xiaomi"),
+        "qianfan.baidubce.com" => Some("baidu"),
+        "tokenhub.tencentmaas.com"
+        | "tokenhub-intl.tencentmaas.com"
+        | "api.hunyuan.cloud.tencent.com" => Some("tencent"),
         _ => None,
     }
 }
@@ -331,6 +291,8 @@ pub struct ModelResolution {
     pub report: ModelReport,
     pub context_window: usize,
     pub effective_turn_output: Option<usize>,
+    /// Input-only catalog ceiling; the shared context window remains separate.
+    pub catalog_max_input_tokens: Option<usize>,
     pub catalog_max_output_tokens: Option<usize>,
     pub catalog_image_input: Option<bool>,
 }
@@ -382,6 +344,18 @@ pub fn resolve(
         } else {
             (128_000, FieldSource::Default, None)
         };
+
+    let catalog_max_input_tokens = catalog.and_then(|record| record.max_input_tokens);
+    let context_note = match (context_note, catalog_max_input_tokens) {
+        (note, Some(limit)) => {
+            let input_note = format!("independent catalog input ceiling {limit}");
+            Some(note.map_or_else(
+                || input_note.clone(),
+                |note| format!("{note}; {input_note}"),
+            ))
+        }
+        (note, None) => note,
+    };
 
     let (hard_output, hard_output_source) = if let Some(output) = upstream.max_output_tokens {
         (Some(output), FieldSource::Upstream)
@@ -499,6 +473,7 @@ pub fn resolve(
         report,
         context_window,
         effective_turn_output,
+        catalog_max_input_tokens,
         catalog_max_output_tokens: catalog.and_then(|record| record.max_output_tokens),
         catalog_image_input: catalog.and_then(|record| record.image_input),
     }
@@ -609,15 +584,294 @@ impl fmt::Display for ModelReport {
     }
 }
 
+/// Suggested model IDs for an interactive setup picker. Sorted by advertised
+/// context capacity, then output capacity; this is a convenience list, not a
+/// recommendation or an access guarantee.
+pub fn suggestions(provider: &str, limit: usize) -> Vec<&'static CatalogRecord> {
+    let mut records: Vec<_> = RECORDS
+        .iter()
+        .filter(|record| record.provider == provider)
+        .collect();
+    records.sort_by(|a, b| {
+        b.context_window
+            .cmp(&a.context_window)
+            .then_with(|| b.max_output_tokens.cmp(&a.max_output_tokens))
+            .then_with(|| a.model.cmp(b.model))
+    });
+    records.truncate(limit);
+    records
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_official_endpoints_match_only_exact_provider_and_model_pairs() {
+        for (host, model, provider) in [
+            ("api.stepfun.com", "step-5-preview", "stepfun"),
+            ("api.xiaomimimo.com", "mimo-v2.6-pro", "xiaomi"),
+            ("qianfan.baidubce.com", "ernie-5.1", "baidu"),
+            ("tokenhub.tencentmaas.com", "hy4", "tencent"),
+            ("tokenhub-intl.tencentmaas.com", "hy3", "tencent"),
+            ("api.hunyuan.cloud.tencent.com", "hunyuan-a13b", "tencent"),
+            ("api.openai.com", "gpt-6-astra", "openai"),
+            (
+                "generativelanguage.googleapis.com",
+                "gemini-4-argon",
+                "google",
+            ),
+            ("api.x.ai", "grok-4.7", "xai"),
+            ("us.api.x.ai", "grok-4.7", "xai"),
+            ("dashscope.aliyuncs.com", "qwen3.8-max", "alibaba"),
+            ("dashscope-intl.aliyuncs.com", "qwen3.8-max", "alibaba"),
+            ("dashscope-us.aliyuncs.com", "qwen3.8-max", "alibaba"),
+            ("api.moonshot.ai", "kimi-k3.1-pro", "moonshot"),
+            ("api.z.ai", "glm-5.3", "zhipu"),
+            ("open.bigmodel.cn", "glm-5.3", "zhipu"),
+            ("api.minimax.io", "MiniMax-M3.1-Flash", "minimax"),
+            ("api.mistral.ai", "mistral-large-4", "mistral"),
+            ("api.cohere.ai", "command-a-plus-05-2026", "cohere"),
+            (
+                "ark.cn-beijing.volces.com",
+                "doubao-seed-evolving",
+                "bytedance",
+            ),
+            ("api.nova.amazon.com", "nova-2-pro-v1", "amazon"),
+            (
+                "integrate.api.nvidia.com",
+                "nvidia/nemotron-3.5-super-vl-120b-a12b",
+                "nvidia",
+            ),
+        ] {
+            let url = format!("https://{host}/v1");
+            let found = select(&url, model, None).unwrap().unwrap();
+            assert_eq!(found.provider, provider, "{url}");
+            assert_eq!(find_alias(&found.key()), Some(found));
+            assert!(select(&url, "unknown-future-model", None)
+                .unwrap()
+                .is_none());
+            for url in [
+                format!("http://{host}/v1"),
+                format!("https://{host}:444/v1"),
+                format!("https://{host}.proxy.example/v1"),
+                format!("https://{host}@proxy.example/v1"),
+            ] {
+                assert!(select(&url, model, None).unwrap().is_none(), "{url}");
+            }
+            assert!(select("https://proxy.example/v1", model, None)
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                select("https://proxy.example/v1", "renamed", Some(&found.key())).unwrap(),
+                Some(found)
+            );
+        }
+        // No wildcard vendor/CDN hosts, managed-cloud auth, or fuzzy model IDs.
+        assert!(provider_for_endpoint("https://bedrock-runtime.us-east-1.amazonaws.com").is_none());
+        assert!(provider_for_endpoint("https://workspace.cn-beijing.maas.aliyuncs.com").is_none());
+        assert!(find_exact("openai", "gpt-6-astra-unreleased").is_none());
+        assert!(find_exact("minimax", "minimax-m3.1-flash").is_none());
+    }
+
+    #[test]
+    fn flagship_limits_do_not_confuse_defaults_with_hard_maxima() {
+        for alias in ["zhipu/glm-5.3-flash", "zhipu/glm-5.3-flashx"] {
+            let record = find_alias(alias).unwrap();
+            assert_eq!(record.image_input, Some(true));
+            assert_eq!(record.max_output_tokens, Some(128_000));
+        }
+        let nvidia = find_alias("nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b").unwrap();
+        assert_eq!(nvidia.model, "nvidia/nemotron-3.5-super-vl-120b-a12b");
+        assert_eq!(
+            nvidia.max_output_tokens, None,
+            "an example max_tokens is not a hard cap"
+        );
+        assert_eq!(
+            nvidia.thinking_levels, None,
+            "enable_thinking is not reasoning_effort"
+        );
+        let astra = find_alias("openai/gpt-6-astra").unwrap();
+        assert_eq!(astra.context_window, Some(1_050_000));
+        assert_eq!(astra.max_input_tokens, Some(922_000));
+        assert_eq!(astra.max_output_tokens, Some(128_000));
+        assert_eq!(
+            find_alias("google/gemini-4-argon")
+                .unwrap()
+                .max_output_tokens,
+            Some(65_536),
+            "foreground streaming, not background long decode"
+        );
+        assert_eq!(
+            find_alias("moonshot/kimi-k3.1-pro")
+                .unwrap()
+                .max_output_tokens,
+            Some(1_048_576),
+            "the 131072 default is not the hard maximum"
+        );
+        assert_eq!(
+            find_alias("minimax/MiniMax-M3.1-Flash")
+                .unwrap()
+                .max_output_tokens,
+            Some(524_288)
+        );
+        for alias in [
+            "xai/grok-4.7",
+            "mistral/mistral-large-4",
+            "amazon/nova-2-lite-v1",
+        ] {
+            assert_eq!(
+                find_alias(alias).unwrap().max_output_tokens,
+                None,
+                "{alias}: unstated or conflicting maximum stays unknown"
+            );
+        }
+        assert_eq!(
+            find_alias("zhipu/glm-5.3").unwrap().image_input,
+            Some(false)
+        );
+        assert_eq!(
+            find_alias("minimax/MiniMax-M3").unwrap().thinking_levels,
+            None,
+            "ignored effort is not supported effort"
+        );
+        assert_eq!(
+            find_alias("bytedance/doubao-seed-evolving")
+                .unwrap()
+                .context_window,
+            Some(1_024_000),
+            "shorthand-only context uses a conservative decimal bound"
+        );
+    }
+
+    #[test]
+    fn aliases_share_verified_caps_but_unlisted_snapshots_do_not_inherit() {
+        for (provider, alias, pinned) in [
+            ("openai", "gpt-5", "gpt-5-2025-08-07"),
+            ("openai", "gpt-5.1", "gpt-5.1-2025-11-13"),
+            ("openai", "gpt-5.6", "gpt-5.6-sol"),
+            ("anthropic", "claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+            ("alibaba", "qwen-plus", "qwen-plus-2025-12-01"),
+            ("alibaba", "qwen3-coder-plus", "qwen3-coder-plus-2025-09-23"),
+        ] {
+            let a = find_exact(provider, alias).unwrap();
+            let b = find_exact(provider, pinned).unwrap();
+            assert_eq!(a.context_window, b.context_window, "{alias}");
+            assert_eq!(a.max_input_tokens, b.max_input_tokens, "{alias}");
+            assert_eq!(a.max_output_tokens, b.max_output_tokens, "{alias}");
+            assert_eq!(a.image_input, b.image_input, "{alias}");
+            assert_eq!(a.thinking_levels, b.thinking_levels, "{alias}");
+            assert_eq!(a.source_url, b.source_url, "{alias}");
+            assert!(find_exact(provider, &format!("{alias}-2099-01-01")).is_none());
+        }
+        for (provider, retired) in [
+            ("deepseek", "deepseek-chat"),
+            ("deepseek", "deepseek-reasoner"),
+            ("openai", "gpt-4o-2024-05-13"),
+            ("google", "gemini-2.0-flash"),
+            ("anthropic", "claude-opus-4-1-20250805"),
+            ("xiaomi", "mimo-v2.5-pro"),
+        ] {
+            assert!(find_exact(provider, retired).is_none(), "{retired}");
+        }
+    }
+
+    #[test]
+    fn expanded_families_keep_per_model_budgets_and_effort_semantics() {
+        let pro = find_exact("openai", "gpt-5-pro").unwrap();
+        assert_eq!(pro.context_window, Some(400_000));
+        assert_eq!(pro.max_output_tokens, Some(272_000));
+        assert_eq!(pro.thinking_levels, Some(&["high"][..]));
+        assert_eq!(
+            find_exact("openai", "gpt-4.1").unwrap().context_window,
+            Some(1_047_576)
+        );
+        assert_eq!(
+            find_exact("openai", "gpt-4o").unwrap().max_output_tokens,
+            Some(16_384)
+        );
+        assert_eq!(
+            find_exact("alibaba", "qwen-plus").unwrap().max_input_tokens,
+            Some(995_904)
+        );
+        assert_eq!(
+            find_exact("alibaba", "qwen3-vl-plus")
+                .unwrap()
+                .max_input_tokens,
+            Some(258_048)
+        );
+        assert_eq!(
+            find_exact("google", "gemini-4-argon")
+                .unwrap()
+                .thinking_levels,
+            Some(&["low", "medium", "high"][..])
+        );
+        assert_eq!(
+            find_exact("openai", "gpt-6.1-terra")
+                .unwrap()
+                .thinking_levels
+                .unwrap()
+                .first(),
+            Some(&"off")
+        );
+        assert!(!find_exact("openai", "gpt-6-astra")
+            .unwrap()
+            .thinking_levels
+            .unwrap()
+            .contains(&"off"));
+        let haiku = find_exact("anthropic", "claude-haiku-4-5").unwrap();
+        assert_eq!(haiku.max_output_tokens, Some(64_000));
+        assert_eq!(
+            haiku.thinking_levels, None,
+            "manual thinking is not effort tiers"
+        );
+        let hy4 = find_exact("tencent", "hy4").unwrap();
+        assert_eq!(
+            hy4.context_window, None,
+            "IDs-only source does not establish caps"
+        );
+        assert_eq!(hy4.max_output_tokens, None);
+        assert_eq!(hy4.image_input, None);
+        assert_eq!(hy4.thinking_levels, None);
+        assert!(
+            find_exact("baidu", "ernie-5.0").is_none(),
+            "stale search extract absent from current directory"
+        );
+    }
+
+    #[test]
+    fn catalog_keys_and_numeric_limits_are_consistent() {
+        let mut keys = std::collections::HashSet::new();
+        for record in RECORDS {
+            assert!(keys.insert(record.key()), "duplicate {}", record.key());
+            if let Some(input) = record.max_input_tokens {
+                assert!(input >= 1024);
+                assert!(record.context_window.is_some_and(|window| input <= window));
+            }
+            if let Some(output) = record.max_output_tokens {
+                assert!(output > 0);
+            }
+            if let Some(levels) = record.thinking_levels {
+                let strings: Vec<_> = levels.iter().map(|level| (*level).to_owned()).collect();
+                assert_eq!(
+                    crate::profiles::normalize_levels(&strings).unwrap(),
+                    strings,
+                    "{} uses canonical Kroma levels",
+                    record.key()
+                );
+            }
+        }
+        assert_eq!(keys.len(), 110);
+        let providers: std::collections::HashSet<_> = RECORDS.iter().map(|r| r.provider).collect();
+        assert_eq!(providers.len(), 18);
+    }
 
     fn fixture() -> CatalogRecord {
         CatalogRecord {
             provider: "fixture-provider",
             model: "fixture-model-v1",
             context_window: Some(500_000),
+            max_input_tokens: None,
             max_output_tokens: Some(64_000),
             image_input: Some(true),
             thinking_levels: Some(&["low", "high"]),

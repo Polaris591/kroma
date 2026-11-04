@@ -65,6 +65,7 @@ fn profile(
         base_url: "http://127.0.0.1:9/v1".into(),
         model: model.into(),
         api_key: None,
+        api_key_env: None,
         deepseek_thinking: None,
         api_protocol: Some("chat".into()),
         reasoning_effort: Some("auto".into()),
@@ -191,5 +192,106 @@ fn cleanup(workdir: &PathBuf) -> Result<()> {
         }
     }
     fs::remove_dir_all(workdir)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn flagship_input_cap_and_catalog_effort_reach_the_runtime() -> Result<()> {
+    let (base_url, server) = metadata_404_server(1);
+    let mut selected = profile("proxy-astra", Some("openai/gpt-6-astra"), None, None);
+    selected.base_url = base_url;
+    selected.api_protocol = Some("responses".into());
+    let config = kroma::config::Config::from_profile(&selected, PathBuf::new(), None)?;
+    assert_eq!(
+        config.thinking_levels_source, None,
+        "absent profile tiers are not an explicit override"
+    );
+    let (offline_budget, offline_report) = config.resolved_limits_without_probe()?;
+    let (model, budget, report) = app::model_from_profile(&selected).await?;
+    server.join().unwrap();
+    assert_eq!(report.context_window.value, Some(1_050_000));
+    assert_eq!(report.hard_output_limit.value, Some(128_000));
+    assert_eq!(budget.window(), 1_050_000);
+    assert_eq!(budget.available_input(), 922_000);
+    assert_eq!(budget.output_reserve(), 4096);
+    assert_eq!(offline_budget.available_input(), budget.available_input());
+    assert_eq!(
+        offline_report.context_window.value,
+        report.context_window.value
+    );
+    assert!(report.status_text().contains("input ceiling 922000"));
+    assert_eq!(report.thinking_levels.source, FieldSource::Catalog);
+    assert_eq!(
+        model.thinking_levels(),
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert!(
+        model.set_reasoning_level("none").is_err(),
+        "Astra rejects disabled reasoning"
+    );
+    model.set_reasoning_level("max")?;
+    assert_eq!(model.reasoning_level().as_deref(), Some("max"));
+    model.set_reasoning_level("auto")?;
+    assert_eq!(model.reasoning_level().as_deref(), Some("auto"));
+    assert_eq!(model.accepts_images(), Some(true));
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_profile_effort_still_overrides_the_catalog() -> Result<()> {
+    // Explicit context + chat needs no network metadata; the unused localhost
+    // endpoint ensures this is not a real provider integration test.
+    let mut selected = profile(
+        "proxy-qwen",
+        Some("alibaba/qwen3.8-max"),
+        Some(1_000_000),
+        None,
+    );
+    let (model, budget, report) = app::model_from_profile(&selected).await?;
+    assert_eq!(
+        budget.available_input(),
+        983_616,
+        "thinking-mode input ceiling, not the full shared window"
+    );
+    assert_eq!(model.thinking_levels(), ["low", "medium", "xhigh"]);
+    assert_eq!(report.thinking_levels.source, FieldSource::Catalog);
+    selected.thinking_levels = Some(vec!["medium".into()]);
+    let (restricted, _, report) = app::model_from_profile(&selected).await?;
+    assert_eq!(restricted.thinking_levels(), ["medium"]);
+    assert_eq!(report.thinking_levels.source, FieldSource::Profile);
+    assert!(restricted.set_reasoning_level("xhigh").is_err());
+    restricted.set_reasoning_level("medium")?;
+    assert_eq!(restricted.reasoning_level().as_deref(), Some("medium"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn expanded_domestic_and_legacy_catalogs_reach_runtime_without_a_probe() -> Result<()> {
+    for (alias, window, input_cap, output_cap) in [
+        ("stepfun/step-5-preview", 1_000_000, Some(1_000_000), 64_000),
+        ("xiaomi/mimo-v2.6-pro", 1_000_000, None, 128_000),
+        ("baidu/ernie-5.1", 128_000, Some(119_000), 65_536),
+        ("anthropic/claude-haiku-4-5", 200_000, None, 64_000),
+    ] {
+        // Explicit limits skip optional network discovery; the explicit alias
+        // still supplies capability ceilings for a differently named proxy ID.
+        let selected = profile("renamed-by-proxy", Some(alias), Some(600_000), Some(4096));
+        let config = kroma::config::Config::from_profile(&selected, PathBuf::new(), None)?;
+        let (_, budget, report) = app::model_from_profile(&selected).await?;
+        let (offline, offline_report) = config.resolved_limits_without_probe()?;
+        assert_eq!(budget.window(), 600_000.min(window), "{alias}");
+        assert_eq!(
+            budget.available_input(),
+            offline.available_input(),
+            "{alias}"
+        );
+        if let Some(cap) = input_cap {
+            assert!(budget.available_input() <= cap, "{alias}");
+        }
+        assert_eq!(report.hard_output_limit.value, Some(output_cap), "{alias}");
+        assert_eq!(report.hard_output_limit.source, FieldSource::Catalog);
+        assert_eq!(report.image_input.value, offline_report.image_input.value);
+        assert_eq!(report.catalog.as_ref().unwrap().key, alias);
+    }
     Ok(())
 }

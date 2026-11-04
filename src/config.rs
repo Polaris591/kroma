@@ -8,6 +8,8 @@ use std::{env, path::PathBuf};
 pub struct Config {
     pub base_url: String,
     pub api_key: Option<String>,
+    /// Saved environment-variable reference, if a profile uses one.
+    pub api_key_env: Option<String>,
     pub model: String,
     pub workdir: PathBuf,
     /// Explicitly enabled only for providers that understand DeepSeek's
@@ -20,7 +22,7 @@ pub struct Config {
     /// Per-profile context capacity; `KROMA_CONTEXT_WINDOW` still wins.
     pub context_window: Option<usize>,
     pub context_window_source: Option<FieldSource>,
-    /// Per-profile reasoning levels; empty means every level is allowed.
+    /// Explicit profile levels; absent levels may fall back to the catalog.
     pub thinking_levels: Vec<String>,
     pub thinking_levels_source: Option<FieldSource>,
     /// Explicit `provider/model` opt-in for a proxy or renamed model. Without
@@ -154,9 +156,20 @@ impl Config {
                 })
                 .unwrap_or_else(|| "https://api.openai.com/v1".into()),
         )?;
+        let nonempty_key = |key: String| (!key.trim().is_empty()).then_some(key);
         let api_key = connection_env("KROMA_API_KEY")
-            .or_else(|| profile.and_then(|p| p.api_key.clone()))
-            .filter(|key| !key.trim().is_empty());
+            .filter(|key| !key.trim().is_empty())
+            .or_else(|| {
+                profile
+                    .and_then(|p| p.api_key.clone())
+                    .filter(|key| !key.trim().is_empty())
+            })
+            .or_else(|| {
+                profile
+                    .and_then(|p| p.api_key_env.as_deref())
+                    .and_then(|name| env::var(name).ok())
+                    .and_then(nonempty_key)
+            });
         let api_protocol = profiles::normalize_protocol(
             &connection_env("KROMA_API_PROTOCOL")
                 .or_else(|| profile.and_then(|p| p.api_protocol.clone()))
@@ -214,8 +227,10 @@ impl Config {
             Err(error) => return Err(error.into()),
         };
         let (thinking_levels, thinking_levels_source) = match profile {
-            Some(profile) => (profile.levels()?, Some(FieldSource::Profile)),
-            None => (Vec::new(), None),
+            Some(profile) if profile.thinking_levels.is_some() => {
+                (profile.levels()?, Some(FieldSource::Profile))
+            }
+            _ => (Vec::new(), None),
         };
         let (catalog_model, catalog_model_source) = match env::var("KROMA_MODEL_CATALOG_MODEL") {
             Ok(raw) => {
@@ -236,6 +251,7 @@ impl Config {
         Ok(Self {
             base_url,
             api_key,
+            api_key_env: profile.and_then(|p| p.api_key_env.clone()),
             model: model.trim().to_owned(),
             workdir,
             deepseek_thinking,
@@ -290,8 +306,11 @@ impl Config {
             &self.api_protocol,
             resolved.effective_turn_output,
         );
-        let budget =
+        let mut budget =
             crate::context::ContextConfig::from_limits(resolved.context_window, effective_output)?;
+        if let Some(limit) = resolved.catalog_max_input_tokens {
+            budget = budget.with_input_limit(limit)?;
+        }
         let reserve_source = if env::var_os("KROMA_OUTPUT_RESERVE_TOKENS").is_some() {
             FieldSource::Environment
         } else if effective_output.is_some() {
@@ -325,6 +344,8 @@ fn needs_saved_profiles(
 #[cfg(test)]
 mod tests {
     use super::{needs_saved_profiles, Config};
+    use crate::profiles::ProviderProfile;
+    use std::env;
 
     #[test]
     fn standalone_process_model_needs_no_http_endpoint_or_saved_profile() {
@@ -342,6 +363,29 @@ mod tests {
             "internal Config keeps a normalized fallback"
         );
         assert!(config.api_key.is_none());
+    }
+
+    #[test]
+    fn an_empty_stored_key_falls_back_to_its_environment_variable() {
+        let name = "KROMA_TEST_EMPTY_KEY_FALLBACK";
+        env::set_var(name, "from-environment");
+        let profile = ProviderProfile {
+            base_url: "http://localhost/v1".into(),
+            model: "test".into(),
+            api_key: Some(String::new()),
+            api_key_env: Some(name.into()),
+            ..ProviderProfile::default()
+        };
+        let config = Config::resolve(
+            Some(&profile),
+            None,
+            std::env::current_dir().unwrap(),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.api_key.as_deref(), Some("from-environment"));
+        env::remove_var(name);
     }
 
     #[test]

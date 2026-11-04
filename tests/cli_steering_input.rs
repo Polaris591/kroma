@@ -75,6 +75,8 @@ fn piped_steer_reaches_the_task_instead_of_being_dropped_before_activation() -> 
     fs::create_dir_all(&plugin)?;
     fs::write(plugin.join("plugin.toml"), PLUGIN_MANIFEST)?;
     fs::write(plugin.join("main.js"), PLUGIN_SOURCE)?;
+    // Personal MCP servers must not change this fixture model's tool budget.
+    fs::write(temp.join("mcp.json"), r#"{"mcpServers":{}}"#)?;
     PluginCatalog::discover_at(plugins.clone(), temp.join("plugins.toml"), &project)?
         .set_enabled("steer-probe", true)?;
 
@@ -83,6 +85,7 @@ fn piped_steer_reaches_the_task_instead_of_being_dropped_before_activation() -> 
         .env("KROMA_PLUGIN_DIR", &plugins)
         .env("KROMA_CONFIG_FILE", temp.join("profiles.json"))
         .env("KROMA_SESSION_FILE", temp.join("session.json"))
+        .env("KROMA_MCP_CONFIG", temp.join("mcp.json"))
         .env_remove("KROMA_MODEL")
         .env_remove("KROMA_BASE_URL")
         .env_remove("KROMA_API_KEY")

@@ -16,6 +16,23 @@ use std::{
 };
 
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
+
+/// A checkpoint is a non-streaming summary request. Each attempt gets the
+/// same generous six-minute deadline; the outer guard allows the initial
+/// attempt plus three timeout retries. Session titles remain short and keep
+/// their own 120-second deadline.
+pub(crate) const CHECKPOINT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(360);
+pub(crate) const CHECKPOINT_MAX_TIMEOUT_RETRIES: usize = 3;
+pub(crate) const CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(1_440);
+const TITLE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn text_attempt_timeout(short: bool) -> Duration {
+    if short {
+        TITLE_ATTEMPT_TIMEOUT
+    } else {
+        CHECKPOINT_ATTEMPT_TIMEOUT
+    }
+}
 const MAX_SSE_PENDING_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
@@ -340,13 +357,16 @@ fn retry_delay(error: &anyhow::Error, retry_index: u32) -> Option<Duration> {
     let http = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ModelHttpError>())?;
+    // Cloudflare also uses the nonstandard 524 status for an origin timeout.
     if !matches!(
         http.status,
         StatusCode::TOO_MANY_REQUESTS
             | StatusCode::BAD_GATEWAY
             | StatusCode::SERVICE_UNAVAILABLE
             | StatusCode::GATEWAY_TIMEOUT
-    ) {
+    ) && http.status.as_u16() != 524
+    // Cloudflare origin timeout (nonstandard HTTP status).
+    {
         return None;
     }
     let delay = http
@@ -1631,7 +1651,8 @@ impl ModelClient {
             let payload = payload_for(max_tokens)?;
             let request = self.request(&payload);
             let start = Instant::now();
-            let result = tokio::time::timeout(Duration::from_secs(120), async {
+            let attempt_timeout = text_attempt_timeout(short);
+            let result = tokio::time::timeout(attempt_timeout, async {
                 let response = request
                     .send()
                     .await
@@ -1655,8 +1676,10 @@ impl ModelClient {
             })
             .await
             .map_err(|err| {
-                anyhow::Error::new(err)
-                    .context("text-generation model request exceeded 120 seconds")
+                anyhow::Error::new(err).context(format!(
+                    "text-generation model request exceeded {} seconds",
+                    attempt_timeout.as_secs()
+                ))
             })
             .and_then(|response| response);
             elapsed += start.elapsed();
@@ -1717,10 +1740,17 @@ impl ModelClient {
                         truncations + 1
                     );
                 }
-                Err(error) if !short && timeouts < 3 && is_timeout(&error) => {
+                Err(error)
+                    if !short
+                        && timeouts < CHECKPOINT_MAX_TIMEOUT_RETRIES
+                        && is_timeout(&error) =>
+                {
                     timeouts += 1;
                     usage_known = false;
-                    crate::runtime_log!("[compact] request timed out; retrying ({timeouts}/3)");
+                    crate::runtime_log!(
+                        "[compact] request timed out; retrying ({timeouts}/{})",
+                        CHECKPOINT_MAX_TIMEOUT_RETRIES
+                    );
                 }
                 Err(error) => {
                     return Err(match spent_usage {
@@ -2358,6 +2388,15 @@ fn is_timeout(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_attempts_allow_three_six_minute_retries() {
+        assert_eq!(CHECKPOINT_ATTEMPT_TIMEOUT, Duration::from_secs(360));
+        assert_eq!(CHECKPOINT_MAX_TIMEOUT_RETRIES, 3);
+        assert_eq!(CHECKPOINT_TOTAL_TIMEOUT, Duration::from_secs(1_440));
+        assert_eq!(text_attempt_timeout(false), CHECKPOINT_ATTEMPT_TIMEOUT);
+        assert_eq!(text_attempt_timeout(true), TITLE_ATTEMPT_TIMEOUT);
+    }
 
     #[test]
     fn truncated_streams_keep_reported_usage_in_typed_error() {
@@ -3081,8 +3120,117 @@ mod tests {
         assert!(retry_delay(&anyhow::Error::new(unavailable), 1).is_some());
     }
 
+    #[test]
+    fn cloudflare_524_is_a_transient_http_error_not_an_unknown_failure() {
+        let error = anyhow::Error::new(ModelHttpError {
+            status: StatusCode::from_u16(524).unwrap(),
+            retry_after: None,
+            message: "error code: 524".into(),
+        });
+        assert_eq!(retry_delay(&error, 1), Some(Duration::from_millis(250)));
+    }
+
     const RECOVERED_STREAM: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
     const PARTIAL_STREAM: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"part\"},\"finish_reason\":null}]}\n\n";
+
+    #[tokio::test]
+    async fn gateway_524_retries_are_bounded_and_honor_retry_after() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        for (failures, retry_header, expected_requests) in [
+            (1, "", 2),
+            (usize::MAX, "", 4),
+            (usize::MAX, "Retry-After: 11\r\n", 1),
+            (
+                usize::MAX,
+                "Retry-After: Wed, 21 Oct 2099 07:28:00 GMT\r\n",
+                1,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let (stop, stopped) = mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let mut requests = 0;
+                loop {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(2)))
+                                .unwrap();
+                            stream
+                                .set_write_timeout(Some(Duration::from_secs(2)))
+                                .unwrap();
+                            read_one_request(&mut stream);
+                            requests += 1;
+                            let (status, headers, body) = if requests <= failures {
+                                ("524 A Timeout Occurred", retry_header, "error code: 524")
+                            } else {
+                                (
+                                    "200 OK",
+                                    "Content-Type: text/event-stream\r\n",
+                                    RECOVERED_STREAM,
+                                )
+                            };
+                            write!(stream, "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                            stream.flush().unwrap();
+                            if requests >= 5 {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            match stopped.recv_timeout(Duration::from_millis(5)) {
+                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                _ => break,
+                            }
+                        }
+                        Err(error) => panic!("mock gateway accept: {error}"),
+                    }
+                }
+                requests
+            });
+            let mut client =
+                ModelClient::new(&format!("http://{address}/v1"), None, "mock".into()).unwrap();
+            client.stream_idle_timeout = Duration::from_secs(2);
+            let mut text = String::new();
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                client.complete(&[Message::new("user", "hello")], &mut |chunk| {
+                    text.push_str(chunk)
+                }),
+            )
+            .await
+            .expect("mock retry loop must terminate");
+            stop.send(()).unwrap();
+            assert_eq!(
+                server.join().unwrap(),
+                expected_requests,
+                "{retry_header:?}"
+            );
+            if failures == 1 {
+                assert_eq!(
+                    result.unwrap().message.content.as_deref(),
+                    Some("recovered")
+                );
+                assert_eq!(
+                    text, "recovered",
+                    "gateway errors must not leak into output"
+                );
+            } else {
+                let error = result.err().expect("persistent 524 must remain an error");
+                let http = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<ModelHttpError>())
+                    .unwrap();
+                assert_eq!(http.status.as_u16(), 524);
+                assert!(text.is_empty());
+            }
+        }
+    }
 
     /// Read one complete request so the client is not blocked by an unread body.
     fn read_one_request(stream: &mut std::net::TcpStream) {

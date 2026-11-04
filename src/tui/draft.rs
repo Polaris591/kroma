@@ -38,6 +38,11 @@ impl UiState {
                 Self::discard_copy(&item);
             }
         }
+        if let Some(draft) = self.cleared_draft.take() {
+            for item in draft.attachments.into_iter().chain(draft.removed) {
+                Self::discard_copy(&item);
+            }
+        }
         self.next_marker = crate::tui::editor::ATTACHMENT_START;
     }
 
@@ -169,5 +174,69 @@ impl UiState {
                 Self::discard_copy(&item);
             }
         }
+        if let Some(draft) = self.cleared_draft.take() {
+            for item in draft.attachments.into_iter().chain(draft.removed) {
+                Self::discard_copy(&item);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ClearedDraft {
+    text: String,
+    attachments: Vec<Attachment>,
+    removed: Vec<Attachment>,
+}
+
+impl UiState {
+    /// Clear the visible draft without deleting its draft files. Ctrl+Z
+    /// restores it while the editor is empty; sending or quitting cleans up
+    /// through the normal ownership path.
+    pub fn clear_draft_undoable(&mut self) {
+        if let Some(previous) = self.cleared_draft.take() {
+            for item in previous.attachments.into_iter().chain(previous.removed) {
+                Self::discard_copy(&item);
+            }
+        }
+        let text = self.editor.text().to_owned();
+        let attachments = std::mem::take(&mut self.attachments);
+        let removed = std::mem::take(&mut self.removed_drafts);
+        self.editor.clear();
+        self.attach_mode = false;
+        self.attach_path.clear();
+        self.next_marker = crate::tui::editor::ATTACHMENT_START;
+        self.cleared_draft = Some(ClearedDraft {
+            text,
+            attachments,
+            removed,
+        });
+        let language = self.preferences.language;
+        self.note(
+            language
+                .text(
+                    "Draft cleared · Ctrl+Z restores it",
+                    "已清空草稿 · Ctrl+Z 恢复",
+                )
+                .to_owned(),
+        );
+    }
+
+    pub fn restore_cleared_draft(&mut self) -> bool {
+        let Some(draft) = self.cleared_draft.take() else {
+            return false;
+        };
+        self.editor.replace_all(&draft.text);
+        for item in &draft.attachments {
+            if let Some(marker) = item.marker {
+                self.editor
+                    .set_attachment_label(marker, item.inline_label());
+            }
+        }
+        self.attachments = draft.attachments;
+        self.removed_drafts = draft.removed;
+        let language = self.preferences.language;
+        self.note(language.text("Draft restored", "草稿已恢复").to_owned());
+        true
     }
 }

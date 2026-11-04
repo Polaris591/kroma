@@ -342,8 +342,8 @@ impl UiState {
         }
         let phase = match self.phase {
             "compacting" => self.preferences.language.text(
-                "Compacting context (120s limit)",
-                "正在压缩上下文（最多 120 秒）",
+                "Compacting context (360s per attempt, up to 3 retries)",
+                "正在压缩上下文（单次 360 秒，最多重试 3 次）",
             ),
             "thinking" => self.preferences.language.text("Thinking", "正在思考"),
             "waiting" if !self.received_model_output => {

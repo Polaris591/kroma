@@ -16,14 +16,14 @@
                                                                                                     
   Commands · ↑↓ select · Tab complete · Esc close ───────────────────────────────────────────────── 
    › /                                                                                              
-   › /clear  — Clear the current conversation                                                       
+   › /checkpoints  — List file snapshots (Git worktrees)                                            
+     /clear  — Clear the current conversation                                                       
      /commands  — Search all slash commands                                                         
      /compact  — Compact context now; preserve original history                                     
      /continue  — Resume the latest conversation                                                    
      /diff  — Show workspace changes                                                                
      /editor  — Edit draft in external editor                                                       
      /exit  — Exit Kroma                                                                            
-     /export <path>  — Export conversation to a file                                                
  ────────────────────────────────────────────────────────────────────────────────────────────────── 
    › Describe a task, or / for commands…                                                            
                                                                                                     

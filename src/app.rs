@@ -15,6 +15,7 @@ use crate::{
     tools::ToolRegistry,
 };
 use anyhow::Result;
+use std::env;
 use std::sync::Arc;
 
 /// The one startup composition point for CLI and future plugin hosts.
@@ -90,7 +91,11 @@ pub async fn default_runtime_with(
     if !skills.is_empty() {
         tools.register(Arc::new(LoadSkill(skills.clone())))?;
     }
-    let mcp_status = mcp::register_configured_report(&mut tools, &config.workdir).await?;
+    let mcp_status = if env::var_os("KROMA_MCP_EAGER").is_some() {
+        mcp::register_configured_report(&mut tools, &config.workdir).await?
+    } else {
+        mcp::register_configured_lazy(&mut tools, &config.workdir).await?
+    };
     if mcp_status.tools > 0 {
         crate::runtime_log!("[mcp] registered {} tool(s)", mcp_status.tools);
     }
@@ -127,6 +132,7 @@ pub async fn default_runtime_with(
     )?;
     let mut agent = agent;
     agent.set_model_report(model_report);
+    agent.enable_checkpoints();
     Ok(DefaultRuntime {
         agent,
         skills,
@@ -225,6 +231,14 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
         resolved.catalog_max_output_tokens,
         resolved.catalog_image_input,
     );
+    model = model.with_thinking_levels(
+        resolved
+            .report
+            .thinking_levels
+            .value
+            .clone()
+            .unwrap_or_default(),
+    );
     // Responses and Anthropic always send an explicit output limit. Even
     // when /models has no hard maximum, their default wire value is 4096;
     // reserve that same amount instead of an unrelated window/8 heuristic.
@@ -237,7 +251,10 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
         report.requested_output_tokens.note =
             Some("provider default; Kroma sends an explicit native output cap".into());
     }
-    let budget = ContextConfig::from_limits(resolved.context_window, effective_output)?;
+    let mut budget = ContextConfig::from_limits(resolved.context_window, effective_output)?;
+    if let Some(limit) = resolved.catalog_max_input_tokens {
+        budget = budget.with_input_limit(limit)?;
+    }
     let reserve_source = if std::env::var_os("KROMA_OUTPUT_RESERVE_TOKENS").is_some() {
         FieldSource::Environment
     } else if effective_output.is_some() {
@@ -289,6 +306,7 @@ mod tests {
             base_url: "http://127.0.0.1:9/v1".into(),
             model: "mock".into(),
             api_key: None,
+            api_key_env: None,
             deepseek_thinking: None,
             api_protocol: Some("chat".into()),
             reasoning_effort: Some("high".into()),
@@ -319,6 +337,7 @@ mod tests {
                 base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
                 model: "mock".into(),
                 api_key: None,
+                api_key_env: None,
                 deepseek_thinking: None,
                 api_protocol: Some(protocol.into()),
                 reasoning_effort: Some("high".into()),
@@ -351,6 +370,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "unknown".into(),
                 api_key: None,
+                api_key_env: None,
                 deepseek_thinking: None,
                 api_protocol: Some(protocol.into()),
                 reasoning_effort: Some("auto".into()),
@@ -374,6 +394,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "unknown".into(),
                 api_key: None,
+                api_key_env: None,
                 deepseek_thinking: None,
                 api_protocol: Some(protocol.into()),
                 reasoning_effort: Some("auto".into()),
@@ -408,6 +429,7 @@ mod tests {
             base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
             model: "deepseek".into(),
             api_key: None,
+            api_key_env: None,
             deepseek_thinking: None,
             api_protocol: Some("chat".into()),
             reasoning_effort: Some("high".into()),

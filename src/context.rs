@@ -277,6 +277,7 @@ impl ContextFactory for BuiltinContextFactory {
 pub struct ContextConfig {
     window: usize,
     available_input: usize,
+    max_input_tokens: Option<usize>,
     soft: usize,
     hard: usize,
     output_reserve: usize,
@@ -332,10 +333,27 @@ impl ContextConfig {
         Ok(Self {
             window,
             available_input,
+            max_input_tokens: None,
             soft,
             hard: safe_input.max(soft),
             output_reserve: reserve,
         })
+    }
+
+    /// Apply an independent input ceiling without confusing it with the shared
+    /// input/output window or reducing the reserved output allowance.
+    pub fn with_input_limit(mut self, limit: usize) -> Result<Self> {
+        if limit < 1_024 {
+            bail!("model input limit must be at least 1024 tokens");
+        }
+        self.max_input_tokens = Some(self.max_input_tokens.map_or(limit, |old| old.min(limit)));
+        if limit < self.available_input {
+            self.available_input = limit;
+            let margin = (self.window / 100).max(1_024).min(limit / 8);
+            self.hard = self.hard.min(limit.saturating_sub(margin));
+            self.soft = self.soft.min(self.hard.saturating_sub(margin));
+        }
+        Ok(self)
     }
 
     pub fn window(&self) -> usize {
@@ -527,7 +545,7 @@ impl Compression {
             measured: None,
             usage: CompactionUsage::default(),
             events: None,
-            checkpoint_timeout: std::time::Duration::from_secs(120),
+            checkpoint_timeout: crate::provider::CHECKPOINT_TOTAL_TIMEOUT,
         }
     }
 
@@ -1041,7 +1059,12 @@ impl Compression {
                 self.budget.summary_tokens(),
                 self.budget.output_reserve(),
             );
-            if tokens.saturating_add(output) <= self.budget.window() {
+            if self
+                .budget
+                .max_input_tokens
+                .is_none_or(|limit| tokens <= limit)
+                && tokens.saturating_add(output) <= self.budget.window()
+            {
                 return Some((boundary, view, tokens));
             }
             boundary = Self::previous_safe_boundary(messages, self.state.covered_until, boundary)?;
@@ -1093,7 +1116,7 @@ impl Compression {
             events.on_event(crate::events::RuntimeEvent::CompactionStarted);
         }
         // Bound the entire checkpoint, including provider retries. Otherwise
-        // repeated 120s timeouts/truncations can stall a foreground task for
+        // repeated attempt timeouts/truncations can stall a foreground task for
         // many minutes with no model deltas. Dropping generation is safe:
         // context is committed only after a complete, validated summary.
         let result = tokio::time::timeout(
@@ -1546,6 +1569,56 @@ fn count(value: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_source_respects_an_independent_input_cap() {
+        let messages = long_completed_turns(8);
+        let backend: Arc<dyn ModelBackend> = Arc::new(TestModel::new([]));
+        let budget = ContextConfig::with_output_reserve(32_000, 4096).unwrap();
+        let state = CompactionState {
+            consumed_until: messages.len(),
+            ..Default::default()
+        };
+        let uncapped = Compression::new(state.clone(), budget, Path::new("unused.json"));
+        let (boundary, _, tokens) = uncapped
+            .summary_source(&messages, &backend, messages.len())
+            .unwrap();
+        assert_eq!(boundary, messages.len());
+        assert!(tokens > 1800, "fixture must exceed the separate input cap");
+        let capped = Compression::new(
+            state,
+            budget.with_input_limit(1800).unwrap(),
+            Path::new("unused.json"),
+        );
+        let (boundary, _, tokens) = capped
+            .summary_source(&messages, &backend, messages.len())
+            .unwrap();
+        assert!(
+            boundary < messages.len(),
+            "summary must shorten rather than exceed the input-only limit"
+        );
+        assert!(tokens <= 1800);
+        assert!(Compression::is_safe_boundary(&messages, boundary));
+    }
+
+    #[test]
+    fn independent_input_ceiling_preserves_shared_window_and_output_reserve() {
+        let base = ContextConfig::with_output_reserve(1_050_000, 4096).unwrap();
+        let capped = base.with_input_limit(922_000).unwrap();
+        assert_eq!(capped.window(), 1_050_000);
+        assert_eq!(capped.output_reserve(), 4096);
+        assert_eq!(capped.available_input(), 922_000);
+        assert!(capped.soft_limit() < capped.hard_limit());
+        assert!(capped.hard_limit() < capped.available_input());
+        let unchanged = capped.with_input_limit(1_050_000).unwrap();
+        assert_eq!(unchanged.available_input(), capped.available_input());
+        assert_eq!(unchanged.hard_limit(), capped.hard_limit());
+        assert!(base.with_input_limit(1023).is_err());
+        let tiny = base.with_input_limit(1024).unwrap();
+        assert!(tiny.soft_limit() < tiny.hard_limit());
+        assert!(tiny.hard_limit() < tiny.available_input());
+    }
+
     use crate::model::{ModelFuture, StreamFuture, TextResult};
     use crate::provider::{FunctionCall, ToolCall};
     use crate::tools::{Tool, ToolContext};
@@ -1966,6 +2039,15 @@ mod tests {
             "the prompt/tool allowance must count toward the trigger"
         );
         assert_eq!(commit.count(), 1);
+    }
+
+    #[test]
+    fn default_checkpoint_deadline_covers_three_six_minute_retries() {
+        assert_eq!(
+            compression().checkpoint_timeout,
+            Duration::from_secs(1_440),
+            "the outer checkpoint guard must allow four 360-second attempts"
+        );
     }
 
     #[tokio::test]

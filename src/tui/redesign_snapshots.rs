@@ -304,7 +304,7 @@ fn export_graphite_visual_gallery() {
     }
     html.push_str("</html>");
     std::fs::write(root.join("index.html"), html).unwrap();
-    println!(
+    crate::cli_println!(
         "Graphite visual gallery: {}",
         root.join("index.html").display()
     );

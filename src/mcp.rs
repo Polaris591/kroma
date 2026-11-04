@@ -16,14 +16,14 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env, fs,
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const MAX_MCP_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -44,6 +44,9 @@ const MAX_TRUST_LOCAL_IMPORTS: usize = 256;
 const MAX_MCP_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MCP_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const MCP_SEARCH_BUDGET: Duration = Duration::from_secs(30);
+const MCP_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(60);
+const MCP_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const TRUST_PROJECT_ENV: &str = "KROMA_TRUST_PROJECT_MCP";
 const PROJECT_ENV_ALLOW: [&str; 12] = [
     "HOME",
@@ -776,7 +779,11 @@ fn configured_servers_with(
     trust_project: Option<bool>,
 ) -> Result<(BTreeMap<String, ServerConfig>, Vec<String>)> {
     let mut warnings = Vec::new();
-    let paths: Vec<(PathBuf, bool)> = if let Some(override_path) = env::var_os("KROMA_MCP_CONFIG") {
+    let paths: Vec<(PathBuf, bool)> = if trust_project.is_some() {
+        // Test/host seam: inspect exactly the project file, not the real user's
+        // MCP servers.
+        vec![(workdir.join(".kroma/mcp.json"), true)]
+    } else if let Some(override_path) = env::var_os("KROMA_MCP_CONFIG") {
         // An explicit user-selected file is treated as user configuration.
         vec![(PathBuf::from(override_path), false)]
     } else {
@@ -945,11 +952,13 @@ impl Connection {
                 for (key, value) in &config.env {
                     process.env(key, expand_env(value, !config.project)?);
                 }
+                // Third-party server logs are noisy and can contain secrets.
+                // Keep them out of Kroma's output unless explicitly requested.
                 process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(
-                    if crate::diagnostics::quiet() {
-                        Stdio::null()
-                    } else {
+                    if env::var_os("KROMA_MCP_STDERR").is_some_and(|value| value == "inherit") {
                         Stdio::inherit()
+                    } else {
+                        Stdio::null()
                     },
                 );
                 process.kill_on_drop(true);
@@ -1602,6 +1611,13 @@ pub async fn register_configured(registry: &mut ToolRegistry, workdir: &Path) ->
 
 /// Test/integration seam: force-enable project MCP without touching the user's
 /// trust store. Production hosts must use the normal trusted path.
+pub async fn register_configured_project_only_report(
+    registry: &mut ToolRegistry,
+    workdir: &Path,
+) -> Result<Registration> {
+    register_configured_report_with(registry, workdir, Some(false)).await
+}
+
 pub async fn register_configured_allow_project(
     registry: &mut ToolRegistry,
     workdir: &Path,
@@ -1625,7 +1641,11 @@ async fn register_configured_report_with(
     workdir: &Path,
     trust_project: Option<bool>,
 ) -> Result<Registration> {
-    let (config, warnings) = configured_servers_with(workdir, trust_project)?;
+    if env::var_os("KROMA_NO_MCP").is_some() {
+        return Ok(Registration::default());
+    }
+    let (mut config, mut warnings) = configured_servers_with(workdir, trust_project)?;
+    filter_servers(&mut config, &mut warnings);
     let mut report = Registration {
         warnings,
         ..Registration::default()
@@ -2411,6 +2431,28 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn an_idle_lazy_connection_is_pruned() -> Result<()> {
+        let dir = scratch("lazy-idle");
+        let connection = with_test_timeout(connect_mock(&dir, MockMode::Normal)).await?;
+        let manager = LazyMcp {
+            servers: BTreeMap::new(),
+            workdir: dir.clone(),
+            connections: tokio::sync::Mutex::new(HashMap::from([(
+                "idle".to_owned(),
+                CachedConnection {
+                    connection: Arc::new(tokio::sync::Mutex::new(connection)),
+                    last_used: Instant::now() - MCP_IDLE_TIMEOUT - Duration::from_secs(1),
+                },
+            )])),
+        };
+        manager.prune_idle(MCP_IDLE_TIMEOUT).await;
+        assert!(manager.connections.lock().await.is_empty());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2649,4 +2691,396 @@ mod trust_hardening_tests {
         fs::remove_dir_all(dir)?;
         Ok(())
     }
+}
+
+fn filter_servers(config: &mut BTreeMap<String, ServerConfig>, warnings: &mut Vec<String>) {
+    let Some(selected) = env::var_os("KROMA_MCP_SERVERS") else {
+        return;
+    };
+    let selected = selected.to_string_lossy();
+    let names = selected
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return;
+    }
+    for name in &names {
+        if !config.contains_key(*name) {
+            warnings.push(format!(
+                "MCP server '{name}' was requested with --mcp but is not configured"
+            ));
+        }
+    }
+    config.retain(|name, _| names.contains(&name.as_str()));
+}
+
+struct CachedConnection {
+    connection: Arc<tokio::sync::Mutex<Connection>>,
+    last_used: Instant,
+}
+
+/// Lazily connected MCP servers, shared by the two discovery tools. No child
+/// process starts until the model actually searches or calls a tool.
+struct LazyMcp {
+    servers: BTreeMap<String, ServerConfig>,
+    workdir: PathBuf,
+    connections: tokio::sync::Mutex<HashMap<String, CachedConnection>>,
+}
+
+impl LazyMcp {
+    async fn connection(&self, name: &str) -> Result<Arc<tokio::sync::Mutex<Connection>>> {
+        let existing = {
+            let mut connections = self.connections.lock().await;
+            connections.get_mut(name).map(|cached| {
+                cached.last_used = Instant::now();
+                Arc::clone(&cached.connection)
+            })
+        };
+        if let Some(connection) = existing {
+            if !connection.lock().await.is_invalid() {
+                return Ok(connection);
+            }
+            self.connections.lock().await.remove(name);
+        }
+        let config = self
+            .servers
+            .get(name)
+            .with_context(|| format!("unknown MCP server '{name}'"))?;
+        let connection = tokio::time::timeout(
+            Duration::from_secs(15),
+            Connection::connect(config, &self.workdir),
+        )
+        .await
+        .with_context(|| format!("MCP server '{name}' startup timed out"))??;
+        let connection = Arc::new(tokio::sync::Mutex::new(connection));
+        let mut connections = self.connections.lock().await;
+        if let Some(cached) = connections.get_mut(name) {
+            cached.last_used = Instant::now();
+            return Ok(Arc::clone(&cached.connection));
+        }
+        connections.insert(
+            name.to_owned(),
+            CachedConnection {
+                connection: Arc::clone(&connection),
+                last_used: Instant::now(),
+            },
+        );
+        Ok(connection)
+    }
+
+    async fn forget(&self, name: &str) {
+        self.connections.lock().await.remove(name);
+    }
+
+    async fn prune_idle(&self, max_idle: Duration) {
+        let mut connections = self.connections.lock().await;
+        let now = Instant::now();
+        connections.retain(|_, cached| now.duration_since(cached.last_used) < max_idle);
+    }
+}
+
+struct McpSearch {
+    manager: Arc<LazyMcp>,
+    server_names: String,
+}
+
+impl Tool for McpSearch {
+    fn name(&self) -> &str {
+        "mcp_search"
+    }
+
+    fn definition(&self) -> Value {
+        json!({"type":"function","function":{
+            "name":"mcp_search",
+            "description":format!(
+                "Search MCP servers for tools. Call this before mcp_call. Available servers: {}. Set server to narrow the search, or query to match names and descriptions.",
+                self.server_names
+            ),
+            "parameters":{"type":"object","properties":{
+                "query":{"type":"string","description":"Words to match in tool names or descriptions"},
+                "server":{"type":"string","description":"Only search this configured server"}
+            },"additionalProperties":false}
+        }})
+    }
+
+    fn execute<'a>(&'a self, call: &'a ToolCall, _ctx: ToolContext<'a>) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let args: Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| json!({}));
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let only = args.get("server").and_then(Value::as_str);
+            if let Some(name) = only {
+                if !self.manager.servers.contains_key(name) {
+                    return ToolResult::error(
+                        json!({"error": format!("unknown MCP server '{name}'")}).to_string(),
+                    );
+                }
+            }
+            let mut found = Vec::new();
+            let mut truncated = false;
+            let deadline = tokio::time::Instant::now() + MCP_SEARCH_BUDGET;
+            for name in self.manager.servers.keys() {
+                if only.is_some_and(|only| only != name) {
+                    continue;
+                }
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    found.push(json!({"server":name,"error":"MCP search time budget exhausted"}));
+                    truncated = true;
+                    continue;
+                }
+                let connection =
+                    match tokio::time::timeout(remaining, self.manager.connection(name)).await {
+                        Ok(Ok(connection)) => connection,
+                        Ok(Err(error)) => {
+                            found.push(json!({"server":name,"error":format!("{error:#}")}));
+                            continue;
+                        }
+                        Err(_) => {
+                            found.push(
+                                json!({"server":name,"error":"MCP search time budget exhausted"}),
+                            );
+                            truncated = true;
+                            continue;
+                        }
+                    };
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let tools = tokio::time::timeout(remaining, async {
+                    let mut connection = connection.lock().await;
+                    #[cfg(any(unix, windows))]
+                    let mut cancel = connection.process_tree().map(|tree| McpCancelGuard {
+                        tree,
+                        cancelled: connection.cancel_signal(),
+                        armed: true,
+                    });
+                    let result = connection.list_tools().await;
+                    #[cfg(any(unix, windows))]
+                    if let Some(cancel) = cancel.as_mut() {
+                        if result.is_ok() || !connection.is_invalid() {
+                            cancel.disarm();
+                        }
+                    }
+                    result
+                })
+                .await;
+                let tools = match tools {
+                    Ok(result) => result,
+                    Err(_) => {
+                        self.manager.forget(name).await;
+                        found.push(json!({
+                            "server": name,
+                            "error": "MCP search time budget exhausted"
+                        }));
+                        truncated = true;
+                        continue;
+                    }
+                };
+                match tools {
+                    Ok(tools) => {
+                        for metadata in tools {
+                            let Some(remote) = metadata["name"].as_str() else {
+                                continue;
+                            };
+                            let description =
+                                metadata["description"].as_str().unwrap_or("MCP tool");
+                            if !query.is_empty()
+                                && !remote.to_ascii_lowercase().contains(&query)
+                                && !description.to_ascii_lowercase().contains(&query)
+                            {
+                                continue;
+                            }
+                            if found.len() >= 50 {
+                                truncated = true;
+                                continue;
+                            }
+                            found.push(json!({
+                                "server":name,
+                                "tool":remote,
+                                "description":description
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        self.manager.forget(name).await;
+                        found.push(json!({"server":name,"error":format!("{error:#}")}));
+                    }
+                }
+            }
+            ToolResult::ok(
+                json!({"tools":found,"truncated":truncated,"usage":"Call mcp_call with {server, tool, arguments}."})
+                    .to_string(),
+            )
+        })
+    }
+}
+
+struct McpCall {
+    manager: Arc<LazyMcp>,
+}
+
+impl Tool for McpCall {
+    fn name(&self) -> &str {
+        "mcp_call"
+    }
+
+    fn definition(&self) -> Value {
+        json!({"type":"function","function":{
+            "name":"mcp_call",
+            "description":"Call a tool discovered with mcp_search. Arguments must be a JSON object.",
+            "parameters":{"type":"object","required":["server","tool"],"properties":{
+                "server":{"type":"string"},
+                "tool":{"type":"string"},
+                "arguments":{"type":"object","description":"Tool arguments as a JSON object"}
+            },"additionalProperties":false}
+        }})
+    }
+
+    fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let parsed: Value = match serde_json::from_str(&call.function.arguments) {
+                Ok(value) => value,
+                Err(error) => {
+                    return ToolResult::error(
+                        json!({"error":format!("invalid arguments: {error}")}).to_string(),
+                    );
+                }
+            };
+            let Some(server) = parsed.get("server").and_then(Value::as_str) else {
+                return ToolResult::error(json!({"error":"server is required"}).to_string());
+            };
+            let Some(tool) = parsed.get("tool").and_then(Value::as_str) else {
+                return ToolResult::error(json!({"error":"tool is required"}).to_string());
+            };
+            let arguments = parsed
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            if !arguments.is_object() {
+                return ToolResult::error(
+                    json!({"error":"arguments must be a JSON object"}).to_string(),
+                );
+            }
+            let connection = match self.manager.connection(server).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    return ToolResult::error(json!({"error":format!("{error:#}")}).to_string());
+                }
+            };
+            let outcome = async {
+                let mut connection = connection.lock().await;
+                if connection.is_invalid() {
+                    drop(connection);
+                    self.manager.forget(server).await;
+                    return Err(anyhow::anyhow!(
+                        "MCP server '{server}' was disconnected; call mcp_search and retry"
+                    ));
+                }
+                #[cfg(any(unix, windows))]
+                let mut cancel = connection.process_tree().map(|tree| McpCancelGuard {
+                    tree,
+                    cancelled: connection.cancel_signal(),
+                    armed: true,
+                });
+                let result = connection.call_tool(tool, arguments).await;
+                #[cfg(any(unix, windows))]
+                if let Some(cancel) = cancel.as_mut() {
+                    if result.is_ok() || !connection.is_invalid() {
+                        cancel.disarm();
+                    }
+                }
+                result
+            }
+            .await;
+            match outcome {
+                Ok(mut value) => {
+                    if let Err(error) = archive_mcp_media(&mut value, ctx.archive) {
+                        return ToolResult::error(json!({"error":error.to_string()}).to_string());
+                    }
+                    let is_error = value
+                        .get("isError")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if is_error {
+                        ToolResult::error(value.to_string())
+                    } else {
+                        ToolResult::ok(value.to_string())
+                    }
+                }
+                Err(error) => {
+                    self.manager.forget(server).await;
+                    ToolResult::error(json!({"error":format!("{error:#}")}).to_string())
+                }
+            }
+        })
+    }
+}
+
+/// Register two small discovery tools instead of every remote schema. Server
+/// processes start on the first `mcp_search` or `mcp_call`.
+pub async fn register_configured_lazy(
+    registry: &mut ToolRegistry,
+    workdir: &Path,
+) -> Result<Registration> {
+    register_configured_lazy_with(registry, workdir, None).await
+}
+
+/// Test/host seam for an explicitly trusted project config.
+pub async fn register_configured_lazy_allow_project(
+    registry: &mut ToolRegistry,
+    workdir: &Path,
+) -> Result<Registration> {
+    register_configured_lazy_with(registry, workdir, Some(true)).await
+}
+
+async fn register_configured_lazy_with(
+    registry: &mut ToolRegistry,
+    workdir: &Path,
+    trust_project: Option<bool>,
+) -> Result<Registration> {
+    if env::var_os("KROMA_NO_MCP").is_some() {
+        return Ok(Registration::default());
+    }
+    let (mut config, mut warnings) = configured_servers_with(workdir, trust_project)?;
+    filter_servers(&mut config, &mut warnings);
+    let mut report = Registration {
+        warnings,
+        ..Registration::default()
+    };
+    if config.is_empty() {
+        return Ok(report);
+    }
+    let names = config.keys().cloned().collect::<Vec<_>>().join(", ");
+    let manager = Arc::new(LazyMcp {
+        servers: config,
+        workdir: workdir.to_path_buf(),
+        connections: tokio::sync::Mutex::new(HashMap::new()),
+    });
+    let weak = Arc::downgrade(&manager);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(MCP_IDLE_REAP_INTERVAL).await;
+            let Some(manager) = weak.upgrade() else {
+                break;
+            };
+            manager.prune_idle(MCP_IDLE_TIMEOUT).await;
+        }
+    });
+    let search: Arc<dyn Tool> = Arc::new(McpSearch {
+        manager: Arc::clone(&manager),
+        server_names: names,
+    });
+    if registry.register(search).is_ok() {
+        report.tools += 1;
+    }
+    let call: Arc<dyn Tool> = Arc::new(McpCall { manager });
+    if registry.register(call).is_ok() {
+        report.tools += 1;
+    }
+    Ok(report)
 }

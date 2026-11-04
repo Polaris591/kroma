@@ -242,6 +242,11 @@ impl Editor {
         }
     }
 
+    pub fn set_attachment_label(&mut self, marker: char, label: String) {
+        self.attachment_labels
+            .insert(marker, format!("【{label}】"));
+    }
+
     pub fn insert_attachment(&mut self, marker: char, label: String) {
         self.insert(&marker.to_string());
         self.attachment_labels

@@ -237,6 +237,10 @@ impl SessionCatalog {
         Ok(self.names()?.contains_key(id))
     }
 
+    pub fn title_matches(&self, text: &str) -> Result<bool> {
+        Ok(self.names()?.values().any(|name| name == text))
+    }
+
     pub fn resolve_name(&self, text: &str) -> Result<String> {
         if text == "default" || self.resolve(text).is_ok() {
             return Ok(text.to_owned());
@@ -298,6 +302,13 @@ impl SessionCatalog {
         Ok(self
             .default
             .with_file_name(format!("{}{}.json", self.prefix, id)))
+    }
+
+    pub fn path_for(&self, id: &str) -> Result<PathBuf> {
+        if id == "default" {
+            return Ok(self.default.clone());
+        }
+        self.named_path(id)
     }
 
     pub fn resolve(&self, id: &str) -> Result<PathBuf> {
@@ -544,6 +555,10 @@ mod tests {
         assert_eq!(catalog.id_for_path(catalog.default_path()), Some("default"));
         assert!(catalog.resolve("../../etc/passwd").is_err());
         assert!(catalog.resolve("unknown").is_err());
+        let fresh = "fresh-name";
+        assert!(catalog.resolve_name(fresh).is_err());
+        assert!(!catalog.title_matches(fresh).unwrap());
+        assert!(catalog.path_for(fresh).is_ok());
         let (id, path) = catalog.new_path().unwrap();
         assert_eq!(catalog.id_for_path(&path), Some(id.as_str()));
         assert!(catalog.resolve(&id).is_err());

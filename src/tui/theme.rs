@@ -219,6 +219,10 @@ impl ThemeStore {
             }
             _ => ThemeSettings::default(),
         };
+        let mut settings = settings;
+        if env::var_os("NO_COLOR").is_some() || env::var_os("KROMA_NO_COLOR").is_some() {
+            settings.preset = "mono".into();
+        }
         let colors = Theme::from_settings(&settings)?;
         Ok(Self {
             path,

@@ -21,6 +21,9 @@ pub struct ProviderProfile {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Environment variable that supplies the key, used instead of storing a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deepseek_thinking: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,7 +163,7 @@ pub fn normalize_levels(levels: &[String]) -> Result<Vec<String>> {
     Ok(result)
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     (1..=48).contains(&name.len())
         && name.as_bytes()[0].is_ascii_alphanumeric()
         && name
@@ -372,8 +375,8 @@ impl Profiles {
     }
 }
 
-fn prompt_value(label: &str, default: &str) -> Result<String> {
-    print!("{label} [{default}]: ");
+pub(crate) fn prompt_value(label: &str, default: &str) -> Result<String> {
+    crate::cli_print!("{label} [{default}]: ");
     io::stdout().flush()?;
     let mut value = String::new();
     if io::stdin().read_line(&mut value)? == 0 {
@@ -392,7 +395,7 @@ fn prompt_optional_tokens(label: &str, current: Option<usize>) -> Result<Option<
     let shown = current
         .map(|value| value.to_string())
         .unwrap_or_else(|| "auto".into());
-    print!("{label} [{shown}] (Enter=keep, '-'=auto): ");
+    crate::cli_print!("{label} [{shown}] (Enter=keep, '-'=auto): ");
     io::stdout().flush()?;
     let mut value = String::new();
     if io::stdin().read_line(&mut value)? == 0 {
@@ -413,7 +416,7 @@ fn prompt_optional_tokens(label: &str, current: Option<usize>) -> Result<Option<
 
 /// Optional level list: Enter keeps the stored value, "-" allows every level.
 fn prompt_levels(current: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    print!(
+    crate::cli_print!(
         "Thinking levels, comma separated (Enter=keep, '-'=all) [{}]: ",
         display_levels(current)
     );
@@ -441,7 +444,7 @@ fn prompt_levels(current: Option<&[String]>) -> Result<Option<Vec<String>>> {
 /// Explicit catalog alias for proxies/renamed models. Enter keeps it, `-`
 /// clears it. The value is validated against the small built-in catalog.
 fn prompt_catalog_model(current: Option<&str>) -> Result<Option<String>> {
-    print!(
+    crate::cli_print!(
         "Built-in catalog model alias, provider/model-id (Enter=keep, '-'=auto) [{}]: ",
         current.unwrap_or("auto")
     );
@@ -527,9 +530,9 @@ impl HiddenInput {
     }
 }
 
-fn prompt_key(existing: bool) -> Result<Option<String>> {
+pub(crate) fn prompt_key(existing: bool) -> Result<Option<String>> {
     let status = if existing { "stored" } else { "not set" };
-    print!("API key ({status}; Enter=keep, '-'=clear): ");
+    crate::cli_print!("API key ({status}; Enter=keep, '-'=clear): ");
     io::stdout().flush()?;
     let guard = HiddenInput::enter()?;
     #[cfg(not(any(unix, windows)))]
@@ -537,7 +540,7 @@ fn prompt_key(existing: bool) -> Result<Option<String>> {
     let mut input = String::new();
     let result = io::stdin().read_line(&mut input);
     drop(guard);
-    println!();
+    crate::cli_println!();
     if result? == 0 {
         bail!("configuration cancelled (stdin closed)");
     }
@@ -566,7 +569,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                 .max_output_tokens
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "auto".into());
-            println!(
+            crate::cli_println!(
                 "model={} | host={} | protocol={} | reasoning={} | deepseek_thinking={} | context={} | output={} | levels={} | key={} (environment overrides saved profile)",
                 config.model,
                 host,
@@ -577,15 +580,34 @@ pub fn cli(args: &[String]) -> Result<()> {
                 output,
                 display_levels((!config.thinking_levels.is_empty()).then_some(&config.thinking_levels[..])),
                 if config.api_key.is_some() {
-                    "configured"
+                    config
+                        .api_key_env
+                        .as_deref()
+                        .map(|name| format!("environment:{name}"))
+                        .unwrap_or_else(|| "configured".into())
+                } else if let Some(name) = config.api_key_env.as_deref() {
+                    format!("environment:{name} (unset)")
                 } else {
-                    "none"
+                    "none".into()
                 }
             );
             let (_budget, report) = config.resolved_limits_without_probe()?;
-            println!(
+            crate::cli_println!(
                 "\nEffective model limits and sources (upstream metadata not queried):\n{report}"
             );
+            Ok(())
+        }
+        [cmd, name] if cmd == "delete" => {
+            Profiles::update(|profiles| {
+                if profiles.profiles.remove(name).is_none() {
+                    bail!("unknown profile; use 'kroma config list'");
+                }
+                if profiles.active.as_deref() == Some(name.as_str()) {
+                    profiles.active = None;
+                }
+                Ok(())
+            })?;
+            crate::cli_println!("Deleted profile {name}");
             Ok(())
         }
         [cmd, name] if cmd == "use" => {
@@ -596,7 +618,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                 profiles.active = Some(name.clone());
                 Ok(())
             })?;
-            println!("Active profile: {name} (takes effect on next Kroma launch)");
+            crate::cli_println!("Active profile: {name} (takes effect on next Kroma launch)");
             Ok(())
         }
         [cmd, name] if cmd == "set" => {
@@ -644,6 +666,11 @@ pub fn cli(args: &[String]) -> Result<()> {
                 Some(key) if key.is_empty() => None,
                 Some(key) => Some(key),
             };
+            let api_key_env = if api_key.is_some() {
+                None
+            } else {
+                original.api_key_env.clone()
+            };
             Profiles::update(|profiles| {
                 profiles.profiles.insert(
                     name.clone(),
@@ -651,6 +678,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                         base_url,
                         model,
                         api_key,
+                        api_key_env,
                         deepseek_thinking,
                         api_protocol: Some(api_protocol),
                         reasoning_effort: Some(reasoning_effort),
@@ -665,10 +693,14 @@ pub fn cli(args: &[String]) -> Result<()> {
                 }
                 Ok(())
             })?;
-            println!("Saved profile '{name}' to private Kroma config. Key value not displayed.");
+            crate::cli_println!(
+                "Saved profile '{name}' to private Kroma config. Key value not displayed."
+            );
             Ok(())
         }
-        _ => bail!("Usage: kroma config [list|show|set <name>|use <name>]"),
+        _ => {
+            bail!("Usage: kroma config [list|show|set <name>|use <name>|delete <name>|test <name>]")
+        }
     }
 }
 
@@ -687,7 +719,7 @@ fn list_profiles() -> Result<()> {
     let profiles = Profiles::load()?;
     let active = profiles.selected(None)?.map(|(name, _)| name);
     if profiles.profiles.is_empty() {
-        println!("No saved profiles. Run 'kroma config set <name>' to create one.");
+        crate::cli_println!("No saved profiles. Run 'kroma config set <name>' to create one.");
     } else {
         for (name, profile) in &profiles.profiles {
             let selected = if active == Some(name.as_str()) {
@@ -699,7 +731,7 @@ fn list_profiles() -> Result<()> {
                 .ok()
                 .and_then(|url| url.host_str().map(str::to_owned))
                 .unwrap_or_else(|| "(invalid)".to_owned());
-            println!(
+            crate::cli_println!(
                 "{selected} {name} | model={} | host={} | protocol={} | reasoning={} | thinking={} | context={} | output={} | levels={} | key={}",
                 profile.model,
                 host,
@@ -709,15 +741,22 @@ fn list_profiles() -> Result<()> {
                 display_limit(profile.context_window),
                 display_limit(profile.max_output_tokens),
                 display_levels(profile.thinking_levels.as_deref()),
-                if profile.api_key.is_some() {
-                    "stored"
-                } else {
-                    "none"
-                }
+                key_state(profile)
             );
         }
     }
     Ok(())
+}
+
+fn key_state(profile: &ProviderProfile) -> String {
+    if profile.api_key.is_some() {
+        return "stored".into();
+    }
+    match profile.api_key_env.as_deref() {
+        Some(name) if env::var_os(name).is_some() => format!("env:{name}"),
+        Some(name) => format!("env:{name} (unset)"),
+        None => "none".into(),
+    }
 }
 
 #[cfg(test)]
@@ -735,6 +774,7 @@ mod tests {
                 base_url: "https://provider.example/v1".into(),
                 model: "deepseek".into(),
                 api_key: Some("non-production-dummy-key".into()),
+                api_key_env: None,
                 deepseek_thinking: Some("high".into()),
                 api_protocol: None,
                 reasoning_effort: None,

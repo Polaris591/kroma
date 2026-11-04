@@ -668,7 +668,7 @@ fn export_plain_preview() {
     }
     html.push_str("</html>");
     std::fs::write(root.join("index.html"), html).unwrap();
-    println!(
+    crate::cli_println!(
         "Plain renderer gallery: {}",
         root.join("index.html").display()
     );

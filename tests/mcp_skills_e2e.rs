@@ -2,7 +2,7 @@
 //! No external MCP provider, API token or LLM is needed.
 use anyhow::{Context, Result};
 use kroma::{
-    mcp::register_configured_allow_project,
+    mcp::{register_configured_allow_project, register_configured_lazy_allow_project},
     protocol::{FunctionCall, ToolCall},
     skills::{LoadSkill, SkillCatalog},
     tools::{ToolContext, ToolRegistry},
@@ -373,7 +373,7 @@ async fn project_mcp_config_is_inert_until_explicitly_trusted() -> Result<()> {
     )?;
 
     let mut tools = ToolRegistry::builtin();
-    let report = kroma::mcp::register_configured_report(&mut tools, &dir).await?;
+    let report = kroma::mcp::register_configured_project_only_report(&mut tools, &dir).await?;
     assert_eq!(report.tools, 0);
     assert!(!marker.exists(), "untrusted project MCP must not execute");
     assert!(
@@ -391,6 +391,7 @@ async fn project_mcp_config_is_inert_until_explicitly_trusted() -> Result<()> {
         marker.exists(),
         "explicitly trusted project MCP did not run"
     );
+    drop(tools);
     fs::remove_dir_all(dir)?;
     Ok(())
 }
@@ -409,7 +410,7 @@ async fn project_mcp_config_is_inert_until_explicitly_trusted_windows() -> Resul
     )?;
 
     let mut tools = ToolRegistry::builtin();
-    let report = kroma::mcp::register_configured_report(&mut tools, &dir).await?;
+    let report = kroma::mcp::register_configured_project_only_report(&mut tools, &dir).await?;
     assert_eq!(report.tools, 0);
     assert!(!marker.exists(), "untrusted project MCP must not execute");
     assert!(
@@ -425,6 +426,103 @@ async fn project_mcp_config_is_inert_until_explicitly_trusted_windows() -> Resul
         marker.exists(),
         "explicitly trusted project MCP did not run"
     );
+    drop(tools);
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lazy_mcp_registers_discovery_tools_without_starting_servers() -> Result<()> {
+    let dir = test_directory("mcp-lazy")?;
+    fs::write(
+        dir.join(".kroma/mcp.json"),
+        serde_json::to_vec(&json!({"mcpServers":{"broken":{
+            "command":"kroma-definitely-missing-command"
+        }}}))?,
+    )?;
+    let mut tools = ToolRegistry::builtin();
+    let report = register_configured_lazy_allow_project(&mut tools, &dir).await?;
+    assert_eq!(report.tools, 2);
+    let definitions = tools.definitions();
+    assert!(definitions
+        .iter()
+        .any(|d| d["function"]["name"] == "mcp_search"));
+    assert!(definitions
+        .iter()
+        .any(|d| d["function"]["name"] == "mcp_call"));
+    assert!(!definitions.iter().any(|d| d["function"]["name"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("mcp__"))));
+    drop(tools);
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lazy_mcp_search_and_call_share_one_connection() -> Result<()> {
+    let dir = test_directory("mcp-lazy-http")?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = format!("http://{}/mcp", listener.local_addr()?);
+    let server = std::thread::spawn(move || -> Result<()> {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept()?;
+            let (line, _headers, request) = read_request(&stream)?;
+            assert!(line.starts_with("POST /mcp "));
+            match request["method"].as_str().context("method missing")? {
+                "tools/list" => reply(
+                    stream,
+                    json!({"jsonrpc":"2.0","id":request["id"],"result":{"tools":[
+                        {"name":"echo","description":"Echo input",
+                         "inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}
+                    ]}}),
+                    true,
+                )?,
+                "tools/call" => {
+                    assert_eq!(request["params"]["name"], "echo");
+                    assert_eq!(request["params"]["arguments"]["text"], "hello");
+                    reply(
+                        stream,
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                            "content":[{"type":"text","text":"lazy-hello"}],"isError":false
+                        }}),
+                        true,
+                    )?;
+                }
+                other => anyhow::bail!("unexpected lazy HTTP MCP method {other}"),
+            }
+        }
+        Ok(())
+    });
+    fs::write(
+        dir.join(".kroma/mcp.json"),
+        serde_json::to_vec(&json!({
+            "mcpServers":{"remote":{"url":endpoint,"protocolVersion":"2026-07-28"}}
+        }))?,
+    )?;
+    let mut tools = ToolRegistry::builtin();
+    let report = register_configured_lazy_allow_project(&mut tools, &dir).await?;
+    assert_eq!(report.tools, 2);
+    let context = || ToolContext {
+        workdir: &dir,
+        archive: Path::new("/tmp/test.json"),
+        on_output: None,
+    };
+    let found = tools.execute(&invoke("mcp_search", "{}"), context()).await;
+    let found: Value = serde_json::from_str(&found.content)?;
+    assert_eq!(found["tools"][0]["server"], "remote");
+    assert_eq!(found["tools"][0]["tool"], "echo");
+    let called = tools
+        .execute(
+            &invoke(
+                "mcp_call",
+                r#"{"server":"remote","tool":"echo","arguments":{"text":"hello"}}"#,
+            ),
+            context(),
+        )
+        .await;
+    let called: Value = serde_json::from_str(&called.content)?;
+    assert_eq!(called["content"][0]["text"], "lazy-hello");
+    server.join().expect("lazy HTTP MCP fixture panicked")?;
     fs::remove_dir_all(dir)?;
     Ok(())
 }

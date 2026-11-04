@@ -354,6 +354,7 @@ async fn exercise(wire: Wire) -> Result<()> {
     let config = || Config {
         base_url: format!("http://{addr}/v1"),
         api_key: Some("mock-key".into()),
+        api_key_env: None,
         model: "mock".into(),
         workdir: dir.clone(),
         deepseek_thinking: None,

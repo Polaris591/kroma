@@ -324,9 +324,10 @@ fn context_checkpoint_has_visible_activity_and_returns_to_connecting() {
     ui.event(UiEvent::TaskStarted);
     ui.event(rx.try_recv().unwrap());
     assert_eq!(ui.phase, "compacting");
-    assert!(ui.activity_status().contains("120"));
+    assert!(ui.activity_status().contains("360"));
+    assert!(ui.activity_status().contains("3 retries"));
     let rows = rendered_rows(&mut ui, 100, 28);
-    assert!(rows.iter().any(|row| row.contains("120")));
+    assert!(rows.iter().any(|row| row.contains("360")));
     ui.event(UiEvent::ModelStarted);
     assert_eq!(ui.phase, "waiting");
     ui.event(UiEvent::TaskFinished);
@@ -2746,7 +2747,7 @@ fn redesign_snapshot_matrix() {
                     "Updated the implementation.
 
 ```rust
-fn main() { println!(\"hello\"); }
+fn main() { crate::cli_println!(\"hello\"); }
 ```",
                 ));
                 if scene == "failure" {

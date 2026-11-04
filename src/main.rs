@@ -50,122 +50,43 @@ async fn terminate_signal() {
     std::future::pending::<()>().await;
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.as_slice() == ["--version"]
-        || args.as_slice() == ["-V"]
-        || args.as_slice() == ["--build-info"]
-    {
-        println!(
-            "kroma {} ({})",
-            env!("CARGO_PKG_VERSION"),
-            env!("KROMA_BUILD_REVISION")
-        );
-        if args.as_slice() == ["--build-info"] {
-            println!("executable: {}", std::env::current_exe()?.display());
-        }
-        return Ok(());
-    }
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        print_help();
-        return Ok(());
-    }
-    if args.first().is_some_and(|arg| arg == "config") {
-        return profiles::cli(&args[1..]);
-    }
-    if args.first().is_some_and(|arg| arg == "diagnostics") {
-        let mut output = None;
-        let mut index = 1;
-        while index < args.len() {
-            match args[index].as_str() {
-                "--output" => {
-                    let path = args
-                        .get(index + 1)
-                        .context("diagnostics --output needs a directory")?;
-                    if output.is_some() {
-                        bail!("diagnostics --output may be specified once");
-                    }
-                    output = Some(PathBuf::from(path));
-                    index += 2;
-                }
-                "--help" | "-h" => {
-                    println!("Usage: kroma diagnostics [--output <new-directory>]\n\nWrites a local-only allowlisted bundle. No upload, model request or plugin process.");
-                    return Ok(());
-                }
-                other => bail!("unexpected diagnostics argument '{other}'\nUsage: kroma diagnostics [--output <new-directory>]"),
-            }
-        }
-        let path = kroma::diagnostics_bundle::generate(output)?;
-        println!(
-            "Diagnostics written to {} (local only; no upload, model request or plugin process).",
-            path.display()
-        );
-        return Ok(());
-    }
-    if args.first().is_some_and(|arg| arg == "plugins") {
-        return kroma::plugins::PluginCatalog::cli(&args[1..]);
-    }
-    if args.first().is_some_and(|arg| arg == "trust-project") {
-        let revoke = args.iter().any(|arg| arg == "--revoke");
-        if args.len() > 2 || (args.len() == 2 && args[1] != "--revoke") {
-            bail!("usage: kroma trust-project [--revoke]");
-        }
-        let dir = env::var("KROMA_WORKDIR")
-            .map(PathBuf::from)
-            .or_else(|_| env::current_dir())?
-            .canonicalize()?;
-        if revoke {
-            kroma::mcp::revoke_project_mcp(&dir)?;
-            println!(
-                "Revoked project MCP trust for {}. The project's .kroma/mcp.json will not load until approved again.",
-                dir.display()
-            );
-        } else {
-            let config = kroma::mcp::trust_project_mcp(&dir)?;
-            println!(
-                "Trusted project MCP config {}. Re-run this command after editing the file.",
-                config.display()
-            );
-        }
-        return Ok(());
-    }
-    if args.first().is_some_and(|arg| arg == "recover-context") {
-        if args.len() > 2 {
-            bail!("usage: kroma recover-context [session-id]");
-        }
-        let dir = env::var("KROMA_WORKDIR")
-            .map(PathBuf::from)
-            .or_else(|_| env::current_dir())?
-            .canonicalize()?;
-        let session = args.get(1).map_or("default", String::as_str);
-        if Agent::recover_builtin_context(&dir, session)? {
-            println!("Recovered session '{session}' using built-in context; complete original history preserved.");
-        } else {
-            println!("Session '{session}' already uses built-in context; no change.");
-        }
-        return Ok(());
-    }
+async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
+    let task = options.task();
+    let force_cli = options.no_tui;
     let config = Config::from_env()?;
-    if args.as_slice() == ["--continue"] {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            bail!("kroma --continue requires an interactive terminal; use kroma --cli and /continue otherwise");
-        }
+    if !options.one_shot()
+        && options.prompt.is_empty()
+        && !force_cli
+        && options.continue_latest
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+    {
         return kroma::tui::run_with_resume(config, true).await;
     }
     let mut model_name = config.model.clone();
-    let json_mode = args.iter().any(|arg| arg == "--json");
-    let print_mode = json_mode || args.iter().any(|arg| arg == "--print");
+    let quiet = options.quiet || env::var_os("KROMA_QUIET").is_some();
+    let verbose = options.verbose || env::var_os("KROMA_VERBOSE").is_some();
+    let json_mode = options.json;
+    let print_mode = options.one_shot();
+    if verbose {
+        let endpoint = reqwest::Url::parse(&config.base_url)
+            .map(|mut url| {
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                url.set_query(None);
+                url.set_fragment(None);
+                url.to_string()
+            })
+            .unwrap_or_else(|_| config.base_url.clone());
+        eprintln!(
+            "[config] model={} endpoint={} protocol={} workdir={}",
+            config.model,
+            endpoint,
+            config.api_protocol,
+            config.workdir.display()
+        );
+    }
     if print_mode {
-        let task = args
-            .iter()
-            .filter(|arg| !matches!(arg.as_str(), "--json" | "--print"))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
         let mut piped = String::new();
         if !io::stdin().is_terminal() {
             tokio::io::stdin()
@@ -193,10 +114,11 @@ async fn main() -> Result<()> {
         if prompt.trim().is_empty() {
             bail!("Usage: kroma --print <task> or pipe input to --print");
         }
+        let output = kroma::output::CliOutput::new();
         let runtime = if json_mode {
             app::default_runtime_with(config, |components| {
                 let sink: Arc<dyn kroma::events::EventSink> =
-                    Arc::new(kroma::cli_events::JsonEvents);
+                    Arc::new(kroma::cli_events::JsonEvents::new(output.clone()));
                 components.events = Some(sink);
                 Ok(())
             })
@@ -204,12 +126,14 @@ async fn main() -> Result<()> {
         } else {
             app::default_runtime(config).await?
         };
-        for warning in runtime
-            .startup_warnings
-            .iter()
-            .chain(runtime.plugin_warnings.iter())
-        {
-            eprintln!("[startup] {warning}");
+        if !quiet {
+            for warning in runtime
+                .startup_warnings
+                .iter()
+                .chain(runtime.plugin_warnings.iter())
+            {
+                eprintln!("[startup] {warning}");
+            }
         }
         let mut agent = runtime.agent;
         agent.set_background_compaction(false);
@@ -218,47 +142,63 @@ async fn main() -> Result<()> {
             let result = drive_task(&mut agent, &prompt, None, &mut |_| {}).await;
             match result {
                 Ok(Some(answer)) => {
-                    println!("{}", serde_json::json!({"type":"result","text":answer}));
+                    output.line(&serde_json::json!({"type":"result","text":answer}).to_string())?;
                 }
                 Ok(None) => bail!("task cancelled"),
                 Err(error) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({"type":"error","message":format!("{error:#}")})
-                    );
+                    output.line(
+                        &serde_json::json!({"type":"error","message":format!("{error:#}")})
+                            .to_string(),
+                    )?;
+                    if output.broken() {
+                        return Ok(());
+                    }
                     bail!("task failed");
                 }
             }
-        } else if !run_task(&mut agent, &prompt, None).await? {
+            if output.broken() {
+                return Ok(());
+            }
+        } else if !run_task(&mut agent, &prompt, None, Some(&output)).await? {
             bail!("task cancelled");
         }
         return Ok(());
     }
-    let force_cli = args.as_slice() == ["--no-tui"] || args.as_slice() == ["--cli"];
-    if args.is_empty() && io::stdin().is_terminal() && io::stdout().is_terminal() {
+    if !force_cli
+        && options.prompt.is_empty()
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+    {
         return kroma::tui::run(config).await;
     }
     let runtime = app::default_runtime(config).await?;
     if let Some(name) = &runtime.selected_model_name {
         model_name = name.clone();
     }
-    for warning in &runtime.startup_warnings {
-        eprintln!("[startup] {warning}");
+    if !quiet {
+        for warning in &runtime.startup_warnings {
+            eprintln!("[startup] {warning}");
+        }
     }
     let mut commands =
         CommandRegistry::builtin_with_warnings(runtime.skills.list(), runtime.startup_warnings)?;
-    for warning in runtime
-        .plugin_warnings
-        .iter()
-        .chain(runtime.plugins.register_commands(&mut commands).iter())
-    {
-        eprintln!("[plugin] {warning}");
+    if !quiet {
+        for warning in runtime
+            .plugin_warnings
+            .iter()
+            .chain(runtime.plugins.register_commands(&mut commands).iter())
+        {
+            eprintln!("[plugin] {warning}");
+        }
+    } else {
+        let _ = runtime.plugins.register_commands(&mut commands);
     }
     let mut agent = runtime.agent;
+    let line_output = kroma::output::CliOutput::new();
 
-    if !args.is_empty() && !force_cli {
+    if !options.prompt.is_empty() {
         agent.set_background_compaction(false);
-        if !run_task(&mut agent, &args.join(" "), None).await? {
+        if !run_task(&mut agent, &task, None, Some(&line_output)).await? {
             bail!("task cancelled");
         }
         return Ok(());
@@ -269,7 +209,7 @@ async fn main() -> Result<()> {
         agent.set_background_compaction(false);
     }
 
-    println!(
+    kroma::cli_println!(
         "Kroma v0.4 | model: {} | session: {} | single-pass compaction | Ctrl+C cancels | /compact | /history | /fork | /rewind | /undo | /new | /resume | /sessions | /skills | /tools | /queue | /exit",
         model_name,
         agent.session_id()
@@ -296,7 +236,7 @@ async fn main() -> Result<()> {
             next
         } else {
             run_followups = false;
-            print!("kroma> ");
+            kroma::cli_print!("kroma> ");
             io::stdout().flush()?;
             tokio::select! {
                 input = lines.next_line() => match input? {
@@ -305,11 +245,11 @@ async fn main() -> Result<()> {
                 },
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
-                    println!();
+                    kroma::cli_println!();
                     continue;
                 },
                 _ = terminate_signal() => {
-                    println!();
+                    kroma::cli_println!();
                     break;
                 }
             }
@@ -318,7 +258,7 @@ async fn main() -> Result<()> {
         // Queued items are always user tasks, not CLI commands. A user may
         // deliberately queue a task whose text starts with a slash.
         if from_queue {
-            match run_task(&mut agent, input, Some(&mut lines)).await {
+            match run_task(&mut agent, input, Some(&mut lines), Some(&line_output)).await {
                 Ok(true) => run_followups = true,
                 Ok(false) => {
                     run_followups = false;
@@ -356,7 +296,9 @@ async fn main() -> Result<()> {
                 },
             };
             match outcome {
-                Some(Ok(output)) => println!("{}", serde_json::to_string_pretty(&output)?),
+                Some(Ok(output)) => {
+                    kroma::cli_println!("{}", serde_json::to_string_pretty(&output)?)
+                }
                 Some(Err(error)) => eprintln!("Shell: {error:#}"),
                 None => eprintln!("[shell] Cancelled; completed side effects are not undone."),
             }
@@ -387,7 +329,7 @@ async fn main() -> Result<()> {
         match command_result {
             Ok(Some(reply)) => {
                 if !reply.output.is_empty() {
-                    println!("{}", reply.output);
+                    kroma::cli_println!("{}", reply.output);
                 }
                 match reply.action {
                     CommandAction::Continue => {}
@@ -404,7 +346,7 @@ async fn main() -> Result<()> {
             Ok(None) => {} // Ordinary user input, including unregistered slash text.
         }
         let input = kroma::convenience::file_reference(input, agent.workdir())?;
-        match run_task(&mut agent, &input, Some(&mut lines)).await {
+        match run_task(&mut agent, &input, Some(&mut lines), Some(&line_output)).await {
             Ok(true) => run_followups = true,
             Ok(false) => {
                 run_followups = false;
@@ -425,23 +367,46 @@ async fn main() -> Result<()> {
 }
 
 /// Returns false when the user cancelled this task. Interactive mode continues.
-async fn run_task(agent: &mut Agent, input: &str, lines: Option<&mut InputLines>) -> Result<bool> {
+async fn run_task(
+    agent: &mut Agent,
+    input: &str,
+    lines: Option<&mut InputLines>,
+    output: Option<&Arc<kroma::output::CliOutput>>,
+) -> Result<bool> {
     let mut saw_text = false;
     let mut ends_with_newline = true;
     let result = drive_task(agent, input, lines, &mut |text| {
         saw_text = true;
         ends_with_newline = text.ends_with('\n');
-        print!("{text}");
-        let _ = io::stdout().flush();
+        if let Some(output) = output {
+            let _ = output.text(text);
+        } else {
+            kroma::cli_print!("{text}");
+            let _ = io::stdout().flush();
+        }
     })
     .await;
     if saw_text && !ends_with_newline {
-        println!();
+        if let Some(output) = output {
+            let _ = output.text(
+                "
+",
+            );
+        } else {
+            kroma::cli_println!();
+        }
+    }
+    if output.is_some_and(|output| output.broken()) {
+        return Ok(true);
     }
     match result? {
         Some(answer) => {
             if !saw_text {
-                println!("{answer}");
+                if let Some(output) = output {
+                    output.line(&answer)?;
+                } else {
+                    kroma::cli_println!("{answer}");
+                }
             }
             Ok(true)
         }
@@ -540,10 +505,13 @@ fn handle_running_input(handle: &TaskInput, text: &str) {
             | "/history"
             | "/fork"
             | "/rewind"
+            | "/checkpoints"
+            | "/restore-files"
     ) || text.starts_with("/resume ")
         || text.starts_with("/history ")
         || text.starts_with("/fork ")
         || text.starts_with("/rewind ")
+        || text.starts_with("/restore-files ")
     {
         eprintln!("[task] Session commands are available after the current task. Ctrl+C cancels.");
     } else {
@@ -555,20 +523,371 @@ fn handle_running_input(handle: &TaskInput, text: &str) {
     }
 }
 
-fn print_help() {
-    println!("Interactive TTY: default A / Plain TUI with full-width shared message backgrounds, continuous role rails and S2 semantic colours. --no-tui (or --cli): original line CLI. F2: switch base theme; /theme reload: reread ~/.kroma/theme.toml.");
-    println!(
-        "Kroma v0.4\n\nUsage:\n  kroma [task text]\n  kroma              Interactive session\n  kroma config set <name>  Save API settings (key is entered privately)\n  kroma plugins list       List installed plugins (no model connection needed)\n  kroma plugins install <dir>  Install local plugin directory (disabled)\n  kroma plugins check <dir>    Validate a plugin and run a bounded protocol smoke test\n  kroma plugins enable <id>   Enable for next startup\n  kroma plugins disable <id>  Disable for next startup\n  kroma plugins set <id> <key> <value>  Set plugin configuration\n  kroma plugins config <id>  Show plugin settings\n  kroma config list        List saved profiles\n  kroma config use <name>  Switch the default profile\n  kroma config show        Show effective settings and model limit sources without secrets\n  kroma diagnostics [--output <new-dir>]  Write a local-only allowlisted diagnostics bundle\n  kroma recover-context [session-id]  Reset unavailable custom context memory while preserving raw history
-  kroma trust-project [--revoke]  Approve or revoke this project's .kroma/mcp.json\n\nControls:\n  Ctrl+C             Cancel active model request or shell task\n  /new               Start a separate saved conversation\n  /sessions          List saved conversations for this workdir\n  /resume <id>       Switch to a saved conversation (or default)\n  /clear             Clear only the active conversation\n  /exit              Quit\n\nOptional environment:\n  KROMA_MODEL                  Model ID (required without a saved profile)\n  KROMA_BASE_URL               OpenAI-compatible API base\n  KROMA_API_KEY                API key, overrides the selected profile\n  KROMA_PROVIDER_PROFILE       Select a saved profile by name\n  KROMA_CONFIG_FILE            Use an alternate JSON profiles path\n  KROMA_WORKDIR                Shell working directory (default current directory)\n  KROMA_PLUGIN_DIR             Override user plugin directory\n  KROMA_PLUGIN_TRY             Load one plugin directory for this run only\n  KROMA_SESSION_FILE           Override default session JSON path (named sessions share its directory)\n  KROMA_DEEPSEEK_THINKING      enabled, high or max; opt-in for DeepSeek-compatible endpoints\n  KROMA_PROFILE                Set to 1 for extra task profiling\n  KROMA_CONTEXT_WINDOW         Model context size in tokens (default 128000)\n  KROMA_OUTPUT_RESERVE_TOKENS  Tokens reserved for response (default min(4096, context/8))
-  KROMA_TRUST_PROJECT_MCP      1 approves this project's .kroma/mcp.json for one run
-  KROMA_WEB_ALLOW_PRIVATE      1 lets the web plugin fetch loopback/private addresses"
-    );
-    println!("\nAdditional model settings:\n  KROMA_API_PROTOCOL           chat (default), responses or anthropic\n  KROMA_REASONING_EFFORT       auto (default), off, low, medium, high, xhigh or max\n  KROMA_MAX_OUTPUT_TOKENS      Override requested output maximum; upstream cap takes priority\n  KROMA_CONTEXT_WINDOW         Override upstream model context capacity\n  KROMA_MODEL_CATALOG_MODEL    Explicit provider/model alias for a proxy (for example anthropic/claude-sonnet-5-5)\n\nKROMA_BASE_URL is the provider's API base URL, such as https://api.anthropic.com/v1.");
-    println!("\nInstruction files:\n  ~/.kroma/AGENTS.md           Global instructions for all projects\n  <workdir>/AGENTS.md          Instructions for the current project\n  Files reload at each new task; the original session transcript is unchanged.\n\nWhile a task runs:\n  type text or /steer <text>    Steer the active task at the next model turn\n  /queue <task>                Schedule a separate task after the current task\n  /queue list | /pending       Inspect pending tasks\n  /queue clear                Remove pending follow-ups\n  /queue run                  Resume a paused follow-up queue\n  Ctrl+C                      Cancel current task and pause queued tasks");
-    println!("\nMCP: ~/.kroma/mcp.json and <workdir>/.kroma/mcp.json (or KROMA_MCP_CONFIG).\nProject MCP configs are disabled until approved with 'kroma trust-project' (or KROMA_TRUST_PROJECT_MCP=1 for one run).\nSkills: ~/.agents/skills, ~/.kroma/skills, <workdir>/.agents/skills, <workdir>/.kroma/skills.\nInteractive: /tools lists Shell, MCP and plugin tools; /skills lists discovered skill metadata; /plugins manages plugins.");
-    println!("\nHistory: /history [count] lists completed checkpoints; /fork [number] starts a separate session; /rewind <number> replaces the current session after preserving its old future; /undo rewinds one turn. /resume <session-id> restores a saved future. These commands never revert files or git commits.");
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(message) = extract_global_options(&mut args) {
+        eprintln!("Error: {message}");
+        return std::process::ExitCode::from(2);
+    }
+    let command = match kroma::cli::parse(&args) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("Error: {}", error.message);
+            return std::process::ExitCode::from(error.code);
+        }
+    };
+    match dispatch(command).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{}", friendly_error(&error));
+            std::process::ExitCode::from(exit_code(&error))
+        }
+    }
 }
 
+async fn dispatch(command: kroma::cli::Command) -> Result<()> {
+    use kroma::cli::{self, Command};
+    match command {
+        Command::Help(topic) => {
+            kroma::cli_println!("{}", cli::help_for(topic.as_deref().unwrap_or("run")));
+            Ok(())
+        }
+        Command::Version { build_info } => {
+            kroma::cli_println!(
+                "kroma {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("KROMA_BUILD_REVISION")
+            );
+            if build_info {
+                kroma::cli_println!("executable: {}", std::env::current_exe()?.display());
+            }
+            Ok(())
+        }
+        Command::Setup => kroma::setup::run().await,
+        Command::Config(args) => {
+            if wants_help(&args) {
+                kroma::cli_println!("{}", cli::help_for("config"));
+                return Ok(());
+            }
+            if let [cmd, name] = args.as_slice() {
+                if cmd == "test" {
+                    return test_profile(name).await;
+                }
+            }
+            profiles::cli(&args)
+        }
+        Command::Plugins(args) => {
+            if wants_help(&args) {
+                kroma::cli_println!("{}", cli::help_for("plugins"));
+                return Ok(());
+            }
+            kroma::plugins::PluginCatalog::cli(&args)
+        }
+        Command::Diagnostics(output) => {
+            let path = kroma::diagnostics_bundle::generate(output)?;
+            kroma::cli_println!(
+                "Diagnostics written to {} (local only; no upload, model request or plugin process).",
+                path.display()
+            );
+            Ok(())
+        }
+        Command::TrustProject { revoke } => {
+            let dir = env::var("KROMA_WORKDIR")
+                .map(PathBuf::from)
+                .or_else(|_| env::current_dir())?
+                .canonicalize()?;
+            if revoke {
+                kroma::mcp::revoke_project_mcp(&dir)?;
+                kroma::cli_println!(
+                    "Revoked project MCP trust for {}. The project's .kroma/mcp.json will not load until approved again.",
+                    dir.display()
+                );
+            } else {
+                let config = kroma::mcp::trust_project_mcp(&dir)?;
+                kroma::cli_println!(
+                    "Trusted project MCP config {}. Re-run this command after editing the file.",
+                    config.display()
+                );
+            }
+            Ok(())
+        }
+        Command::RecoverContext(session) => {
+            let dir = env::var("KROMA_WORKDIR")
+                .map(PathBuf::from)
+                .or_else(|_| env::current_dir())?
+                .canonicalize()?;
+            let session = session.unwrap_or_else(|| "default".into());
+            if Agent::recover_builtin_context(&dir, &session)? {
+                kroma::cli_println!("Recovered session '{session}' using built-in context; complete original history preserved.");
+            } else {
+                kroma::cli_println!(
+                    "Session '{session}' already uses built-in context; no change."
+                );
+            }
+            Ok(())
+        }
+        Command::Run(options) => {
+            apply_run_environment(&options)?;
+            if let Err(error) = Config::from_env() {
+                let interactive = options.prompt.is_empty()
+                    && !options.one_shot()
+                    && io::stdin().is_terminal()
+                    && io::stdout().is_terminal();
+                if interactive && is_missing_model(&error) {
+                    kroma::setup::run().await?;
+                } else {
+                    return Err(error);
+                }
+            }
+            prepare_one_shot_session(&options)?;
+            run_legacy(options).await
+        }
+    }
+}
+
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "-h" || arg == "--help")
+}
+
+fn apply_run_environment(options: &kroma::cli::RunOptions) -> Result<()> {
+    if let Some(cwd) = &options.cwd {
+        env::set_var("KROMA_WORKDIR", cwd);
+    }
+    if let Some(path) = &options.config_file {
+        env::set_var("KROMA_CONFIG_FILE", path);
+    }
+    if let Some(language) = &options.language {
+        env::set_var("KROMA_LANG", language);
+    }
+    if options.no_color {
+        env::set_var("NO_COLOR", "1");
+    }
+    if options.quiet {
+        env::set_var("KROMA_QUIET", "1");
+    }
+    if options.verbose {
+        env::set_var("KROMA_VERBOSE", "1");
+    }
+    if options.no_mcp {
+        env::set_var("KROMA_NO_MCP", "1");
+    }
+    if !options.mcp.is_empty() {
+        env::set_var("KROMA_MCP_SERVERS", options.mcp.join(","));
+    }
+    Ok(())
+}
+
+fn prepare_one_shot_session(options: &kroma::cli::RunOptions) -> Result<()> {
+    if options.new_session {
+        // A stale TUI target must not turn --new back into a resume.
+        env::remove_var("KROMA_TUI_SESSION");
+    }
+    if !options.one_shot() && options.session.is_none() {
+        let line_host = options.no_tui || !io::stdin().is_terminal() || !io::stdout().is_terminal();
+        let wants_line_mode = line_host || !options.prompt.is_empty();
+        if options.new_session && wants_line_mode {
+            // Create the fresh path below; do not let the line host reuse default.
+        } else if !options.continue_latest
+            || !wants_line_mode
+            || (options.prompt.is_empty() && !line_host)
+        {
+            return Ok(());
+        }
+    }
+    let explicit_env = env::var_os("KROMA_SESSION_FILE");
+    if explicit_env.is_some()
+        && options.session.is_none()
+        && !options.new_session
+        && !options.continue_latest
+    {
+        return Ok(());
+    }
+    let workdir = env::var("KROMA_WORKDIR")
+        .map(PathBuf::from)
+        .or_else(|_| env::current_dir())?
+        .canonicalize()
+        .context("project path does not exist")?;
+    let catalog = kroma::sessions::SessionCatalog::new(&workdir)?;
+    let path = if let Some(name) = &options.session {
+        match catalog.resolve_name(name) {
+            Ok(id) if id != "default" => catalog.resolve(&id)?,
+            Ok(_) => catalog.path_for("default")?,
+            Err(error) if catalog.title_matches(name)? => return Err(error),
+            Err(_) => catalog.path_for(name)?,
+        }
+    } else if options.continue_latest {
+        let id = catalog
+            .recent()?
+            .ok_or_else(|| anyhow::anyhow!("no saved conversation; run a task first"))?;
+        catalog.resolve(&id)?
+    } else {
+        catalog.new_path()?.1
+    };
+    env::set_var("KROMA_SESSION_FILE", &path);
+    if !options.one_shot() {
+        if let Some(name) = &options.session {
+            env::set_var("KROMA_TUI_SESSION", name);
+        }
+    }
+    Ok(())
+}
+
+fn is_missing_model(error: &anyhow::Error) -> bool {
+    format!("{error:#}")
+        .contains("KROMA_MODEL, an enabled model plugin or a saved profile is required")
+}
+
+fn friendly_error(error: &anyhow::Error) -> String {
+    let text = format!("{error:#}");
+    let hint = if text.contains("401") || text.contains("403") {
+        Some("Hint: check this profile's API key with `kroma config test <name>` or `kroma setup`.")
+    } else if text.contains("404") && (text.contains("model") || text.contains("Model")) {
+        Some("Hint: check the model ID with `kroma setup` or `kroma config show`.")
+    } else if text.contains("error sending request")
+        || text.contains("connection refused")
+        || text.contains("dns error")
+    {
+        Some(
+            "Hint: the model endpoint is unreachable; check KROMA_BASE_URL or `kroma config show`.",
+        )
+    } else if text.contains("session already in use") {
+        Some(
+            "Hint: use `--new` for a separate run, or `--session <name>` for another conversation.",
+        )
+    } else if text.contains("context near hard limit") {
+        Some("Hint: reduce MCP tools (--no-mcp), shorten the task, or use a larger model.")
+    } else if text.contains("KROMA_MODEL, an enabled model plugin or a saved profile is required") {
+        Some("Hint: run `kroma setup` (interactive) or set KROMA_MODEL, KROMA_BASE_URL and KROMA_API_KEY.")
+    } else {
+        None
+    };
+    match hint {
+        Some(hint) => format!("Error: {text}\n{hint}"),
+        None => format!("Error: {text}"),
+    }
+}
+
+fn exit_code(error: &anyhow::Error) -> u8 {
+    let text = format!("{error:#}");
+    if text.contains("401") || text.contains("403") {
+        4
+    } else if text.contains("KROMA_MODEL, an enabled model plugin or a saved profile is required") {
+        3
+    } else if text.contains("context near hard limit") {
+        6
+    } else if text.contains("model returned HTTP") || text.contains("request failed") {
+        5
+    } else {
+        1
+    }
+}
+
+async fn test_profile(name: &str) -> Result<()> {
+    let profiles = profiles::Profiles::load()?;
+    let profile = profiles
+        .profiles
+        .get(name)
+        .cloned()
+        .with_context(|| format!("unknown profile '{name}'; use `kroma config list`"))?;
+    let started = std::time::Instant::now();
+    let (model, _, _) = app::model_from_profile(&profile).await?;
+    let result = model
+        .generate_short_text("You are a connectivity test. Reply with OK.", "ping", 16)
+        .await?;
+    kroma::cli_println!(
+        "Profile '{name}' connected in {:?}: {}",
+        started.elapsed(),
+        result.text.trim()
+    );
+    Ok(())
+}
+/// Global options may appear before a subcommand (for example
+/// `kroma --config-file work.json config show`). They become environment
+/// variables so every command and profile loader sees the same selection.
+fn extract_global_options(args: &mut Vec<String>) -> Result<(), String> {
+    let mut kept = Vec::with_capacity(args.len());
+    let mut index = 0;
+    let mut mcp_names = Vec::new();
+    let mut mcp_seen = false;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            kept.extend(args[index..].iter().cloned());
+            break;
+        }
+        let (name, inline) = arg
+            .split_once('=')
+            .map_or((arg, None), |(name, value)| (name, Some(value)));
+        let takes_value = matches!(name, "--cwd" | "--config-file" | "--language" | "--mcp");
+        if takes_value {
+            let value = inline.map(str::to_owned).or_else(|| {
+                index += 1;
+                args.get(index).cloned()
+            });
+            let Some(value) = value else {
+                return Err(format!("{name} needs a value"));
+            };
+            if value.starts_with('-') && value != "-" {
+                return Err(format!("{name} needs a value, got option '{value}'"));
+            }
+            match name {
+                "--cwd" => {
+                    if value.is_empty() {
+                        return Err("--cwd cannot be empty".into());
+                    }
+                    env::set_var("KROMA_WORKDIR", value);
+                }
+                "--config-file" => {
+                    if value.is_empty() {
+                        return Err("--config-file cannot be empty".into());
+                    }
+                    env::set_var("KROMA_CONFIG_FILE", value);
+                }
+                "--language" => {
+                    if !matches!(value.as_str(), "en" | "zh") {
+                        return Err("--language must be en or zh".into());
+                    }
+                    env::set_var("KROMA_LANG", value);
+                }
+                "--mcp" => {
+                    let names = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    if names.is_empty() {
+                        return Err("--mcp needs at least one server name".into());
+                    }
+                    mcp_names.extend(names);
+                    mcp_seen = true;
+                }
+                _ => unreachable!(),
+            }
+        } else if matches!(
+            name,
+            "--no-mcp" | "--quiet" | "-q" | "--verbose" | "-v" | "--no-color"
+        ) && inline.is_none()
+        {
+            match name {
+                "--no-mcp" => env::set_var("KROMA_NO_MCP", "1"),
+                "--quiet" | "-q" => env::set_var("KROMA_QUIET", "1"),
+                "--verbose" | "-v" => env::set_var("KROMA_VERBOSE", "1"),
+                "--no-color" => env::set_var("NO_COLOR", "1"),
+                _ => unreachable!(),
+            }
+        } else {
+            kept.push(args[index].clone());
+        }
+        index += 1;
+    }
+    if mcp_seen {
+        env::set_var("KROMA_MCP_SERVERS", mcp_names.join(","));
+    }
+    *args = kept;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +906,33 @@ mod tests {
         handle_running_input(&inbox, "/queue list");
         handle_running_input(&inbox, "/queue clear");
         assert!(inbox.queued().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod global_option_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_mcp_options_accumulate_and_flags_are_removed() {
+        let mut args = ["--mcp", "a,b", "--mcp", "c", "--quiet", "task"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        extract_global_options(&mut args).unwrap();
+        assert_eq!(args, ["task"]);
+        assert_eq!(env::var("KROMA_MCP_SERVERS").unwrap(), "a,b,c");
+        assert!(env::var_os("KROMA_QUIET").is_some());
+        env::remove_var("KROMA_MCP_SERVERS");
+        env::remove_var("KROMA_QUIET");
+    }
+
+    #[test]
+    fn a_global_option_cannot_swallow_another_option() {
+        let mut args = ["--cwd", "--print"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert!(extract_global_options(&mut args).is_err());
     }
 }
