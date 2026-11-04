@@ -18,3 +18,7 @@ __pycache__/
 # reproducible locally and never belong to a source commit.
 /reviews/**/*.html
 /reviews/**/*.png
+
+# Generated npm package staging and tarballs
+/.npm-dist*/
+/npm/.npm-dist*/

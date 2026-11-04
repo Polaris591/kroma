@@ -1,0 +1,11 @@
+{
+  "name": "kroma-npm-tools",
+  "private": true,
+  "description": "Build and test Kroma's npm distribution without publishing",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "stage": "node stage.cjs",
+    "smoke": "node smoke.cjs"
+  }
+}
