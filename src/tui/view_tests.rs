@@ -1899,7 +1899,8 @@ fn long_draft_does_not_jump_when_drag_selection_starts() {
     ui.editor.paste(
         &(0..20)
             .map(|i| format!("line {i:02}\n"))
-            .collect::<String>(),
+            .collect::<Vec<_>>()
+            .concat(),
     );
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| ui.draw(frame)).unwrap();
@@ -2295,7 +2296,8 @@ fn bench_streaming_frame_latency_three_hundred_and_three_thousand_messages() {
 
     let details = (0..2400)
         .map(|i| format!("    indented output {i} 中文 👩‍💻\n        deeper {i}\n"))
-        .collect::<String>();
+        .collect::<Vec<_>>()
+        .concat();
     let detail_line_count = details.lines().count();
     assert_eq!(detail_line_count, 4800);
     let mut state = UiState::new(

@@ -880,7 +880,7 @@ mod tests {
         }
     }
 
-    fn inputs<'a>(levels: &'a [String]) -> ModelInputs<'a> {
+    fn inputs(levels: &[String]) -> ModelInputs<'_> {
         ModelInputs {
             model: "fixture-model-v1",
             base_url: "https://proxy.example/v1",

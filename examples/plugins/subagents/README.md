@@ -36,6 +36,9 @@ One tool, `subagent`, takes up to eight independent tasks:
 | `tasks[].task` | Nonempty UTF-8 string, at most 16 KiB (the child inlines piped stdin only up to that size) |
 | `tasks[].cwd` | Existing directory; defaults to the host working directory |
 | `tasks[].resume` | Optional token from an earlier result; continues that child's saved conversation (see below) |
+| `tasks[].profile` | `general` (default), `explore`, `planner`, `reviewer`, `verifier` or a custom profile |
+| `tasks[].label` | Printable human label up to 60 characters; defaults to first line of task |
+| `tasks[].complexity` | Optional `light`, `medium` or `heavy` for auto-model profiles; default medium |
 
 Results always follow input order, even when tasks finish out of order. A started
 task also returns a `resume` token.
@@ -146,19 +149,32 @@ its saved conversation:
   prepare worktrees with ordinary tools and pass each one as `cwd`.
 - The plugin never creates branches, merges or resolves conflicts.
 
-## Model
+## Profiles and models (1.0)
 
-- `model` (default `deepseek-v4.1-flash`) sets `KROMA_MODEL` for every child
-  process. It must be an id the parent's endpoint serves: children keep the
-  parent's endpoint, key and protocol, and only the model id changes.
-- `thinking` (default `max`, one of `off`, `enabled`, `high`, `max`) sets
-  `KROMA_DEEPSEEK_THINKING`, the DeepSeek reasoning tier. It applies to
-  DeepSeek-compatible endpoints; other providers ignore it.
-- Remove either setting or set it empty to let children inherit the parent
-  conversation's model and profile.
-- `/plugins set subagents model <id>` (or `kroma plugins set subagents model
-  <id>`) changes it for this installation without editing the manifest; the
-  manifest value is the default a fresh install starts from.
+The bundled profiles are `general` (unrestricted task), `explore` and `planner`
+(read-only), `reviewer` (read-only) and `verifier` (read/test). Custom Markdown
+profiles are read from `~/.kroma/agents/*.md`, then
+`<project>/.kroma/agents/*.md`, with the project definition taking precedence.
+Frontmatter accepts only `name`, `description`, `model`, `thinking`, `shell`,
+`tools`, `disallowedTools`, `maxTurns` and `maxTokens`; the rest is a profile
+prompt. Invalid files reject the whole batch before starting children.
+
+The manifest no longer hardcodes DeepSeek or `max` thinking. Profiles can use
+`inherit`, `auto`, `light`, `medium`, or `heavy`; user settings
+`model_light` / `model_medium` / `model_heavy` select optional model IDs for
+the named tiers. Missing mappings reuse the model from the normal child
+configuration; no upstream ID is guessed. Advanced setups may set
+`model` and `thinking` in plugin settings to override this fallback.
+
+The child Kroma host enforces an allowlist/denylist of tools, a literal-command
+read-only/test Shell policy and model-turn/token admission limits. The child
+never exposes nested `subagent`, `memory_remember` or `memory_forget` tools, and
+its automatic memory task-summary hook is disabled. This is not an OS sandbox;
+a permitted test process can execute arbitrary code from the repository.
+
+Completed run evidence is cleaned after 30 days or 150 completed runs, without
+deleting in-progress directories or a run explicitly being resumed. Results
+and resume tokens remain ordered by the original tasks.
 
 Sessions are isolated; **the filesystem is not**. A task instruction such as
 "do not edit files" is not a permission boundary.

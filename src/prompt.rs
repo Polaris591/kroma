@@ -383,7 +383,7 @@ mod tests {
             composer.extra_estimated_tokens(&stored[0]),
             added.div_ceil(3)
         );
-        assert!(!V7_GUIDANCE.is_empty());
+        assert!(V7_GUIDANCE.len() > 100);
     }
 
     #[test]

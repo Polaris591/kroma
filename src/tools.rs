@@ -41,6 +41,7 @@ impl ToolResult {
 
 #[derive(Clone, Copy)]
 pub struct ToolContext<'a> {
+    pub model_connection: Option<&'a crate::model::ModelConnection>,
     pub workdir: &'a Path,
     pub archive: &'a Path,
     pub on_output: Option<&'a shell::OutputCallback<'a>>,
@@ -49,6 +50,12 @@ pub struct ToolContext<'a> {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn definition(&self) -> Value;
+    /// A successful execution mutates reference data used by model-level
+    /// ephemeral context packs. Plugins declare this in their manifest; the
+    /// core does not need to know a particular plugin's tool name.
+    fn invalidates_model_context(&self) -> bool {
+        false
+    }
     fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a>;
 }
 
@@ -151,6 +158,12 @@ impl ToolRegistry {
 
     pub fn definitions(&self) -> Vec<Value> {
         self.tools.iter().map(|tool| tool.definition()).collect()
+    }
+
+    pub fn invalidates_model_context(&self, name: &str) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| tool.name() == name && tool.invalidates_model_context())
     }
 
     pub fn is_builtin_only(&self) -> bool {
@@ -284,6 +297,7 @@ pub async fn execute(call: &ToolCall, workdir: &Path, archive: &Path) -> ToolRes
         .execute(
             call,
             ToolContext {
+                model_connection: None,
                 workdir,
                 archive,
                 on_output: None,
@@ -377,6 +391,7 @@ mod tests {
         let workdir = std::env::temp_dir();
         let archive = workdir.join("kroma-perf-unused-session.json");
         let ctx = ToolContext {
+            model_connection: None,
             workdir: &workdir,
             archive: &archive,
             on_output: None,
@@ -439,6 +454,7 @@ mod tests {
 
     fn test_context() -> ToolContext<'static> {
         ToolContext {
+            model_connection: None,
             workdir: Path::new("."),
             archive: Path::new("session.json"),
             on_output: None,
@@ -588,6 +604,7 @@ mod tests {
             .execute(
                 &call,
                 ToolContext {
+                    model_connection: None,
                     workdir: Path::new("."),
                     archive: Path::new("session.json"),
                     on_output: None,

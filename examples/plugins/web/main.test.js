@@ -168,7 +168,7 @@ test("JSONL priority failover reports actual provider and preserves diagnostics 
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const req = {type: "tool", name: "web_search", request_id: 11, arguments: {query: "ok"}};
-  const result = await runWorker(t, {provider: "auto", search_priority: ["searxng", "firecrawl"],
+  const result = await runWorker(t, {provider: "auto", paid_fallback: true, search_priority: ["searxng", "firecrawl"],
     searxng_url: origin, firecrawl_base_url: origin, firecrawl_api_key: "fake-local-key"}, [req,
     {...req, request_id: 12, arguments: {query: "fail"}},
     {...req, request_id: 13, arguments: {query: "ok", provider: "searxng"}}]);
@@ -181,8 +181,8 @@ test("JSONL priority failover reports actual provider and preserves diagnostics 
   assert.equal(lines[1].code, "HTTP_ERROR");
   assert.deepEqual(lines[1].attempts.map(x => x.provider), ["searxng", "firecrawl"]);
   assert.equal(lines[1].attempts[1].status, 429);
-  assert.equal(lines[2].attempts, undefined);
-  assert.deepEqual(calls, ["/search", "/v2/search", "/search", "/v2/search", "/search"]);
+  assert.equal(lines[2].code, "INVALID_ARGUMENT");
+  assert.deepEqual(calls, ["/search", "/v2/search", "/search", "/v2/search"]);
   assert.doesNotMatch(result.stdout + result.stderr, /fake-local-key|never-echo-secret/);
 });
 

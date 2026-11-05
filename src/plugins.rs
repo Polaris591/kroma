@@ -244,6 +244,8 @@ pub struct PluginToolSpec {
     pub description: String,
     #[serde(default)]
     pub streaming: bool,
+    #[serde(default)]
+    pub invalidates_context: bool,
     /// Optional whole-call deadline for this tool, enforced by the host for
     /// streaming and non-streaming calls alike. A global
     /// `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` value caps it when smaller.
@@ -1612,6 +1614,7 @@ impl PluginCatalog {
                     description: tool.description.clone(),
                     parameters: tool.parameters.clone(),
                     streaming: tool.streaming,
+                    invalidates_context: tool.invalidates_context,
                     timeout: effective_tool_timeout(tool.timeout_secs, plugin_tool_timeout()),
                     data_dir: plugin.worker.data_dir.clone(),
                     worker: plugin.worker.clone(),
@@ -1674,7 +1677,13 @@ impl PluginCatalog {
         let summary_workers = self
             .plugins
             .iter()
-            .filter(|plugin| plugin.enabled && plugin.has_task_summary())
+            // A child agent inherits project memory for read-only context.
+            // Suppress end-of-task promotion to avoid child-memory pollution.
+            .filter(|plugin| {
+                plugin.enabled
+                    && plugin.has_task_summary()
+                    && std::env::var("KROMA_SUBAGENT_DEPTH").ok().as_deref() != Some("1")
+            })
             .map(|plugin| plugin.worker.clone())
             .collect::<Vec<_>>();
         if workers.is_empty() && context_workers.is_empty() && summary_workers.is_empty() {
@@ -2214,12 +2223,16 @@ struct PluginToolAdapter {
     description: String,
     parameters: Value,
     streaming: bool,
+    invalidates_context: bool,
     timeout: Option<Duration>,
     data_dir: PathBuf,
     worker: Arc<PluginWorker>,
 }
 
 impl Tool for PluginToolAdapter {
+    fn invalidates_model_context(&self) -> bool {
+        self.invalidates_context
+    }
     fn name(&self) -> &str {
         &self.name
     }
@@ -2240,6 +2253,7 @@ impl Tool for PluginToolAdapter {
         let data_dir = self.data_dir.clone();
         let workdir = context.workdir.to_path_buf();
         let archive = context.archive.to_path_buf();
+        let model_connection = context.model_connection.cloned();
         let call_id = call.id.clone();
         Box::pin(async move {
             let Ok(arguments) = arguments else {
@@ -2250,7 +2264,7 @@ impl Tool for PluginToolAdapter {
             };
             let payload = json!({"type":if streaming {"tool_stream"} else {"tool"},
                 "name":name, "arguments":arguments, "workdir":workdir,
-                "archive":archive, "call_id":call_id.clone()});
+                "archive":archive, "call_id":call_id.clone(), "model_connection":model_connection});
             if streaming {
                 let mut stream = worker.start_stream(payload);
                 let consumed = async {
@@ -3308,6 +3322,7 @@ base_url = "https://example.com""#,
             name: "hi".into(),
             description: "hello".into(),
             streaming: false,
+            invalidates_context: false,
             timeout_secs: None,
             replace: false,
             parameters: empty_parameters(),

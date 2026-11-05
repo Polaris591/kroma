@@ -87,6 +87,80 @@ fn mock_model(posts: Arc<AtomicUsize>) -> (String, std::thread::JoinHandle<()>) 
 }
 
 #[test]
+fn read_only_one_shot_skips_git_checkpoint_entirely() {
+    let home = temp_dir("read-only-home");
+    let workdir = temp_dir("read-only-project");
+    assert!(Command::new("git")
+        .args(["-C", &workdir.to_string_lossy(), "init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    fs::write(workdir.join("README.md"), "unchanged\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        // Startup queries /models/test before the streaming completion.
+        // Answer the metadata probe without consuming the one model turn.
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let mut length = 0;
+            reader.read_line(&mut line).unwrap();
+            let is_metadata = line.starts_with("GET ");
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            if is_metadata {
+                let answer = "{\"id\":\"test\",\"context_length\":32768}";
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len()).unwrap();
+                stream.flush().unwrap();
+                continue;
+            }
+            let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"nothing changed\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n"
+        );
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}", sse.len()).unwrap();
+            stream.flush().unwrap();
+            break;
+        }
+    });
+    let output = Command::new(env!("CARGO_BIN_EXE_kroma"))
+        .current_dir(&workdir)
+        .args(["--print", "say nothing changed"])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("KROMA_MODEL", "test")
+        .env("KROMA_BASE_URL", &base_url)
+        .env("KROMA_API_KEY", "test")
+        .env("KROMA_NO_MCP", "1")
+        .env_remove("KROMA_NO_CHECKPOINTS")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("nothing changed"));
+    assert!(
+        !home.join(".kroma/checkpoints").exists(),
+        "read-only model answers should not start the expensive Git transaction"
+    );
+    fs::remove_dir_all(home).unwrap();
+    fs::remove_dir_all(workdir).unwrap();
+}
+
+#[test]
 fn one_shot_run_snapshots_before_tools_without_touching_project_git() {
     let home = temp_dir("home");
     let workdir = temp_dir("project");

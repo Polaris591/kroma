@@ -426,8 +426,8 @@ impl Store {
         Ok(memory)
     }
 
-    /// Promote every pending entry whose quote appears verbatim (whitespace-
-    /// and case-normalized) in one of `recent_users`; drop the rest. Applies
+    /// Promote at most one pending rule anchored to the current user message
+    /// (whitespace- and case-normalized); drop the rest. Applies
     /// `supersedes` on promotion. Idempotent: a replayed summary finds no
     /// pending rows and changes nothing.
     pub(crate) fn promote_pending(
@@ -454,7 +454,7 @@ impl Store {
                 .source_quote
                 .as_deref()
                 .is_some_and(|quote| quote_matches(quote, recent_users));
-            if !matched {
+            if !matched || report.promoted > 0 {
                 set_state(&tx, &memory, STATE_DROPPED)?;
                 report.dropped += 1;
                 continue;

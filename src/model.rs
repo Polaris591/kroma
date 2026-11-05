@@ -47,6 +47,19 @@ pub struct Completion {
     pub first_token: Option<Duration>,
 }
 
+/// Non-secret active connection information. Tool hosts can pass it to a
+/// delegated child without leaking keys or requiring it to guess which model
+/// the parent actually selected. Profiles resolve credentials locally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConnection {
+    pub model: String,
+    pub base_url: String,
+    pub api_protocol: String,
+    pub reasoning_effort: Option<String>,
+    pub deepseek_thinking: Option<String>,
+    pub provider_profile: Option<String>,
+}
+
 /// A tool-free text-generation result. The default context implementation
 /// uses this for factual memory segments and consolidation.
 pub struct TextResult {
@@ -63,6 +76,11 @@ pub type SummaryResult = TextResult;
 /// deterministic test fake. Tools are supplied by the runtime, never chosen
 /// by the model adapter itself.
 pub trait ModelBackend: Send + Sync {
+    /// Only built-in HTTP providers report a reusable connection. Process
+    /// plugins can return None rather than misrepresent an external backend.
+    fn connection_info(&self) -> Option<ModelConnection> {
+        None
+    }
     /// Called at session boundaries, not per token. External adapters may
     /// attach session identity to their JSONL requests without altering messages.
     fn set_session_context(&self, _id: &str, _archive: &Path) {}
@@ -186,6 +204,12 @@ pub trait ModelBackend: Send + Sync {
     fn usage_matches_projection(&self) -> bool {
         true
     }
+
+    /// A tool may mutate external context data used by a request-only model
+    /// projection (for example, forgetting a project memory). Wrappers that
+    /// cache those projections can opt into invalidation. Normal providers
+    /// have nothing to invalidate.
+    fn invalidate_ephemeral_context(&self) {}
 
     /// Optional low-budget title/label request. Unlike a checkpoint, short text
     /// should not reserve a large hidden-reasoning completion allowance.

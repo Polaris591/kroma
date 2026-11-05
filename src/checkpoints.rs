@@ -246,6 +246,22 @@ impl Repo {
         let status = if self.cancel.is_none() {
             command.status()?
         } else {
+            // Git transactions are synchronous and may also run from tests or
+            // external hosts without a Tokio runtime. tokio::process::Command
+            // needs a reactor even for a polling try_wait loop; supply a small
+            // temporary one only in that case. The ordinary Agent path runs
+            // inside spawn_blocking and reuses its existing runtime handle.
+            let fallback_runtime = if tokio::runtime::Handle::try_current().is_err() {
+                Some(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .context("initializing cancellable Git process reactor")?,
+                )
+            } else {
+                None
+            };
+            let _reactor_guard = fallback_runtime.as_ref().map(|runtime| runtime.enter());
             let mut command = tokio::process::Command::from(command);
             command.kill_on_drop(true);
             #[cfg(unix)]
@@ -257,7 +273,7 @@ impl Repo {
             let (mut child, _tree) = crate::winsys::ChildTreeGuard::spawn(&mut command)?;
             #[cfg(not(windows))]
             let mut child = command.spawn()?;
-            let status = loop {
+            loop {
                 if self.cancelled() {
                     #[cfg(windows)]
                     _tree.terminate();
@@ -278,8 +294,7 @@ impl Repo {
                     Some(status) => break status,
                     None => std::thread::sleep(Duration::from_millis(5)),
                 }
-            };
-            status
+            }
         };
         checked_output(Output {
             status,
@@ -459,12 +474,26 @@ fn snapshot_turn(repo: &Repo, session: &str, turn: u64) -> Result<Option<String>
         }
     }
     repo.check_cancelled()?;
-    let message = format!("turn {turn}");
     let parent = repo
         .git(&["rev-parse", "-q", "--verify", &reference])
         .ok()
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .filter(|parent| !parent.is_empty());
+    // Agent's in-memory turn counter resets on process restart. Persisted Git
+    // ancestry is authoritative for display numbering, so a restarted session
+    // never labels two different commits "turn 1".
+    let previous_turn = parent.as_deref().and_then(|hash| {
+        repo.git(&["show", "-s", "--format=%s", hash])
+            .ok()
+            .and_then(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .strip_prefix("turn ")
+                    .and_then(|number| number.parse::<u64>().ok())
+            })
+    });
+    let turn = previous_turn.map_or(turn, |last| turn.max(last.saturating_add(1)));
+    let message = format!("turn {turn}");
     let mut commit = vec![
         "-c",
         "commit.gpgsign=false",
@@ -1073,6 +1102,23 @@ mod tests {
         assert_eq!(report.removed, vec!["new.txt"]);
         assert!(!root.join("new.txt").exists());
         assert_eq!(fs::read_to_string(root.join("notes.txt"))?, "first\n");
+        cleanup(&root, &repo);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshots_continue_turn_numbers_after_agent_restart() -> Result<()> {
+        let (root, repo) = initialized("restart-number")?;
+        fs::write(root.join("notes.txt"), "before restart\n")?;
+        let first = snapshot_turn(&repo, "restart-session", 1)?.unwrap();
+        fs::write(root.join("notes.txt"), "after restart\n")?;
+        let second = snapshot_turn(&repo, "restart-session", 1)?.unwrap();
+        assert_ne!(first, second);
+        let subject =
+            String::from_utf8_lossy(&repo.git(&["show", "-s", "--format=%s", &second])?.stdout)
+                .trim()
+                .to_owned();
+        assert_eq!(subject, "turn 2");
         cleanup(&root, &repo);
         Ok(())
     }

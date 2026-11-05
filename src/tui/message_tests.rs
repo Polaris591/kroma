@@ -291,7 +291,8 @@ fn streaming_extends_rails_without_moving_pinned_history() {
     ui.event(UiEvent::Text(
         (0..120)
             .map(|i| format!("line-{i:03} stable reply\n"))
-            .collect(),
+            .collect::<Vec<_>>()
+            .concat(),
     ));
     draw(&mut ui, 80, 24);
     ui.scroll(20);

@@ -1,6 +1,6 @@
 id = "subagents"
 name = "Subagents"
-version = "0.3.0"
+version = "1.0.0"
 description = "Delegate self-contained tasks to isolated Kroma agents"
 command = "node"
 args = ["main.js"]
@@ -15,9 +15,9 @@ task_timeout_secs = 300
 # Model for every child process, exactly as the endpoint names it. Empty or
 # removed means "inherit the parent conversation's model and profile".
 # Change it with `kroma plugins set subagents model <id>`.
-model = "deepseek-v4.1-flash"
+model = ""
 # DeepSeek thinking tier: off, enabled, high or max. Empty inherits the parent.
-thinking = "max"
+thinking = ""
 
 [[tools]]
 name = "subagent"
@@ -46,4 +46,14 @@ description = "Existing directory for this task. Defaults to the current working
 [tools.parameters.properties.tasks.items.properties.resume]
 type = "string"
 description = "Optional resume token from an earlier result. Continues that child's saved conversation in the same cwd; it is a fork, not a retry."
+[tools.parameters.properties.tasks.items.properties.profile]
+type = "string"
+description = "Agent profile (general, explore, planner, reviewer, verifier or custom)."
+[tools.parameters.properties.tasks.items.properties.label]
+type = "string"
+description = "Optional readable task label (1..60 characters)."
+[tools.parameters.properties.tasks.items.properties.complexity]
+type = "string"
+enum = ["light", "medium", "heavy"]
+description = "Model tier for auto profiles; defaults to medium."
 

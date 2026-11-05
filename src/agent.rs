@@ -1061,42 +1061,11 @@ impl Agent {
             events.on_event(RuntimeEvent::TaskStarted);
         }
 
-        // Start the task clock before the snapshot so wall time and
-        // `snapshot_ms` include it. Keep one tiny task-level usage guard: both
+        // Start the task clock before any model or tool work. Keep one tiny
+        // task-level usage guard: both
         // explicit failure and normal completion report here; dropping this
         // future on Ctrl+C reports cancellation without a monitoring framework.
         let mut stats = TaskStats::begin();
-        if self.checkpoints {
-            self.checkpoint_turn = self.checkpoint_turn.saturating_add(1);
-            let workdir = self.workdir.clone();
-            let session = self.session_id().to_owned();
-            let turn = self.checkpoint_turn;
-            let cancelled = Arc::new(AtomicBool::new(false));
-            // Git inspection can be slow on a large worktree; keep it off the
-            // async runtime thread while still finishing before the task starts.
-            let snapshot = {
-                let cancelled = Arc::clone(&cancelled);
-                tokio::task::spawn_blocking(move || {
-                    crate::checkpoints::snapshot_cancellable(&workdir, &session, turn, cancelled)
-                })
-            };
-            // The guard owns cancellation for this transaction: if the run
-            // future is dropped, the blocking task kills Git and releases the
-            // store lock instead of mutating it after a later task starts.
-            let guard = SnapshotGuard {
-                cancelled,
-                abort: snapshot.abort_handle(),
-            };
-            let snapshot_started = Instant::now();
-            let snapshot = snapshot.await;
-            stats.snapshot_time += snapshot_started.elapsed();
-            match snapshot {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => self.checkpoint_warning(format!("snapshot skipped: {error:#}")),
-                Err(error) => self.checkpoint_warning(format!("snapshot task failed: {error:#}")),
-            }
-            drop(guard);
-        }
         let result = self
             .run_inner(user_input, attachments, on_text, &mut stats)
             .await;
@@ -1133,6 +1102,36 @@ impl Agent {
             events.on_event(RuntimeEvent::TaskFinished { status });
         }
         result
+    }
+
+    async fn snapshot_before_first_tool(&mut self, stats: &mut TaskStats) {
+        self.checkpoint_turn = self.checkpoint_turn.saturating_add(1);
+        let workdir = self.workdir.clone();
+        let session = self.session_id().to_owned();
+        let turn = self.checkpoint_turn;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        // A read-only model answer never needs a file snapshot. Defer the
+        // first expensive Git transaction until the model actually requests
+        // a tool, but finish it *before* any tool/hook can mutate files.
+        let snapshot = {
+            let cancelled = Arc::clone(&cancelled);
+            tokio::task::spawn_blocking(move || {
+                crate::checkpoints::snapshot_cancellable(&workdir, &session, turn, cancelled)
+            })
+        };
+        let guard = SnapshotGuard {
+            cancelled,
+            abort: snapshot.abort_handle(),
+        };
+        let started = Instant::now();
+        let result = snapshot.await;
+        stats.snapshot_time += started.elapsed();
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => self.checkpoint_warning(format!("snapshot skipped: {error:#}")),
+            Err(error) => self.checkpoint_warning(format!("snapshot task failed: {error:#}")),
+        }
+        drop(guard);
     }
 
     async fn run_inner(
@@ -1195,6 +1194,8 @@ impl Agent {
         let base_extra_tokens = prompt_tokens.saturating_add(bytes_to_tokens(tool_schema_bytes));
 
         let mut overflow_retries = 0;
+        let mut truncation_retries = 0;
+        let mut checkpoint_ready = false;
         loop {
             // Steering is a durable new user instruction, delivered only
             // after the preceding model turn and all its tool results.
@@ -1350,6 +1351,7 @@ impl Agent {
             let completion = match completion {
                 Ok(completion) => {
                     overflow_retries = 0;
+                    truncation_retries = 0;
                     completion
                 }
                 Err(error) => {
@@ -1363,6 +1365,17 @@ impl Agent {
                             cached_tokens: usage.and_then(|u| u.cached),
                             reasoning_tokens: usage.and_then(|u| u.reasoning),
                         });
+                    }
+                    if !printed_text
+                        && !streamed_reasoning
+                        && truncation_retries == 0
+                        && crate::provider::is_output_truncation(&error)
+                    {
+                        truncation_retries += 1;
+                        crate::runtime_log!(
+                            "[model] output was truncated before any streamed text; retrying once without replaying tools"
+                        );
+                        continue;
                     }
                     if !printed_text
                         && !streamed_reasoning
@@ -1523,6 +1536,12 @@ impl Agent {
             // round-trips), but run strictly in the returned order. Each
             // result retains its own tool_call_id and is saved before the
             // next call; no concurrency or command-safety classifier.
+            if !checkpoint_ready {
+                checkpoint_ready = true;
+                if self.checkpoints {
+                    self.snapshot_before_first_tool(stats).await;
+                }
+            }
             for call in calls {
                 if let Some(events) = &self.events {
                     events.on_event(RuntimeEvent::ToolStarted {
@@ -1555,11 +1574,21 @@ impl Agent {
                         });
                     }
                 };
+                let mut active_model = self.model.connection_info();
+                if let Some(model) = &mut active_model {
+                    model.provider_profile = self
+                        .catalog
+                        .model_choice(self.session_id())
+                        .ok()
+                        .flatten()
+                        .map(|choice| choice.profile);
+                }
                 let (result, warnings) = self
                     .tools
                     .execute_with_warnings(
                         &call,
                         ToolContext {
+                            model_connection: active_model.as_ref(),
                             workdir: &self.workdir,
                             archive: self.session.archive_path(),
                             on_output: self
@@ -1569,6 +1598,11 @@ impl Agent {
                         },
                     )
                     .await;
+                // Any tool that declares ephemeral context mutation refreshes
+                // model-side packs. No plugin name is hardcoded into the core.
+                if !result.is_error && self.tools.invalidates_model_context(&call.function.name) {
+                    self.model.invalidate_ephemeral_context();
+                }
                 self.active_tool = None;
                 stats.tool_time += tool_started.elapsed();
                 stats.tools += 1;
@@ -1808,12 +1842,14 @@ impl TaskStats {
         );
         if self.compaction.requests > 0 {
             crate::runtime_log!(
-                "[usage] checkpoint: {} request(s), {:.2}s model time | input: {} | output: {} | cached: {}",
+                "[usage] checkpoint: {} request(s) ({} without reported usage), {:.2}s model time | observed input: {} | observed output: {} | observed cached: {}{}",
                 self.compaction.requests,
+                self.compaction.unmeasured_requests,
                 self.compaction.elapsed.as_secs_f64(),
                 display_count(self.compaction.input),
                 display_count(self.compaction.output),
                 display_count(self.compaction.cached),
+                if self.compaction.unmeasured_requests > 0 { " (lower bounds only)" } else { "" },
             );
             crate::runtime_log!(
                 "[usage] combined: {} model request(s) | input: {} | output: {} | cached: {}",

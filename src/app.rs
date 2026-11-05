@@ -153,6 +153,18 @@ pub async fn default_runtime_with(
     // A child Kroma applies its own policy after all plugin/MCP tools have
     // been registered. The parent/default runtime has no added checks.
     let subagent_policy = SubagentPolicy::from_env()?;
+    if std::env::var("KROMA_SUBAGENT_DEPTH").ok().as_deref() == Some("1") {
+        for name in ["subagent", "memory_remember", "memory_forget"] {
+            if components
+                .tools
+                .definitions()
+                .iter()
+                .any(|definition| definition["function"]["name"] == name)
+            {
+                components.tools.disable(name)?;
+            }
+        }
+    }
     if let Some(policy) = &subagent_policy {
         policy.apply(&mut components.tools, &mut components.prompt)?;
     }

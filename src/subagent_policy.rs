@@ -84,6 +84,9 @@ impl SubagentPolicy {
                 .as_ref()
                 .is_some_and(|only| !only.contains(name.as_str()))
                 || deny.contains(name.as_str())
+                // Child project memory is read-only; no nested delegation.
+                // A permissive custom profile cannot override this boundary.
+                || matches!(name.as_str(), "subagent" | "memory_remember" | "memory_forget")
                 || (name == "shell" && self.shell == "deny")
             {
                 tools.disable(name)?;
@@ -239,6 +242,21 @@ fn allowed_command(command: &str, mode: &str) -> bool {
 mod tests {
     use super::*;
 
+    struct NamedTool(&'static str);
+
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn definition(&self) -> serde_json::Value {
+            serde_json::json!({"type":"function","function":{"name":self.0,
+                "parameters":{"type":"object"}}})
+        }
+        fn execute<'a>(&'a self, _: &'a ToolCall, _: ToolContext<'a>) -> ToolFuture<'a> {
+            Box::pin(async { ToolResult::ok("mock") })
+        }
+    }
+
     #[test]
     fn read_only_rejects_shell_control_and_mutation() {
         for allowed in [
@@ -288,5 +306,36 @@ mod tests {
             .unwrap()
             .contains("Restricted subagent"));
         assert_eq!(policy.limits().max_turns, 20);
+    }
+
+    #[test]
+    fn permissive_profile_still_forbids_nested_agents_and_memory_writes() {
+        let mut tools = ToolRegistry::builtin();
+        for name in [
+            "subagent",
+            "memory_remember",
+            "memory_forget",
+            "memory_search",
+        ] {
+            tools.register(Arc::new(NamedTool(name))).unwrap();
+        }
+        let policy = SubagentPolicy {
+            profile: "general".into(),
+            prompt: "Finish the task".into(),
+            tools: None,
+            disallowed_tools: vec![],
+            shell: "inherit".into(),
+            max_turns: 40,
+            max_tokens: 0,
+        };
+        policy
+            .apply(&mut tools, &mut PromptComposer::default())
+            .unwrap();
+        let names: Vec<String> = tools
+            .definitions()
+            .iter()
+            .filter_map(|v| v["function"]["name"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(names, vec!["shell", "memory_search"]);
     }
 }

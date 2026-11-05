@@ -202,6 +202,7 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
             .execute(
                 &call,
                 ToolContext {
+                    model_connection: None,
                     workdir: &workspace,
                     archive: &archive,
                     on_output: None,
@@ -214,6 +215,7 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
             .execute(
                 &call,
                 ToolContext {
+                    model_connection: None,
                     workdir: &workspace,
                     archive: &archive,
                     on_output: None,
@@ -380,6 +382,7 @@ async fn tool_replacement_prompt_override_and_hooks_execute() -> Result<()> {
             .execute(
                 &call,
                 ToolContext {
+                    model_connection: None,
                     workdir: &workdir,
                     archive: temp.path(),
                     on_output: None,
@@ -1168,6 +1171,7 @@ async fn plugin_jsonl_rejects_incorrect_response_correlation() -> Result<()> {
         .execute(
             &call,
             ToolContext {
+                model_connection: None,
                 workdir: temp.path(),
                 archive: temp.path(),
                 on_output: None,
@@ -1456,6 +1460,7 @@ process.stdout.write(JSON.stringify({content:"recovered"})+"\n");}});"#,
         },
     };
     let ctx = ToolContext {
+        model_connection: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1512,6 +1517,7 @@ frame({event:"complete",result:{content:"ok",is_error:false}});});"#,
     let mut prompt = PromptComposer::default();
     loaded.contribute(&mut tools, &mut prompt);
     let ctx = ToolContext {
+        model_connection: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1605,6 +1611,7 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
         },
     };
     let ctx = ToolContext {
+        model_connection: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1679,6 +1686,7 @@ frame({event:"error",message:"worker is unusable"});});"#,
         },
     };
     let ctx = ToolContext {
+        model_connection: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1741,6 +1749,7 @@ process.stdout.write(JSON.stringify({content:"recovered"})+String.fromCharCode(1
         },
     };
     let ctx = ToolContext {
+        model_connection: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1811,6 +1820,7 @@ setInterval(()=>frame({event:"output_delta",stream:"stdout",delta:"."}),50);});"
         },
     };
     let ctx = ToolContext {
+        model_connection: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1923,6 +1933,7 @@ async fn web_tools_roundtrip_through_kroma_to_local_http_server() -> Result<()> 
         .iter()
         .any(|schema| schema["function"]["name"] == "web_fetch"));
     let ctx = ToolContext {
+        model_connection: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -2580,6 +2591,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
         .execute(
             &call,
             ToolContext {
+                model_connection: None,
                 workdir: temp.path(),
                 archive: &archive,
                 on_output: None,
@@ -2911,6 +2923,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
                 .execute(
                     &call,
                     ToolContext {
+                        model_connection: None,
                         workdir: &workdir,
                         archive: temp.path(),
                         on_output: None,
@@ -3240,6 +3253,7 @@ async fn process_plugin_tool_streams_progress_without_changing_final_result() ->
         .execute(
             &call,
             ToolContext {
+                model_connection: None,
                 workdir: temp.path(),
                 archive: temp.path(),
                 on_output: Some(&callback),
@@ -3663,6 +3677,14 @@ createInterface({input:process.stdin}).on("line",line=>{
         log.matches("\"type\":\"request_context\"").count(),
         context_calls,
         "the same boundary must reuse the cached pack"
+    );
+    model.invalidate_ephemeral_context();
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let log = fs::read_to_string(directory.join("requests.log"))?;
+    assert_eq!(
+        log.matches("\"type\":\"request_context\"").count(),
+        context_calls + 1,
+        "memory mutation must invalidate even an unchanged user-turn digest"
     );
     let failed = vec![
         Message::new("system", "system"),

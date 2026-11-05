@@ -147,6 +147,7 @@ async fn call_tool(
         .execute(
             &call,
             ToolContext {
+                model_connection: None,
                 workdir,
                 archive,
                 on_output: None,

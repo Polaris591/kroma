@@ -459,6 +459,9 @@ struct MeasuredRequest {
 #[derive(Default)]
 pub struct CompactionUsage {
     pub requests: usize,
+    /// Attempts not represented in the rolled-up known token totals. Known
+    /// sums are lower bounds whenever this is nonzero, never full cost.
+    pub unmeasured_requests: usize,
     pub elapsed: Duration,
     pub input: Option<u64>,
     pub output: Option<u64>,
@@ -476,9 +479,17 @@ impl CompactionUsage {
         self.cached = sum_known(self.cached, usage.cached, old);
     }
 
+    fn record_failed_unmeasured(&mut self, requests: usize) {
+        self.requests = self.requests.saturating_add(requests);
+        self.unmeasured_requests = self.unmeasured_requests.saturating_add(requests);
+    }
+
     fn record(&mut self, summary: &SummaryResult) {
         let old = self.requests == 0;
         self.requests += summary.requests;
+        if summary.usage.is_none() {
+            self.unmeasured_requests = self.unmeasured_requests.saturating_add(summary.requests);
+        }
         self.elapsed += summary.elapsed;
         self.input = sum_known(
             self.input,
@@ -1211,11 +1222,19 @@ impl Compression {
                 self.failed_this_turn = true;
                 // The provider may already have billed earlier attempts of this
                 // summary. Record what it reported before failing the request.
-                match crate::provider::failed_summary_usage(&error) {
-                    Some((usage, requests)) => self.usage.record_failed(requests, usage),
+                match crate::provider::failed_summary_attempts(&error) {
+                    Some((usage, attempted, reported)) => {
+                        if reported > 0 {
+                            self.usage.record_failed(reported, usage);
+                        }
+                        let unknown = attempted.saturating_sub(reported);
+                        if unknown > 0 {
+                            self.usage.record_failed_unmeasured(unknown);
+                        }
+                    }
                     // The request started even when the provider reported no
                     // usage; never present it as a free zero-request summary.
-                    None => self.usage.record_failed(1, &crate::model::Usage::default()),
+                    None => self.usage.record_failed_unmeasured(1),
                 }
                 crate::runtime_log!("[compact] checkpoint request failed: {error:#}");
                 return Err(error);
@@ -3742,6 +3761,7 @@ mod tests {
             .execute(
                 &search,
                 ToolContext {
+                    model_connection: None,
                     workdir: &dir,
                     archive: &archive,
                     on_output: None,
@@ -3764,6 +3784,7 @@ mod tests {
             .execute(
                 &read,
                 ToolContext {
+                    model_connection: None,
                     workdir: &dir,
                     archive: &archive,
                     on_output: None,

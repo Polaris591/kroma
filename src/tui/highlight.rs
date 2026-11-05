@@ -171,7 +171,7 @@ impl Lexer {
                 && chars
                     .get(i + 1)
                     .is_some_and(|(_, c)| c.is_alphabetic() || *c == '_')
-                && !chars.get(i + 2).is_some_and(|(_, c)| *c == char::from(39))
+                && chars.get(i + 2).is_none_or(|(_, c)| *c != char::from(39))
             {
                 i += 2;
                 while i < chars.len() && (chars[i].1.is_alphanumeric() || chars[i].1 == '_') {

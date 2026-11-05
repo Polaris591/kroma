@@ -231,7 +231,7 @@ pub(super) fn summary(name: &str, command: &str, language: Language) -> String {
         ("bash" | "sh", "-c" | "-lc") => return caption("Run shell script", "执行 Shell 脚本"),
         _ => {}
     }
-    if (program == "cat" && second == ">") || (program == "echo" && second == ">") {
+    if (program == "cat" || program == "echo") && second == ">" {
         return format!("{} · {}", language.text("Write file", "写入文件"), third);
     }
     // No fabricated "purpose": show the real command prefix rather than

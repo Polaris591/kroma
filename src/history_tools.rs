@@ -352,6 +352,7 @@ mod tests {
             .execute(
                 &search,
                 ToolContext {
+                    model_connection: None,
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
@@ -379,6 +380,7 @@ mod tests {
             .execute(
                 &read,
                 ToolContext {
+                    model_connection: None,
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
@@ -404,6 +406,7 @@ mod tests {
             .execute(
                 &read,
                 ToolContext {
+                    model_connection: None,
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
@@ -483,6 +486,7 @@ mod tests {
             .execute(
                 &search,
                 ToolContext {
+                    model_connection: None,
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
@@ -509,6 +513,7 @@ mod tests {
             .execute(
                 &read,
                 ToolContext {
+                    model_connection: None,
                     workdir: &dir,
                     archive: &path,
                     on_output: None,

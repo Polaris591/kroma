@@ -3279,7 +3279,7 @@ impl UiState {
             && self.picker.is_none()
             && editor_inner.width > 0
             && editor_inner.height > 0
-            && !self.editor_selection.is_some_and(|(a, b)| a != b)
+            && self.editor_selection.is_none_or(|(a, b)| a == b)
         {
             let (cx, cy) = if self.attach_mode {
                 (
