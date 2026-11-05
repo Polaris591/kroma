@@ -181,7 +181,9 @@ impl CacheTrace {
             "common_prefix_json_bytes": same_prefix_json_bytes,
             "first_changed_role": first_changed_role,
             "input_tokens": usage.and_then(|u| u.input),
+            "output_tokens": usage.and_then(|u| u.output),
             "cached_tokens": usage.and_then(|u| u.cached),
+            "reasoning_tokens": usage.and_then(|u| u.reasoning),
         });
         if let Err(error) = append_record(&Self::sidecar(session), &record) {
             crate::runtime_log!("[cache-trace] failed to write request diagnostic: {error}");
@@ -321,6 +323,50 @@ mod tests {
         assert_eq!(record["change"], "baseline");
         assert_eq!(record["message_count"], 2);
         assert!(record["cached_tokens"].is_null());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_request_preserves_reported_usage_without_logging_contents() {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-trace-failure-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let session = root.join("failed.json");
+        let mut trace = CacheTrace {
+            previous: None,
+            session: None,
+            request: 0,
+        };
+        let usage = Usage {
+            input: Some(90),
+            output: Some(12),
+            cached: Some(64),
+            reasoning: Some(5),
+            total: Some(102),
+        };
+        trace.record(
+            &session,
+            capture(
+                &[Message::new("user", "SECRET")],
+                &CompactionState::default(),
+            ),
+            Some(&usage),
+            false,
+        );
+        let jsonl = std::fs::read_to_string(CacheTrace::sidecar(&session)).unwrap();
+        assert!(!jsonl.contains("SECRET"));
+        let record: Value = serde_json::from_str(jsonl.trim()).unwrap();
+        assert_eq!(record["status"], "error");
+        assert_eq!(record["input_tokens"], 90);
+        assert_eq!(record["output_tokens"], 12);
+        assert_eq!(record["cached_tokens"], 64);
+        assert_eq!(record["reasoning_tokens"], 5);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
