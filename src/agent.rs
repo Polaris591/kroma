@@ -17,6 +17,7 @@ use crate::{
     sessions::SessionCatalog,
     shell,
     steering::TaskInput,
+    subagent_policy::AgentLimits,
     token_estimate::bytes_to_tokens,
     tools::{ToolContext, ToolRegistry},
     usage::UsageMeter,
@@ -77,6 +78,7 @@ pub struct Agent {
     cache_trace: Option<CacheTrace>,
     checkpoints: bool,
     checkpoint_turn: u64,
+    subagent_limits: Option<AgentLimits>,
 }
 
 /// The tool call Kroma dispatched but has not yet recorded a result for.
@@ -358,6 +360,7 @@ impl Agent {
             cache_trace: CacheTrace::from_env(),
             checkpoints: false,
             checkpoint_turn: 0,
+            subagent_limits: None,
         };
         agent.sync_session_context();
         if new_session && !defer_initial_save {
@@ -374,6 +377,12 @@ impl Agent {
             crate::runtime_log!("[shell] unable to clean orphan captures: {error:#}");
         }
         Ok(agent)
+    }
+
+    /// Only the child-process composition path installs these limits. The
+    /// default user Agent Loop remains unchanged when no subagent is active.
+    pub fn set_subagent_limits(&mut self, limits: AgentLimits) {
+        self.subagent_limits = Some(limits);
     }
 
     pub fn reset(&mut self) -> Result<()> {
@@ -1190,6 +1199,14 @@ impl Agent {
             // Steering is a durable new user instruction, delivered only
             // after the preceding model turn and all its tool results.
             self.append_pending_steering()?;
+            if let Some(limits) = self.subagent_limits {
+                if stats.calls >= limits.max_turns {
+                    bail!(
+                        "SUBAGENT_TURN_LIMIT: completed {} model requests; child session can be resumed",
+                        stats.calls
+                    );
+                }
+            }
             // The provider can discover that vision is unsupported during an
             // earlier tool round. Keep the image reserve consistent with the
             // actual projection instead of using the first round's estimate.
@@ -1228,6 +1245,24 @@ impl Agent {
             let (estimated_input_tokens, budget_view_bytes) = self
                 .context_budget
                 .validate_with_tool_bytes(&budget_view, tool_schema_bytes, calibrated_input)?;
+            if let Some(limits) = self.subagent_limits {
+                if limits.max_tokens > 0 {
+                    // Cached input is a subset of input; never count it twice.
+                    // A provider can exceed its requested output allowance,
+                    // so this is a next-request admission guard, not an OS
+                    // billing quota or a promise to stop mid-token.
+                    let spent = stats
+                        .input
+                        .unwrap_or(0)
+                        .saturating_add(stats.output.unwrap_or(0));
+                    if spent.saturating_add(estimated_input_tokens as u64) >= limits.max_tokens {
+                        bail!(
+                            "SUBAGENT_TOKEN_LIMIT: request would exceed {} input+output tokens; child session can be resumed",
+                            limits.max_tokens
+                        );
+                    }
+                }
+            }
             if let Some(events) = &self.events {
                 events.on_event(RuntimeEvent::ContextPrepared {
                     messages: view.len(),

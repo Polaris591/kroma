@@ -166,9 +166,10 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Recall for `request_context`: intent matches first, then the most
-    /// recently updated active entries. Bounded, read-only and empty when
-    /// memory use is off.
+    /// Recall for `request_context`: only evidence relevant to this intent.
+    /// Never fill an otherwise empty pack with unrelated recent notes: those
+    /// would pollute every user task and invalidate the zero-maintenance
+    /// plugin's promise that a non-match is byte-identical to no plugin.
     pub fn recall(&self, intent: &str, limit: usize) -> Result<Vec<Memory>> {
         if !read_settings(&self.conn)?.use_enabled {
             return Ok(Vec::new());
@@ -185,23 +186,60 @@ impl Store {
                 }
             }
         }
+        // A new task often contains surrounding words absent from the stored
+        // rule ("pnpm dependency" vs "use pnpm for packages"). Exact multi-
+        // token FTS requires *all* words. Retry distinctive single terms,
+        // never the unrelated latest-N fallback, and bound the work per task.
+        // Ignore generic instruction words that would recall nearly anything.
         if memories.len() < limit {
-            let sql = format!(
-                "SELECT {COLUMNS} FROM memories WHERE state=?1
-                   AND (expires_at IS NULL OR expires_at > ?2)
-                 ORDER BY updated_at DESC, id DESC LIMIT ?3"
-            );
-            let mut statement = self.conn.prepare(&sql)?;
-            let rows = statement.query_map(
-                params![STATE_ACCEPTED, now, (limit * 2) as i64],
-                memory_from_row,
-            )?;
-            for memory in rows.collect::<rusqlite::Result<Vec<_>>>()? {
-                if memories.len() >= limit {
+            let mut terms = Vec::new();
+            for word in query.split(|ch: char| !ch.is_alphanumeric()) {
+                let word = word.to_lowercase();
+                if word.chars().count() < 4
+                    || matches!(
+                        word.as_str(),
+                        "this"
+                            | "that"
+                            | "with"
+                            | "from"
+                            | "have"
+                            | "using"
+                            | "please"
+                            | "make"
+                            | "change"
+                            | "configure"
+                            | "project"
+                            | "about"
+                            | "should"
+                            | "would"
+                            | "could"
+                    )
+                {
+                    continue;
+                }
+                if !terms.contains(&word) {
+                    terms.push(word);
+                }
+                if terms.len() == MAX_QUERY_TOKENS {
                     break;
                 }
-                if seen.insert(memory.id.clone()) {
-                    memories.push(memory);
+            }
+            for term in terms {
+                for hit in self.search(&term, &[], limit)? {
+                    if memories.len() >= limit {
+                        break;
+                    }
+                    if seen.contains(&hit.id) {
+                        continue;
+                    }
+                    if let Some(memory) = load_memory(&self.conn, &hit.id)? {
+                        if is_active(&memory, now) && seen.insert(memory.id.clone()) {
+                            memories.push(memory);
+                        }
+                    }
+                }
+                if memories.len() >= limit {
+                    break;
                 }
             }
         }
@@ -658,6 +696,29 @@ mod tests {
             1
         );
         assert_eq!(store.search("WAL", &hints(&[]), 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn automatic_recall_never_backfills_unrelated_recent_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), "s1");
+        add(&mut store, "preference", "use pnpm for packages", &[], true);
+        add(
+            &mut store,
+            "decision",
+            "use SQLite WAL for transactions",
+            &[],
+            true,
+        );
+
+        assert!(store
+            .recall("configure an unrelated CSS flex layout", 6)
+            .unwrap()
+            .is_empty());
+        let hits = store.recall("pnpm packages", 6).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].text.contains("pnpm"));
+        assert!(store.recall("", 6).unwrap().is_empty());
     }
 
     #[test]
