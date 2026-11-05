@@ -1,7 +1,7 @@
 //! One tool-free, bounded model request after the first completed turn.
 //! It does not delay the conversation or change the authoritative transcript.
 use super::event_queue::EventSender;
-use super::view::UiEvent;
+use super::runtime_events::UiEvent;
 use crate::{model::ModelBackend, sessions::SessionCatalog};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -89,7 +89,7 @@ mod tests {
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct TitleModel(Arc<AtomicUsize>);
+    struct TitleModel(Arc<AtomicUsize>, Duration);
     impl ModelBackend for TitleModel {
         fn complete<'a>(
             &'a self,
@@ -116,7 +116,11 @@ mod tests {
             output_tokens: usize,
         ) -> ModelFuture<'a, TextResult> {
             self.0.fetch_add(1, Ordering::Relaxed);
+            let delay = self.1;
             Box::pin(async move {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 assert_eq!(output_tokens, 128);
                 Ok(TextResult {
                     text: "**优化 Kroma 会话**".into(),
@@ -131,6 +135,53 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "local async/catalog benchmark; mock title requests only"]
+    async fn perf_title_schedule_and_completion() -> Result<()> {
+        use std::time::{Instant, SystemTime, UNIX_EPOCH};
+        let root = std::env::temp_dir().join(format!(
+            "kroma-perf-title-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let catalog = SessionCatalog::from_default(root.join("default.json"))?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let model = Arc::new(TitleModel(count.clone(), Duration::from_millis(30)));
+        let (sender, mut receiver) = super::super::event_queue::channel();
+        let mut scheduled = Vec::new();
+        let mut completed = Vec::new();
+        for _ in 0..11 {
+            let (id, path) = catalog.new_path()?;
+            std::fs::write(path, "{}")?;
+            let start = Instant::now();
+            schedule(
+                model.clone(),
+                catalog.default_path().to_path_buf(),
+                id.clone(),
+                "user input".into(),
+                "assistant answer".into(),
+                sender.clone(),
+            );
+            scheduled.push(start.elapsed());
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), receiver.recv()).await?,
+                Some(UiEvent::TitleUsage { requests: 1, .. })
+            ));
+            assert!(
+                matches!(tokio::time::timeout(Duration::from_secs(2), receiver.recv()).await?, Some(UiEvent::SessionTitleUpdated(ref named)) if named == &id)
+            );
+            completed.push(start.elapsed());
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 11);
+        let fixture = serde_json::json!({"mock_delay_ms":30,"title_requests":11,"output_budget":128,"billable_usage":null});
+        crate::performance::report("title.schedule", &scheduled, fixture.clone());
+        crate::performance::report("title.completion", &completed, fixture);
+        drop(receiver);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -149,7 +200,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let (tx, mut rx) = super::super::event_queue::channel();
         schedule(
-            Arc::new(TitleModel(count.clone())),
+            Arc::new(TitleModel(count.clone(), Duration::ZERO)),
             catalog.default_path().to_path_buf(),
             id.clone(),
             "检查会话系统".into(),
@@ -172,7 +223,7 @@ mod tests {
         assert_eq!(catalog.list()?[0].name.as_deref(), Some("优化 Kroma 会话"));
         catalog.name_session(&id, "手动名称")?;
         schedule(
-            Arc::new(TitleModel(count.clone())),
+            Arc::new(TitleModel(count.clone(), Duration::ZERO)),
             catalog.default_path().to_path_buf(),
             id.clone(),
             "later".into(),

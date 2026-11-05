@@ -7,11 +7,14 @@ mod event_queue;
 mod gitinfo;
 mod help;
 mod highlight;
+#[cfg(test)]
+mod input_tests;
 mod links;
 mod logo;
 mod markdown;
 mod picker;
 mod preferences;
+mod runtime_events;
 mod terminal_feedback;
 mod theme;
 mod title;
@@ -44,9 +47,10 @@ use event_queue::EventReceiver;
 use futures_util::StreamExt;
 use picker::{Action as PickerAction, Item as PickerItem, Kind as PickerKind, Picker};
 use ratatui::{backend::CrosstermBackend, Terminal};
+use runtime_events::{UiEvent, UiSink};
 use std::{io, process::Command, sync::Arc};
 use theme::ThemeStore;
-use view::{UiEvent, UiSink, UiState};
+use view::UiState;
 
 struct TerminalScreen {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -177,8 +181,8 @@ enum InputAction {
     Edit,
 }
 
-fn attach_text(state: &mut UiState, text: &str, workdir: &std::path::Path, explicit: bool) {
-    if explicit || attachments::long_paste(text) {
+fn attach_text(state: &mut UiState, text: &str, workdir: &std::path::Path) {
+    if attachments::long_paste(text) {
         if state.attachments.len() >= MAX_ATTACHMENTS {
             state.note(
                 state
@@ -209,7 +213,7 @@ fn attach_text(state: &mut UiState, text: &str, workdir: &std::path::Path, expli
             ),
         }
     } else {
-        state.editor.paste(text);
+        state.paste_text(text);
     }
 }
 
@@ -474,6 +478,9 @@ fn key_action(
     if key.kind == KeyEventKind::Release {
         return InputAction::None;
     }
+    if !state.attach_mode && state.editor_selection_key(key) {
+        return InputAction::None;
+    }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::BackTab | KeyCode::Tab
@@ -615,6 +622,14 @@ fn key_action(
     }
 }
 
+fn text_paste_shortcut(key: &KeyEvent) -> bool {
+    key.kind != KeyEventKind::Release
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && ((matches!(key.code, KeyCode::Char('v' | 'V'))
+            && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (key.code == KeyCode::Insert && key.modifiers == KeyModifiers::SHIFT))
+}
+
 fn input_event(
     state: &mut UiState,
     event: Event,
@@ -661,6 +676,22 @@ fn input_event(
         }
         return InputAction::None;
     }
+    let event = match event {
+        Event::Key(key) if text_paste_shortcut(&key) => match attachments::clipboard_text() {
+            Ok(text) => Event::Paste(text),
+            Err(error) => {
+                state.note_with_level(
+                    view::NoticeLevel::Error,
+                    format!(
+                        "{}: {error:#}",
+                        state.preferences.language.text("Paste failed", "粘贴失败")
+                    ),
+                );
+                return InputAction::None;
+            }
+        },
+        event => event,
+    };
     // Copy an existing selection before interpreting Ctrl+C as cancel,
     // clear-draft or quit. A copied history selection must never discard an
     // unrelated unsent draft or terminate the agent.
@@ -691,14 +722,17 @@ fn input_event(
         // changing Ctrl+C's existing clear/cancel behavior.
         Event::Key(key)
             if key.kind != KeyEventKind::Release
-                && ((key.code == KeyCode::Char('c')
+                && ((matches!(key.code, KeyCode::Char('c' | 'C'))
                     && key
                         .modifiers
                         .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT))
                     || (key.code == KeyCode::Insert
                         && key.modifiers.contains(KeyModifiers::CONTROL))) =>
         {
-            if let Some(selected) = state.editor_selected_text() {
+            if let Some(selected) = state
+                .editor_selected_text()
+                .or_else(|| state.selected_text())
+            {
                 copy_selection_feedback(state, &selected);
             }
         }
@@ -711,7 +745,8 @@ fn input_event(
             open_picker(state, PickerKind::Commands, "", workdir);
         }
         Event::Key(key)
-            if matches!(key.code, KeyCode::Char('v' | 'V'))
+            if key.kind != KeyEventKind::Release
+                && matches!(key.code, KeyCode::Char('v' | 'V'))
                 && key.modifiers.contains(KeyModifiers::ALT) =>
         {
             if running {
@@ -722,7 +757,7 @@ fn input_event(
                 return InputAction::None;
             }
             match attachments::clipboard(workdir) {
-                Ok(ClipboardPaste::Text(text)) => attach_text(state, &text, workdir, true),
+                Ok(ClipboardPaste::Text(text)) => attach_text(state, &text, workdir),
                 Ok(ClipboardPaste::Attach(mut items)) => {
                     if state.attachments.len() + items.len() > MAX_ATTACHMENTS {
                         state.note(
@@ -764,7 +799,7 @@ fn input_event(
                 && !state.attach_mode =>
         {
             let word = state.editor.word_before_caret();
-            if word.starts_with('@') {
+            if word.starts_with('@') && state.editor_selected_text().is_none() {
                 match crate::convenience::suggestions(workdir, &word) {
                     Ok(matches) if matches.len() == 1 => {
                         state.editor.replace_word_before_caret(&matches[0]);
@@ -799,11 +834,8 @@ fn input_event(
             return key_action(state, key, running, model);
         }
         Event::Key(key) => {
-            // Native terminal mouse selection is disabled in a full-screen
-            // app. Keep draft selection independent of the transcript; a
-            // normal editing keystroke dismisses the highlighted draft.
-            if key.kind != KeyEventKind::Release {
-                state.clear_editor_selection();
+            if key.kind == KeyEventKind::Release {
+                return InputAction::None;
             }
             if state.attach_mode {
                 match key.code {
@@ -847,7 +879,9 @@ fn input_event(
             return action;
         }
         Event::Paste(text) => {
-            state.clear_editor_selection();
+            if text.is_empty() {
+                return InputAction::None;
+            }
             if state.attach_mode {
                 state.attach_path.push_str(&text);
             } else if running && attachments::long_paste(&text) {
@@ -856,9 +890,9 @@ fn input_event(
                     "请等待当前任务结束后粘贴长文本",
                 ));
             } else if running {
-                state.editor.paste(&text);
+                state.paste_text(&text);
             } else {
-                attach_text(state, &text, workdir, false);
+                attach_text(state, &text, workdir);
             }
         }
         Event::Mouse(mouse) => match mouse.kind {
@@ -2410,7 +2444,7 @@ mod tests {
     }
 
     #[test]
-    fn input_mouse_drag_selects_draft_and_editing_clears_only_its_highlight() {
+    fn input_mouse_drag_selects_draft_and_typing_replaces_selected_text() {
         use crossterm::event::{MouseButton, MouseEvent};
         use ratatui::{backend::TestBackend, Terminal};
         let (mut ui, model) = setup();
@@ -2476,7 +2510,15 @@ mod tests {
             std::path::Path::new("."),
         );
         assert!(ui.editor_selected_text().is_none());
-        assert!(ui.editor.text().ends_with('z'));
+        assert_eq!(ui.editor.text(), "z 中文 👩‍💻");
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)),
+            false,
+            &model,
+            std::path::Path::new("."),
+        );
+        assert_eq!(ui.editor.text(), "draft 中文 👩‍💻");
     }
 
     #[test]
@@ -2905,9 +2947,11 @@ mod tests {
         ));
         assert!(ui.attachments.is_empty());
         assert!(ui.notification.contains("after this task"));
-        let log = "long error\n".repeat(20);
+        let log = "long error\n".repeat(600);
         input_event(&mut ui, Event::Paste(log), true, &model, &dir);
         assert!(ui.attachments.is_empty());
+        assert!(ui.editor.text().is_empty());
+        assert!(ui.notification.contains("when this task finishes"));
     }
 
     #[test]

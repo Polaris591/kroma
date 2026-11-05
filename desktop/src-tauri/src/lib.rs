@@ -268,15 +268,22 @@ struct ProfileInput {
 }
 
 fn merge_profile_input(old: ProviderProfile, profile: ProfileInput) -> ProviderProfile {
-    let api_key = if profile.clear_key {
-        None
+    let inline_key = profile.api_key.filter(|v| !v.is_empty());
+    // The Desktop form has no env-reference field, so an ordinary save keeps
+    // the stored reference. A new inline key, or an explicit clear, must drop
+    // it so the profile is left with exactly one credential.
+    let (api_key, api_key_env) = if profile.clear_key {
+        (None, None)
+    } else if let Some(key) = inline_key {
+        (Some(key), None)
     } else {
-        profile.api_key.filter(|v| !v.is_empty()).or(old.api_key)
+        (old.api_key, old.api_key_env)
     };
     ProviderProfile {
         base_url: profile.base_url,
         model: profile.model,
         api_key,
+        api_key_env,
         api_protocol: Some(profile.protocol),
         reasoning_effort: Some(profile.reasoning),
         deepseek_thinking: profile.deepseek_thinking.filter(|v| v != "off"),
@@ -299,11 +306,7 @@ async fn save_profile(
         let name = profile.name.clone();
         let merged = {
             let profiles = Profiles::load()?;
-            let old = profiles
-                .profiles
-                .get(&name)
-                .cloned()
-                .unwrap_or_default();
+            let old = profiles.profiles.get(&name).cloned().unwrap_or_default();
             merge_profile_input(old, profile)
         };
         Profiles::update(|profiles| {
@@ -657,6 +660,30 @@ mod tests {
         assert!(validate_external_url("https://example.org/\nmalicious").is_err());
     }
 
+    fn profile_input() -> ProfileInput {
+        ProfileInput {
+            name: "work".into(),
+            base_url: "https://proxy.example/v1".into(),
+            model: "renamed".into(),
+            api_key: None,
+            clear_key: false,
+            protocol: "anthropic".into(),
+            reasoning: "auto".into(),
+            deepseek_thinking: None,
+            context_window: Some(200_000),
+            max_output_tokens: Some(8_000),
+        }
+    }
+
+    fn env_key_profile() -> ProviderProfile {
+        ProviderProfile {
+            base_url: "https://proxy.example/v1".into(),
+            model: "renamed".into(),
+            api_key_env: Some("KROMA_TEST_KEY".into()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn saving_a_desktop_profile_preserves_the_catalog_alias() {
         let old = ProviderProfile {
@@ -667,21 +694,7 @@ mod tests {
             catalog_model: Some("anthropic/claude-sonnet-5-5".into()),
             ..Default::default()
         };
-        let saved = merge_profile_input(
-            old,
-            ProfileInput {
-                name: "work".into(),
-                base_url: "https://proxy.example/v1".into(),
-                model: "renamed".into(),
-                api_key: None,
-                clear_key: false,
-                protocol: "anthropic".into(),
-                reasoning: "auto".into(),
-                deepseek_thinking: None,
-                context_window: Some(200_000),
-                max_output_tokens: Some(8_000),
-            },
-        );
+        let saved = merge_profile_input(old, profile_input());
         assert_eq!(
             saved.catalog_model.as_deref(),
             Some("anthropic/claude-sonnet-5-5")
@@ -690,6 +703,37 @@ mod tests {
         assert_eq!(saved.api_key.as_deref(), Some("old-key"));
         assert_eq!(saved.context_window, Some(200_000));
     }
+
+    #[test]
+    fn an_ordinary_save_keeps_the_profile_env_reference() {
+        let saved = merge_profile_input(env_key_profile(), profile_input());
+        assert_eq!(saved.api_key_env.as_deref(), Some("KROMA_TEST_KEY"));
+        assert_eq!(saved.api_key, None);
+
+        // The form always sends a key field; an empty one means "unchanged".
+        let mut untouched = profile_input();
+        untouched.api_key = Some(String::new());
+        let saved = merge_profile_input(env_key_profile(), untouched);
+        assert_eq!(saved.api_key_env.as_deref(), Some("KROMA_TEST_KEY"));
+        assert_eq!(saved.api_key, None);
+    }
+
+    #[test]
+    fn a_new_inline_key_or_an_explicit_clear_drops_the_env_reference() {
+        let mut supplied = profile_input();
+        supplied.api_key = Some("new-key".into());
+        let saved = merge_profile_input(env_key_profile(), supplied);
+        assert_eq!(saved.api_key.as_deref(), Some("new-key"));
+        assert_eq!(saved.api_key_env, None);
+
+        let mut cleared = profile_input();
+        cleared.clear_key = true;
+        cleared.api_key = Some("ignored-key".into());
+        let saved = merge_profile_input(env_key_profile(), cleared);
+        assert_eq!(saved.api_key, None);
+        assert_eq!(saved.api_key_env, None);
+    }
+
     fn idle_host(project: PathBuf) -> Host {
         Host {
             project,

@@ -35,14 +35,19 @@ pub mod skills;
 pub mod steering;
 pub mod tools;
 pub mod tui;
+pub mod update;
 pub mod usage;
 
 mod atomic_file;
 mod cache_trace;
 mod catalog_file;
+mod file_lock;
 mod history_tools;
 mod path_display;
 mod private_file;
 mod token_estimate;
 #[cfg(windows)]
 mod winsys;
+
+#[cfg(test)]
+mod performance;

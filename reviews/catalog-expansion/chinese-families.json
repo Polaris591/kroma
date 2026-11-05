@@ -1,0 +1,211 @@
+[
+  {
+    "provider": "alibaba",
+    "models": ["qwen3.7-max", "qwen3.7-max-2026-05-20"],
+    "context": 1000000,
+    "input": 983616,
+    "output": 131072,
+    "image": false,
+    "levels": null,
+    "source": "https://www.alibabacloud.com/help/en/model-studio/qwen3-7-max",
+    "notes": "Active previous-generation Max flagship. Official Context Limits table: context 1,000,000; max input 991,808 (983,616 in thinking mode); max output 131,072; max CoT 262,144. The stricter thinking-mode input ceiling is recorded, matching the existing qwen3.8-max policy. Text-only interface, so image=false. Snapshot qwen3.7-max-2026-05-20 is documented as functionally equivalent, hence identical caps. Effort tiers are not restated for Qwen3.7 and were not copied from qwen3.8, so levels=null. Additional: https://www.alibabacloud.com/help/en/model-studio/text-generation-model"
+  },
+  {
+    "provider": "alibaba",
+    "models": ["qwen3.7-plus", "qwen3.7-plus-2026-05-26"],
+    "context": 1000000,
+    "input": 983616,
+    "output": 131072,
+    "image": true,
+    "levels": null,
+    "source": "https://www.alibabacloud.com/help/en/model-studio/qwen3-7-plus",
+    "notes": "Active Plus model and current recommended default. Same Context Limits table as qwen3.7-max: 1,000,000 context, 991,808 input (983,616 thinking), 131,072 output. Input modality is Image+Text+Video, so image=true. Snapshot qwen3.7-plus-2026-05-26 documented as functionally equivalent. Effort tiers unverified for this ID, levels=null. Additional: https://www.alibabacloud.com/help/en/model-studio/text-generation-model"
+  },
+  {
+    "provider": "alibaba",
+    "models": ["qwen-plus", "qwen-plus-2025-12-01"],
+    "context": 1000000,
+    "input": 997952,
+    "output": 32768,
+    "image": false,
+    "levels": null,
+    "source": "https://www.alibabacloud.com/help/en/model-studio/qwen-plus",
+    "notes": "Official stable alias (Qwen3-series Plus) plus its declared equivalent snapshot qwen-plus-2025-12-01. Context Limits: context 1,000,000; max input 997,952 (995,904 thinking); max output 32,768; max CoT 81,920. Input and output modality are Text only here, so image=false. Older snapshots do NOT inherit these caps (qwen-plus-2025-04-28 is 131,072/129,024/8,192), so only the equivalent snapshot was grouped. levels=null: no per-ID effort tier list verified."
+  },
+  {
+    "provider": "alibaba",
+    "models": ["qwen3-coder-plus", "qwen3-coder-plus-2025-09-23"],
+    "context": 1000000,
+    "input": 997952,
+    "output": 65536,
+    "image": false,
+    "levels": null,
+    "source": "https://www.alibabacloud.com/help/en/model-studio/qwen3-coder-plus",
+    "notes": "Current coding model (Coding Agent, tool use). Context Limits repeated for the alias and for the 2025-09-23 snapshot section: context 1,000,000; max input 997,952; max output 65,536. Text-only modality. Structured output and batch inference are unsupported on this ID, which matters for request shaping. The 2025-07-22 snapshot publishes the same numbers but is omitted as superseded. Cross-checked identical limits at https://help.aliyun.com/zh/model-studio/qwen3-coder-plus and https://www.alibabacloud.com/help/en/model-studio/text-generation-model"
+  },
+  {
+    "provider": "alibaba",
+    "models": ["qwen3-vl-plus"],
+    "context": 262144,
+    "input": 260096,
+    "output": 32768,
+    "image": true,
+    "levels": null,
+    "source": "https://www.alibabacloud.com/help/en/model-studio/qwen3-vl-plus",
+    "notes": "Current vision-language model, still listed in the platform Context Cache model directory. Context Limits: context 262,144; max input 260,096 (258,048 thinking); max output 32,768; max CoT 81,920. Input modality Text+Image+Video. Snapshot IDs qwen3-vl-plus-2025-12-19 and qwen3-vl-plus-2025-09-23 are current, but per-snapshot limits are not published separately on that page, so they were excluded rather than guessed. Additional: https://help.aliyun.com/en/model-studio/context-cache"
+  },
+  {
+    "provider": "alibaba",
+    "models": ["qwen3.6-plus", "qwen3.5-plus"],
+    "context": 1000000,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://www.alibabacloud.com/help/en/model-studio/text-generation-model",
+    "notes": "Still-callable previous Plus generations, listed on the official older-models tables with 1M context and thinking-mode support. Only context is published there; per-ID input/output caps and modality are not stated, so they stay null. Snapshot IDs exist (for example qwen3.5-plus-2026-04-20 in the Context Cache list) but were not added because standalone limits were not verified in this pass."
+  },
+  {
+    "provider": "alibaba",
+    "models": ["qwen-max"],
+    "context": 128000,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://www.alibabacloud.com/help/en/model-studio/text-generation-model",
+    "notes": "Legacy stable Max alias still served (qwen-max and its snapshots, 128k context, floored to 128,000 per catalog convention). Thinking mode is explicitly Unsupported for this family, so there are no effort tiers and levels=null. Input/output caps are not stated on the model table and were not invented. Snapshots such as qwen-max-2025-01-25 were not added because per-snapshot limits are unverified."
+  },
+  {
+    "provider": "alibaba",
+    "models": ["qwen3-coder-flash"],
+    "context": 1000000,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://www.alibabacloud.com/help/en/model-studio/text-generation-model",
+    "notes": "Current fast coding sibling, listed in the official Qwen3-Coder older-models table with 1M context, thinking mode, function calling and structured output. Its dedicated page was not reachable in this pass, so input/output caps stay null instead of being copied from qwen3-coder-plus. Additional: https://help.aliyun.com/en/model-studio/context-cache"
+  },
+  {
+    "provider": "zhipu",
+    "models": ["glm-4.7"],
+    "context": 200000,
+    "input": null,
+    "output": 128000,
+    "image": false,
+    "levels": null,
+    "source": "https://docs.z.ai/guides/llm/glm-4.7",
+    "notes": "Active previous flagship: guide page states 200K context and 128K max output, and it is still on the official price list (https://docs.z.ai/guides/overview/pricing.md). 200K and 128K are recorded as conservative decimal bounds (200,000/128,000), consistent with the existing GLM-5.3 rows. Input is Text only, so image=false. Thinking is an enable/disable switch rather than documented effort tiers, so levels=null."
+  },
+  {
+    "provider": "zhipu",
+    "models": ["glm-4.7-flashx"],
+    "context": 200000,
+    "input": null,
+    "output": 128000,
+    "image": false,
+    "levels": null,
+    "source": "https://docs.z.ai/guides/llm/glm-4.7",
+    "notes": "Lightweight high-speed sibling of GLM-4.7, documented on the same guide with identical 200K/128K text-only limits, and billable on the price page. levels=null for the same reason as glm-4.7: no published effort tier list."
+  },
+  {
+    "provider": "zhipu",
+    "models": ["glm-4.7-flash"],
+    "context": 200000,
+    "input": null,
+    "output": 128000,
+    "image": false,
+    "levels": null,
+    "source": "https://docs.z.ai/guides/llm/glm-4.7",
+    "notes": "Free 30B-A3B lightweight GLM-4.7 variant with the same 200K/128K text-only limits; the free tier is visible on https://docs.z.ai/guides/overview/pricing.md. A catalog match does not prove free-plan quota or rate-limit headroom. levels=null."
+  },
+  {
+    "provider": "zhipu",
+    "models": ["glm-4.6"],
+    "context": 200000,
+    "input": null,
+    "output": 128000,
+    "image": false,
+    "levels": null,
+    "source": "https://docs.z.ai/guides/llm/glm-4.6",
+    "notes": "Active coding-oriented generation immediately before 4.7: 200K context and 128K max output (decimal bounds recorded). Text-only. Thinking via thinking={type:enabled} and streaming tool calls (tool_stream) are supported per https://docs.z.ai/guides/overview/migrate-to-glm-4.6, and the ID is still billable. levels=null: no effort tier list published."
+  },
+  {
+    "provider": "zhipu",
+    "models": ["glm-4.5"],
+    "context": 128000,
+    "input": null,
+    "output": null,
+    "image": false,
+    "levels": null,
+    "source": "https://docs.z.ai/guides/overview/pricing.md",
+    "notes": "Still on the official paid price list, so callable. The 128K context figure comes from the official model repository README (https://github.com/zai-org/GLM-4.5), which states the full 128K context and that GLM-4.6 raised it to 200K; recorded as the conservative 128,000 bound. No separate output maximum is published for 4.5, so output=null. Its guide page is no longer in the docs index (https://docs.z.ai/llms.txt). GLM-4.5-Air, 4.5-X, 4.5-AirX, 4.5-Flash, 4.6V, 4.5V, 5.2, 5.1 and 5 also appear on the active price list, but per-ID caps were not verified in this pass so they were excluded rather than guessed."
+  },
+  {
+    "provider": "moonshot",
+    "models": ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"],
+    "context": 262144,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://platform.kimi.ai/docs/models.md",
+    "notes": "Callable now with constraints: listed as available dedicated coding models with 256k context, but the K2 series is closed to new registrations since 2026-10-31 and is scheduled for full retirement by end of December 2026. 262,144 is the exact figure published for all K2 series at https://platform.kimi.ai/docs/pricing/chat.md. No max output is published for K2, so output=null; modality is not stated for the code ID, so image=null. Treat as short-lived rows: K2 status must be re-checked before any release."
+  },
+  {
+    "provider": "moonshot",
+    "models": ["kimi-k2.6"],
+    "context": 262144,
+    "input": null,
+    "output": null,
+    "image": true,
+    "levels": null,
+    "source": "https://platform.kimi.ai/docs/models.md",
+    "notes": "Available previous-generation multimodal model: text and visual input, thinking and non-thinking modes, 256k context (262,144 exactly per the pricing page). Same K2 lifecycle constraint: no new registrations from 2026-10-31, retirement planned end of December 2026. Thinking is a mode toggle rather than documented effort tiers, and no output maximum is published, so output and levels stay null."
+  },
+  {
+    "provider": "bytedance",
+    "models": ["doubao-seed-2-1-lite-260915"],
+    "context": 1024000,
+    "input": 1024000,
+    "output": 256000,
+    "image": true,
+    "levels": null,
+    "source": "https://docs.volcengine.com/docs/ark/model-list?lang=zh",
+    "notes": "Current recommended Lite in the same generation as the catalog's doubao-seed-2-1-pro-260915. Official length column: context 1024k, max input 1024k, max answer 256k (default 4k), max CoT 256k; multimodal understanding, tool calls, structured output. RESOLUTION OF THE 1024k/256k AMBIGUITY: Volcengine's k is 1024, proven numerically inside the same table by kimi-k3-1-pro, published as 1024k context and 1024k max answer, against Kimi's own 1,048,576/1,048,576 in https://platform.kimi.ai/docs/pricing/chat.md; therefore 1024k=1,048,576 and 256k=262,144. The recorded values are floored to the conservative decimal bounds (1,024,000/256,000) per docs/model-catalog.md policy instead of claiming binary units. levels=null: the table publishes no effort tier list. Additional: https://docs.volcengine.com/docs/ark/chat-api?lang=zh"
+  },
+  {
+    "provider": "bytedance",
+    "models": ["doubao-seed-2-1-pro-260628"],
+    "context": 256000,
+    "input": 256000,
+    "output": 256000,
+    "image": true,
+    "levels": null,
+    "source": "https://docs.volcengine.com/docs/ark/model-list?lang=zh",
+    "notes": "Previous pinned Seed 2.1 Pro snapshot, still served (listed under other models, not marked retiring). 256k context, 256k max input, 256k max answer, 256k max CoT: the answer ceiling equals the whole window, so input and output share one budget and must not be added. 256k floored to 256,000 per the unit resolution on the 2-1-lite row. Not LTS-flagged, so it may be superseded. levels=null."
+  },
+  {
+    "provider": "bytedance",
+    "models": ["doubao-seed-2-1-turbo-260628"],
+    "context": 256000,
+    "input": 256000,
+    "output": 256000,
+    "image": true,
+    "levels": null,
+    "source": "https://docs.volcengine.com/docs/ark/model-list?lang=zh",
+    "notes": "Fast sibling in the Seed 2.1 line: 256k context, 256k max input, 256k max answer, 256k max CoT, again a shared window that must not be summed. Rate limits on the row are 500 RPM / 1,000,000 TPM. levels=null: no effort tier list published."
+  },
+  {
+    "provider": "bytedance",
+    "models": ["doubao-seed-2-0-lite-260428", "doubao-seed-2-0-mini-260428"],
+    "context": 256000,
+    "input": 224000,
+    "output": 128000,
+    "image": true,
+    "levels": null,
+    "source": "https://docs.volcengine.com/docs/ark/model-list?lang=zh",
+    "notes": "Both are LTS-flagged on the official list, making them the durable Seed 2.0 options. Limits: context 256k, max input 224k, max answer 128k (default 4k), max CoT 128k, floored to 256,000/224,000/128,000 per the unit resolution on the 2-1-lite row. The input cap is strictly below the context, matching the catalog's separate input-ceiling field. The 260215 pro/lite/mini predecessors and doubao-seed-2-0-code-preview-260215 are marked retiring on the same page and were excluded. levels=null."
+  }
+]

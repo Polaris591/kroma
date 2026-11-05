@@ -24,7 +24,10 @@ use crate::{
 use anyhow::{bail, Result};
 use std::{
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -65,6 +68,7 @@ pub struct Agent {
     /// A `run_with_attachments` future exists. It is cleared on normal return;
     /// leaving it set after a dropped future is what makes `cancel` meaningful.
     task_active: bool,
+    model_in_flight: bool,
     /// The tool call currently executing and when it started. A cancelled turn
     /// uses it to say how long the interrupted command may have been running.
     active_tool: Option<ActiveTool>,
@@ -81,6 +85,21 @@ struct ActiveTool {
     id: String,
     name: String,
     started: Instant,
+}
+
+/// Cancels cooperative checkpoint work when a run future is dropped.
+/// `spawn_blocking` cannot be aborted once it starts, so the flag lets the
+/// transaction kill its active Git child and release the per-project lock.
+struct SnapshotGuard {
+    cancelled: Arc<AtomicBool>,
+    abort: tokio::task::AbortHandle,
+}
+
+impl Drop for SnapshotGuard {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.abort.abort();
+    }
 }
 
 /// Completed conversation checkpoints. A checkpoint is the message prefix
@@ -332,6 +351,7 @@ impl Agent {
             context_budget,
             task_input: TaskInput::default(),
             task_active: false,
+            model_in_flight: false,
             active_tool: None,
             usage: UsageMeter::default(),
             model_report: None,
@@ -393,6 +413,16 @@ impl Agent {
         }
     }
 
+    fn remember_active_session(&self) {
+        if let Err(error) = self.catalog.remember_active(self.session_id()) {
+            let message = format!("Unable to record recent conversation: {error:#}");
+            crate::runtime_log!("[session] {message}");
+            if let Some(events) = &self.events {
+                events.on_event(RuntimeEvent::Warning { message: &message });
+            }
+        }
+    }
+
     pub fn session_id(&self) -> &str {
         self.catalog
             .id_for_path(self.session.archive_path())
@@ -402,6 +432,13 @@ impl Agent {
     /// Enable automatic local file snapshots for this host.
     pub fn enable_checkpoints(&mut self) {
         self.checkpoints = std::env::var_os("KROMA_NO_CHECKPOINTS").is_none();
+    }
+
+    fn checkpoint_warning(&self, message: String) {
+        crate::runtime_log!("[checkpoints] {message}");
+        if let Some(events) = &self.events {
+            events.on_event(RuntimeEvent::Warning { message: &message });
+        }
     }
 
     /// Read-only durable conversation for host renderers (CLI/TUI).
@@ -443,7 +480,7 @@ impl Agent {
     /// Manually checkpoint completed history without adding a user turn or
     /// executing tools. The context policy owns validation and WAL commit.
     pub async fn compact(&mut self) -> Result<crate::context::CompactionReport> {
-        let _active = self.task_input.start()?;
+        let _active = self.task_input.start_exclusive()?;
         self.session.ensure_writable()?;
         self.prompt.refresh_for_task(&self.workdir, "")?;
         self.compression.set_event_sink(self.events.clone());
@@ -452,9 +489,12 @@ impl Agent {
         let mut system = vec![self.messages[0].clone()];
         self.prompt.apply(&mut system);
         self.compression.set_prompt_context(system.first());
-        let extra_tokens = self
-            .prompt
-            .extra_estimated_tokens(&self.messages[0])
+        let prompt_tokens = if self.compression.composes_prompt_context() {
+            0
+        } else {
+            self.prompt.extra_estimated_tokens(&self.messages[0])
+        };
+        let extra_tokens = prompt_tokens
             .saturating_add(bytes_to_tokens(serde_json::to_vec(&tools)?.len()))
             .saturating_add(crate::attachments::active_image_tokens(
                 &self.messages,
@@ -650,17 +690,18 @@ impl Agent {
         until: usize,
         id: String,
         path: PathBuf,
-        state: PersistedContext,
+        mut state: PersistedContext,
     ) -> Result<String> {
-        let compression = self
-            .context_factory
-            .restore(state, self.context_budget, &path)?;
-        let messages = shell::clone_session_captures(
+        let (messages, paths) = shell::clone_session_captures(
             &self.workdir,
             self.session.archive_path(),
             &path,
             &self.messages[..until],
         )?;
+        remap_capture_references(&mut state, &paths)?;
+        let compression = self
+            .context_factory
+            .restore(state, self.context_budget, &path)?;
         let next = SessionStore::open_at(path, &self.workdir)?;
         next.reset(&messages, &compression.state())?;
         self.catalog.copy_model_choice(&source_id, &id)?;
@@ -670,7 +711,7 @@ impl Agent {
         self.compression = compression;
         self.task_active = false;
         self.sync_session_context();
-        self.catalog.remember_active(self.session_id())?;
+        self.remember_active_session();
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::SessionForked {
                 from: &source_id,
@@ -768,23 +809,24 @@ impl Agent {
         until: usize,
         backup_id: String,
         backup_path: PathBuf,
-        backup_state: PersistedContext,
+        mut backup_state: PersistedContext,
         retained_state: PersistedContext,
     ) -> Result<String> {
-        let archived_compression =
-            self.context_factory
-                .restore(backup_state, self.context_budget, &backup_path)?;
         let next_compression = self.context_factory.restore(
             retained_state,
             self.context_budget,
             self.session.archive_path(),
         )?;
-        let archived = shell::clone_session_captures(
+        let (archived, paths) = shell::clone_session_captures(
             &self.workdir,
             self.session.archive_path(),
             &backup_path,
             &self.messages,
         )?;
+        remap_capture_references(&mut backup_state, &paths)?;
+        let archived_compression =
+            self.context_factory
+                .restore(backup_state, self.context_budget, &backup_path)?;
         let backup = SessionStore::open_at(backup_path, &self.workdir)?;
         backup.reset(&archived, &archived_compression.state())?;
         self.catalog
@@ -908,7 +950,7 @@ impl Agent {
         self.context_budget = next_budget;
         self.task_active = false;
         self.sync_session_context();
-        self.catalog.remember_active(self.session_id())?;
+        self.remember_active_session();
         if let Some(events) = &self.events {
             if fresh {
                 events.on_event(RuntimeEvent::SessionCreated {
@@ -930,6 +972,17 @@ impl Agent {
             return Ok(());
         }
         self.task_active = false;
+        if std::mem::take(&mut self.model_in_flight) {
+            self.usage.record(None);
+            if let Some(events) = &self.events {
+                events.on_event(RuntimeEvent::FailedRequestUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cached_tokens: None,
+                    reasoning_tokens: None,
+                });
+            }
+        }
         // Take the checkpoint usage before aborting; a custom policy may clear
         // its transient accounting in `abort`.
         let checkpoint = self.compression.take_usage();
@@ -998,27 +1051,43 @@ impl Agent {
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::TaskStarted);
         }
+
+        // Start the task clock before the snapshot so wall time and
+        // `snapshot_ms` include it. Keep one tiny task-level usage guard: both
+        // explicit failure and normal completion report here; dropping this
+        // future on Ctrl+C reports cancellation without a monitoring framework.
+        let mut stats = TaskStats::begin();
         if self.checkpoints {
             self.checkpoint_turn = self.checkpoint_turn.saturating_add(1);
             let workdir = self.workdir.clone();
             let session = self.session_id().to_owned();
             let turn = self.checkpoint_turn;
+            let cancelled = Arc::new(AtomicBool::new(false));
             // Git inspection can be slow on a large worktree; keep it off the
             // async runtime thread while still finishing before the task starts.
-            let snapshot = tokio::task::spawn_blocking(move || {
-                crate::checkpoints::snapshot(&workdir, &session, turn)
-            })
-            .await;
+            let snapshot = {
+                let cancelled = Arc::clone(&cancelled);
+                tokio::task::spawn_blocking(move || {
+                    crate::checkpoints::snapshot_cancellable(&workdir, &session, turn, cancelled)
+                })
+            };
+            // The guard owns cancellation for this transaction: if the run
+            // future is dropped, the blocking task kills Git and releases the
+            // store lock instead of mutating it after a later task starts.
+            let guard = SnapshotGuard {
+                cancelled,
+                abort: snapshot.abort_handle(),
+            };
+            let snapshot_started = Instant::now();
+            let snapshot = snapshot.await;
+            stats.snapshot_time += snapshot_started.elapsed();
             match snapshot {
                 Ok(Ok(_)) => {}
-                Ok(Err(error)) => crate::runtime_log!("[checkpoints] snapshot skipped: {error:#}"),
-                Err(error) => crate::runtime_log!("[checkpoints] snapshot task failed: {error:#}"),
+                Ok(Err(error)) => self.checkpoint_warning(format!("snapshot skipped: {error:#}")),
+                Err(error) => self.checkpoint_warning(format!("snapshot task failed: {error:#}")),
             }
+            drop(guard);
         }
-        // Keep one tiny task-level usage guard. Both explicit failure and
-        // normal completion report here; dropping this future on Ctrl+C
-        // reports cancellation, without adding a monitoring framework.
-        let mut stats = TaskStats::begin();
         let result = self
             .run_inner(user_input, attachments, on_text, &mut stats)
             .await;
@@ -1086,9 +1155,7 @@ impl Agent {
         self.session
             .append(&self.messages, &self.compression.state())?;
         stats.journal_time += journal_started.elapsed();
-        if let Err(error) = self.catalog.remember_active(self.session_id()) {
-            crate::runtime_log!("[session] unable to record recent conversation: {error:#}");
-        }
+        self.remember_active_session();
         // The task's attachments are immutable and steering messages are
         // explicitly excluded by the projection. Read small inline logs once,
         // not once per tool round.
@@ -1111,10 +1178,12 @@ impl Agent {
         self.prompt.apply(&mut projected_system);
         self.compression
             .set_prompt_context(projected_system.first());
-        let base_extra_tokens = self
-            .prompt
-            .extra_estimated_tokens(&self.messages[0])
-            .saturating_add(bytes_to_tokens(tool_schema_bytes));
+        let prompt_tokens = if self.compression.composes_prompt_context() {
+            0
+        } else {
+            self.prompt.extra_estimated_tokens(&self.messages[0])
+        };
+        let base_extra_tokens = prompt_tokens.saturating_add(bytes_to_tokens(tool_schema_bytes));
 
         let mut overflow_retries = 0;
         loop {
@@ -1140,6 +1209,7 @@ impl Agent {
                     extra_tokens,
                 )
                 .await?;
+            self.session.ensure_writable()?;
             self.prompt.apply(&mut view);
             // Model context is a projection, not the WAL. Keep images for the
             // current task (including its tool rounds), but don't repeatedly
@@ -1152,9 +1222,12 @@ impl Agent {
             self.model.project_for_budget(&mut budget_view);
             // Reuse the tool-schema bytes measured once for this task,
             // and the validated message bytes for cache calibration.
+            let calibrated_input = self
+                .compression
+                .calibrated_input_tokens(&self.messages, &budget_view);
             let (estimated_input_tokens, budget_view_bytes) = self
                 .context_budget
-                .validate_with_tool_bytes(&budget_view, tool_schema_bytes)?;
+                .validate_with_tool_bytes(&budget_view, tool_schema_bytes, calibrated_input)?;
             if let Some(events) = &self.events {
                 events.on_event(RuntimeEvent::ContextPrepared {
                     messages: view.len(),
@@ -1203,6 +1276,8 @@ impl Agent {
                 });
             }
             let event_sink = self.events.clone();
+            self.model_in_flight = true;
+            stats.model_started = Some(Instant::now());
             let completion = self
                 .model
                 .complete_with_task_images(
@@ -1224,6 +1299,8 @@ impl Agent {
                     },
                 )
                 .await;
+            self.model_in_flight = false;
+            stats.model_started = None;
             if let (Some(trace), Some(snapshot)) = (&mut self.cache_trace, cache_snapshot) {
                 trace.record(
                     self.session.archive_path(),
@@ -1440,9 +1517,9 @@ impl Agent {
                         });
                     }
                 };
-                let result = self
+                let (result, warnings) = self
                     .tools
-                    .execute(
+                    .execute_with_warnings(
                         &call,
                         ToolContext {
                             workdir: &self.workdir,
@@ -1476,12 +1553,21 @@ impl Agent {
                             "arguments": arguments,
                         }));
                 }
+                for warning in &warnings {
+                    message
+                        .provider_items
+                        .get_or_insert_with(Vec::new)
+                        .push(serde_json::json!({"type":"kroma_tool_warning","message":warning}));
+                }
                 self.messages.push(message);
                 let journal_started = Instant::now();
                 self.session
                     .append(&self.messages, &self.compression.state())?;
                 stats.journal_time += journal_started.elapsed();
                 if let Some(events) = &self.events {
+                    for warning in &warnings {
+                        events.on_event(RuntimeEvent::Warning { message: warning });
+                    }
                     events.on_event(RuntimeEvent::ToolFinished {
                         name: &call.function.name,
                         id: &call.id,
@@ -1544,10 +1630,40 @@ impl Agent {
     }
 }
 
+fn remap_capture_references(
+    state: &mut PersistedContext,
+    paths: &[(String, String)],
+) -> Result<()> {
+    if let PersistedContext::Builtin(state) = state {
+        let mut changed = false;
+        for (old, new) in paths {
+            let escaped_old = serde_json::to_string(old)?;
+            let escaped_new = serde_json::to_string(new)?;
+            for segment in &mut state.summaries {
+                // Summaries can quote either a path or its escaped tool JSON.
+                let text = segment
+                    .text
+                    .replace(
+                        &escaped_old[1..escaped_old.len() - 1],
+                        &escaped_new[1..escaped_new.len() - 1],
+                    )
+                    .replace(old, new);
+                changed |= text != segment.text;
+                segment.text = text;
+            }
+        }
+        if changed {
+            state.revision = state.revision.saturating_add(1);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct TaskStats {
     calls: usize,
     elapsed: Duration,
+    model_started: Option<Instant>,
     input: Option<u64>,
     output: Option<u64>,
     cached: Option<u64>,
@@ -1557,6 +1673,7 @@ struct TaskStats {
     profile: bool,
     started: Option<Instant>,
     context_time: Duration,
+    snapshot_time: Duration,
     tool_time: Duration,
     journal_time: Duration,
     apec_finalize_time: Duration,
@@ -1691,9 +1808,10 @@ impl TaskStats {
             let ms = |time: Duration| format!("{:.2}", time.as_secs_f64() * 1_000.0);
             let wall = self.started.map_or(Duration::ZERO, |start| start.elapsed());
             crate::runtime_log!(
-                "[profile] wall_ms={} | context_ms={} | model_ms={} | shell_ms={} | journal_ms={} | apec_finish_ms={} | model_requests={} | tool_calls={} | peak_context_json_bytes={} | sent_messages_json_bytes={} | raw_history_json_bytes={}",
+                "[profile] wall_ms={} | context_ms={} | snapshot_ms={} | model_ms={} | shell_ms={} | journal_ms={} | apec_finish_ms={} | model_requests={} | tool_calls={} | peak_context_json_bytes={} | sent_messages_json_bytes={} | raw_history_json_bytes={}",
                 ms(wall),
                 ms(self.context_time),
+                ms(self.snapshot_time),
                 ms(self.elapsed),
                 ms(self.tool_time),
                 ms(self.journal_time),
@@ -1711,9 +1829,14 @@ impl TaskStats {
 impl Drop for TaskStats {
     fn drop(&mut self) {
         if !self.reported {
-            // A dropped agent.run future is the Ctrl+C cancellation path.
-            // Count only successful model calls; an interrupted attempt has
-            // unknown provider usage and is not silently treated as free.
+            if let Some(started) = self.model_started.take() {
+                self.calls += 1;
+                self.elapsed += started.elapsed();
+                self.input = None;
+                self.output = None;
+                self.cached = None;
+                self.reasoning = None;
+            }
             self.finish("cancelled");
         }
     }
@@ -2198,3 +2321,7 @@ mod failure_boundary_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "agent_repair_tests.rs"]
+mod repair_tests;

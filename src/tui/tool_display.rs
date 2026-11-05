@@ -1,6 +1,8 @@
 //! Human-readable tool activity, derived solely from the actual tool call.
 //! These descriptions do not alter execution or infer an outcome from stderr.
 use super::preferences::Language;
+use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) fn prose_width(width: usize) -> usize {
     width.min((width.saturating_mul(3) / 4).clamp(100, 160))
@@ -265,6 +267,288 @@ pub(super) fn has_diagnostic(details: &str) -> bool {
             || line.starts_with("警告：")
             || line.starts_with("错误：")
     })
+}
+
+/// Shorten text by terminal cell width rather than UTF-8 bytes or chars.
+/// A long command must not take over the conversation's reading column.
+pub(super) fn ellipsize_cells(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+    let mut output = String::new();
+    let mut used = 0;
+    for ch in value.chars() {
+        let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cells > width - 1 {
+            break;
+        }
+        output.push(ch);
+        used += cells;
+    }
+    output.push('…');
+    output
+}
+
+pub(super) fn compact_line(value: &str, width: usize) -> String {
+    ellipsize_cells(
+        &value.split_whitespace().collect::<Vec<_>>().join(" "),
+        width,
+    )
+}
+
+pub(super) fn tool_arguments(name: &str, raw: &str) -> String {
+    let value: Value = match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(_) => return raw.to_owned(),
+    };
+    if name == "shell" {
+        return value["command"]
+            .as_str()
+            .map_or_else(|| raw.to_owned(), str::to_owned);
+    }
+    if name == "subagent" {
+        if let Some(tasks) = value.get("tasks").and_then(Value::as_array) {
+            if !tasks.is_empty() {
+                let total = tasks.len();
+                return tasks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let task = item
+                            .get("task")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let cwd = item
+                            .get("cwd")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|c| !c.is_empty() && *c != ".");
+                        match cwd {
+                            Some(dir) => format!("[{}/{total}] {task} ({dir})", i + 1),
+                            None => format!("[{}/{total}] {task}", i + 1),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+        }
+    }
+    value.to_string()
+}
+
+fn subagent_result_details(value: &Value) -> Option<String> {
+    value.get("run_id")?.as_str()?;
+    let results = value.get("results")?.as_array()?;
+    if results.is_empty() {
+        return None;
+    }
+    let total = results.len();
+    let mut lines = Vec::new();
+    let mut one_liners = Vec::new();
+    let mut failed_liners = Vec::new();
+    let mut ok_count = 0usize;
+    let mut fail_count = 0usize;
+    let mut strip = Vec::with_capacity(total);
+
+    for (i, item) in results.iter().enumerate() {
+        let idx = i + 1;
+        let status = item
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
+        let secs = item
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| format!(" {:.1}s ·", ms as f64 / 1000.0))
+            .unwrap_or_default();
+        match status {
+            "completed" => {
+                ok_count += 1;
+                strip.push(format!("{idx}✓"));
+                let out =
+                    compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 72);
+                one_liners.push(format!("✓ [{idx}/{total}]{secs} \"{out}\""));
+            }
+            "not_started" => {
+                strip.push(format!("{idx}–"));
+                let code = item
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("BATCH_ABORTED");
+                let line = format!("– [{idx}/{total}] not started ({code})");
+                failed_liners.push(line.clone());
+                one_liners.push(line);
+            }
+            _ => {
+                fail_count += 1;
+                strip.push(format!("{idx}✗"));
+                let code = item
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("FAILED");
+                let msg = compact_line(
+                    item.pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("task failed"),
+                    64,
+                );
+                let line = format!("✗ [{idx}/{total}]{secs} {code}: {msg}");
+                failed_liners.push(line.clone());
+                one_liners.push(line);
+            }
+        }
+    }
+
+    if total <= 2 {
+        lines.extend(one_liners);
+    } else {
+        let mark = if ok_count == total {
+            "✓"
+        } else if ok_count > 0 {
+            "△"
+        } else {
+            "✗"
+        };
+        let fail_note = if fail_count > 0 {
+            format!(" · {fail_count} failed")
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "{mark} {ok_count}/{total} completed{fail_note} · {}",
+            strip.join(" ")
+        ));
+        if !failed_liners.is_empty() {
+            lines.push(failed_liners.join(" · "));
+        } else {
+            let answers = results
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let out =
+                        compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 28);
+                    format!("{} \"{out}\"", i + 1)
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            lines.push(answers);
+        }
+    }
+
+    for (i, item) in results.iter().enumerate() {
+        let idx = i + 1;
+        let status = item
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
+        let secs = item
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| format!(" · {:.1}s", ms as f64 / 1000.0))
+            .unwrap_or_default();
+        match status {
+            "completed" => {
+                lines.push(format!("── [{idx}/{total}] ✓ completed{secs}"));
+                let out = item
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if !out.is_empty() {
+                    for line in out.lines() {
+                        lines.push(line.trim_end().to_owned());
+                    }
+                }
+            }
+            "not_started" => {
+                let code = item
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("BATCH_ABORTED");
+                lines.push(format!("── [{idx}/{total}] – not started ({code})"));
+                if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
+                    lines.push(msg.trim().to_owned());
+                }
+            }
+            _ => {
+                let code = item
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("FAILED");
+                lines.push(format!("── [{idx}/{total}] ✗ failed ({code}){secs}"));
+                if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
+                    lines.push(msg.trim().to_owned());
+                }
+                if item
+                    .get("partial")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    if let Some(out) = item.get("output").and_then(Value::as_str) {
+                        let out = out.trim();
+                        if !out.is_empty() {
+                            lines.push("partial answer:".to_owned());
+                            for line in out.lines() {
+                                lines.push(line.trim_end().to_owned());
+                            }
+                        }
+                    }
+                }
+                if let Some(art) = item.get("artifacts").and_then(Value::as_str) {
+                    lines.push(format!("artifacts: {art}"));
+                }
+            }
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+pub(super) fn tool_result_details(raw: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_owned();
+    };
+    if let Some(subagent) = subagent_result_details(&value) {
+        return subagent;
+    }
+    if let Some(error) = value.get("error") {
+        return error.as_str().unwrap_or(raw).to_owned();
+    }
+    let mut lines = Vec::new();
+    if let Some(code) = value.get("exit_code") {
+        lines.push(format!("exit: {}", code));
+    }
+    if let Some(stdout) = value.get("stdout").and_then(Value::as_str) {
+        if !stdout.trim().is_empty() {
+            lines.push(stdout.to_owned());
+        }
+    }
+    if let Some(stderr) = value.get("stderr").and_then(Value::as_str) {
+        if !stderr.trim().is_empty() {
+            lines.push(format!("stderr: {stderr}"));
+        }
+    }
+    if let Some(content) = value.get("content").and_then(Value::as_array) {
+        for item in content.iter() {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                lines.push(text.to_owned());
+            }
+        }
+    }
+    for key in ["stdout_file", "stderr_file"] {
+        if let Some(path) = value.get(key).and_then(Value::as_str) {
+            lines.push(format!("{key}: {path}"));
+        }
+    }
+    if lines.is_empty() {
+        return raw.to_owned();
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]

@@ -1,0 +1,16 @@
+{
+  "captured_at": "2026-11-05T09:08:44.635Z",
+  "platform": "win32",
+  "release": "10.0.26200",
+  "arch": "x64",
+  "cpu": "AMD Ryzen 5 7500F 6-Core Processor             ",
+  "logical_cpus": 12,
+  "memory_bytes": 33947545600,
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-pc-windows-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "node": "v22.23.3",
+  "notes": [
+    "Windows GNU",
+    "Local synthetic/fake requests, no paid provider",
+    "Host load varies; use paired reference/current for optimization conclusions"
+  ]
+}

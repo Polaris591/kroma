@@ -1,5 +1,5 @@
  ◆ Kroma / untitled session             
-  ▎  Review the change. 请 检 查 代 码 。     
+     Review the change. 请 检 查 代 码 。     
      Preserve Unicode and indentation.  
                                         
   ◆  Updated the implementation.        

@@ -226,6 +226,7 @@
   function applyEvents(events: DesktopEvent[]) {
     for (const e of events) {
       switch(e.kind) {
+        case 'warning': toast(String(e.message ?? '运行警告')); break;
         case 'text_delta': stream += e.text ?? ''; break;
         case 'reasoning_delta': thinking += e.text ?? ''; break;
         case 'model_finished':

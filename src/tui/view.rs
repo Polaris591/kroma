@@ -27,6 +27,8 @@ mod transcript_panel;
 pub(super) use chrome::{display_session_title, NoticeLevel};
 
 use super::event_queue::EventSender;
+use super::runtime_events::UiEvent;
+use super::tool_display::{compact_line, ellipsize_cells, tool_arguments, tool_result_details};
 use super::{
     attachments::{Attachment, MAX_ATTACHMENTS},
     editor::Editor,
@@ -34,9 +36,7 @@ use super::{
     picker::Picker,
     theme::{Theme, ThemeStore},
 };
-use crate::{
-    events::RuntimeEvent, plugins::PluginLayoutSpec, protocol::Message, sessions::SessionEntry,
-};
+use crate::{plugins::PluginLayoutSpec, protocol::Message, sessions::SessionEntry};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -51,7 +51,7 @@ use std::{
     time::{Duration, Instant},
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 /// Keep continuation lines under the content, not underneath list bullets or
 /// code gutters. Terminal cells (not UTF-8 byte lengths) determine wrapping.
@@ -388,6 +388,11 @@ enum Decor {
     Group(String),
     Inspect(String),
     TurnStart(usize),
+    Rail {
+        column: u16,
+        color: Color,
+        first_only: bool,
+    },
     Gutter {
         column: u16,
         glyph: &'static str,
@@ -431,161 +436,6 @@ impl Entry {
     }
 }
 
-pub enum UiEvent {
-    GitInfo {
-        revision: u64,
-        session: String,
-        info: super::gitinfo::Info,
-        changes: Option<super::gitinfo::Changes>,
-    },
-    TaskStarted,
-    CompactionStarted,
-    ModelStarted,
-    Usage {
-        input: Option<u64>,
-        output: Option<u64>,
-        cached: Option<u64>,
-        reasoning: Option<u64>,
-    },
-    TitleUsage {
-        session_id: String,
-        requests: usize,
-        input: Option<u64>,
-        output: Option<u64>,
-        cached: Option<u64>,
-        reasoning: Option<u64>,
-    },
-    ApecUsage {
-        requests: usize,
-        input: Option<u64>,
-        output: Option<u64>,
-        cached: Option<u64>,
-    },
-    UsageBatch(crate::usage::UsageMeter),
-    ApecUsageBatch(crate::usage::UsageMeter),
-    BacklogOverflow,
-    Context {
-        estimated: usize,
-    },
-    ActualInput(u64),
-    Text(String),
-    ReasoningDelta(String),
-    ReasoningFinal(String),
-    ToolStarted {
-        name: String,
-        id: String,
-        args: String,
-    },
-    ToolFinished {
-        id: String,
-        result: String,
-        failed: bool,
-    },
-    ToolOutput {
-        id: String,
-        stream: String,
-        chunk: String,
-    },
-    SessionTitleUpdated(String),
-    TaskFinished,
-}
-
-pub struct UiSink(pub EventSender);
-
-impl crate::events::EventSink for UiSink {
-    fn on_event(&self, event: RuntimeEvent<'_>) {
-        let message = match event {
-            RuntimeEvent::TaskStarted => Some(UiEvent::TaskStarted),
-            RuntimeEvent::CompactionStarted => Some(UiEvent::CompactionStarted),
-            RuntimeEvent::ModelStarted { .. } => Some(UiEvent::ModelStarted),
-            RuntimeEvent::ContextPrepared {
-                estimated_input_tokens,
-                ..
-            } => Some(UiEvent::Context {
-                estimated: estimated_input_tokens,
-            }),
-            RuntimeEvent::TextDelta(delta) => Some(UiEvent::Text(delta.to_owned())),
-            RuntimeEvent::ReasoningDelta(delta) => Some(UiEvent::ReasoningDelta(delta.to_owned())),
-            RuntimeEvent::ModelFinished {
-                input_tokens,
-                output_tokens,
-                reasoning_tokens,
-                cached_tokens,
-                reasoning,
-                ..
-            } => {
-                let _ = self.0.send(UiEvent::Usage {
-                    input: input_tokens,
-                    output: output_tokens,
-                    cached: cached_tokens,
-                    reasoning: reasoning_tokens,
-                });
-                if let Some(tokens) = input_tokens {
-                    let _ = self.0.send(UiEvent::ActualInput(tokens));
-                }
-                if let Some(text) = reasoning.filter(|s| !s.is_empty()) {
-                    let _ = self.0.send(UiEvent::ReasoningFinal(text.to_owned()));
-                }
-                None
-            }
-            RuntimeEvent::FailedRequestUsage {
-                input_tokens,
-                output_tokens,
-                cached_tokens,
-                reasoning_tokens,
-            } => {
-                let _ = self.0.send(UiEvent::Usage {
-                    input: input_tokens,
-                    output: output_tokens,
-                    cached: cached_tokens,
-                    reasoning: reasoning_tokens,
-                });
-                None
-            }
-            RuntimeEvent::CompactionUsage {
-                requests,
-                input_tokens,
-                output_tokens,
-                cached_tokens,
-            } => Some(UiEvent::ApecUsage {
-                requests,
-                input: input_tokens,
-                output: output_tokens,
-                cached: cached_tokens,
-            }),
-            RuntimeEvent::ToolStarted {
-                name,
-                id,
-                arguments,
-            } => Some(UiEvent::ToolStarted {
-                name: name.to_owned(),
-                id: id.to_owned(),
-                args: tool_arguments(name, arguments),
-            }),
-            RuntimeEvent::ToolFinished {
-                id,
-                result,
-                is_error,
-                ..
-            } => Some(UiEvent::ToolFinished {
-                id: id.to_owned(),
-                result: tool_result_details(result),
-                failed: is_error,
-            }),
-            RuntimeEvent::ToolOutput { id, stream, chunk } => Some(UiEvent::ToolOutput {
-                id: id.to_owned(),
-                stream: stream.to_owned(),
-                chunk: chunk.to_owned(),
-            }),
-            RuntimeEvent::TaskFinished { .. } => Some(UiEvent::TaskFinished),
-            _ => None,
-        };
-        if let Some(message) = message {
-            let _ = self.0.send(message);
-        }
-    }
-}
-
 fn excerpt(text: &str, limit: usize) -> String {
     let mut chars = text.chars();
     let short = chars.by_ref().take(limit).collect::<String>();
@@ -594,29 +444,6 @@ fn excerpt(text: &str, limit: usize) -> String {
     } else {
         short
     }
-}
-
-/// Shorten text by terminal cell width rather than UTF-8 bytes or chars.
-/// A long command must not take over the conversation's reading column.
-fn ellipsize_cells(value: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if UnicodeWidthStr::width(value) <= width {
-        return value.to_owned();
-    }
-    let mut output = String::new();
-    let mut used = 0;
-    for ch in value.chars() {
-        let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + cells > width - 1 {
-            break;
-        }
-        output.push(ch);
-        used += cells;
-    }
-    output.push('…');
-    output
 }
 
 /// Windows canonicalization returns a verbatim `\\?\` path. That prefix is
@@ -629,13 +456,6 @@ fn strip_verbatim_path(value: &str) -> String {
     } else {
         value.to_owned()
     }
-}
-
-fn compact_line(value: &str, width: usize) -> String {
-    ellipsize_cells(
-        &value.split_whitespace().collect::<Vec<_>>().join(" "),
-        width,
-    )
 }
 
 /// Find the failure's useful diagnostic, not its full tool-result envelope.
@@ -685,252 +505,6 @@ fn failure_summary(details: &str) -> String {
         (None, true) => "Tool failed".into(),
         (None, false) => message.to_owned(),
     }
-}
-
-fn tool_arguments(name: &str, raw: &str) -> String {
-    let value: Value = match serde_json::from_str(raw) {
-        Ok(value) => value,
-        Err(_) => return raw.to_owned(),
-    };
-    if name == "shell" {
-        return value["command"]
-            .as_str()
-            .map_or_else(|| raw.to_owned(), str::to_owned);
-    }
-    if name == "subagent" {
-        if let Some(tasks) = value.get("tasks").and_then(Value::as_array) {
-            if !tasks.is_empty() {
-                let total = tasks.len();
-                return tasks
-                    .iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        let task = item
-                            .get("task")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .split_whitespace()
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let cwd = item
-                            .get("cwd")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|c| !c.is_empty() && *c != ".");
-                        match cwd {
-                            Some(dir) => format!("[{}/{total}] {task} ({dir})", i + 1),
-                            None => format!("[{}/{total}] {task}", i + 1),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(
-                        "
-",
-                    );
-            }
-        }
-    }
-    value.to_string()
-}
-
-fn subagent_result_details(value: &Value) -> Option<String> {
-    value.get("run_id")?.as_str()?;
-    let results = value.get("results")?.as_array()?;
-    if results.is_empty() {
-        return None;
-    }
-    let total = results.len();
-    let mut lines = Vec::new();
-    let mut one_liners = Vec::new();
-    let mut failed_liners = Vec::new();
-    let mut ok_count = 0usize;
-    let mut fail_count = 0usize;
-    let mut strip = Vec::with_capacity(total);
-
-    for (i, item) in results.iter().enumerate() {
-        let idx = i + 1;
-        let status = item
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("failed");
-        let secs = item
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .map(|ms| format!(" {:.1}s ·", ms as f64 / 1000.0))
-            .unwrap_or_default();
-        match status {
-            "completed" => {
-                ok_count += 1;
-                strip.push(format!("{idx}✓"));
-                let out =
-                    compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 72);
-                one_liners.push(format!("✓ [{idx}/{total}]{secs} \"{out}\""));
-            }
-            "not_started" => {
-                strip.push(format!("{idx}–"));
-                let code = item
-                    .pointer("/error/code")
-                    .and_then(Value::as_str)
-                    .unwrap_or("BATCH_ABORTED");
-                let line = format!("– [{idx}/{total}] not started ({code})");
-                failed_liners.push(line.clone());
-                one_liners.push(line);
-            }
-            _ => {
-                fail_count += 1;
-                strip.push(format!("{idx}✗"));
-                let code = item
-                    .pointer("/error/code")
-                    .and_then(Value::as_str)
-                    .unwrap_or("FAILED");
-                let msg = compact_line(
-                    item.pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("task failed"),
-                    64,
-                );
-                let line = format!("✗ [{idx}/{total}]{secs} {code}: {msg}");
-                failed_liners.push(line.clone());
-                one_liners.push(line);
-            }
-        }
-    }
-
-    if total <= 2 {
-        lines.extend(one_liners);
-    } else {
-        let mark = if ok_count == total {
-            "✓"
-        } else if ok_count > 0 {
-            "△"
-        } else {
-            "✗"
-        };
-        let fail_note = if fail_count > 0 {
-            format!(" · {fail_count} failed")
-        } else {
-            String::new()
-        };
-        lines.push(format!(
-            "{mark} {ok_count}/{total} completed{fail_note} · {}",
-            strip.join(" ")
-        ));
-        if !failed_liners.is_empty() {
-            lines.push(failed_liners.join(" · "));
-        } else {
-            let answers = results
-                .iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    let out =
-                        compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 28);
-                    format!("{} \"{out}\"", i + 1)
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            lines.push(answers);
-        }
-    }
-
-    for (i, item) in results.iter().enumerate() {
-        let idx = i + 1;
-        let status = item
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("failed");
-        let secs = item
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .map(|ms| format!(" · {:.1}s", ms as f64 / 1000.0))
-            .unwrap_or_default();
-        match status {
-            "completed" => {
-                lines.push(format!("── [{idx}/{total}] ✓ completed{secs}"));
-                let out = item
-                    .get("output")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                if !out.is_empty() {
-                    for line in out.lines() {
-                        lines.push(line.trim_end().to_owned());
-                    }
-                }
-            }
-            "not_started" => {
-                let code = item
-                    .pointer("/error/code")
-                    .and_then(Value::as_str)
-                    .unwrap_or("BATCH_ABORTED");
-                lines.push(format!("── [{idx}/{total}] – not started ({code})"));
-                if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
-                    lines.push(msg.trim().to_owned());
-                }
-            }
-            _ => {
-                let code = item
-                    .pointer("/error/code")
-                    .and_then(Value::as_str)
-                    .unwrap_or("FAILED");
-                lines.push(format!("── [{idx}/{total}] ✗ failed ({code}){secs}"));
-                if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
-                    lines.push(msg.trim().to_owned());
-                }
-                if let Some(art) = item.get("artifacts").and_then(Value::as_str) {
-                    lines.push(format!("artifacts: {art}"));
-                }
-            }
-        }
-    }
-    Some(lines.join(
-        "
-",
-    ))
-}
-
-fn tool_result_details(raw: &str) -> String {
-    let Ok(value) = serde_json::from_str::<Value>(raw) else {
-        return raw.to_owned();
-    };
-    if let Some(subagent) = subagent_result_details(&value) {
-        return subagent;
-    }
-    if let Some(error) = value.get("error") {
-        return error.as_str().unwrap_or(raw).to_owned();
-    }
-    let mut lines = Vec::new();
-    if let Some(code) = value.get("exit_code") {
-        lines.push(format!("exit: {}", code));
-    }
-    if let Some(stdout) = value.get("stdout").and_then(Value::as_str) {
-        if !stdout.trim().is_empty() {
-            lines.push(stdout.to_owned());
-        }
-    }
-    if let Some(stderr) = value.get("stderr").and_then(Value::as_str) {
-        if !stderr.trim().is_empty() {
-            lines.push(format!("stderr: {stderr}"));
-        }
-    }
-    if let Some(content) = value.get("content").and_then(Value::as_array) {
-        for item in content.iter() {
-            if let Some(text) = item.get("text").and_then(Value::as_str) {
-                lines.push(text.to_owned());
-            }
-        }
-    }
-    for key in ["stdout_file", "stderr_file"] {
-        if let Some(path) = value.get(key).and_then(Value::as_str) {
-            lines.push(format!("{key}: {path}"));
-        }
-    }
-    if lines.is_empty() {
-        return raw.to_owned();
-    }
-    lines.join(
-        "
-",
-    )
 }
 
 #[derive(Clone, Copy)]
@@ -1671,6 +1245,7 @@ impl UiState {
             self.history_cache = None;
         }
         match event {
+            UiEvent::Warning(message) => self.note_with_level(NoticeLevel::Warning, message),
             UiEvent::GitInfo {
                 revision,
                 session,
@@ -2263,6 +1838,80 @@ impl UiState {
         }
     }
 
+    pub fn paste_text(&mut self, text: &str) {
+        self.editor.paste_over(text, self.editor_selection.take());
+        self.clear_editor_selection();
+        self.prune_attachments();
+    }
+
+    pub fn editor_selection_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(
+                key.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+        {
+            let (anchor, head) = self
+                .editor_selection
+                .unwrap_or((self.editor.caret(), self.editor.caret()));
+            self.editor.set_caret(head);
+            self.editor.key(key);
+            self.editor_selection = Some((anchor, self.editor.caret()));
+            self.editor_selecting = false;
+            self.selection_start = None;
+            self.selection_end = None;
+            self.selection_dragging = false;
+            return true;
+        }
+        if let Some((a, b)) = self.editor_selection.filter(|(a, b)| a != b) {
+            let replacement = match key.code {
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some("\n".into())
+                }
+                KeyCode::Char(ch)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    Some(ch.to_string())
+                }
+                KeyCode::Enter
+                    if key.modifiers.intersects(
+                        KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    ) =>
+                {
+                    Some("\n".into())
+                }
+                KeyCode::Tab if key.modifiers.is_empty() => Some("    ".into()),
+                KeyCode::Backspace | KeyCode::Delete => Some(String::new()),
+                _ => None,
+            };
+            if let Some(text) = replacement {
+                self.paste_text(&text);
+                return true;
+            }
+            if key.modifiers.is_empty() && matches!(key.code, KeyCode::Left | KeyCode::Right) {
+                self.editor.set_caret(if key.code == KeyCode::Left {
+                    a.min(b)
+                } else {
+                    a.max(b)
+                });
+                self.clear_editor_selection();
+                return true;
+            }
+            self.editor.set_caret(b);
+        }
+        self.clear_editor_selection();
+        false
+    }
+
     pub fn clear_editor_selection(&mut self) {
         self.editor_selection = None;
         self.editor_selecting = false;
@@ -2449,9 +2098,8 @@ impl UiState {
                     if !self.plain_style {
                         decor.push((
                             block_start,
-                            Decor::Gutter {
+                            Decor::Rail {
                                 column: 1,
-                                glyph: "▎",
                                 color: theme.user,
                                 first_only: true,
                             },
@@ -3023,6 +2671,9 @@ impl UiState {
                         Decor::Gutter {
                             first_only: true,
                             ..
+                        } | Decor::Rail {
+                            first_only: true,
+                            ..
                         } | Decor::Inspect(_)
                     ) || row == start
                     {
@@ -3299,6 +2950,16 @@ impl UiState {
             .iter()
             .filter(|(row, _)| (start_row..end_row).contains(row))
         {
+            // A space with a coloured background stays blank in native terminal copies.
+            if let Decor::Rail { column, color, .. } = item {
+                if history.width > *column {
+                    if let Some(cell) =
+                        buffer.cell_mut((history.x + column, history.y + (row - start_row) as u16))
+                    {
+                        cell.set_symbol(" ").set_bg(*color);
+                    }
+                }
+            }
             if let Decor::Gutter {
                 column,
                 glyph,
@@ -3520,6 +3181,23 @@ impl UiState {
                     .language
                     .text(" Attachment path · Esc cancel ", " 附件路径 · Esc 取消 "),
                 Style::default().fg(colors.accent_text),
+            ));
+        }
+        if !self.attach_mode && self.editor.text().contains('\n') {
+            let lines = self.editor.text().split('\n').count();
+            let language = self.preferences.language;
+            let action = if self.running {
+                language.text("Enter queue", "Enter 排队")
+            } else {
+                language.text("Enter send", "Enter 发送")
+            };
+            block = block.title_top(Line::styled(
+                format!(
+                    " {lines} {} · Ctrl+J {} · {action} ",
+                    language.text("lines", "行"),
+                    language.text("newline", "换行")
+                ),
+                Style::default().fg(colors.muted),
             ));
         }
         frame.render_widget(block, composer);

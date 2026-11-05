@@ -1,0 +1,11 @@
+
+running 6 tests
+test tests::a_new_inline_key_or_an_explicit_clear_drops_the_env_reference ... ok
+test tests::an_ordinary_save_keeps_the_profile_env_reference ... ok
+test tests::saving_a_desktop_profile_preserves_the_catalog_alias ... ok
+test tests::a_running_task_blocks_session_and_plugin_changes ... ok
+test tests::simple_plugin_settings_preserve_typed_values ... ok
+test tests::only_http_links_can_leave_the_webview ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

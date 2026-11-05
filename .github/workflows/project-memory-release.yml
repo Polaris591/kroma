@@ -1,0 +1,43 @@
+name: Project memory release
+
+on:
+  push:
+    tags: ["project-memory-v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: kroma-memory-linux-x86_64
+          - os: macos-latest
+            artifact: kroma-memory-macos
+          - os: windows-latest
+            artifact: kroma-memory-windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --locked --release --manifest-path examples/plugins/project-memory/Cargo.toml
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          cp examples/plugins/project-memory/target/release/kroma-memory dist/${{ matrix.artifact }}
+          chmod +x dist/${{ matrix.artifact }}
+          (cd dist && shasum -a 256 ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256)
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item examples/plugins/project-memory/target/release/kroma-memory.exe dist/${{ matrix.artifact }}.exe
+          (Get-FileHash dist/${{ matrix.artifact }}.exe -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.artifact }}.exe" | Set-Content dist/${{ matrix.artifact }}.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*

@@ -1,0 +1,244 @@
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\tool_record_tests.rs:533:
+         !live_text.contains("{\"tasks\""),
+         "header must not dump raw JSON: {live_text}"
+     );
+[31m-    assert!(live_text.contains("检查 src/session.rs 恢复逻辑") && live_text.contains("运行集成测试"));
+[0m     assert!(
+[32m+        live_text.contains("检查 src/session.rs 恢复逻辑") && live_text.contains("运行集成测试")
+[0m[32m+    );
+[0m[32m+    assert!(
+[0m         live_text.contains("1✓ 2▶ · 10s/600s") && !live_text.contains("1▶ 2▶ · 5s/600s"),
+         "stale heartbeat status bar must be replaced in place: {live_text}"
+     );
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\tool_record_tests.rs:554:
+                 "status": "completed",
+                 "exit_code": 0,
+                 "output": "恢复逻辑正常
+[31m-WAL 顺序已验证",
+[0m[32m+    WAL 顺序已验证",
+[0m                 "output_truncated": false,
+                 "duration_ms": 8200,
+                 "usage": {"requests": 1, "input": 3100, "output": 90, "cached": 0, "reasoning": 0},
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\tool_records.rs:294:
+ fn subagent_finished_preview(details: &str, limit: usize) -> (Vec<String>, bool) {
+     let mut has_sections = false;
+     let mut summary = Vec::new();
+[31m-    for line in details.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
+[0m[32m+    for line in details
+[0m[32m+        .lines()
+[0m[32m+        .map(str::trim_end)
+[0m[32m+        .filter(|l| !l.trim().is_empty())
+[0m[32m+    {
+[0m         if line.starts_with("── [") {
+             has_sections = true;
+             break;
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\tool_records.rs:494:
+             }
+             let diff = name == "shell"
+                 && (entry.body.contains("git diff") || entry.details.contains("diff --git "));
+[31m-            let has_subagent_sections = name == "subagent"
+[0m[31m-                && entry.details.lines().any(|l| l.starts_with("── ["));
+[0m[32m+            let has_subagent_sections =
+[0m[32m+                name == "subagent" && entry.details.lines().any(|l| l.starts_with("── ["));
+[0m             let mut in_sections = !has_subagent_sections;
+             for output in entry.details.lines() {
+                 if !in_sections {
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\tool_records.rs:539:
+                 subagent_finished_preview(&entry.details, limit)
+             };
+             if running && preview.is_empty() {
+[31m-                preview.push(language.text("Waiting for subagents…", "正在启动子代理…").into());
+[0m[32m+                preview.push(
+[0m[32m+                    language
+[0m[32m+                        .text("Waiting for subagents…", "正在启动子代理…")
+[0m[32m+                        .into(),
+[0m[32m+                );
+[0m             }
+             let preview_len = preview.len();
+             for (index, line) in preview.into_iter().enumerate() {
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\tool_records.rs:553:
+                 let max = width.saturating_sub(6 + UnicodeWidthStr::width(suffix));
+                 let clipped = format!("{}{suffix}", clip_line(&line, max));
+                 card.preformatted.push(card.lines.len());
+[31m-                card.lines.push(body_line(Line::from(subagent_preview_spans(&clipped, theme))));
+[0m[32m+                card.lines.push(body_line(Line::from(subagent_preview_spans(
+[0m[32m+                    &clipped, theme,
+[0m[32m+                ))));
+[0m             }
+             return;
+         }
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:646:
+         .map(str::trim)
+         .filter(|line| !line.is_empty())
+         .collect::<Vec<_>>();
+[31m-    if let Some(subagent_fail) = lines.iter().copied().find(|line| line.starts_with("✗ [") || line.starts_with("△ ")) {
+[0m[32m+    if let Some(subagent_fail) = lines
+[0m[32m+        .iter()
+[0m[32m+        .copied()
+[0m[32m+        .find(|line| line.starts_with("✗ [") || line.starts_with("△ "))
+[0m[32m+    {
+[0m         return subagent_fail.to_owned();
+     }
+     let exit = lines.iter().find_map(|line| line.strip_prefix("exit: "));
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:719:
+                         }
+                     })
+                     .collect::<Vec<_>>()
+[31m-                    .join("
+[0m[31m-");
+[0m[32m+                    .join(
+[0m[32m+                        "
+[0m[32m+",
+[0m[32m+                    );
+[0m             }
+         }
+     }
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:743:
+ 
+     for (i, item) in results.iter().enumerate() {
+         let idx = i + 1;
+[31m-        let status = item.get("status").and_then(Value::as_str).unwrap_or("failed");
+[0m[32m+        let status = item
+[0m[32m+            .get("status")
+[0m[32m+            .and_then(Value::as_str)
+[0m[32m+            .unwrap_or("failed");
+[0m         let secs = item
+             .get("duration_ms")
+             .and_then(Value::as_u64)
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:753:
+             "completed" => {
+                 ok_count += 1;
+                 strip.push(format!("{idx}✓"));
+[31m-                let out = compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 72);
+[0m[32m+                let out =
+[0m[32m+                    compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 72);
+[0m                 one_liners.push(format!("✓ [{idx}/{total}]{secs} \"{out}\""));
+             }
+             "not_started" => {
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:760:
+                 strip.push(format!("{idx}–"));
+[31m-                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("BATCH_ABORTED");
+[0m[32m+                let code = item
+[0m[32m+                    .pointer("/error/code")
+[0m[32m+                    .and_then(Value::as_str)
+[0m[32m+                    .unwrap_or("BATCH_ABORTED");
+[0m                 let line = format!("– [{idx}/{total}] not started ({code})");
+                 failed_liners.push(line.clone());
+                 one_liners.push(line);
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:766:
+             _ => {
+                 fail_count += 1;
+                 strip.push(format!("{idx}✗"));
+[31m-                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("FAILED");
+[0m[31m-                let msg = compact_line(item.pointer("/error/message").and_then(Value::as_str).unwrap_or("task failed"), 64);
+[0m[32m+                let code = item
+[0m[32m+                    .pointer("/error/code")
+[0m[32m+                    .and_then(Value::as_str)
+[0m[32m+                    .unwrap_or("FAILED");
+[0m[32m+                let msg = compact_line(
+[0m[32m+                    item.pointer("/error/message")
+[0m[32m+                        .and_then(Value::as_str)
+[0m[32m+                        .unwrap_or("task failed"),
+[0m[32m+                    64,
+[0m[32m+                );
+[0m                 let line = format!("✗ [{idx}/{total}]{secs} {code}: {msg}");
+                 failed_liners.push(line.clone());
+                 one_liners.push(line);
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:778:
+     if total <= 2 {
+         lines.extend(one_liners);
+     } else {
+[31m-        let mark = if ok_count == total { "✓" } else if ok_count > 0 { "△" } else { "✗" };
+[0m[31m-        let fail_note = if fail_count > 0 { format!(" · {fail_count} failed") } else { String::new() };
+[0m[31m-        lines.push(format!("{mark} {ok_count}/{total} completed{fail_note} · {}", strip.join(" ")));
+[0m[32m+        let mark = if ok_count == total {
+[0m[32m+            "✓"
+[0m[32m+        } else if ok_count > 0 {
+[0m[32m+            "△"
+[0m[32m+        } else {
+[0m[32m+            "✗"
+[0m[32m+        };
+[0m[32m+        let fail_note = if fail_count > 0 {
+[0m[32m+            format!(" · {fail_count} failed")
+[0m[32m+        } else {
+[0m[32m+            String::new()
+[0m[32m+        };
+[0m[32m+        lines.push(format!(
+[0m[32m+            "{mark} {ok_count}/{total} completed{fail_note} · {}",
+[0m[32m+            strip.join(" ")
+[0m[32m+        ));
+[0m         if !failed_liners.is_empty() {
+             lines.push(failed_liners.join(" · "));
+         } else {
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:788:
+                 .iter()
+                 .enumerate()
+                 .map(|(i, item)| {
+[31m-                    let out = compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 28);
+[0m[32m+                    let out =
+[0m[32m+                        compact_line(item.get("output").and_then(Value::as_str).unwrap_or(""), 28);
+[0m                     format!("{} \"{out}\"", i + 1)
+                 })
+                 .collect::<Vec<_>>()
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:799:
+ 
+     for (i, item) in results.iter().enumerate() {
+         let idx = i + 1;
+[31m-        let status = item.get("status").and_then(Value::as_str).unwrap_or("failed");
+[0m[32m+        let status = item
+[0m[32m+            .get("status")
+[0m[32m+            .and_then(Value::as_str)
+[0m[32m+            .unwrap_or("failed");
+[0m         let secs = item
+             .get("duration_ms")
+             .and_then(Value::as_u64)
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:808:
+         match status {
+             "completed" => {
+                 lines.push(format!("── [{idx}/{total}] ✓ completed{secs}"));
+[31m-                let out = item.get("output").and_then(Value::as_str).unwrap_or("").trim();
+[0m[32m+                let out = item
+[0m[32m+                    .get("output")
+[0m[32m+                    .and_then(Value::as_str)
+[0m[32m+                    .unwrap_or("")
+[0m[32m+                    .trim();
+[0m                 if !out.is_empty() {
+                     for line in out.lines() {
+                         lines.push(line.trim_end().to_owned());
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:816:
+                 }
+             }
+             "not_started" => {
+[31m-                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("BATCH_ABORTED");
+[0m[32m+                let code = item
+[0m[32m+                    .pointer("/error/code")
+[0m[32m+                    .and_then(Value::as_str)
+[0m[32m+                    .unwrap_or("BATCH_ABORTED");
+[0m                 lines.push(format!("── [{idx}/{total}] – not started ({code})"));
+                 if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
+                     lines.push(msg.trim().to_owned());
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:823:
+                 }
+             }
+             _ => {
+[31m-                let code = item.pointer("/error/code").and_then(Value::as_str).unwrap_or("FAILED");
+[0m[32m+                let code = item
+[0m[32m+                    .pointer("/error/code")
+[0m[32m+                    .and_then(Value::as_str)
+[0m[32m+                    .unwrap_or("FAILED");
+[0m                 lines.push(format!("── [{idx}/{total}] ✗ failed ({code}){secs}"));
+                 if let Some(msg) = item.pointer("/error/message").and_then(Value::as_str) {
+                     lines.push(msg.trim().to_owned());
+Diff in \\?\D:\Kroma\kroma-latest\src\tui\view.rs:834:
+             }
+         }
+     }
+[31m-    Some(lines.join("
+[0m[31m-"))
+[0m[32m+    Some(lines.join(
+[0m[32m+        "
+[0m[32m+",
+[0m[32m+    ))
+[0m }
+ 
+ fn tool_result_details(raw: &str) -> String {

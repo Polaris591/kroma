@@ -12,9 +12,10 @@ const {forHost, packageName, executable} = require("../platforms.cjs");
 let fixture, launcher, nativeManifest, binary, helper;
 const version = "1.2.3";
 before(() => {
-  fixture = fs.mkdtempSync(path.join(os.tmpdir(), "kroma launcher test "));
+  // macOS resolves the temp root through /private/var, so compare real paths.
+  fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "kroma launcher test ")));
   launcher = path.join(fixture, "launcher.cjs");
-  for (const file of ["launcher.cjs", "platforms.cjs"]) {
+  for (const file of ["launcher.cjs", "platforms.cjs", "update.cjs"]) {
     fs.copyFileSync(path.join(__dirname, "..", file), path.join(fixture, file));
   }
   fs.writeFileSync(path.join(fixture, "package.json"), JSON.stringify({name: "kroma", version}));
@@ -138,4 +139,15 @@ test("launcher refuses unsupported architectures and musl before resolving packa
     assert.equal(result.stdout, "");
     assert.match(result.stderr, message);
   }
+});
+
+test("update help works before native resolution and invalid update arguments are usage errors", () => {
+  fs.renameSync(nativeManifest, nativeManifest + ".hidden");
+  try {
+    const help = run(["update", "--help"]);
+    assert.equal(help.status, 0);
+    assert.match(help.stdout, /Usage: kroma update/);
+    const bad = run(["update", "--channel", "bad"]);
+    assert.equal(bad.status, 2);
+  } finally { fs.renameSync(nativeManifest + ".hidden", nativeManifest); }
 });

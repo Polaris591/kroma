@@ -58,12 +58,20 @@ fn graphite_input_and_prose_share_a_column_without_message_boxes() {
                 .unwrap();
             assert_eq!(cell.bg, ui.themes.colors.background);
             assert!(!cell.modifier.contains(Modifier::BOLD));
-            let marks = buffer
-                .content()
+            let marks = ui
+                .history_cache
+                .as_ref()
+                .unwrap()
+                .decor
                 .iter()
-                .filter(|cell| cell.symbol() == "▎")
+                .filter(|(_, item)| matches!(item, Decor::Rail { .. }))
                 .count();
             assert_eq!(marks, 1);
+            let rail = buffer
+                .cell((ui.selection_area.x + 1, ui.selection_area.y + user as u16))
+                .unwrap();
+            assert_eq!(rail.symbol(), " ");
+            assert_eq!(rail.bg, ui.themes.colors.user);
             assert!(!buffer
                 .content()
                 .iter()

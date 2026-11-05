@@ -1,0 +1,10 @@
+
+> smoke
+> node smoke.cjs ../target/npm-release-prep
+
+
+changed 2 packages in 966ms
+
+changed 2 packages in 1s
+Local-registry npm install, local/global update repair, bin shims, reinstall, uninstall and --omit=optional passed: win32-x64, kroma 0.4.0
+Tarballs: D:\Kroma\kroma-latest\target\npm-release-prep\tarballs

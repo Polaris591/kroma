@@ -1,0 +1,2 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.95s

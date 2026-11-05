@@ -220,6 +220,9 @@ impl EventSink for DesktopEvents {
                     "output":output_tokens,"cached":cached_tokens,
                     "reasoning_tokens":reasoning_tokens}));
             }
+            RuntimeEvent::Warning { message } => {
+                self.push(json!({"kind":"warning","message":message}))
+            }
             RuntimeEvent::ModelFailed => self.push(json!({"kind":"model_failed"})),
             RuntimeEvent::TaskFinished { status } => {
                 self.push(json!({"kind":"task_finished","status":status}))

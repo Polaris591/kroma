@@ -10,6 +10,7 @@ use std::{
 #[derive(Default)]
 struct Inbox {
     active: bool,
+    steerable: bool,
     steering: VecDeque<String>,
     followups: VecDeque<String>,
 }
@@ -32,11 +33,20 @@ impl Drop for ActiveTask {
 
 impl TaskInput {
     pub(crate) fn start(&self) -> Result<ActiveTask> {
+        self.start_mode(true)
+    }
+
+    pub(crate) fn start_exclusive(&self) -> Result<ActiveTask> {
+        self.start_mode(false)
+    }
+
+    fn start_mode(&self, steerable: bool) -> Result<ActiveTask> {
         let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
         if inbox.active {
             bail!("another Kroma task is still active");
         }
         inbox.active = true;
+        inbox.steerable = steerable;
         Ok(ActiveTask(self.clone()))
     }
 
@@ -48,7 +58,7 @@ impl TaskInput {
             bail!("steering instruction cannot be empty");
         }
         let mut inbox = self.inner.lock().expect("steering inbox lock poisoned");
-        if !inbox.active {
+        if !inbox.active || !inbox.steerable {
             bail!("no active task to steer");
         }
         inbox.steering.push_back(text);

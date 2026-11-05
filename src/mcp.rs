@@ -516,45 +516,12 @@ impl TrustStoreLock {
     fn acquire(path: &Path) -> Result<Self> {
         let parent = path.parent().context("MCP trust store has no parent")?;
         fs::create_dir_all(parent)?;
-        let lock_path = parent.join("trusted-mcp.json.lock");
-        for _ in 0..250 {
-            let mut options = fs::OpenOptions::new();
-            options.read(true).write(true).create(true);
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt;
-                options.share_mode(0);
-            }
-            match options.open(&lock_path) {
-                Ok(file) => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::fd::AsRawFd;
-                        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }
-                            != 0
-                        {
-                            let error = std::io::Error::last_os_error();
-                            if error.kind() == std::io::ErrorKind::WouldBlock {
-                                std::thread::sleep(Duration::from_millis(20));
-                                continue;
-                            }
-                            return Err(error).context("locking MCP trust store");
-                        }
-                    }
-                    return Ok(Self { _file: file });
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::PermissionDenied
-                    ) || (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33))) =>
-                {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => return Err(error).context("opening MCP trust store lock"),
-            }
-        }
-        bail!("MCP trust store is busy in another Kroma process")
+        let file = crate::file_lock::acquire(
+            &parent.join("trusted-mcp.json.lock"),
+            Duration::from_secs(5),
+        )
+        .context("locking MCP trust store")?;
+        Ok(Self { _file: file })
     }
 }
 

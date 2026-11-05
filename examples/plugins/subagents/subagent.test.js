@@ -597,6 +597,8 @@ test("the advertised limits match the manifest", () => {
   assert.ok(manifest.includes("max_parallel = " + LIMITS.maxParallel), manifest);
   assert.ok(manifest.includes("max_output_chars = " + LIMITS.outputChars), manifest);
   assert.ok(manifest.includes("task_timeout_secs = " + LIMITS.taskTimeoutSecs), manifest);
+  assert.match(manifest, /properties.tasks.items.properties.resume/);
+  assert.match(manifest, /nesting is refused/);
 });
 
 test("a JSON line that is not an object is a protocol fault, not a crash", async () => {
@@ -959,6 +961,274 @@ test("a malformed task_timeout_secs is refused before any child starts", async (
       {code: "CONFIG_ERROR", message: /task_timeout_secs must be an integer/},
     );
     assert.equal(h.calls.length, 0);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a failed task keeps the text it streamed before the deadline", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(batch([{task: "a"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir, taskTimeoutMs: 20});
+    const taskDir = path.dirname(h.calls[0].options.env.KROMA_SESSION_FILE);
+    h.calls[0].child.stdout.emit("data", Buffer.from(
+      JSON.stringify({type: "text_delta", text: "half "}) + "\n"
+      + JSON.stringify({type: "text_delta", text: "an answer"}) + "\n"));
+    const response = await run;
+    assert.equal(response.status, "failed");
+    const [result] = response.results;
+    assert.equal(result.status, "failed");
+    assert.equal(result.error.code, "CHILD_TIMEOUT");
+    assert.equal(result.partial, true);
+    assert.equal(result.output, "half an answer");
+    assert.equal(result.output_truncated, false);
+    assert.match(result.error.message, /partial answer kept/);
+    assert.equal(fs.readFileSync(path.join(taskDir, "partial.txt"), "utf8"), "half an answer");
+    assert.equal(fs.existsSync(path.join(taskDir, "answer.txt")), false);
+    const state = JSON.parse(fs.readFileSync(path.join(taskDir, "state.json"), "utf8"));
+    assert.equal(state.partial_chars, "half an answer".length);
+    assert.doesNotMatch(fs.readFileSync(path.join(taskDir, "events.ndjson"), "utf8"), /half an answer/);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a final result wins over the streamed draft", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(batch([{task: "a"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    h.calls[0].finish({frames: [
+      {type: "text_delta", text: "an early draft"},
+      {type: "result", text: "the final answer"},
+    ]});
+    const response = await run;
+    const [result] = response.results;
+    assert.equal(response.status, "completed");
+    assert.equal(result.output, "the final answer");
+    assert.equal("partial" in result, false);
+    assert.equal(fs.existsSync(path.join(result.artifacts, "partial.txt")), false);
+    assert.equal(fs.readFileSync(path.join(result.artifacts, "answer.txt"), "utf8"),
+      "the final answer");
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("child exit codes become actionable error codes", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const tasks = [3, 4, 5, 6].map(code => ({task: `exit-${code}`}));
+    const run = runBatch(batch(tasks, {workdir: dir, config: {max_parallel: 4}}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    h.calls.forEach((call, index) => call.finish({code: [3, 4, 5, 6][index]}));
+    const response = await run;
+    assert.deepEqual(response.results.map(result => result.error.code),
+      ["MODEL_NOT_CONFIGURED", "AUTH_FAILED", "MODEL_REQUEST_FAILED", "CONTEXT_LIMIT"]);
+    assert.deepEqual(response.results.map(result => result.exit_code), [3, 4, 5, 6]);
+    assert.match(response.results[1].error.message, /code 4/);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("warnings stay in the evidence trail", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(batch([{task: "a"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    h.calls[0].finish({frames: [
+      {type: "warning", message: "tool output was trimmed"},
+      {type: "result", text: "ok"},
+    ]});
+    const response = await run;
+    const events = fs.readFileSync(
+      path.join(response.results[0].artifacts, "events.ndjson"), "utf8");
+    assert.match(events, /tool output was trimmed/);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("compaction usage counts its requests without erasing model reasoning", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(batch([{task: "a"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    h.calls[0].finish({frames: [
+      {type: "model_finished", input: 10, output: 5, cached: 2, reasoning_tokens: 1},
+      {type: "apec_usage", requests: 3, input: 4, output: 2, cached: 1},
+      {type: "result", text: "ok"},
+    ]});
+    const response = await run;
+    assert.deepEqual(response.results[0].usage,
+      {requests: 4, input: 14, output: 7, cached: 3, reasoning: 1});
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a large batch shares the response budget instead of a fixed floor", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const tasks = Array.from({length: 8}, (_, index) => ({task: "t" + index}));
+    const run = runBatch(batch(tasks, {workdir: dir,
+      config: {max_parallel: 8, max_output_chars: 100000}}),
+    {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    h.calls.forEach(call => call.finish({frames: [{type: "result", text: "x".repeat(100000)}]}));
+    const response = await run;
+    assert.ok(Buffer.byteLength(JSON.stringify(response, null, 2), "utf8") <= 512 * 1024);
+    assert.ok(response.results.every(result => result.output_truncated));
+    assert.ok(response.results.every(result => result.output.length > 10000),
+      response.results.map(result => result.output.length).join(","));
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("tool calls are counted in the result and state", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(batch([{task: "a"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    h.calls[0].finish({frames: [
+      {type: "tool_started", name: "shell", id: "t1"},
+      {type: "tool_finished", name: "shell", id: "t1"},
+      {type: "tool_started", name: "edit", id: "t2"},
+      {type: "tool_finished", name: "edit", id: "t2"},
+      {type: "result", text: "ok"},
+    ]});
+    const response = await run;
+    assert.equal(response.results[0].tool_calls, 2);
+    const state = JSON.parse(fs.readFileSync(
+      path.join(response.results[0].artifacts, "state.json"), "utf8"));
+    assert.equal(state.tool_calls, 2);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("live rows preview the text a child is writing", async () => {
+  const dir = workspace();
+  const h = harness();
+  const seen = [];
+  try {
+    const run = runBatch(batch([{task: "a"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir,
+        heartbeatMs: 10, onProgress: text => seen.push(text)});
+    await new Promise(resolve => setTimeout(resolve, 20));
+    h.calls[0].child.stdout.emit("data", Buffer.from(
+      JSON.stringify({type: "model_started", request: 1}) + "\n"
+      + JSON.stringify({type: "text_delta", text: "scanning the store"}) + "\n"));
+    await new Promise(resolve => setTimeout(resolve, 40));
+    h.calls[0].finish({frames: [{type: "result", text: "done"}]});
+    await run;
+    assert.ok(seen.some(line => line.startsWith("[1/1] ") && line.includes('"scanning the store"')),
+      JSON.stringify(seen));
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a resume copies the saved child session into a new run", async () => {
+  const dir = workspace();
+  const first = harness();
+  try {
+    const firstRun = runBatch(batch([{task: "first"}], {workdir: dir}),
+      {spawn: first.spawn, terminate: child => child.kill(), dataDir: dir});
+    first.calls[0].finish({frames: [{type: "result", text: "first answer"}]});
+    const firstResponse = await firstRun;
+    const token = firstResponse.results[0].resume;
+    assert.match(token, /^[^/]+\/0$/);
+    const source = firstResponse.results[0].artifacts;
+    fs.writeFileSync(path.join(source, "session.json"), '{"version":1,"messages":[]}');
+    fs.writeFileSync(path.join(source, "session.json.wal"), "journal");
+    const before = fs.readFileSync(path.join(source, "session.json"));
+
+    const second = harness();
+    const secondRun = runBatch(batch([{task: "follow up", resume: token}], {workdir: dir}),
+      {spawn: second.spawn, terminate: child => child.kill(), dataDir: dir});
+    const call = second.calls[0];
+    assert.equal(call.options.cwd, fs.realpathSync(dir));
+    const copied = call.options.env.KROMA_SESSION_FILE;
+    assert.notEqual(copied, path.join(source, "session.json"));
+    assert.equal(fs.readFileSync(copied, "utf8"), '{"version":1,"messages":[]}');
+    assert.equal(fs.readFileSync(copied + ".wal", "utf8"), "journal");
+    assert.equal(call.stdin.text, "follow up");
+    second.calls[0].finish({frames: [{type: "result", text: "second answer"}]});
+    const secondResponse = await secondRun;
+    assert.equal(secondResponse.status, "completed");
+    assert.equal(secondResponse.results[0].output, "second answer");
+    assert.notEqual(secondResponse.results[0].resume, token);
+    assert.deepEqual(fs.readFileSync(path.join(source, "session.json")), before);
+    const state = JSON.parse(fs.readFileSync(
+      path.join(secondResponse.results[0].artifacts, "state.json"), "utf8"));
+    assert.equal(state.resumed_from, token);
+    const request = JSON.parse(fs.readFileSync(
+      path.join(dir, "runs", secondResponse.run_id, "request.json"), "utf8"));
+    assert.equal(request.tasks[0].resume, token);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("resume tokens are validated before any child starts", async () => {
+  const dir = workspace();
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "kroma-subagent-other-"));
+  const h = harness();
+  const run = resume => runBatch(batch([{task: "x", resume}], {workdir: dir}),
+    {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+  try {
+    await assert.rejects(run("../escape/0"), {code: "INVALID_ARGUMENT"});
+    await assert.rejects(run("missing-run/0"), {code: "RESUME_MISSING"});
+
+    const active = path.join(dir, "runs", "run-active", "0");
+    fs.mkdirSync(active, {recursive: true});
+    fs.writeFileSync(path.join(active, "state.json"),
+      JSON.stringify({status: "running", cwd: dir}));
+    fs.writeFileSync(path.join(active, "session.json"), "{}");
+    await assert.rejects(run("run-active/0"), {code: "RESUME_ACTIVE"});
+
+    const mismatch = path.join(dir, "runs", "run-mismatch", "0");
+    fs.mkdirSync(mismatch, {recursive: true});
+    fs.writeFileSync(path.join(mismatch, "state.json"),
+      JSON.stringify({status: "completed", cwd: other}));
+    fs.writeFileSync(path.join(mismatch, "session.json"), "{}");
+    await assert.rejects(
+      runBatch(batch([{task: "x", cwd: dir, resume: "run-mismatch/0"}], {workdir: dir}),
+        {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir}),
+      {code: "INVALID_ARGUMENT"});
+    assert.equal(h.calls.length, 0, "nothing may start for a rejected resume");
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+    fs.rmSync(other, {recursive: true, force: true});
+  }
+});
+
+test("partial output keeps the most recent text within the budget", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(batch([{task: "a"}], {workdir: dir,
+      config: {max_output_chars: 1000}}),
+    {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir, taskTimeoutMs: 20});
+    h.calls[0].child.stdout.emit("data", Buffer.from(
+      JSON.stringify({type: "text_delta", text: "a".repeat(1400) + "THE-END"}) + "\n"));
+    const response = await run;
+    const [result] = response.results;
+    assert.equal(result.status, "failed");
+    assert.equal(result.partial, true);
+    assert.equal(Array.from(result.output).length, 1000);
+    assert.ok(result.output.endsWith("THE-END"));
+    assert.equal(result.output_truncated, true);
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }

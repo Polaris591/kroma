@@ -57,7 +57,7 @@ fn raised_blocks_wrap_without_polluting_selection_or_links() {
             cache
                 .decor
                 .iter()
-                .filter(|(_, item)| matches!(item, Decor::Gutter { glyph: "▎", .. }))
+                .filter(|(_, item)| matches!(item, Decor::Rail { .. }))
                 .count()
                 == 1,
             "user identity is marked once, not on every wrapped row"
@@ -75,7 +75,7 @@ fn raised_blocks_wrap_without_polluting_selection_or_links() {
                 ))
                 .unwrap()
                 .symbol(),
-            "▎"
+            " "
         );
         ui.selection_start = Some((0, 0));
         ui.selection_end = Some((cache.text.lines.len() - 1, 39));

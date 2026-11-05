@@ -115,3 +115,12 @@ Writes a local, allowlisted bundle. No upload, model request or plugin process.
 | 4 | Provider authentication/authorization failure |
 | 5 | Model request failure |
 | 6 | Context limit |
+
+## Updates
+
+`kroma update --check [--channel latest|next]` explicitly checks the official npm registry.
+`kroma update [--channel latest|next]` upgrades an unambiguous npm installation via npm.
+Global installs remain global; local installs update their owning project and may change
+its package.json/lockfile. Other managers and linked installs require manual upgrades.
+Native Cargo/source binaries print instructions instead of replacing themselves.
+There are no startup/background checks. Close other Kroma sessions before upgrading.

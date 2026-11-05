@@ -149,3 +149,52 @@ fn one_shot_run_snapshots_before_tools_without_touching_project_git() {
     let _ = fs::remove_dir_all(home);
     let _ = fs::remove_dir_all(workdir);
 }
+
+#[test]
+fn snapshot_failure_emits_a_warning_but_does_not_repeat_the_tool() {
+    let home = temp_dir("warning-home");
+    let workdir = temp_dir("warning-project");
+    assert!(Command::new("git")
+        .args(["-C", &workdir.to_string_lossy(), "init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    fs::create_dir_all(home.join(".kroma")).unwrap();
+    fs::write(home.join(".kroma/checkpoints"), "not a directory").unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let (base_url, server) = mock_model(posts.clone());
+    let output = Command::new(env!("CARGO_BIN_EXE_kroma"))
+        .current_dir(&workdir)
+        .args(["--json", "change the note"])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("KROMA_MODEL", "test")
+        .env("KROMA_BASE_URL", base_url)
+        .env("KROMA_API_KEY", "test")
+        .env("KROMA_NO_MCP", "1")
+        .env_remove("KROMA_NO_CHECKPOINTS")
+        .env_remove("KROMA_SESSION_FILE")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    server.join().unwrap();
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events.iter().any(|event| event["type"] == "warning"
+            && event["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("snapshot skipped"))),
+        "{events:?}"
+    );
+    assert_eq!(posts.load(Ordering::SeqCst), 2);
+    assert!(fs::read_to_string(workdir.join("note.txt"))
+        .unwrap()
+        .contains("changed"));
+    fs::remove_dir_all(home).unwrap();
+    fs::remove_dir_all(workdir).unwrap();
+}

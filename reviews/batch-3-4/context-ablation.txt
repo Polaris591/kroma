@@ -1,0 +1,11 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+    Finished `release` profile [optimized] target(s) in 1m 09s
+     Running unittests src\lib.rs (target\release\deps\kroma-e42228b31dbdc43b.exe)
+
+running 1 test
+test context::tests::perf_summary_source_shrinking_prefix ... PERF {"fixture":{"alternating_order":true,"input_cap":1800,"messages":201,"raw_json_bytes":132534},"max_ns":49046600,"min_ns":13390200,"name":"context.summary_source.reference","p50_ns":16111600,"p95_ns":35918700,"samples":21}
+PERF {"fixture":{"alternating_order":true,"input_cap":1800,"messages":201,"raw_json_bytes":132534},"max_ns":14202300,"min_ns":5774000,"name":"context.summary_source.current","p50_ns":7823900,"p95_ns":11397600,"samples":21}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 620 filtered out; finished in 0.74s
+

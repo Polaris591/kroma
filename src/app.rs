@@ -26,6 +26,9 @@ pub struct RuntimeComponents {
     // window after swapping the backend.
     model: Arc<dyn ModelBackend>,
     context_budget: ContextConfig,
+    /// Limits resolved for `model`. Diagnostics never inherit the previous
+    /// model report after a replacement of unknown provenance.
+    model_report: Option<ModelReport>,
     pub tools: ToolRegistry,
     pub context_factory: Arc<dyn ContextFactory>,
     pub prompt: PromptComposer,
@@ -39,9 +42,30 @@ impl RuntimeComponents {
         self.model.clone()
     }
 
+    /// Effective limits resolved for the current model, when the host knows
+    /// them. A replacement without a report leaves `None`.
+    pub fn model_report(&self) -> Option<&ModelReport> {
+        self.model_report.as_ref()
+    }
+
+    /// Swapping to a model without a resolved report clears the old one
+    /// instead of advertising another model window and output reserve.
     pub fn replace_model(&mut self, model: Arc<dyn ModelBackend>, budget: ContextConfig) {
         self.model = model;
         self.context_budget = budget;
+        self.model_report = None;
+    }
+
+    /// Replace a model whose limits the host resolved explicitly.
+    pub fn replace_model_with_report(
+        &mut self,
+        model: Arc<dyn ModelBackend>,
+        budget: ContextConfig,
+        report: ModelReport,
+    ) {
+        self.model = model;
+        self.context_budget = budget;
+        self.model_report = Some(report);
     }
 }
 
@@ -52,8 +76,10 @@ pub struct DefaultRuntime {
     pub startup_warnings: Vec<String>,
     pub plugin_warnings: Vec<String>,
     pub selected_model_name: Option<String>,
-    /// Unmodified application components for idle plugin reloads. Share
-    /// existing MCP/Skill adapters; never reconnect or rebuild Agent Loop.
+    /// Host components (including `customize` contributions) captured before
+    /// plugin tool/prompt overlays, so an idle reload re-applies plugins onto
+    /// the same base instead of stacking them twice. Share existing MCP/Skill
+    /// adapters; never reconnect or rebuild Agent Loop.
     pub base_tools: ToolRegistry,
     pub base_prompt: PromptComposer,
 }
@@ -106,20 +132,30 @@ pub async fn default_runtime_with(
     let mut components = RuntimeComponents {
         model,
         context_budget: budget,
+        model_report: Some(model_report),
         tools,
         context_factory: Arc::new(BuiltinContextFactory),
         prompt,
         events: None,
         defer_initial_session: false,
     };
+    // Host customization runs first so its tools and prompt become the reload
+    // base. Plugin overlays apply afterwards to the live components only;
+    // replaying them onto a base that already contains them would duplicate
+    // or conflict on every idle reload.
+    customize(&mut components)?;
     let base_tools = components.tools.clone();
     let base_prompt = components.prompt.clone();
     plugin_warnings.splice(0..0, plugins.warnings.clone());
     plugin_warnings.extend(plugins.contribute(&mut components.tools, &mut components.prompt));
     plugin_warnings.extend(plugins.replace_context(&mut components.context_factory));
-    customize(&mut components)?;
     components.model = plugins.model_hooks(components.model, components.context_budget);
     components.events = plugins.wrap_events(components.events)?;
+    let selected_model_name = components.model_report.as_ref().and_then(|report| {
+        (selected_model_name.is_some() || report.model != config.model)
+            .then(|| report.model.clone())
+    });
+    let model_report = components.model_report.take();
     let agent = Agent::with_runtime_budget_mode(
         components.model,
         components.tools,
@@ -131,7 +167,9 @@ pub async fn default_runtime_with(
         components.defer_initial_session,
     )?;
     let mut agent = agent;
-    agent.set_model_report(model_report);
+    if let Some(report) = model_report {
+        agent.set_model_report(report);
+    }
     agent.enable_checkpoints();
     Ok(DefaultRuntime {
         agent,
@@ -282,9 +320,11 @@ mod tests {
             Arc::new(ModelClient::new("http://127.0.0.1:9/v1", None, "next".into()).unwrap());
         let initial = ContextConfig::with_output_reserve(16_384, 1024).unwrap();
         let desired = ContextConfig::with_output_reserve(262_144, 8192).unwrap();
+        let report = model_catalog::plugin_report("first", 16_384, 1024, None, &[]);
         let mut components = RuntimeComponents {
             model: first,
             context_budget: initial,
+            model_report: Some(report),
             tools: ToolRegistry::builtin(),
             context_factory: Arc::new(BuiltinContextFactory),
             prompt: PromptComposer::default(),
@@ -295,6 +335,10 @@ mod tests {
         assert!(Arc::ptr_eq(&components.model(), &next));
         assert_eq!(components.context_budget.window(), 262_144);
         assert_eq!(components.context_budget.output_reserve(), 8192);
+        assert!(
+            components.model_report().is_none(),
+            "an unreported replacement must not keep the previous report"
+        );
     }
 
     #[tokio::test]

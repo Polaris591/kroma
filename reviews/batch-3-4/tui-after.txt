@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running unittests src\lib.rs (target\release\deps\kroma-e42228b31dbdc43b.exe)
+
+running 1 test
+test tui::view::tests::bench_streaming_frame_latency_three_hundred_and_three_thousand_messages ... TUI scenario=streaming-window messages=300 terminal=80x24 frames=60 median=1902us p95=2468us
+TUI scenario=streaming-window messages=3000 terminal=80x24 frames=60 median=1879us p95=2628us
+TUI scenario=all-history messages=3000 terminal=100x30 forced-cache-rebuilds=8 median=18069us p95=19055us
+TUI scenario=expanded-tool-output lines=4800 terminal=100x30 forced-cache-rebuilds=12 median=9959us p95=13904us
+TUI scenario=long-code-block lines=900 terminal=100x30 forced-cache-rebuilds=12 median=1824us p95=2322us
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 623 filtered out; finished in 0.55s
+

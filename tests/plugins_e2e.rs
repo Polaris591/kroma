@@ -1245,7 +1245,8 @@ async fn model_request_hooks_can_change_projection_and_tools_without_touching_wa
 .on("line",line=>{
  const req=JSON.parse(line);
  const messages=req.arguments.messages;
- messages.splice(1,0,{role:"assistant",content:"request-only note"});
+ const oversized=messages.some(m=>m.content==="oversize");
+ messages.splice(1,0,{role:"assistant",content:oversized?"X".repeat(600000):"request-only note"});
  const tools=[{type:"function",function:{name:"custom_tool",description:"hooked",parameters:{type:"object"}}}];
  process.stdout.write(JSON.stringify({content:JSON.stringify({messages,tools})})+"\n");
 });"#,
@@ -1281,6 +1282,25 @@ async fn model_request_hooks_can_change_projection_and_tools_without_touching_wa
         serde_json::to_value(&definitions)?,
         tools_before,
         "provider projection must not modify Kroma's tool registry"
+    );
+    assert!(!model.usage_matches_projection());
+    let oversized = [
+        Message::new("system", "original"),
+        Message::new("user", "oversize"),
+    ];
+    let error = model
+        .complete(&oversized, &definitions, &mut |_| {})
+        .await
+        .err()
+        .expect("oversized hook projection must fail");
+    assert!(
+        error.to_string().contains("context input budget"),
+        "{error:#}"
+    );
+    assert_eq!(
+        serde_json::to_value(captured.0.lock().unwrap().as_slice())?,
+        serde_json::to_value(&sent)?,
+        "over-budget hook input must not reach the model"
     );
     Ok(())
 }
@@ -3574,5 +3594,93 @@ fn a_project_plugin_needs_a_new_approval_after_its_code_changes() -> Result<()> 
     load()?.set_enabled("drift", true)?;
     let (present, warnings) = registered(load()?)?;
     assert!(present, "re-approval restores the plugin: {warnings:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_request_context_and_task_summary_are_budgeted_and_fail_open() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins").join("memory");
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join("plugin.toml"),
+        "api_version=2\nid='memory'\nname='Memory'\ncommand='node'\nargs=['main.js']\ncapabilities=['request_context','task_summary']\n",
+    )?;
+    fs::write(
+        directory.join("main.js"),
+        r#"const fs=require("node:fs");
+const {createInterface}=require("node:readline");
+createInterface({input:process.stdin}).on("line",line=>{
+ const req=JSON.parse(line);
+ fs.appendFileSync("requests.log", JSON.stringify({type:req.type,version:req.protocol_version,args:req.arguments})+"\n");
+ let content="{}";
+ if(req.type==="request_context"){
+   const intent=String(req.arguments?.intent||"");
+   if(intent.includes("FAIL")) content=JSON.stringify({blocks:[{id:"bad",kind:"preference",text:"x".repeat(2000)}]});
+   else if(intent.includes("EMPTY")) content=JSON.stringify({blocks:[]});
+   else content=JSON.stringify({blocks:[{id:"mem-1",kind:"preference",text:"Use pnpm, not npm",paths:[]}]});
+ }
+ if(req.type==="task_summary") content=JSON.stringify({ok:true});
+ process.stdout.write(JSON.stringify({protocol_version:2,request_id:req.request_id,content})+"\n");
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("memory", true)?;
+    let catalog = PluginCatalog::discover_at(global, state, temp.path())?;
+    let captured = Arc::new(CaptureModel::default());
+    let budget = ContextConfig::with_output_reserve(32768, 1024)?;
+    let model = catalog.model_hooks(captured.clone(), budget);
+    let archive = temp.path().join("sessions").join("s1.json");
+    model.set_session_context("s1", &archive);
+    let history = vec![
+        Message::new("system", "system"),
+        Message::new("user", "please use pnpm for this repo"),
+    ];
+    let before = serde_json::to_value(&history)?;
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    let injected = sent[1].content.as_deref().unwrap_or("");
+    assert!(injected.contains("<project-memory trust=\"unverified-reference\">"));
+    assert!(injected.contains("Use pnpm, not npm"));
+    assert_eq!(serde_json::to_value(&history)?, before);
+    assert!(model.usage_matches_projection());
+    let log = fs::read_to_string(directory.join("requests.log"))?;
+    assert!(log.contains("\"type\":\"request_context\""));
+    assert!(log.contains("\"type\":\"task_summary\""));
+    assert!(log.contains("\"version\":2"));
+    assert!(log.contains("please use pnpm for this repo"));
+    assert!(log.contains("\"max_tokens\""));
+    let context_calls = log.matches("\"type\":\"request_context\"").count();
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let log = fs::read_to_string(directory.join("requests.log"))?;
+    assert_eq!(
+        log.matches("\"type\":\"request_context\"").count(),
+        context_calls,
+        "the same boundary must reuse the cached pack"
+    );
+    let failed = vec![
+        Message::new("system", "system"),
+        Message::new("user", "FAIL please use pnpm"),
+    ];
+    model.complete(&failed, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    assert!(!sent[1]
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .contains("<project-memory"));
+    let empty = vec![
+        Message::new("system", "system"),
+        Message::new("user", "EMPTY please use pnpm"),
+    ];
+    model.complete(&empty, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    assert_eq!(sent[1].content.as_deref(), Some("EMPTY please use pnpm"));
     Ok(())
 }

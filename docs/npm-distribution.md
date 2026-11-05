@@ -1,9 +1,10 @@
 # npm distribution
 
-This document describes the repository's npm packaging and installation-testing
-stage: how the tarballs are built, what CI verifies, and what is deliberately not
-implemented yet. This stage stops at reviewable artifacts. **None of these
-packages is published to an npm registry.**
+This document describes the repository's npm packaging, installation testing and
+update path: how the tarballs are built, what CI verifies, how `kroma update`
+behaves, and what is deliberately not done yet. The packaging stage stops at
+reviewable artifacts. **None of these packages is published to an npm registry**,
+and the release workflow described at the end has not been executed.
 
 ## Status and package names
 
@@ -24,10 +25,12 @@ package name must be confirmed by a human before any future release. If a name
 changes, the launcher, platform table and generated manifests must be changed
 together.
 
-There is no publishing step, registry authentication, npm token, secret, trusted
-publisher configuration or update command in this packaging stage. The npm CI
-workflow has read-only repository access and stops after uploading tarballs as
-workflow artifacts. Built-in `kroma update` is not implemented either.
+The npm CI workflow (`.github/workflows/npm.yml`) has read-only repository access
+and stops after uploading tarballs as workflow artifacts; it has no registry
+login, token, secret or publish step. A separate, manually dispatched release
+workflow is the intended publication path, but it has not been run: no package is
+published and no trusted publisher is confirmed here. The update path
+that ships with Kroma is described in [Update path](#update-path).
 
 ## Packages and versions
 
@@ -72,7 +75,40 @@ this allowlist.
   Alpine/musl, Windows ARM64, 32-bit systems and other architectures are not
   supported by this npm distribution. Source builds remain available for those
   hosts.
-- **No update behavior.** The launcher does not check for or install updates.
+- **Updates are manual.** The launcher does not check for or install updates on
+  its own; it acts only when you run `kroma update`, and then only through the
+  npm package manager against the official HTTPS registry. See
+  [Update path](#update-path).
+
+## Update path
+
+Updates are user-initiated in every installation:
+
+| Command | Behavior |
+| --- | --- |
+| `kroma update --check` | Read-only. Reads the channel version from the official npm registry over HTTPS and prints it; installs nothing. |
+| `kroma update` | Updates to the `latest` channel when the installation is an unambiguous npm install. |
+| `kroma update --channel next` | Same, for the `next` prerelease dist-tag while one is published. |
+
+There is no startup check, background poll, update notification or automatic
+download. Nothing about an update is scheduled by the TUI, the line CLI or the
+launcher.
+
+For an npm installation the launcher handles `kroma update` before the native
+executable starts: it runs your npm package manager against the official HTTPS
+registry (`https://registry.npmjs.org`). It does not implement a second
+downloader and does not consult another registry or mirror. Global installs stay
+global; local direct dependencies update their owning project and may change its
+package.json/lockfile. Linked, transitive and other-manager installations are
+refused. It does not scan PATH or delete other installations. Missing platform
+packages can be repaired by npm; success requires both installed versions to match.
+
+A Cargo or source binary is never overwritten by Kroma. `kroma update --check`
+still reads the channel version from the registry and reports it, and `kroma
+update` prints the manual rebuild or `cargo install` command for you to run.
+Profiles, sessions and checkpoints under `~/.kroma` are not rewritten by an
+update; project-local installs may change package.json/lockfile. The channel is chosen per
+command: `latest` is the default, and `next` resolves only while that dist-tag exists.
 
 ## CI build and install baselines
 
@@ -227,14 +263,18 @@ platform's native tarball and a copy of the main `kroma` tarball. The main packa
 has the same contents and version in every job; a release collector should use one
 copy plus all five native tarballs. Preserve and publish the exact `.tgz` files;
 do not extract and repack POSIX packages on Windows, which can lose executable
-permission bits. POSIX smoke tests verify the native tarball executable mode. The workflow has no publish, registry-login,
-token, secret, provenance or update step. Existing `core.yml` and `desktop.yml`
-gates are not modified or replaced by this workflow.
+permission bits. POSIX smoke tests verify the native tarball executable mode. The workflow has no publish, registry-login, token,
+secret or provenance step, and it never runs an update command. Existing
+`core.yml` and `desktop.yml` gates are not modified or replaced by this
+workflow. Publishing lives in a separate release workflow.
 
-## First release sequencing (future, not implemented)
+## Release workflow (not executed)
 
-Publishing is out of scope for this stage. When a first release is eventually
-prepared, the conceptual order is:
+Publishing has not been performed. Publication is meant to go through a separate
+release workflow for maintainers, started only by manual `workflow_dispatch`; it
+is not triggered by pushes and has not been executed for these packages. Confirm
+the actual file and inputs in the repository before any dispatch. Its intended
+order is:
 
 1. Confirm package-name availability, registry ownership and maintainer access.
 2. Review the exact tarball contents and confirm every package has the same
@@ -245,10 +285,16 @@ prepared, the conceptual order is:
 
 Platform packages go first because the main package's `optionalDependencies`
 specify exact native versions. A main package published first would temporarily
-make installation fail while its native dependencies are unavailable. Release
-review, tagging, registry ownership verification, trusted publishing and
-provenance are future work and are not automated anywhere in this repository.
-The CI artifacts are build outputs for review, not a published release.
+make installation fail while its native dependencies are unavailable.
+
+The workflow is expected to check a `v<version>` tag against `Cargo.toml`,
+default to the `next` channel, default `publish` to false, require an explicit
+ownership confirmation through the protected `npm-release` environment, validate
+the five native artifacts, publish the platform packages before the main package
+with OIDC provenance, and attach checksums to the GitHub release. Those defaults
+and the exact workflow file are for the maintainer to confirm; see
+[releasing](releasing.md) for the checklist. The CI artifacts in the packaging
+workflow remain build outputs for review, not a published release.
 
 ## Cargo and manual builds
 
@@ -259,7 +305,9 @@ without npm, and this packaging infrastructure does not modify `Cargo.toml`,
 already-built release binary into generated package directories. The npm
 workflow does not replace the existing core or desktop CI gates.
 
-Not implemented in this stage: npm publication, registry authentication, npm
-tokens/secrets, trusted publishing, provenance/signing, version-bump automation,
-update checks or update commands, musl builds, Windows ARM64, 32-bit platforms,
-and locally verified support beyond the five CI baselines.
+Not done or not verified in this stage: an executed npm publication, confirmed
+registry ownership or trusted-publisher configuration, npm tokens/secrets,
+version-bump automation, publishing from ordinary CI, musl builds, Windows ARM64,
+32-bit platforms, and locally verified support beyond the five CI baselines.
+Update checks are never automatic: `kroma update` is user-initiated, and no
+package has been installed from a public registry yet.

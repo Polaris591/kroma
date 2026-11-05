@@ -3,7 +3,11 @@ use super::preferences::Language;
 
 pub(super) fn text(language: Language) -> &'static str {
     language.text(
-        "Enter sends; Shift+Enter, Alt+Enter or Ctrl+J inserts a newline.
+        "Enter sends; Ctrl+J, Alt+Enter or Shift+Enter inserts a newline (terminal support varies).
+Terminal paste keeps multiline text editable up to 4 KiB; larger text becomes an attachment.
+Ctrl+V / Shift+Insert reads the local text clipboard if forwarded by the terminal; use terminal paste over SSH.
+Shift+arrows/Home/End selects draft text; Ctrl+Shift+Home/End selects to the draft boundary.
+Typing or pasting replaces the selection; Ctrl+Z restores the whole replacement.
 PgUp/PgDn or wheel scrolls; Alt+↑/↓ jumps to previous/next user turn.
 Ctrl+End returns to latest. Drafts survive navigation and Esc.
 Type / or /commands for the index; Tab completes without executing.
@@ -24,7 +28,7 @@ Context turns yellow at 70%, red at 90%; /usage has API-token breakdowns.
 Git status and per-turn /diff summaries are best effort, never inferred as zero.
 Ctrl+Left/Right moves by word; Ctrl+W or Alt+Backspace deletes a word.
 Ctrl+Z / Ctrl+Y undoes/redoes draft edits; Ctrl+G opens the external editor.
-Alt+V pastes clipboard media/text; fallback attachment path closes with Esc.
+Alt+V pastes local clipboard media/text when idle; short text stays editable. Path fallback closes with Esc.
 With a selection Ctrl+C copies first; otherwise clears (Ctrl+Z restores) or cancels. Ctrl+Q quits.
 Esc only closes popups/path input, never cancels an Agent task or clears a draft.
 While running: Enter queues; /steer text redirects; only Ctrl+C cancels.
@@ -35,7 +39,11 @@ Ctrl+Q quits when idle; /exit also exits.
 /theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]
 /queue task · /skills · /tools
 Not included: approvals, sidebars, default split panes, card walls, complex animations or a new UI runtime.",
-        "Enter 发送；Shift+Enter、Alt+Enter 或 Ctrl+J 换行。
+        "Enter 发送；Ctrl+J、Alt+Enter 或 Shift+Enter 换行（部分组合依赖终端支持）。
+普通多行粘贴在 4 KiB 内保持可编辑，超过才折叠为附件。
+终端转交按键时，Ctrl+V / Shift+Insert 读取本机文字剪贴板；SSH 请用终端自带粘贴。
+Shift+方向键/Home/End 选择草稿；Ctrl+Shift+Home/End 选到草稿起点/终点。
+输入或粘贴会替换选区；Ctrl+Z 一次撤销整次替换。
 PgUp/PgDn 或滚轮翻页；Alt+↑/↓ 跳到上一轮/下一轮用户消息。
 Ctrl+End 返回最新；导航与 Esc 均保留草稿。
 输入 / 或 /commands 查看命令索引；↑↓选择，Tab 补全，不会直接执行。
@@ -56,7 +64,7 @@ Esc 关闭检视并保留草稿；Ctrl+T 查看可搜索的全文记录。
 Git 状态与本轮 /diff 改动摘要尽力采集；未知不显示为零。
 Ctrl+左右方向键按词移动；Ctrl+W 或 Alt+Backspace 删除前一个词。
 Ctrl+Z / Ctrl+Y 撤销/重做草稿；Ctrl+G 使用外部编辑器。
-Alt+V 粘贴图片或文本；附件路径输入用 Esc 关闭。
+空闲时 Alt+V 粘贴本机图片或文本，短文本保持可编辑；附件路径输入用 Esc 关闭。
 有选区时 Ctrl+C 优先复制；否则清空草稿（Ctrl+Z 可恢复）或取消任务。Ctrl+Q 退出。
 Esc 只关闭弹层或路径输入，不取消 Agent 任务、不清空草稿。
 运行中 Enter 排队；/steer 文本发送引导；只有 Ctrl+C 取消任务。

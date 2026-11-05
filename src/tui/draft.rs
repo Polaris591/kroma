@@ -22,8 +22,11 @@ impl UiState {
         self.next_marker += 1;
         let label = item.inline_label();
         item.marker = Some(marker);
-        self.editor.insert_attachment(marker, label);
+        self.editor
+            .insert_attachment(marker, label, self.editor_selection.take());
+        self.clear_editor_selection();
         self.attachments.push(item);
+        self.prune_attachments();
         Ok(())
     }
 

@@ -1,0 +1,261 @@
+[
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-6.1-terra"
+    ],
+    "context": 1050000,
+    "input": null,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "off",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "source": "https://developers.openai.com/api/docs/models",
+    "notes": "Current GPT-6.1 flagship-family sibling. Catalog card lists reasoning levels none/low/medium/high/xhigh/max (Kroma canonical 'off' for API 'none') and displays context '1.05M'; 1,050,000 is the exact count shown for the same window on the GPT-6 compare page. No separate max-input figure documented for this model, so input=null (do not inherit 922,000 from Astra). Text+image input, 128K max output."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-6-luna"
+    ],
+    "context": 1050000,
+    "input": null,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "off",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "source": "https://developers.openai.com/api/docs/models/compare",
+    "notes": "Current lowest-cost GPT-6 model. Compare page: 1,050,000 context, 128,000 max output, image input supported, knowledge cutoff May 18 2026. Levels none/low/medium/high/xhigh/max. No separate max-input cap documented, so input=null."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-5.6-sol",
+      "gpt-5.6"
+    ],
+    "context": 1050000,
+    "input": 922000,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "off",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+    "notes": "Previous-generation flagship, still active (model page carries no Status: Deprecated marker). Effort supports none/low/medium(default)/high/xhigh/max. max input 922,000 is separate from the 1,050,000 shared window. `gpt-5.6` is an official alias routing to GPT-5.6 Sol with identical caps, so both IDs are grouped. Constraint: prompts >272K input tokens bill at 2x input / 1.5x output for the whole request (pricing, not a capability cap)."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-5.3-codex"
+    ],
+    "context": 400000,
+    "input": 272000,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "source": "https://developers.openai.com/api/docs/models/gpt-5.3-codex",
+    "notes": "Coding specialist, Status: Deprecated (notice 2026-10-01, six months). Callable for existing accounts until shutdown 2027-04-01; closed to new adopters. Effort only low/medium/high/xhigh (no none/off and no max documented here) - do not add off/max. Responses API only: Chat Completions and Batch are 'Not supported' on the model page."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-5.1",
+      "gpt-5.1-2025-11-13"
+    ],
+    "context": 400000,
+    "input": null,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "off",
+      "low",
+      "medium",
+      "high"
+    ],
+    "source": "https://developers.openai.com/api/docs/models/gpt-5.1",
+    "notes": "Status: Deprecated (2026-10-01 notice, shutdown 2027-04-01), callable for existing accounts until then. `gpt-5.1-2025-11-13` is the documented default snapshot and is the only entry under Snapshots, so identical caps follow from the official page. reasoning.effort supports none(default)/low/medium/high - no xhigh/max, do not infer from GPT-6. No max-input figure documented, input=null; 128K max output, text+image input."
+  },
+  {
+    "provider": "anthropic",
+    "models": [
+      "claude-opus-5"
+    ],
+    "context": 1000000,
+    "input": null,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "source": "https://platform.claude.com/docs/en/models/opus-5/overview",
+    "notes": "Status: Active (legacy) - lifecycle 'active', retirement not sooner than 2027-07-24. Adaptive thinking, default effort high. All five effort levels: xhigh and max are explicitly listed for Claude Opus 5 in the official effort doc, low/medium/high are the remaining documented levels. Max output 128K (300K only on Message Batches beta header output-300k-2026-03-24). temperature/top_p/top_k rejected on 4.7-and-later generations."
+  },
+  {
+    "provider": "anthropic",
+    "models": [
+      "claude-sonnet-5"
+    ],
+    "context": 1000000,
+    "input": null,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "source": "https://platform.claude.com/docs/en/models/sonnet-5/overview",
+    "notes": "Status: Active (legacy), retirement not sooner than 2027-06-30. Adaptive thinking on by default, default effort high. Official effort doc lists xhigh and max for Claude Sonnet 5. 1M context / 128K output; 300K output only via Batch beta. Constraint: setting temperature/top_p/top_k returns 400."
+  },
+  {
+    "provider": "anthropic",
+    "models": [
+      "claude-opus-4-8"
+    ],
+    "context": 1000000,
+    "input": null,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "source": "https://platform.claude.com/docs/en/models/opus-4-8/overview",
+    "notes": "Status: Active (legacy), retirement not sooner than 2027-05-28. Adaptive thinking, default effort high; effort doc lists xhigh and max for Opus 4.8 and choosing-a-model recommends xhigh for its coding/agentic work. 1M context / 128K output (300K Batch beta)."
+  },
+  {
+    "provider": "google",
+    "models": [
+      "gemini-3.1-pro-preview"
+    ],
+    "context": 1048576,
+    "input": 1048576,
+    "output": 65536,
+    "image": true,
+    "levels": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "source": "https://aistudio.google.com/docs/models/gemini-3.1-pro-preview",
+    "notes": "Preview model (no shutdown date announced; previews may retire on short notice). Google publishes only input 1,048,576 / output 65,536, so context is recorded as the input limit (no shared-window figure is documented; conservative). Thinking default high; levels low/medium/high per official thinking doc. Sibling endpoint gemini-3.1-pro-preview-customtools exists but its limits are NOT documented as identical, so it is deliberately not grouped."
+  },
+  {
+    "provider": "google",
+    "models": [
+      "gemini-3.6-flash"
+    ],
+    "context": 1048576,
+    "input": 1048576,
+    "output": 65536,
+    "image": true,
+    "levels": [
+      "minimal",
+      "low",
+      "medium",
+      "high"
+    ],
+    "source": "https://aistudio.google.com/docs/models/gemini-3.6-flash",
+    "notes": "Stable previous-generation Flash, still available for production, no shutdown date announced. Text/image/video/audio/PDF input, text output. Input 1,048,576 / output 65,536 (no separate shared window published). Default thinking medium; levels minimal/low/medium/high per official thinking doc."
+  },
+  {
+    "provider": "google",
+    "models": [
+      "gemini-3.5-flash-lite"
+    ],
+    "context": 1048576,
+    "input": 1048576,
+    "output": 65536,
+    "image": true,
+    "levels": [
+      "minimal",
+      "low",
+      "medium",
+      "high"
+    ],
+    "source": "https://aistudio.google.com/docs/models/gemini-3.5-flash-lite",
+    "notes": "Stable low-latency Flash-Lite, no shutdown date announced. Input 1,048,576 / output 65,536. Default thinking minimal; levels minimal/low/medium/high per official thinking doc."
+  },
+  {
+    "provider": "google",
+    "models": [
+      "gemini-2.5-flash-lite"
+    ],
+    "context": 1048576,
+    "input": 1048576,
+    "output": 65536,
+    "image": true,
+    "levels": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "source": "https://aistudio.google.com/docs/models/gemini-2.5-flash-lite",
+    "notes": "Explicitly NOT deprecated: served until further notice, but 2.5-family API access is limited to users who actively used those models (effectively closed to new adopters). Thinking off by default; levels low/medium/high. Input 1,048,576 / output 65,536. Preview snapshot gemini-2.5-flash-lite-preview-09-2025 is shut down and is not included."
+  },
+  {
+    "provider": "google",
+    "models": [
+      "gemini-2.5-pro"
+    ],
+    "context": 1048576,
+    "input": 1048576,
+    "output": 65536,
+    "image": true,
+    "levels": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "source": "https://aistudio.google.com/docs/models/gemini-2.5-pro",
+    "notes": "Deprecated but callable for existing 2.5 users until 2026-12-01; from that date requests automatically route to gemini-3.8-flash and bill at its rates (official deprecations page). Knowledge cutoff Jan 2025. Input 1,048,576 / output 65,536; thinking on by default, levels low/medium/high."
+  },
+  {
+    "provider": "google",
+    "models": [
+      "gemini-2.5-flash"
+    ],
+    "context": 1048576,
+    "input": 1048576,
+    "output": 65536,
+    "image": true,
+    "levels": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "source": "https://aistudio.google.com/docs/models/gemini-2.5-flash",
+    "notes": "Deprecated, existing 2.5 users only; effective 2026-12-01 all requests auto-route to gemini-3.5-flash-lite at its rates. Callable until then. Input 1,048,576 / output 65,536; thinking on by default, levels low/medium/high. Preview snapshot gemini-2.5-flash-preview-09-2025 is shut down and is not included."
+  }
+]

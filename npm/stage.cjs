@@ -51,6 +51,7 @@ function stage({target, binary, out}) {
   }
   fs.copyFileSync(path.join(__dirname, "launcher.cjs"), path.join(mainDir, "launcher.cjs"));
   fs.copyFileSync(path.join(__dirname, "platforms.cjs"), path.join(mainDir, "platforms.cjs"));
+  fs.copyFileSync(path.join(__dirname, "update.cjs"), path.join(mainDir, "update.cjs"));
   fs.chmodSync(path.join(mainDir, "launcher.cjs"), 0o755);
   const destination = path.join(nativeDir, "bin", executable(platform));
   fs.copyFileSync(source, destination);
@@ -61,7 +62,7 @@ function stage({target, binary, out}) {
     description: "An observable Rust AI coding agent with a terminal UI, MCP tools and file checkpoints",
     engines: {node: ">=22"},
     bin: {kroma: "launcher.cjs"},
-    files: ["launcher.cjs", "platforms.cjs", "LICENSE", "README.md"],
+    files: ["launcher.cjs", "platforms.cjs", "update.cjs", "LICENSE", "README.md"],
     optionalDependencies: Object.fromEntries(platforms.map(item => [packageName(item), version])),
   };
   const native = {

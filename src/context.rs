@@ -111,6 +111,11 @@ pub trait ContextPolicy: Send {
     fn new_user_turn(&mut self) {}
     fn mark_consumed(&mut self, _message_count: usize) {}
     fn observe(&mut self, _sent: &[Message], _input: Option<u64>, _cached: Option<u64>) {}
+    /// Calibrate final admission only when the complete provider projection
+    /// still matches a successful request. Other policies stay conservative.
+    fn calibrated_input_tokens(&self, _messages: &[Message], _view: &[Message]) -> Option<usize> {
+        None
+    }
     /// Reuse the already validated serialized projection size. Custom
     /// policies retain the existing observe hook without any API break.
     fn observe_with_bytes(
@@ -130,6 +135,11 @@ pub trait ContextPolicy: Send {
     /// send. Built-in compaction fingerprints it so dynamic instructions can
     /// invalidate a measured prefix even when their byte length is unchanged.
     fn set_prompt_context(&mut self, _system: Option<&Message>) {}
+    /// True when `set_prompt_context` supplies the exact composed system
+    /// message, so callers must not also add a separate prompt text delta.
+    fn composes_prompt_context(&self) -> bool {
+        false
+    }
     fn take_usage(&mut self) -> CompactionUsage {
         CompactionUsage::default()
     }
@@ -376,16 +386,17 @@ impl ContextConfig {
     /// been assembled. The internal context planner still controls compaction.
     pub fn validate_final_request(&self, view: &[Message], tools: &[Value]) -> Result<usize> {
         let tool_bytes = serde_json::to_vec(tools)?.len();
-        Ok(self.validate_with_tool_bytes(view, tool_bytes)?.0)
+        Ok(self.validate_with_tool_bytes(view, tool_bytes, None)?.0)
     }
 
-    /// Return the exact serialized projection byte count alongside the
-    /// conservative token estimate, so observe() need not serialize it again.
+    /// Return the serialized projection size and admitted token estimate. A
+    /// matching provider measurement may replace the conservative estimate.
     /// Tool schema bytes are stable throughout one agent task.
     pub(crate) fn validate_with_tool_bytes(
         &self,
         view: &[Message],
         tool_bytes: usize,
+        calibrated_input: Option<usize>,
     ) -> Result<(usize, usize)> {
         let message_bytes = serde_json::to_vec(view)?.len();
         let active_images = view
@@ -405,6 +416,7 @@ impl ContextConfig {
                 .saturating_add(inline_log_bytes),
         )
         .saturating_add(active_images.saturating_mul(crate::attachments::IMAGE_TOKEN_ALLOWANCE));
+        let estimated = calibrated_input.unwrap_or(estimated);
         if estimated >= self.hard {
             bail!(
                 "complete model request exceeds the context input budget (about {} tokens, hard limit {}, output reserve {}); reduce injected prompt/tool schema or shorten the conversation",
@@ -505,6 +517,9 @@ pub struct Compression {
     usage: CompactionUsage,
     events: Option<Arc<dyn crate::events::EventSink>>,
     checkpoint_timeout: std::time::Duration,
+    /// A checkpoint request started and has not returned yet. A dropped
+    /// future leaves it set so `take_usage` reports unknown usage.
+    summary_in_flight: bool,
 }
 
 impl Compression {
@@ -546,6 +561,7 @@ impl Compression {
             usage: CompactionUsage::default(),
             events: None,
             checkpoint_timeout: crate::provider::CHECKPOINT_TOTAL_TIMEOUT,
+            summary_in_flight: false,
         }
     }
 
@@ -564,6 +580,11 @@ impl Compression {
     }
 
     pub fn take_usage(&mut self) -> CompactionUsage {
+        if std::mem::take(&mut self.summary_in_flight) {
+            // A cancelled checkpoint cannot report provider usage, but one did
+            // start: keep it visible as unknown instead of free.
+            self.usage.record_failed(1, &crate::model::Usage::default());
+        }
         std::mem::take(&mut self.usage)
     }
 
@@ -598,6 +619,23 @@ impl Compression {
 
     pub fn view(&self, messages: &[Message]) -> Vec<Message> {
         self.view_with_state(messages, &self.state)
+    }
+
+    /// Substitute the exact prompt-composed system message the provider gets.
+    /// Budgets must use the serialized projection, not persisted text plus a
+    /// text-length delta.
+    fn apply_request_system(&self, view: &mut [Message]) {
+        if let (Some(system), Some(first)) = (&self.request_system, view.first_mut()) {
+            if first.role == "system" && system.role == "system" {
+                *first = system.clone();
+            }
+        }
+    }
+
+    fn request_view(&self, messages: &[Message]) -> Vec<Message> {
+        let mut view = self.view(messages);
+        self.apply_request_system(&mut view);
+        view
     }
 
     fn tool_preview(&self, msg: &Message, index: usize) -> String {
@@ -645,6 +683,29 @@ impl Compression {
         .to_string()
     }
 
+    /// Estimate the complete checkpoint request: the retained source, the
+    /// instruction the provider appends, and the tool prefix. The source is
+    /// projected exactly like the wire request, so provider-filtered history
+    /// (for example unsupported reasoning) is not charged.
+    fn checkpoint_request_tokens(
+        &self,
+        source: &[Message],
+        model: &Arc<dyn ModelBackend>,
+    ) -> usize {
+        let mut budget_view = source.to_vec();
+        model.project_for_budget(&mut budget_view);
+        let images = crate::attachments::active_image_tokens(&budget_view, model.accepts_images());
+        let logs = crate::attachments::inline_log_extra_bytes(source)
+            .map(bytes_to_tokens)
+            .unwrap_or(0);
+        budget_view.push(Message::new("user", CHECKPOINT_PROMPT));
+        let bytes = serde_json::to_vec(&budget_view).unwrap_or_default().len();
+        serialized_request_tokens(bytes)
+            .saturating_add(bytes_to_tokens(self.request_tool_bytes))
+            .saturating_add(images)
+            .saturating_add(logs)
+    }
+
     /// Compute the projected request size once; replacing a tool result only
     /// changes one serialized message. At the hard limit, already-consumed
     /// old results may also be previewed as a last-resort capacity fallback.
@@ -660,7 +721,9 @@ impl Compression {
             model.project_for_budget(&mut effective);
         }
         let mut bytes = serde_json::to_vec(&effective).unwrap_or_default().len();
-        let mut tokens = self.tokens_for_json_bytes(bytes);
+        let mut tokens = self
+            .measured_watermark(messages, &effective, self.request_extra_tokens)
+            .unwrap_or_else(|| self.tokens_for_json_bytes(bytes));
         if tokens < self.budget.hard {
             return (0, tokens);
         }
@@ -702,7 +765,9 @@ impl Compression {
                 .unwrap_or_default()
                 .len();
             bytes = bytes.saturating_sub(before).saturating_add(after);
-            tokens = self.tokens_for_json_bytes(bytes);
+            tokens = self
+                .measured_watermark(messages, &effective, self.request_extra_tokens)
+                .unwrap_or_else(|| self.tokens_for_json_bytes(bytes));
             view[projected].content = Some(summary);
             shortened += 1;
         }
@@ -719,21 +784,6 @@ impl Compression {
         serialized_request_tokens(bytes).saturating_add(self.request_extra_tokens)
     }
 
-    /// Estimate the exact checkpoint source, including tool schemas and
-    /// media/expanded-log allowances, without double-counting prompt additions
-    /// that are already present in the projected system message.
-    fn source_tokens(&self, view: &[Message], model: &Arc<dyn ModelBackend>) -> usize {
-        let bytes = serde_json::to_vec(view).unwrap_or_default().len();
-        let images = crate::attachments::active_image_tokens(view, model.accepts_images());
-        let logs = crate::attachments::inline_log_extra_bytes(view)
-            .map(bytes_to_tokens)
-            .unwrap_or(0);
-        serialized_request_tokens(bytes)
-            .saturating_add(bytes_to_tokens(self.request_tool_bytes))
-            .saturating_add(images)
-            .saturating_add(logs)
-    }
-
     pub fn observe(&mut self, sent: &[Message], input: Option<u64>, cached: Option<u64>) {
         self.observe_with_bytes(sent, None, input, cached);
     }
@@ -745,7 +795,7 @@ impl Compression {
         input: Option<u64>,
         _cached: Option<u64>,
     ) {
-        let Some(input) = input else {
+        let Some(input) = input.filter(|input| *input > 0) else {
             // Without a provider measurement there is no safe incremental
             // water line for a later request.
             self.measured = None;
@@ -827,34 +877,37 @@ impl Compression {
     /// Prefer provider-reported input tokens plus an estimate for appended
     /// messages. Fall back to the full projection whenever any part of the
     /// measured prefix may have changed.
+    #[cfg(test)]
     fn watermark(&self, messages: &[Message], view: &[Message], extra_tokens: usize) -> usize {
-        let full = self.tokens(view);
-        let Some(measured) = &self.measured else {
-            return full;
-        };
-        if !self.measurement_compatible(measured, messages) {
-            return full;
+        self.measured_watermark(messages, view, extra_tokens)
+            .unwrap_or_else(|| self.tokens(view))
+    }
+
+    fn measured_watermark(
+        &self,
+        messages: &[Message],
+        view: &[Message],
+        extra_tokens: usize,
+    ) -> Option<usize> {
+        let measured = self.measured.as_ref()?;
+        if !self.measurement_compatible(measured, messages)
+            || !self.prefix_matches(measured, view, extra_tokens)
+        {
+            return None;
         }
         let added_bytes = if view.len() > measured.sent.len() {
-            serde_json::to_vec(&view[measured.sent.len()..])
-                .map(|bytes| bytes.len())
-                .unwrap_or(0)
+            serde_json::to_vec(&view[measured.sent.len()..]).ok()?.len()
         } else {
             0
         };
-        // Tool-result JSON is often denser than ordinary prose (the real
-        // DeepSeek fixture groups tokenized near 2.4 bytes/token). Extend the
-        // measured prefix with a bounded 25% margin over the 3-bytes/token
-        // heuristic so a large appended tool result cannot silently carry the
-        // request past the 90%-of-window trigger.
-        let base = bytes_to_tokens(added_bytes);
-        let incremental = with_measured_margin(base);
-        let composed = (measured.input as usize).saturating_add(incremental);
-        if self.prefix_matches(measured, view, extra_tokens) {
-            composed
-        } else {
-            full
-        }
+        // Retain the 25% margin for new tool-result JSON; only the unchanged
+        // prefix uses the provider's measured token count.
+        let incremental = with_measured_margin(bytes_to_tokens(added_bytes));
+        Some(
+            usize::try_from(measured.input)
+                .unwrap_or(usize::MAX)
+                .saturating_add(incremental),
+        )
     }
 
     fn cached_system(&self, messages: &[Message]) -> Option<Message> {
@@ -1027,31 +1080,31 @@ impl Compression {
         boundary: usize,
     ) -> Option<(usize, Vec<Message>, usize)> {
         let mut boundary = boundary;
-        loop {
-            let mut view = self.summary_source_view(messages, &self.state);
-            if let Some(system) = self
-                .request_system
-                .clone()
-                .or_else(|| self.cached_system(messages))
-            {
-                if let Some(first) = view.first_mut() {
-                    if first.role == "system" {
-                        *first = system;
-                    }
+        let mut view = self.summary_source_view(messages, &self.state);
+        if let Some(system) = self
+            .request_system
+            .clone()
+            .or_else(|| self.cached_system(messages))
+        {
+            if let Some(first) = view.first_mut() {
+                if first.role == "system" {
+                    *first = system;
                 }
             }
-            crate::attachments::project_history(&mut view, model.accepts_images());
-            // Do not call project_for_budget here. The provider payload builder
-            // needs the original reasoning/provider provenance to make the
-            // same replay decision as the coding request. Projecting first
-            // strips provenance and changes the cached prefix.
+        }
+        crate::attachments::project_history(&mut view, model.accepts_images());
+        // Do not call project_for_budget here. The provider payload builder
+        // needs the original reasoning/provider provenance to make the
+        // same replay decision as the coding request. Projecting first
+        // strips provenance and changes the cached prefix.
+        loop {
             let end =
                 1 + self.state.summaries.len() + boundary.saturating_sub(self.state.covered_until);
             if end > view.len() {
                 return None;
             }
             view.truncate(end);
-            let tokens = self.source_tokens(&view, model);
+            let tokens = self.checkpoint_request_tokens(&view, model);
             // Reserve the provider's first (cache-matching) attempt here.
             // Truncated retries are separately clamped to the remaining
             // window headroom by generate_checkpoint_with_ceiling.
@@ -1084,6 +1137,7 @@ impl Compression {
         if boundary <= self.state.covered_until {
             return Ok(false);
         }
+        let selected_boundary = boundary;
         let source_bytes = self.replaced_context_bytes(messages, boundary);
         if source_bytes < MIN_CHECKPOINT_SOURCE_BYTES {
             crate::runtime_log!(
@@ -1097,7 +1151,11 @@ impl Compression {
             crate::runtime_log!("[compact] checkpoint source does not fit the model window");
             return Ok(false);
         };
-        let source_bytes = self.replaced_context_bytes(messages, boundary);
+        let source_bytes = if boundary == selected_boundary {
+            source_bytes
+        } else {
+            self.replaced_context_bytes(messages, boundary)
+        };
         if source_bytes < MIN_CHECKPOINT_SOURCE_BYTES {
             crate::runtime_log!(
                 "[compact] checkpoint source is too small to reduce context; keeping it raw"
@@ -1119,6 +1177,7 @@ impl Compression {
         // repeated attempt timeouts/truncations can stall a foreground task for
         // many minutes with no model deltas. Dropping generation is safe:
         // context is committed only after a complete, validated summary.
+        self.summary_in_flight = true;
         let result = tokio::time::timeout(
             self.checkpoint_timeout,
             model.generate_checkpoint_with_ceiling(
@@ -1137,14 +1196,18 @@ impl Compression {
             )
         })
         .and_then(|result| result);
+        self.summary_in_flight = false;
         let result = match result {
             Ok(result) => result,
             Err(error) => {
                 self.failed_this_turn = true;
                 // The provider may already have billed earlier attempts of this
                 // summary. Record what it reported before failing the request.
-                if let Some((usage, requests)) = crate::provider::failed_summary_usage(&error) {
-                    self.usage.record_failed(requests, usage);
+                match crate::provider::failed_summary_usage(&error) {
+                    Some((usage, requests)) => self.usage.record_failed(requests, usage),
+                    // The request started even when the provider reported no
+                    // usage; never present it as a free zero-request summary.
+                    None => self.usage.record_failed(1, &crate::model::Usage::default()),
                 }
                 crate::runtime_log!("[compact] checkpoint request failed: {error:#}");
                 return Err(error);
@@ -1158,7 +1221,6 @@ impl Compression {
                 "checkpoint summary is empty or obviously incomplete; original history preserved"
             );
         }
-        let source_bytes = self.replaced_context_bytes(messages, boundary);
         if text.len() >= source_bytes {
             self.failed_this_turn = true;
             bail!("checkpoint summary is not shorter than its source; original history preserved");
@@ -1180,8 +1242,10 @@ impl Compression {
             );
         }
 
-        let before = self.tokens(&self.view(messages));
-        let after = self.tokens(&self.view_with_state(messages, &next));
+        let before = self.tokens(&self.request_view(messages));
+        let mut composed = self.view_with_state(messages, &next);
+        self.apply_request_system(&mut composed);
+        let after = self.tokens(&composed);
         if after >= before {
             self.failed_this_turn = true;
             bail!("checkpoint did not reduce the projected context; original history preserved");
@@ -1226,30 +1290,37 @@ impl Compression {
         self.request_extra_tokens = extra_tokens;
         self.current_raw_system = messages.first().cloned();
 
-        // Plan with the projection the provider will actually send. The
-        // actual prompt-composed system message is not available here yet,
-        // but prompt/tool additions are represented by `extra_tokens`.
-        let mut planning_view = self.view(messages);
+        // Plan with the projection the provider will actually send, including
+        // the prompt-composed system message and its serialized escaping.
+        let mut planning_view = self.request_view(messages);
         crate::attachments::project_history(&mut planning_view, model.accepts_images());
         model.project_for_budget(&mut planning_view);
-        let mut watermark = self.watermark(messages, &planning_view, extra_tokens);
-
-        // The final request uses a conservative JSON estimate. Do not let a
-        // cheaper provider-measured watermark suppress a necessary checkpoint
-        // when that final admission check would reject the same projection.
         let conservative = self.tokens(&planning_view);
-        if (watermark >= self.budget.soft || conservative >= self.budget.hard)
-            && !self.failed_this_turn
-        {
+        let mut watermark = self
+            .measured_watermark(messages, &planning_view, extra_tokens)
+            .unwrap_or(conservative);
+
+        if watermark >= self.budget.soft && !self.failed_this_turn {
+            crate::runtime_log!(
+                "[compact] checkpoint trigger | input_watermark={} soft_limit={} | local_json_estimate={} hard_limit={} | model_window={} output_reserve={}",
+                watermark,
+                self.budget.soft,
+                conservative,
+                self.budget.hard,
+                self.budget.window,
+                self.budget.output_reserve
+            );
             match self.compact_once(messages, model, store).await {
                 Ok(true) => {
                     // A checkpoint was committed. Re-plan once and never run
                     // a second checkpoint in the same prepare call.
-                    let mut view = self.view(messages);
+                    let mut view = self.request_view(messages);
                     let mut planning = view.clone();
                     crate::attachments::project_history(&mut planning, model.accepts_images());
                     model.project_for_budget(&mut planning);
-                    watermark = self.watermark(messages, &planning, extra_tokens);
+                    watermark = self
+                        .measured_watermark(messages, &planning, extra_tokens)
+                        .unwrap_or_else(|| self.tokens(&planning));
                     if watermark >= self.budget.hard {
                         let (mut shortened, mut tokens) = self.fit_tool_results_with_budget(
                             messages,
@@ -1293,7 +1364,10 @@ impl Compression {
             }
         }
 
-        let mut view = self.view(messages);
+        let mut view = self.request_view(messages);
+        if watermark < self.budget.hard {
+            return Ok(view);
+        }
         let (mut shortened, mut tokens) =
             self.fit_tool_results_with_budget(messages, &mut view, Some(model), false);
         if tokens >= self.budget.hard {
@@ -1330,12 +1404,12 @@ impl ContextPolicy for Compression {
             // checkpoint, but keeps the same completed-turn boundaries and
             // recent-history retention. Never mark new evidence consumed.
             self.failed_this_turn = false;
-            let mut before = self.view(messages);
+            let mut before = self.request_view(messages);
             crate::attachments::project_history(&mut before, model.accepts_images());
             model.project_for_budget(&mut before);
             let before_tokens = self.tokens(&before);
             let compacted = self.compact_once(messages, model, store).await?;
-            let mut after = self.view(messages);
+            let mut after = self.request_view(messages);
             crate::attachments::project_history(&mut after, model.accepts_images());
             model.project_for_budget(&mut after);
             Ok(CompactionReport {
@@ -1375,6 +1449,10 @@ impl ContextPolicy for Compression {
         Compression::set_prompt_context(self, system);
     }
 
+    fn composes_prompt_context(&self) -> bool {
+        true
+    }
+
     fn mark_consumed(&mut self, message_count: usize) {
         Compression::mark_consumed(self, message_count);
     }
@@ -1391,6 +1469,21 @@ impl ContextPolicy for Compression {
         cached: Option<u64>,
     ) {
         Compression::observe_with_bytes(self, sent, Some(serialized_bytes), input, cached);
+    }
+
+    fn calibrated_input_tokens(&self, messages: &[Message], view: &[Message]) -> Option<usize> {
+        let measured = self.measured.as_ref()?;
+        let system = self
+            .request_system
+            .as_ref()
+            .or_else(|| measured.sent.first())?;
+        if !view
+            .first()
+            .is_some_and(|first| same_message(first, system))
+        {
+            return None;
+        }
+        self.measured_watermark(messages, view, self.request_extra_tokens)
     }
 
     fn take_usage(&mut self) -> CompactionUsage {
@@ -1569,6 +1662,166 @@ fn count(value: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Frozen pre-experiment planner: compare exact boundaries, bytes and tokens.
+    impl Compression {
+        fn reference_summary_source(
+            &self,
+            messages: &[Message],
+            model: &Arc<dyn ModelBackend>,
+            boundary: usize,
+        ) -> Option<(usize, Vec<Message>, usize)> {
+            let mut boundary = boundary;
+            loop {
+                let mut view = self.summary_source_view(messages, &self.state);
+                if let Some(system) = self
+                    .request_system
+                    .clone()
+                    .or_else(|| self.cached_system(messages))
+                {
+                    if let Some(first) = view.first_mut() {
+                        if first.role == "system" {
+                            *first = system;
+                        }
+                    }
+                }
+                crate::attachments::project_history(&mut view, model.accepts_images());
+                // Do not call project_for_budget here. The provider payload builder
+                // needs the original reasoning/provider provenance to make the
+                // same replay decision as the coding request. Projecting first
+                // strips provenance and changes the cached prefix.
+                let end = 1
+                    + self.state.summaries.len()
+                    + boundary.saturating_sub(self.state.covered_until);
+                if end > view.len() {
+                    return None;
+                }
+                view.truncate(end);
+                let tokens = self.checkpoint_request_tokens(&view, model);
+                // Reserve the provider's first (cache-matching) attempt here.
+                // Truncated retries are separately clamped to the remaining
+                // window headroom by generate_checkpoint_with_ceiling.
+                let output = model.checkpoint_output_ceiling(
+                    self.budget.summary_tokens(),
+                    self.budget.output_reserve(),
+                );
+                if self
+                    .budget
+                    .max_input_tokens
+                    .is_none_or(|limit| tokens <= limit)
+                    && tokens.saturating_add(output) <= self.budget.window()
+                {
+                    return Some((boundary, view, tokens));
+                }
+                boundary =
+                    Self::previous_safe_boundary(messages, self.state.covered_until, boundary)?;
+            }
+        }
+    }
+
+    #[test]
+    fn summary_source_matches_reference_when_shrinking_the_prefix() {
+        let backend: Arc<dyn ModelBackend> = Arc::new(TestModel::new([]));
+        for rounds in [0, 1, 8, 40] {
+            let messages = long_completed_turns(rounds);
+            for cap in [1800, 4096, 28_000] {
+                let budget = ContextConfig::with_output_reserve(32_000, 4096)
+                    .unwrap()
+                    .with_input_limit(cap)
+                    .unwrap();
+                let context =
+                    Compression::new(CompactionState::default(), budget, Path::new("unused.json"));
+                for boundary in [1, messages.len()] {
+                    let encode = |source: Option<(usize, Vec<Message>, usize)>| {
+                        source.map(|(boundary, view, tokens)| {
+                            (boundary, serde_json::to_vec(&view).unwrap(), tokens)
+                        })
+                    };
+                    assert_eq!(
+                        encode(context.summary_source(&messages, &backend, boundary)),
+                        encode(context.reference_summary_source(&messages, &backend, boundary))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "local CPU benchmark; run in release mode with one test thread"]
+    fn perf_summary_source_shrinking_prefix() {
+        use std::{hint::black_box, time::Instant};
+        let messages = long_completed_turns(100);
+        let backend: Arc<dyn ModelBackend> = Arc::new(TestModel::new([]));
+        let budget = ContextConfig::with_output_reserve(131_072, 4096)
+            .unwrap()
+            .with_input_limit(1800)
+            .unwrap();
+        let context =
+            Compression::new(CompactionState::default(), budget, Path::new("unused.json"));
+        let mut current = Vec::new();
+        let mut reference = Vec::new();
+        for index in 0..23 {
+            for old in if index % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            } {
+                let start = Instant::now();
+                let result = if old {
+                    context.reference_summary_source(&messages, &backend, messages.len())
+                } else {
+                    context.summary_source(&messages, &backend, messages.len())
+                };
+                let elapsed = start.elapsed();
+                assert!(black_box(result).is_some());
+                if index > 1 {
+                    if old {
+                        reference.push(elapsed);
+                    } else {
+                        current.push(elapsed);
+                    }
+                }
+            }
+        }
+        let fixture = json!({"messages":messages.len(),"input_cap":1800,"raw_json_bytes":serde_json::to_vec(&messages).unwrap().len(),"alternating_order":true});
+        crate::performance::report(
+            "context.summary_source.reference",
+            &reference,
+            fixture.clone(),
+        );
+        crate::performance::report("context.summary_source.current", &current, fixture);
+    }
+
+    #[tokio::test]
+    #[ignore = "local mock benchmark; no provider requests or billable usage"]
+    async fn perf_context_prepare_and_mock_checkpoint_wait() {
+        use std::time::Instant;
+        for delay_ms in [0, 30] {
+            let messages = grow_history(budget().soft_limit() + 100, 900);
+            let original = serde_json::to_vec(&messages).unwrap();
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let mut model = TestModel::new([]);
+                model.delay = Duration::from_millis(delay_ms);
+                let model = Arc::new(model);
+                let backend: Arc<dyn ModelBackend> = model.clone();
+                let mut context = compression();
+                context.mark_consumed(messages.len());
+                let commit = RecordingCommit::default();
+                let start = Instant::now();
+                context.prepare(&messages, &backend, &commit).await.unwrap();
+                samples.push(start.elapsed());
+                assert_eq!(model.calls().len(), 1);
+                assert_eq!(commit.count(), 1);
+            }
+            assert_eq!(serde_json::to_vec(&messages).unwrap(), original);
+            crate::performance::report(
+                "context.prepare.checkpoint",
+                &samples,
+                json!({"mock_delay_ms":delay_ms,"requests_per_prepare":1,"billable_usage":null}),
+            );
+        }
+    }
 
     #[test]
     fn checkpoint_source_respects_an_independent_input_cap() {
@@ -2447,7 +2700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conservative_hard_limit_triggers_checkpoint_despite_low_measured_watermark() {
+    async fn measured_prefix_prevents_premature_checkpoint_and_final_rejection() {
         let model = Arc::new(TestModel::new([Ok(GOOD_CHECKPOINT.to_owned())]));
         let backend: Arc<dyn ModelBackend> = model.clone();
         let messages = grow_history(budget().hard_limit() + 400, 700);
@@ -2464,13 +2717,96 @@ mod tests {
             None,
         );
         let commit = RecordingCommit::default();
-        context.prepare(&messages, &backend, &commit).await.unwrap();
-        assert_eq!(
-            model.calls().len(),
-            1,
-            "a measurable prefix must not suppress a needed checkpoint"
+        let prepared = context.prepare(&messages, &backend, &commit).await.unwrap();
+        assert!(
+            model.calls().is_empty(),
+            "JSON size must not override a matching provider measurement"
         );
-        assert_eq!(commit.count(), 1);
+        assert_eq!(commit.count(), 0);
+        assert_eq!(
+            serde_json::to_value(&prepared).unwrap(),
+            serde_json::to_value(&view).unwrap()
+        );
+        let calibrated = context.calibrated_input_tokens(&messages, &prepared);
+        assert_eq!(calibrated, Some(budget().soft_limit() / 2));
+        assert!(budget()
+            .validate_with_tool_bytes(&prepared, 0, None)
+            .is_err());
+        assert_eq!(
+            budget()
+                .validate_with_tool_bytes(&prepared, 0, calibrated)
+                .unwrap()
+                .0,
+            budget().soft_limit() / 2
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_or_missing_measurements_keep_the_conservative_checkpoint_guard() {
+        for change in 0..7 {
+            let model: Arc<dyn ModelBackend> =
+                Arc::new(TestModel::new([Ok(GOOD_CHECKPOINT.to_owned())]));
+            let mut messages = grow_history(budget().hard_limit() + 400, 700);
+            let mut context = compression();
+            context.mark_consumed(messages.len());
+            context.set_request_context(&model, &[]);
+            context.current_raw_system = Some(messages[0].clone());
+            let view = context.view(&messages);
+            context.observe(&view, Some((budget().soft_limit() / 2) as u64), Some(0));
+            let extra = if change == 6 { 1 } else { 0 };
+            match change {
+                0 => messages[1]
+                    .content
+                    .as_mut()
+                    .unwrap()
+                    .replace_range(..1, "X"),
+                1 => context.set_prompt_context(Some(&Message::new("system", "changed prompt"))),
+                2 => context.set_request_context(&model, &[json!({"changed": true})]),
+                3 => context.set_request_context(
+                    &(Arc::new(TestModel::new([])) as Arc<dyn ModelBackend>),
+                    &[],
+                ),
+                4 => context.observe(&view, None, None),
+                5 => context.observe(&view, Some(0), Some(0)),
+                _ => context.request_extra_tokens = extra,
+            }
+            assert!(
+                context
+                    .calibrated_input_tokens(&messages, &context.view(&messages))
+                    .is_none(),
+                "change={change}"
+            );
+            let commit = RecordingCommit::default();
+            context
+                .prepare_with_extra(&messages, &model, &commit, extra)
+                .await
+                .unwrap();
+            assert_eq!(commit.count(), 1, "change={change}");
+        }
+    }
+
+    #[test]
+    fn calibrated_final_guard_rejects_overflow_and_changed_system() {
+        let model: Arc<dyn ModelBackend> = Arc::new(TestModel::new([]));
+        let messages = grow_history(budget().hard_limit() + 400, 700);
+        let mut context = compression();
+        context.set_request_context(&model, &[]);
+        context.current_raw_system = Some(messages[0].clone());
+        let view = context.view(&messages);
+        context.observe(&view, Some(budget().hard_limit() as u64), Some(0));
+        let calibrated = context.calibrated_input_tokens(&messages, &view);
+        assert_eq!(calibrated, Some(budget().hard_limit()));
+        assert!(budget()
+            .validate_with_tool_bytes(&view, 0, calibrated)
+            .is_err());
+        context.observe(&view, Some(1_000), Some(0));
+        let mut changed = view;
+        changed[0].content = Some("unplanned injected system prompt".into());
+        let calibrated = context.calibrated_input_tokens(&messages, &changed);
+        assert!(calibrated.is_none());
+        assert!(budget()
+            .validate_with_tool_bytes(&changed, 0, calibrated)
+            .is_err());
     }
 
     #[tokio::test]
@@ -3163,9 +3499,11 @@ mod tests {
             Message::new("system", "You are a coding agent."),
             Message::new("user", "hello 你好"),
         ];
-        let (_, message_bytes) = budget.validate_with_tool_bytes(&view, 0).unwrap();
+        let (_, message_bytes) = budget.validate_with_tool_bytes(&view, 0, None).unwrap();
         let tool_bytes = 2;
-        let (estimated, bytes) = budget.validate_with_tool_bytes(&view, tool_bytes).unwrap();
+        let (estimated, bytes) = budget
+            .validate_with_tool_bytes(&view, tool_bytes, None)
+            .unwrap();
         assert_eq!(bytes, message_bytes);
         assert_eq!(estimated, (message_bytes + tool_bytes).div_ceil(3) + 256);
         assert_ne!(
@@ -3246,8 +3584,8 @@ mod tests {
         assert!(source[2].provider_items.is_some());
         assert_eq!(
             probe.0.load(Ordering::SeqCst),
-            0,
-            "the checkpoint source must remain unprojected for provider cache replay"
+            1,
+            "only the budget copy is projected; the provider-facing source keeps provenance"
         );
     }
 

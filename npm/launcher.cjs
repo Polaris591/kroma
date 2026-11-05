@@ -28,7 +28,13 @@ function resolveBinary() {
   return binary;
 }
 
-function main() {
+async function main() {
+  const {updateArgs, runUpdate} = require("./update.cjs");
+  const args = updateArgs(process.argv.slice(2));
+  if (args !== null) {
+    try { await runUpdate(args); } catch (error) { console.error(`Kroma: ${error.message}`); process.exitCode = error.exitCode || 1; }
+    return;
+  }
   let binary;
   try {
     binary = resolveBinary();

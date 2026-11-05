@@ -20,6 +20,20 @@ fn draw(ui: &mut UiState, width: u16, height: u16) -> Buffer {
 fn neutral(color: Color) -> bool {
     matches!(color, Color::Reset) || matches!(color, Color::Rgb(r,g,b) if r==g && g==b)
 }
+fn assert_neutral_backgrounds_except_message_rails(ui: &UiState, buffer: &Buffer) {
+    let messages = ui.message_colors();
+    for (index, cell) in buffer.content().iter().enumerate() {
+        if neutral(cell.bg) {
+            continue;
+        }
+        let x = buffer.area.x + (index % usize::from(buffer.area.width)) as u16;
+        let y = buffer.area.y + (index / usize::from(buffer.area.width)) as u16;
+        assert_eq!(x, ui.selection_area.x + 1);
+        assert!((ui.selection_area.y..ui.selection_area.bottom()).contains(&y));
+        assert_eq!(cell.symbol(), " ");
+        assert!(cell.bg == messages.user_rail || cell.bg == messages.assistant_rail);
+    }
+}
 fn finish_tool(ui: &mut UiState, id: &str, command: &str, result: &str, failed: bool) {
     ui.event(UiEvent::ToolStarted {
         name: "shell".into(),
@@ -522,12 +536,12 @@ fn semantic_long_statuses_and_risk_readings_survive_small_terminals() {
         ui.editor.paste(&"中文 draft line\n".repeat(12));
         let buffer = draw(&mut ui, width, height);
         assert!(ui.editor_area.right() <= width && ui.editor_area.bottom() <= height);
-        assert!(buffer.content().iter().all(|cell| neutral(cell.bg)));
+        assert_neutral_backgrounds_except_message_rails(&ui, &buffer);
     }
 }
 
 #[test]
-fn semantic_render_keeps_all_backgrounds_neutral_and_editor_geometry_stable() {
+fn semantic_render_keeps_non_rail_backgrounds_neutral_and_editor_geometry_stable() {
     for preset in ["dark", "light"] {
         let mut ui = ui();
         ui.themes.select(preset).unwrap();
@@ -538,9 +552,7 @@ fn semantic_render_keeps_all_backgrounds_neutral_and_editor_geometry_stable() {
         let buffer = draw(&mut ui, 80, 24);
         let area = ui.editor_area;
         assert!(area.bottom() < 24);
-        for cell in buffer.content() {
-            assert!(neutral(cell.bg));
-        }
+        assert_neutral_backgrounds_except_message_rails(&ui, &buffer);
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
                 assert!(neutral(buffer.cell((x, y)).unwrap().fg));

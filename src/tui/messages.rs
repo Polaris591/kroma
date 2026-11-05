@@ -1,5 +1,5 @@
 //! Message identity decoration, separate from S2 execution-state colours.
-//! Rails and surfaces are painted after layout and never enter copied text.
+//! Rails use background-coloured spaces so native terminal copies stay clean.
 use super::palette::MessageColors;
 use super::*;
 
@@ -24,15 +24,14 @@ impl UiState {
         let p = self.message_colors();
         for row in start..end {
             decor.push((row, Decor::Surface(Surface::Message)));
-            let (glyph, color) = match role {
-                MessageRole::User => ("▎", p.user_rail),
-                MessageRole::Assistant => ("▎", p.assistant_rail),
+            let color = match role {
+                MessageRole::User => p.user_rail,
+                MessageRole::Assistant => p.assistant_rail,
             };
             decor.push((
                 row,
-                Decor::Gutter {
+                Decor::Rail {
                     column: 1,
-                    glyph,
                     color,
                     first_only: false,
                 },

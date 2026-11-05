@@ -169,19 +169,22 @@ impl Editor {
         pieces.get(index).map_or(offset, |(start, _)| *start)
     }
 
+    fn displayed_grapheme<'a>(&'a self, grapheme: &'a str) -> &'a str {
+        if grapheme == "\t" {
+            return "    ";
+        }
+        grapheme
+            .chars()
+            .next()
+            .and_then(|ch| self.attachment_labels.get(&ch))
+            .filter(|_| grapheme.chars().count() == 1)
+            .map_or(grapheme, String::as_str)
+    }
+
     fn visual_width(&self, start: usize, end: usize) -> usize {
         self.text[self.byte_index(start)..self.byte_index(end)]
             .graphemes(true)
-            .map(|part| {
-                part.chars()
-                    .next()
-                    .and_then(|ch| self.attachment_labels.get(&ch))
-                    .filter(|_| part.chars().count() == 1)
-                    .map_or_else(
-                        || UnicodeWidthStr::width(part),
-                        |label| UnicodeWidthStr::width(label.as_str()),
-                    )
-            })
+            .map(|part| UnicodeWidthStr::width(self.displayed_grapheme(part)))
             .sum()
     }
 
@@ -189,15 +192,7 @@ impl Editor {
         let mut caret = start;
         let mut column = 0;
         for grapheme in self.text[self.byte_index(start)..self.byte_index(end)].graphemes(true) {
-            let width = grapheme
-                .chars()
-                .next()
-                .and_then(|ch| self.attachment_labels.get(&ch))
-                .filter(|_| grapheme.chars().count() == 1)
-                .map_or_else(
-                    || UnicodeWidthStr::width(grapheme),
-                    |label| UnicodeWidthStr::width(label.as_str()),
-                );
+            let width = UnicodeWidthStr::width(self.displayed_grapheme(grapheme));
             if column + width > target {
                 break;
             }
@@ -207,15 +202,25 @@ impl Editor {
         caret
     }
 
-    fn insert(&mut self, input: &str) {
+    fn replace_range(&mut self, a: usize, b: usize, input: &str) {
+        let start = a.min(b).min(self.text.chars().count());
+        let end = a.max(b);
         self.checkpoint();
-        let byte = self.byte_index(self.caret);
-        self.text.insert_str(byte, input);
-        self.caret += input.chars().count();
+        self.text
+            .replace_range(self.byte_index(start)..self.byte_index(end), input);
+        self.caret = start + input.chars().count();
         self.history_index = None;
     }
 
+    fn insert(&mut self, input: &str) {
+        self.replace_range(self.caret, self.caret, input);
+    }
+
     pub fn paste(&mut self, text: &str) {
+        self.paste_over(text, None);
+    }
+
+    pub fn paste_over(&mut self, text: &str, selection: Option<(usize, usize)>) {
         // Text from the OS clipboard cannot impersonate a draft's attachment.
         let clean = text
             .replace("\r\n", "\n")
@@ -229,7 +234,8 @@ impl Editor {
                 }
             })
             .collect::<String>();
-        self.insert(&clean);
+        let (a, b) = selection.unwrap_or((self.caret, self.caret));
+        self.replace_range(a, b, &clean);
     }
 
     pub fn localize_attachment_labels(&mut self, language: super::preferences::Language) {
@@ -247,8 +253,14 @@ impl Editor {
             .insert(marker, format!("【{label}】"));
     }
 
-    pub fn insert_attachment(&mut self, marker: char, label: String) {
-        self.insert(&marker.to_string());
+    pub fn insert_attachment(
+        &mut self,
+        marker: char,
+        label: String,
+        selection: Option<(usize, usize)>,
+    ) {
+        let (a, b) = selection.unwrap_or((self.caret, self.caret));
+        self.replace_range(a, b, &marker.to_string());
         self.attachment_labels
             .insert(marker, format!("【{label}】"));
     }
@@ -362,13 +374,15 @@ impl Editor {
             .unwrap_or(chars.len())
     }
 
-    fn move_vertical(&mut self, up: bool) {
+    fn move_vertical(&mut self, up: bool, recall: bool) {
         let chars: Vec<char> = self.text.chars().collect();
         let start = self.line_start();
         let column = self.visual_width(start, self.caret);
         if up {
             if start == 0 {
-                self.history_step(true);
+                if recall {
+                    self.history_step(true);
+                }
                 return;
             }
             let previous_end = start - 1;
@@ -380,7 +394,9 @@ impl Editor {
         } else {
             let end = self.line_end();
             if end == chars.len() {
-                self.history_step(false);
+                if recall {
+                    self.history_step(false);
+                }
                 return;
             }
             let next_start = end + 1;
@@ -494,10 +510,14 @@ impl Editor {
             KeyCode::Right if ctrl => self.caret = self.word_boundary(false),
             KeyCode::Left => self.caret = self.previous_grapheme(),
             KeyCode::Right => self.caret = self.next_grapheme(),
+            KeyCode::Home if ctrl => self.caret = 0,
+            KeyCode::End if ctrl => self.caret = self.text.chars().count(),
             KeyCode::Home => self.caret = self.line_start(),
             KeyCode::End => self.caret = self.line_end(),
-            KeyCode::Up => self.move_vertical(true),
-            KeyCode::Down => self.move_vertical(false),
+            KeyCode::Up => self.move_vertical(true, !key.modifiers.contains(KeyModifiers::SHIFT)),
+            KeyCode::Down => {
+                self.move_vertical(false, !key.modifiers.contains(KeyModifiers::SHIFT))
+            }
             _ => {}
         }
         EditAction::None
@@ -522,12 +542,7 @@ impl Editor {
                 char_index += 1;
                 continue;
             }
-            let label = grapheme
-                .chars()
-                .next()
-                .and_then(|ch| self.attachment_labels.get(&ch))
-                .filter(|_| grapheme.chars().count() == 1);
-            let displayed = label.map_or(grapheme, String::as_str);
+            let displayed = self.displayed_grapheme(grapheme);
             let cells = UnicodeWidthStr::width(displayed);
             if col + cells > width && col > 0 {
                 rows.push(String::new());
@@ -582,12 +597,7 @@ impl Editor {
                 col = 0;
                 continue;
             }
-            let displayed = grapheme
-                .chars()
-                .next()
-                .and_then(|ch| self.attachment_labels.get(&ch))
-                .filter(|_| grapheme.chars().count() == 1)
-                .map_or(grapheme, String::as_str);
+            let displayed = self.displayed_grapheme(grapheme);
             let cells = UnicodeWidthStr::width(displayed);
             if col + cells > width && col > 0 {
                 rows.push(EditorVisualRow {
@@ -643,6 +653,10 @@ impl Editor {
             }
         }
         row.end
+    }
+
+    pub fn caret(&self) -> usize {
+        self.caret
     }
 
     pub fn set_caret(&mut self, index: usize) {
@@ -723,7 +737,7 @@ mod tests {
         assert!(spans.iter().any(|&(row, _, _)| row == 1));
         // Draft markers must copy as human-visible chips, not private Unicode.
         editor.clear();
-        editor.insert_attachment('\u{e000}', "screenshot.png".into());
+        editor.insert_attachment('\u{e000}', "screenshot.png".into(), None);
         assert_eq!(
             editor.selected_display_text(0, 1).as_deref(),
             Some("【screenshot.png】")
@@ -830,7 +844,7 @@ mod tests {
         for _ in 0..3 {
             editor.key(key(KeyCode::Left));
         }
-        editor.insert_attachment(token, "foo.jpg".into());
+        editor.insert_attachment(token, "foo.jpg".into(), None);
         assert_eq!(editor.visible_text(), "你看看【foo.jpg】怎么样");
         let (rendered, _, _) = editor.viewport(60, 3);
         assert_eq!(rendered, editor.visible_text());
@@ -849,7 +863,7 @@ mod tests {
         let mut editor = Editor::default();
         editor.paste("看一下");
         let token = char::from_u32(ATTACHMENT_START).unwrap();
-        editor.insert_attachment(token, "file.png".into());
+        editor.insert_attachment(token, "file.png".into(), None);
         editor.key(key(KeyCode::Backspace));
         assert_eq!(editor.text(), "看一下");
         editor.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));

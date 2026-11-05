@@ -1,0 +1,25 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+    Finished `release` profile [optimized] target(s) in 1m 02s
+     Running unittests src\lib.rs (target\release\deps\kroma-e42228b31dbdc43b.exe)
+
+running 1 test
+test checkpoints::tests::perf_file_checkpoint_first_unchanged_and_delta ... PERF {"fixture":{"bytes_per_file":1024,"cancellable":true,"files":1000,"includes_root_discovery":true,"store_preinitialized":true},"max_ns":1273988500,"min_ns":1273988500,"name":"checkpoint.first_capture","p50_ns":1273988500,"p95_ns":1273988500,"samples":1}
+PERF {"fixture":{"bytes_per_file":1024,"cancellable":true,"files":1000,"includes_root_discovery":true,"store_preinitialized":true},"max_ns":449738600,"min_ns":288731800,"name":"checkpoint.unchanged","p50_ns":395717700,"p95_ns":426499000,"samples":21}
+PERF {"fixture":{"bytes_per_file":1024,"cancellable":true,"files":1000,"includes_root_discovery":true,"store_preinitialized":true},"max_ns":973708100,"min_ns":790020000,"name":"checkpoint.one_file_delta","p50_ns":867119900,"p95_ns":972885400,"samples":21}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 620 filtered out; finished in 28.76s
+
+    Finished `release` profile [optimized] target(s) in 0.46s
+     Running unittests src\lib.rs (target\release\deps\kroma-e42228b31dbdc43b.exe)
+
+running 1 test
+test tui::view::tests::bench_streaming_frame_latency_three_hundred_and_three_thousand_messages ... TUI scenario=streaming-window messages=300 terminal=80x24 frames=60 median=4243us p95=5586us
+TUI scenario=streaming-window messages=3000 terminal=80x24 frames=60 median=4543us p95=6799us
+TUI scenario=all-history messages=3000 terminal=100x30 forced-cache-rebuilds=8 median=37945us p95=42161us
+TUI scenario=expanded-tool-output lines=4800 terminal=100x30 forced-cache-rebuilds=12 median=24639us p95=26895us
+TUI scenario=long-code-block lines=900 terminal=100x30 forced-cache-rebuilds=12 median=4179us p95=5961us
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 620 filtered out; finished in 1.24s
+

@@ -1,0 +1,28 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+error: items after a test module
+   --> src\tui\tool_display.rs:273:1
+    |
+273 | mod tests {
+    | ^^^^^^^^^
+...
+340 | pub(super) fn ellipsize_cells(value: &str, width: usize) -> String {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+361 | pub(super) fn compact_line(value: &str, width: usize) -> String {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+368 | pub(super) fn tool_arguments(name: &str, raw: &str) -> String {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+414 | fn subagent_result_details(value: &Value) -> Option<String> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+569 | pub(super) fn tool_result_details(raw: &str) -> String {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#items_after_test_module
+    = note: `-D clippy::items-after-test-module` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::items_after_test_module)]`
+    = help: move the items to before the test module was defined
+
+error: could not compile `kroma` (lib test) due to 1 previous error

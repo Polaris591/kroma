@@ -13,10 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     borrow::Cow,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
     time::Instant,
 };
@@ -429,11 +430,195 @@ impl ModelBackend for ProcessModelBackend {
     }
 }
 
+/// One validated memory block returned by a `request_context` plugin.
+#[derive(Clone, Debug)]
+struct Pack {
+    id: String,
+    kind: String,
+    text: String,
+    paths: Vec<String>,
+}
+
+/// Host policy for V2 project memory; see docs/project-memory-v2-contract.md.
+const PACK_MAX_BLOCKS: usize = 6;
+const PACK_MAX_TEXT_CHARS: usize = 1200;
+const PACK_MAX_TOKENS: usize = 1024;
+const PACK_MAX_IDENT_CHARS: usize = 64;
+const PACK_MAX_PATHS: usize = 8;
+const INTENT_MAX_CHARS: usize = 2000;
+const SUMMARY_MAX_USERS: usize = 8;
+const SUMMARY_MAX_USER_CHARS: usize = 2000;
+const SUMMARY_MAX_BYTES: usize = 8192;
+/// Bounded cache of stable packs, keyed by archive and boundary user digest.
+const PACK_CACHE_ENTRIES: usize = 8;
+
+fn pack_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= PACK_MAX_IDENT_CHARS
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+}
+
+/// Stable non-cryptographic digest: pack identity only, never security.
+fn pack_digest(parts: &[&str]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// One host-admitted block. Anything malformed, oversized or unidentifiable is
+/// dropped instead of reaching the model.
+fn pack_block(value: &Value) -> Option<Pack> {
+    let id = value.get("id")?.as_str()?;
+    let kind = value.get("kind")?.as_str()?;
+    let text = value.get("text")?.as_str()?;
+    if !pack_identifier(id) || !pack_identifier(kind) || text.trim().is_empty() {
+        return None;
+    }
+    if text.chars().count() > PACK_MAX_TEXT_CHARS {
+        return None;
+    }
+    let paths = value
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .take(PACK_MAX_PATHS)
+                .filter(|path| !path.is_empty() && path.len() <= 260)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Pack {
+        id: id.to_owned(),
+        kind: kind.to_owned(),
+        text: text.to_owned(),
+        paths,
+    })
+}
+
+fn render_packs(packs: &[Pack]) -> String {
+    let mut rendered = String::from(r#"<project-memory trust="unverified-reference">"#);
+    for pack in packs {
+        let paths = if pack.paths.is_empty() {
+            String::new()
+        } else {
+            format!(" (paths: {})", pack.paths.join(", "))
+        };
+        rendered.push_str("\n- ");
+        if pack.kind == "review" {
+            rendered.push_str("review (unverified history)");
+        } else {
+            rendered.push_str(&pack.kind);
+        }
+        rendered.push_str(": ");
+        rendered.push_str(&pack.text);
+        rendered.push_str(&paths);
+    }
+    rendered.push_str("\n</project-memory>");
+    rendered
+}
+
+/// Last user request and its digest: the boundary that identifies one task.
+fn last_user_task(messages: &[Message]) -> Option<(String, String)> {
+    let last = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")?;
+    let content = last.content.as_deref().unwrap_or("").trim();
+    if content.is_empty() {
+        return None;
+    }
+    let intent: String = content.chars().take(INTENT_MAX_CHARS).collect();
+    Some((intent, pack_digest(&["user", content])))
+}
+
+/// Append host packs to the last user message of the projection only.
+fn with_packs(messages: &[Message], packs: &[Pack]) -> Vec<Message> {
+    let mut view = messages.to_vec();
+    let rendered = render_packs(packs);
+    if let Some(message) = view.iter_mut().rev().find(|message| message.role == "user") {
+        message.content = Some(match message.content.as_deref() {
+            Some(existing) if !existing.trim().is_empty() => {
+                format!("{existing}\n\n{rendered}")
+            }
+            _ => rendered,
+        });
+    }
+    view
+}
+
+fn recent_users(messages: &[Message]) -> Vec<String> {
+    let mut recent = Vec::new();
+    let mut bytes = 0usize;
+    for message in messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == "user")
+    {
+        if recent.len() >= SUMMARY_MAX_USERS {
+            break;
+        }
+        let content = message.content.as_deref().unwrap_or("").trim();
+        if content.is_empty() {
+            continue;
+        }
+        let text: String = content.chars().take(SUMMARY_MAX_USER_CHARS).collect();
+        if bytes.saturating_add(text.len()) > SUMMARY_MAX_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(text.len());
+        recent.push(text);
+    }
+    recent.reverse();
+    recent
+}
+
+#[derive(Default)]
+struct PackCache {
+    entries: HashMap<(PathBuf, String), Vec<Pack>>,
+    order: VecDeque<(PathBuf, String)>,
+}
+
+impl PackCache {
+    fn get(&self, key: &(PathBuf, String)) -> Option<Vec<Pack>> {
+        self.entries.get(key).cloned()
+    }
+
+    fn remember(&mut self, key: (PathBuf, String), packs: Vec<Pack>) {
+        if self.entries.insert(key.clone(), packs).is_none() {
+            self.order.push_back(key);
+        }
+        while self.order.len() > PACK_CACHE_ENTRIES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+}
+
 pub(super) struct PluginModelHooks {
     inner: Arc<dyn ModelBackend>,
     budget: ContextConfig,
+    /// V1 `before_model_request` patches; only these invalidate usage.
     workers: Vec<Arc<PluginWorker>>,
+    context_workers: Vec<Arc<PluginWorker>>,
+    summary_workers: Vec<Arc<PluginWorker>>,
     session: RwLock<Option<(String, PathBuf)>>,
+    /// Stable packs, keyed by archive plus boundary user-message digest.
+    packs: Mutex<PackCache>,
+    /// Fingerprint of the last summarized task; a repeated round is skipped.
+    last_summary: Mutex<Option<String>>,
     /// Updated by the last projection. The Agent reads it after completion.
     usage_matches_projection: AtomicBool,
 }
@@ -443,13 +628,192 @@ impl PluginModelHooks {
         inner: Arc<dyn ModelBackend>,
         budget: ContextConfig,
         workers: Vec<Arc<PluginWorker>>,
+        context_workers: Vec<Arc<PluginWorker>>,
+        summary_workers: Vec<Arc<PluginWorker>>,
     ) -> Self {
         Self {
             inner,
             budget,
             workers,
+            context_workers,
+            summary_workers,
             session: RwLock::new(None),
+            packs: Mutex::new(PackCache::default()),
+            last_summary: Mutex::new(None),
             usage_matches_projection: AtomicBool::new(true),
+        }
+    }
+
+    fn session_fields(&self) -> (Option<String>, Option<PathBuf>) {
+        self.session
+            .read()
+            .ok()
+            .and_then(|data| data.clone())
+            .map_or((None, None), |(id, archive)| (Some(id), Some(archive)))
+    }
+
+    fn project_fields(&self) -> Value {
+        let workdir = self
+            .workers
+            .iter()
+            .chain(self.context_workers.iter())
+            .chain(self.summary_workers.iter())
+            .next()
+            .map(|worker| worker.workdir.clone());
+        match workdir {
+            Some(workdir) => json!({
+                "workspace_id": pack_digest(&[&workdir.to_string_lossy()]),
+                "git_root": Value::Null,
+                "workdir": workdir.to_string_lossy(),
+            }),
+            None => json!({
+                "workspace_id": Value::Null,
+                "git_root": Value::Null,
+                "workdir": Value::Null,
+            }),
+        }
+    }
+
+    fn session_json(&self) -> Value {
+        let (session_id, archive) = self.session_fields();
+        json!({
+            "id": session_id,
+            "archive": archive.as_deref().map(|path| path.to_string_lossy()),
+        })
+    }
+
+    fn validate_view(&self, messages: &[Message], tools: &[Value]) -> Result<usize> {
+        let mut planned = messages.to_vec();
+        self.inner.project_for_budget(&mut planned);
+        self.budget.validate_final_request(&planned, tools)
+    }
+
+    /// Ask each `request_context` plugin once per (archive, boundary digest).
+    /// Timeouts, errors and malformed answers mean "no memory", never a failed
+    /// model request, and an empty answer is cached too.
+    async fn request_packs(&self, messages: &[Message]) -> Vec<Pack> {
+        let (session_id, archive) = self.session_fields();
+        let Some(archive) = archive else {
+            return Vec::new();
+        };
+        let Some((intent, digest)) = last_user_task(messages) else {
+            return Vec::new();
+        };
+        let key = (archive.clone(), digest);
+        if let Some(cached) = self.packs.lock().ok().and_then(|cache| cache.get(&key)) {
+            return cached;
+        }
+        let max_tokens = (self.budget.available_input() / 100).clamp(1, PACK_MAX_TOKENS);
+        let project = self.project_fields();
+        let session = json!({"id": session_id, "archive": archive.to_string_lossy()});
+        let mut packs: Vec<Pack> = Vec::new();
+        let mut used = 0usize;
+        for worker in &self.context_workers {
+            if packs.len() >= PACK_MAX_BLOCKS {
+                break;
+            }
+            let request = json!({
+                "type": "request_context", "name": "request_context",
+                "arguments": {
+                    "intent": intent,
+                    "budget": {
+                        "max_tokens": max_tokens,
+                        "max_bytes": max_tokens.saturating_mul(3),
+                    },
+                    "project": project,
+                    "session": session,
+                }
+            });
+            let Ok(reply) = worker
+                .invoke_async_timeout(request, super::PLUGIN_MEMORY_CALL_TIMEOUT)
+                .await
+            else {
+                continue;
+            };
+            if reply.is_error {
+                continue;
+            }
+            let Ok(answer) = serde_json::from_str::<Value>(&reply.content) else {
+                continue;
+            };
+            let Some(blocks) = answer.get("blocks").and_then(Value::as_array) else {
+                continue;
+            };
+            for block in blocks {
+                if packs.len() >= PACK_MAX_BLOCKS {
+                    break;
+                }
+                let Some(pack) = pack_block(block) else {
+                    continue;
+                };
+                if packs.iter().any(|known| known.id == pack.id) {
+                    continue;
+                }
+                // Whole entries only: never split a block to fit the budget.
+                let cost = crate::token_estimate::bytes_to_tokens(
+                    render_packs(std::slice::from_ref(&pack)).len(),
+                );
+                if used.saturating_add(cost) > max_tokens {
+                    break;
+                }
+                used = used.saturating_add(cost);
+                packs.push(pack);
+            }
+        }
+        if let Ok(mut cache) = self.packs.lock() {
+            cache.remember(key, packs.clone());
+        }
+        packs
+    }
+
+    /// Best-effort completion notice. The plugin owns idempotency; a slow or
+    /// broken summary may delay this completion but never fails the task.
+    async fn summarize_task(&self, messages: &[Message], reply: &Message) {
+        if self.summary_workers.is_empty()
+            || reply.role != "assistant"
+            || reply
+                .tool_calls
+                .as_deref()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            return;
+        }
+        let recent = recent_users(messages);
+        if recent.is_empty() {
+            return;
+        }
+        let (_, archive) = self.session_fields();
+        let archive = archive
+            .as_deref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let fingerprint = pack_digest(&[
+            &archive,
+            &recent.join(" | "),
+            reply.content.as_deref().unwrap_or(""),
+        ]);
+        if let Ok(mut last) = self.last_summary.lock() {
+            if last.as_deref() == Some(fingerprint.as_str()) {
+                return;
+            }
+            *last = Some(fingerprint);
+        }
+        let (session_id, archive) = self.session_fields();
+        let request = json!({
+            "type": "task_summary", "name": "task_summary",
+            "arguments": {
+                "status": "completed",
+                "recent_users": recent,
+                "project": self.project_fields(),
+                "session": self.session_json(),
+            },
+            "session_id": session_id,
+            "archive": archive,
+        });
+        for worker in &self.summary_workers {
+            let _ = worker
+                .invoke_async_timeout(request.clone(), super::PLUGIN_MEMORY_CALL_TIMEOUT)
+                .await;
         }
     }
 
@@ -463,20 +827,18 @@ impl PluginModelHooks {
         // Hook leaves the request unchanged.
         self.usage_matches_projection
             .store(false, Ordering::Relaxed);
-        let mut view: Cow<'_, [Message]> = Cow::Borrowed(messages);
+        let mut view = messages.to_vec();
         let mut schemas: Cow<'_, [Value]> = Cow::Borrowed(tools);
-        let (session_id, archive) = self
-            .session
-            .read()
-            .ok()
-            .and_then(|data| data.clone())
-            .map_or((None, None), |(id, path)| (Some(id), Some(path)));
+        // Only a V1 request rewrite makes provider-reported usage a poor
+        // calibration source; a host memory pack keeps the existing contract.
+        let mut rewritten = false;
+        let (session_id, archive) = self.session_fields();
         for worker in &self.workers {
             let reply = worker
                 .invoke_async(json!({
                     "type":"hook", "name":"before_model_request",
                     "session_id":session_id,"archive":archive,
-                    "arguments":{"messages":view.as_ref(),"tools":schemas.as_ref()}
+                    "arguments":{"messages":view,"tools":schemas.as_ref()}
                 }))
                 .await?;
             if reply.is_error {
@@ -488,28 +850,37 @@ impl PluginModelHooks {
                 .as_object_mut()
                 .context("model request hook must return an object")?;
             if let Some(messages) = fields.remove("messages") {
-                view = Cow::Owned(
-                    serde_json::from_value(messages)
-                        .context("invalid replacement model messages")?,
-                );
+                view = serde_json::from_value(messages)
+                    .context("invalid replacement model messages")?;
+                rewritten = true;
             }
             if let Some(tools) = fields.remove("tools") {
                 schemas = Cow::Owned(
                     serde_json::from_value(tools).context("invalid replacement model tools")?,
                 );
+                rewritten = true;
             }
         }
-        let mut planned = view.as_ref().to_vec();
-        self.inner.project_for_budget(&mut planned);
-        self.budget
-            .validate_final_request(&planned, schemas.as_ref())?;
-        // A borrowed view means every hook left the request byte-identical;
-        // then provider usage describes the Agent's planning projection.
-        self.usage_matches_projection.store(
-            matches!(view, Cow::Borrowed(_)) && matches!(schemas, Cow::Borrowed(_)),
-            Ordering::Relaxed,
-        );
-        Ok((view.into_owned(), schemas))
+        let packs = self.request_packs(messages).await;
+        if !packs.is_empty() {
+            let packed = with_packs(&view, &packs);
+            match self.validate_view(&packed, schemas.as_ref()) {
+                Ok(_) => {
+                    view = packed;
+                }
+                // A pack that no longer fits must not fail the task: drop it
+                // and retry the final validation exactly once.
+                Err(_) => {
+                    self.validate_view(&view, schemas.as_ref())?;
+                }
+            }
+        } else if rewritten {
+            // Rewritten requests cannot reuse the Agent's calibrated budget.
+            self.validate_view(&view, schemas.as_ref())?;
+        }
+        self.usage_matches_projection
+            .store(!rewritten, Ordering::Relaxed);
+        Ok((view, schemas))
     }
 }
 
@@ -526,6 +897,7 @@ impl ModelBackend for PluginModelHooks {
     }
     fn usage_matches_projection(&self) -> bool {
         self.usage_matches_projection.load(Ordering::Relaxed)
+            && self.inner.usage_matches_projection()
     }
     fn accepts_images(&self) -> Option<bool> {
         self.inner.accepts_images()
@@ -548,7 +920,12 @@ impl ModelBackend for PluginModelHooks {
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
             let (view, schemas) = self.projection(messages, tools).await?;
-            self.inner.complete(&view, schemas.as_ref(), on_text).await
+            let result = self
+                .inner
+                .complete(&view, schemas.as_ref(), on_text)
+                .await?;
+            self.summarize_task(messages, &result.message).await;
+            Ok(result)
         })
     }
 
@@ -561,9 +938,12 @@ impl ModelBackend for PluginModelHooks {
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
             let (view, schemas) = self.projection(messages, tools).await?;
-            self.inner
+            let result = self
+                .inner
                 .complete_with_reasoning(&view, schemas.as_ref(), on_text, on_reasoning)
-                .await
+                .await?;
+            self.summarize_task(messages, &result.message).await;
+            Ok(result)
         })
     }
 
@@ -577,9 +957,12 @@ impl ModelBackend for PluginModelHooks {
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
             let (view, schemas) = self.projection(messages, tools).await?;
-            self.inner
+            let result = self
+                .inner
                 .complete_with_task_images(&view, schemas.as_ref(), images, on_text, on_reasoning)
-                .await
+                .await?;
+            self.summarize_task(messages, &result.message).await;
+            Ok(result)
         })
     }
 

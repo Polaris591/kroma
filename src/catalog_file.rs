@@ -2,9 +2,9 @@
 //! processes; atomic replacement protects readers. Never unlink the lock file.
 use anyhow::{Context, Result};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     path::Path,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// Bounded synchronous transaction. The closure must not await or re-enter.
@@ -43,54 +43,6 @@ pub(crate) fn update_and_return<T: serde::Serialize, R>(
 }
 
 fn acquire(path: &Path) -> Result<File> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match try_acquire(path) {
-            Ok(file) => return Ok(file),
-            Err(error) if contended(&error) && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(5))
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("cannot lock catalog {}", path.display()))
-            }
-        }
-    }
-}
-
-fn contended(error: &std::io::Error) -> bool {
-    #[cfg(windows)]
-    {
-        error.raw_os_error() == Some(32)
-    }
-    #[cfg(not(windows))]
-    {
-        error.kind() == std::io::ErrorKind::WouldBlock
-    }
-}
-
-fn try_acquire(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(0);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        // SAFETY: owned live descriptor, no pointers. Closing this independently
-        // opened descriptor releases the lock, including on error paths.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(file)
+    crate::file_lock::acquire(path, Duration::from_secs(5))
+        .with_context(|| format!("cannot lock catalog {}", path.display()))
 }

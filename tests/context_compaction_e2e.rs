@@ -3,7 +3,7 @@ use anyhow::Result;
 use kroma::{
     agent::Agent,
     context::{BuiltinContextFactory, ContextConfig},
-    model::{Completion, ModelBackend, ModelFuture, StreamFuture, TextResult},
+    model::{Completion, ModelBackend, ModelFuture, StreamFuture, TextResult, Usage},
     prompt::PromptComposer,
     protocol::{FunctionCall, Message, ToolCall},
     sessions::SessionCatalog,
@@ -53,6 +53,7 @@ struct ScriptedModel {
     checkpoints: AtomicUsize,
     fail_checkpoints: bool,
     checkpoint_delay: Duration,
+    usage_divisor: Option<usize>,
     seen: Mutex<Vec<Vec<Message>>>,
 }
 
@@ -63,6 +64,7 @@ impl ScriptedModel {
             checkpoints: AtomicUsize::new(0),
             fail_checkpoints: false,
             checkpoint_delay: Duration::ZERO,
+            usage_divisor: None,
             seen: Mutex::new(Vec::new()),
         }
     }
@@ -107,7 +109,13 @@ impl ModelBackend for ScriptedModel {
             };
             Ok(Completion {
                 message,
-                usage: None,
+                usage: self.usage_divisor.map(|divisor| Usage {
+                    input: Some(
+                        (serde_json::to_vec(messages).unwrap().len() / divisor).max(1) as u64,
+                    ),
+                    cached: Some(0),
+                    ..Usage::default()
+                }),
                 elapsed: Duration::ZERO,
                 first_token: None,
             })
@@ -512,5 +520,92 @@ async fn checkpoint_failure_at_hard_limit_uses_preview_and_continues() -> Result
     assert!(wal.len() > 70_000);
     drop(agent);
     remove_session(&dir);
+    Ok(())
+}
+
+#[tokio::test]
+async fn calibrated_requests_cross_json_ceiling_without_compaction_or_hook_rejection() -> Result<()>
+{
+    for with_hook in [false, true] {
+        if with_hook
+            && std::process::Command::new("node")
+                .arg("--version")
+                .output()
+                .is_err()
+        {
+            continue;
+        }
+        let dir = isolated_dir()?;
+        let model = Arc::new(ScriptedModel {
+            usage_divisor: Some(12),
+            ..ScriptedModel::with_checkpoint_failure()
+        });
+        let budget = ContextConfig::with_output_reserve(32_768, 4_096)?;
+        let backend: Arc<dyn ModelBackend> = if with_hook {
+            let plugins = dir.join("plugins");
+            let plugin = plugins.join("passthrough");
+            std::fs::create_dir_all(&plugin)?;
+            std::fs::write(
+                plugin.join("plugin.toml"),
+                "id='passthrough'
+name='No-op'
+command='node'
+args=['main.js']
+hooks=['before_model_request']
+",
+            )?;
+            std::fs::write(
+                plugin.join("main.js"),
+                r#"require('node:readline').createInterface({input:process.stdin}).on('line',()=>process.stdout.write(JSON.stringify({content:'{}'})+String.fromCharCode(10)));"#,
+            )?;
+            let state = dir.join("plugins.toml");
+            kroma::plugins::PluginCatalog::discover_at(plugins.clone(), state.clone(), &dir)?
+                .set_enabled("passthrough", true)?;
+            kroma::plugins::PluginCatalog::discover_at(plugins, state, &dir)?
+                .model_hooks(model.clone(), budget)
+        } else {
+            model.clone()
+        };
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(HugeOutput { bytes: 0 }))?;
+        let mut agent = Agent::with_runtime_budget(
+            backend,
+            tools,
+            Arc::new(BuiltinContextFactory),
+            PromptComposer::default(),
+            None,
+            dir.clone(),
+            budget,
+        )?;
+        for index in 0..12 {
+            agent
+                .run(&format!("turn {index} {}", "R".repeat(9_000)), &mut |_| {})
+                .await?;
+        }
+        let seen = model.seen.lock().unwrap();
+        assert!(
+            budget
+                .validate_final_request(seen.last().unwrap(), &[])
+                .is_err(),
+            "fixture must exceed the uncalibrated JSON ceiling"
+        );
+        assert_eq!(
+            model.checkpoints.load(Ordering::SeqCst),
+            0,
+            "with_hook={with_hook}"
+        );
+        assert_eq!(
+            model.completions.load(Ordering::SeqCst),
+            13,
+            "with_hook={with_hook}"
+        );
+        assert!(agent.messages().iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|s| s.starts_with("turn 0 "))));
+        drop(seen);
+        drop(agent);
+        remove_session(&dir);
+    }
     Ok(())
 }

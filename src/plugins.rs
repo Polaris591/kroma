@@ -1,15 +1,26 @@
 //! Lightweight process plugins. No runtime ABI, Agent hooks or extra model calls.
 //! An enabled plugin exposes tools/commands through a newline-delimited JSON
 //! process and contributes static prompt text at runtime composition.
+mod approval;
 mod context;
+#[cfg(test)]
+use approval::PluginScanLimits;
+use approval::{PluginCodeScan, PLUGIN_SCAN_LIMITS};
 mod model;
 mod stream;
-const PLUGIN_API_VERSION: u32 = 1;
+/// V1 plugins keep the original envelope and frame contract byte for byte.
+const PLUGIN_API_VERSION_V1: u32 = 1;
+/// V2 only changes the worker protocol version and enables the two host calls.
+const PLUGIN_API_VERSION_V2: u32 = 2;
+/// Host memory calls are fail-open and bounded apart from the 120-second
+/// tool/hook timeout, so a slow plugin cannot stall the model request.
+const PLUGIN_MEMORY_CALL_TIMEOUT: Duration = Duration::from_secs(2);
+const PLUGIN_CAPABILITIES: [&str; 2] = ["request_context", "task_summary"];
 const MAX_INSTALL_ENTRIES: usize = 20_000;
 const MAX_INSTALL_BYTES: u64 = 64 * 1024 * 1024;
 
 fn default_plugin_api_version() -> u32 {
-    PLUGIN_API_VERSION
+    PLUGIN_API_VERSION_V1
 }
 
 use crate::{
@@ -120,6 +131,9 @@ pub struct PluginManifest {
     pub replace_prompt: Option<String>,
     #[serde(default)]
     pub hooks: Vec<String>,
+    /// V2 host capabilities; V1 manifests must leave this empty.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub context: Option<PluginContextSpec>,
     #[serde(default)]
@@ -253,6 +267,49 @@ pub struct PluginCommandSpec {
 }
 
 impl PluginManifest {
+    fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|item| item == capability)
+    }
+
+    /// Capabilities are a V2-only host contract and always need a process.
+    fn validate_capabilities(&self) -> Result<()> {
+        if self.capabilities.is_empty() {
+            return Ok(());
+        }
+        if self.api_version != PLUGIN_API_VERSION_V2 {
+            bail!(
+                "plugin '{}' capabilities require api_version = {}",
+                self.id,
+                PLUGIN_API_VERSION_V2
+            );
+        }
+        if self
+            .command
+            .as_deref()
+            .is_none_or(|cmd| cmd.trim().is_empty())
+        {
+            bail!("plugin '{}' capabilities require a command", self.id);
+        }
+        let mut seen = BTreeSet::new();
+        for capability in &self.capabilities {
+            if !PLUGIN_CAPABILITIES.contains(&capability.as_str()) {
+                bail!(
+                    "plugin '{}' declares unsupported capability '{}'",
+                    self.id,
+                    capability
+                );
+            }
+            if !seen.insert(capability.as_str()) {
+                bail!(
+                    "plugin '{}' declares capability '{}' twice",
+                    self.id,
+                    capability
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn read(directory: &Path) -> Result<Self> {
         let path = directory.join("plugin.toml");
         let text =
@@ -264,14 +321,19 @@ impl PluginManifest {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.api_version != PLUGIN_API_VERSION {
+        if !matches!(
+            self.api_version,
+            PLUGIN_API_VERSION_V1 | PLUGIN_API_VERSION_V2
+        ) {
             bail!(
-                "plugin '{}' requires API version {}; Kroma supports version {}",
+                "plugin '{}' requires API version {}; Kroma supports versions {} and {}",
                 self.id,
                 self.api_version,
-                PLUGIN_API_VERSION
+                PLUGIN_API_VERSION_V1,
+                PLUGIN_API_VERSION_V2
             );
         }
+        self.validate_capabilities()?;
         if !valid_id(&self.id) {
             bail!("plugin id must contain only ASCII letters, digits, '-' or '_'");
         }
@@ -282,6 +344,7 @@ impl PluginManifest {
             && self.commands.is_empty()
             && self.events.is_empty()
             && self.hooks.is_empty()
+            && self.capabilities.is_empty()
             && self.context.is_none()
             && self.model.is_none()
             && self.ui.is_none()
@@ -546,47 +609,12 @@ struct PluginStateLock {
 }
 impl PluginStateLock {
     fn acquire(path: &Path) -> Result<Self> {
-        let parent = path.parent().context("plugin state needs a parent")?;
+        let parent = path.parent().context("plugin settings has no parent")?;
         fs::create_dir_all(parent)?;
-        let lock_path = parent.join("plugins.toml.lock");
-        for _ in 0..250 {
-            let mut options = fs::OpenOptions::new();
-            options.read(true).write(true).create(true);
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt;
-                options.share_mode(0);
-            }
-            match options.open(&lock_path) {
-                Ok(file) => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::fd::AsRawFd;
-                        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }
-                            != 0
-                        {
-                            let e = std::io::Error::last_os_error();
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                std::thread::sleep(std::time::Duration::from_millis(20));
-                                continue;
-                            }
-                            return Err(e).context("locking plugin settings");
-                        }
-                    }
-                    return Ok(Self { _file: file });
-                }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::PermissionDenied
-                    ) || (cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))) =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => return Err(e).context("opening plugin settings lock"),
-            }
-        }
-        bail!("plugin settings are busy in another Kroma process")
+        let file =
+            crate::file_lock::acquire(&parent.join("plugins.toml.lock"), Duration::from_secs(5))
+                .context("locking plugin settings")?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -639,36 +667,6 @@ impl PluginState {
     }
 }
 
-/// Length-prefixed fields keep "ab"+"c" from hashing like "a"+"bc".
-fn push_approval_field(material: &mut Vec<u8>, bytes: &[u8]) {
-    material.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    material.extend_from_slice(bytes);
-}
-
-/// Bind a project plugin approval to the bytes that will actually run: the
-/// manifest plus every local script the worker tracks. The worker scan is
-/// already bounded, so this stays O(plugin code) rather than O(repository).
-/// This is an approval boundary, not a change detector, so it never falls back
-/// to a file length or modification time and fails closed when a tracked file
-/// could not be read.
-fn plugin_content_fingerprint(directory: &Path, worker: &PluginWorker) -> Result<String> {
-    let manifest = fs::read(directory.join("plugin.toml"))
-        .context("reading the plugin manifest for approval")?;
-    let mut material = Vec::new();
-    push_approval_field(&mut material, b"kroma-project-plugin-approval-v2");
-    push_approval_field(&mut material, &manifest);
-    let mut entrypoints: Vec<_> = worker.entrypoints.iter().collect();
-    entrypoints.sort_by(|left, right| left.0.cmp(&right.0));
-    for (path, digest, _) in entrypoints {
-        let digest = digest
-            .as_deref()
-            .with_context(|| format!("cannot read {} for approval", path.display()))?;
-        push_approval_field(&mut material, path.to_string_lossy().as_bytes());
-        push_approval_field(&mut material, digest.as_bytes());
-    }
-    Ok(crate::mcp::content_digest(&material))
-}
-
 #[derive(Clone)]
 pub struct PluginCatalog {
     directory: PathBuf,
@@ -719,11 +717,23 @@ impl Plugin {
             .any(|hook| hook == "before_model_request")
     }
 
+    fn has_request_context(&self) -> bool {
+        self.manifest.has_capability("request_context")
+    }
+
+    fn has_task_summary(&self) -> bool {
+        self.manifest.has_capability("task_summary")
+    }
+
+    /// Model hooks and both V2 host calls keep process-local state, so the
+    /// catalog must treat them like a model/context backend on reload.
     fn has_stateful_backend(&self) -> bool {
         self.enabled
             && (self.manifest.model.is_some()
                 || self.manifest.context.is_some()
-                || self.has_model_hook())
+                || self.has_model_hook()
+                || self.has_request_context()
+                || self.has_task_summary())
     }
 
     fn config_overrides<'a>(
@@ -881,19 +891,35 @@ impl PluginCatalog {
                                 .context("plugin state needs a parent")?
                                 .join("plugin-data")
                         };
-                        let worker = Arc::new(PluginWorker::new(
-                            &dir,
-                            workdir,
-                            &manifest,
-                            serde_json::to_value(settings)?,
-                            data_root.join(&manifest.id),
-                        ));
-                        let approved_content = project_key
-                            .as_ref()
-                            .map(|_| plugin_content_fingerprint(&dir, &worker));
                         let requested = match &project_key {
                             Some(key) => state.enabled_projects.contains(key),
                             None => state.enabled.contains(&manifest.id),
+                        };
+                        let settings = serde_json::to_value(settings)?;
+                        // Disabled discovery reads the manifest and settings
+                        // only. A requested plugin -- including a re-enabled
+                        // one -- always gets the complete bounded scan, because
+                        // that scan is what its approval is bound to.
+                        let worker = Arc::new(if requested {
+                            PluginWorker::new(
+                                &dir,
+                                workdir,
+                                &manifest,
+                                settings,
+                                data_root.join(&manifest.id),
+                            )
+                        } else {
+                            PluginWorker::unscanned(
+                                &dir,
+                                workdir,
+                                &manifest,
+                                settings,
+                                data_root.join(&manifest.id),
+                            )
+                        });
+                        let approved_content = match &project_key {
+                            Some(_) if requested => Some(approval::fingerprint(&dir, &worker.scan)),
+                            _ => None,
                         };
                         let blocked = match (&project_key, &approved_content) {
                             (Some(key), Some(content)) => {
@@ -923,6 +949,16 @@ impl PluginCatalog {
                         // `enabled` is what actually runs, so a listing can never
                         // claim a plugin is active while its code is unapproved.
                         let enabled = requested && blocked.is_none();
+                        // A user-installed plugin is trusted by its
+                        // installation, so there an incomplete scan only
+                        // weakens change tracking. Report it instead of
+                        // silently claiming the code is fully tracked.
+                        if let Some(reason) = worker.scan.error.as_deref().filter(|_| enabled) {
+                            warnings.push(format!(
+                                "plugin '{}' code changes may not be noticed: {reason}",
+                                manifest.id
+                            ));
+                        }
                         let event_worker =
                             (!manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
                         plugins.push(Plugin {
@@ -1065,7 +1101,8 @@ impl PluginCatalog {
                     "project": plugin.project_key.is_some(),
                     "transient": plugin.transient,
                     "api_version": plugin.manifest.api_version,
-                    "protocol_version": PLUGIN_API_VERSION,
+                    "protocol_version": plugin.worker.protocol_version(),
+                    "capabilities": plugin.manifest.capabilities,
                     "settings": settings,
                     "secret_settings": secret_settings,
                     "set_secrets": set_secrets,
@@ -1162,34 +1199,43 @@ impl PluginCatalog {
         }
         let plugin = plugin.ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         let key = plugin.project_key.as_deref().unwrap_or(id).to_owned();
+        // Disabling never needs content approval. A plugin whose code is
+        // oversized, unreadable or otherwise unverifiable must still be
+        // possible to turn off, and disabling always clears the stored
+        // request so a later reload cannot resurrect it.
+        if !enabled {
+            state.enabled.remove(&key);
+            state.enabled_projects.remove(&key);
+            state.project_fingerprints.remove(&key);
+            state.save(&self.state_path)?;
+            return Ok(format!(
+                "Plugin '{id}' disabled. Restart Kroma, or run /plugins reload while idle (model/context plugins require restart)."
+            ));
+        }
+        // Enabling approves exactly what will run, so it rescans instead of
+        // trusting the lazy worker that disabled discovery built. Any
+        // incomplete scan fails the approval instead of approving a subset.
+        let scanned = plugin.worker.rescanned();
         let approved_content = match plugin.project_key {
-            Some(_) => Some(plugin_content_fingerprint(
+            Some(_) => Some(approval::fingerprint(
                 &plugin.worker.directory,
-                &plugin.worker,
+                &scanned.scan,
             )?),
             None => None,
         };
-        if enabled {
-            if plugin.project_key.is_some() {
-                state.enabled_projects.insert(key.clone());
-            } else {
-                state.enabled.insert(key.clone());
-            }
-            if let Some(content) = approved_content {
-                state.project_fingerprints.insert(key, content);
-            }
+        if plugin.project_key.is_some() {
+            state.enabled_projects.insert(key.clone());
         } else {
-            state.enabled_projects.remove(&key);
-            state.enabled.remove(&key);
-            state.project_fingerprints.remove(&key);
+            state.enabled.insert(key.clone());
+        }
+        if let Some(content) = approved_content {
+            state.project_fingerprints.insert(key, content);
         }
         state.save(&self.state_path)?;
         Ok(format!(
-            "Plugin '{id}' {}. Restart Kroma, or run /plugins reload while idle (model/context plugins require restart).",
-            if enabled { "enabled" } else { "disabled" }
+            "Plugin '{id}' enabled. Restart Kroma, or run /plugins reload while idle (model/context plugins require restart)."
         ))
     }
-
     pub fn set_config(&self, id: &str, key: &str, value: Option<&str>) -> Result<String> {
         self.set_config_value(id, key, value.map(|v| toml::Value::String(v.to_owned())))
     }
@@ -1368,7 +1414,15 @@ impl PluginCatalog {
             format!("plugin={} name={}", manifest.id, manifest.name),
             format!(
                 "api_version={} protocol_version={}",
-                manifest.api_version, PLUGIN_API_VERSION
+                manifest.api_version, manifest.api_version
+            ),
+            format!(
+                "capabilities: {}",
+                if manifest.capabilities.is_empty() {
+                    "none".to_owned()
+                } else {
+                    manifest.capabilities.join(",")
+                }
             ),
             format!("contributions: {contributions}"),
         ];
@@ -1467,6 +1521,8 @@ impl PluginCatalog {
                     || old.manifest.model != plugin.manifest.model
                     || old.manifest.context != plugin.manifest.context
                     || old.has_model_hook() != plugin.has_model_hook()
+                    || old.has_request_context() != plugin.has_request_context()
+                    || old.has_task_summary() != plugin.has_task_summary()
                     || !same_worker)
             {
                 bail!(
@@ -1606,20 +1662,31 @@ impl PluginCatalog {
         let workers = self
             .plugins
             .iter()
-            .filter(|plugin| {
-                plugin.enabled
-                    && plugin
-                        .manifest
-                        .hooks
-                        .iter()
-                        .any(|hook| hook == "before_model_request")
-            })
+            .filter(|plugin| plugin.enabled && plugin.has_model_hook())
             .map(|plugin| plugin.worker.clone())
             .collect::<Vec<_>>();
-        if workers.is_empty() {
+        let context_workers = self
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.enabled && plugin.has_request_context())
+            .map(|plugin| plugin.worker.clone())
+            .collect::<Vec<_>>();
+        let summary_workers = self
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.enabled && plugin.has_task_summary())
+            .map(|plugin| plugin.worker.clone())
+            .collect::<Vec<_>>();
+        if workers.is_empty() && context_workers.is_empty() && summary_workers.is_empty() {
             backend
         } else {
-            Arc::new(model::PluginModelHooks::new(backend, budget, workers))
+            Arc::new(model::PluginModelHooks::new(
+                backend,
+                budget,
+                workers,
+                context_workers,
+                summary_workers,
+            ))
         }
     }
 
@@ -1678,8 +1745,12 @@ impl PluginCatalog {
                         .api_key_env
                         .as_ref()
                         .and_then(|name| env::var(name).ok());
+                    // HTTP protocols send an explicit output cap; native ones
+                    // otherwise default to 4096. The manifest reserve is the
+                    // context budget, so it must also bound the wire value.
                     let client = ModelClient::new(&spec.base_url, key, spec.model.clone())?
-                        .with_protocol(&spec.protocol)?;
+                        .with_protocol(&spec.protocol)?
+                        .with_output_tokens(Some(spec.output_reserve));
                     Ok((Arc::new(client), window))
                 })();
                 match prepared {
@@ -2432,7 +2503,7 @@ fn plugin_event_name(event: &RuntimeEvent<'_>) -> Option<&'static str> {
         RuntimeEvent::ModelStarted { .. } => "model_started",
         RuntimeEvent::ModelFinished { .. } => "model_finished",
         RuntimeEvent::ModelFailed => "model_failed",
-        RuntimeEvent::FailedRequestUsage { .. } => return None,
+        RuntimeEvent::FailedRequestUsage { .. } | RuntimeEvent::Warning { .. } => return None,
         RuntimeEvent::CompactionUsage { .. } => "compaction_usage",
         RuntimeEvent::ToolStarted { .. } => "tool_started",
         RuntimeEvent::ToolFinished { .. } => "tool_finished",
@@ -2453,6 +2524,7 @@ fn plugin_event_fields(event: &RuntimeEvent<'_>) -> Value {
         | RuntimeEvent::CompactionStarted
         | RuntimeEvent::ModelFailed
         | RuntimeEvent::FailedRequestUsage { .. } => json!({}),
+        RuntimeEvent::Warning { message } => json!({"message":message}),
         RuntimeEvent::TaskFinished { status } => json!({"status":status}),
         RuntimeEvent::ContextPrepared {
             messages,
@@ -2527,13 +2599,14 @@ struct PluginWorker {
     directory: PathBuf,
     workdir: PathBuf,
     data_dir: PathBuf,
+    /// Manifest protocol version; every envelope and frame for this worker
+    /// uses it so V1 plugins stay byte-compatible.
+    protocol_version: u32,
     command: Option<String>,
     args: Vec<String>,
     settings: Value,
-    // Track owned script dependencies (including imported helpers), never
-    // recursively fingerprint external node_modules. Unchanged workers stay warm.
-    // Each tracked file binds approval to content, never to a size or mtime.
-    entrypoints: Vec<(PathBuf, Option<String>, Option<SystemTime>)>,
+    /// Content approval is independent of the worker process lifecycle.
+    scan: PluginCodeScan,
     process: Mutex<Option<PluginProcess>>,
     next_request: AtomicU64,
     active: Mutex<Option<(u64, u32)>>,
@@ -2548,10 +2621,11 @@ impl PluginWorker {
             directory: self.directory.clone(),
             workdir: self.workdir.clone(),
             data_dir: self.data_dir.clone(),
+            protocol_version: self.protocol_version,
             command: self.command.clone(),
             args: self.args.clone(),
             settings: self.settings.clone(),
-            entrypoints: self.entrypoints.clone(),
+            scan: self.scan.clone(),
             process: Mutex::new(None),
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
@@ -2559,6 +2633,31 @@ impl PluginWorker {
         }
     }
 
+    /// Worker description from manifest and settings metadata only. Used while
+    /// a plugin is not requested, so disabled discovery never reads plugin
+    /// code. The scan error keeps such a worker from ever being mistaken for a
+    /// complete, approved definition.
+    fn unscanned(
+        dir: &Path,
+        workdir: &Path,
+        manifest: &PluginManifest,
+        settings: Value,
+        data_dir: PathBuf,
+    ) -> Self {
+        Self::with_scan(
+            dir,
+            workdir,
+            manifest,
+            settings,
+            data_dir,
+            PluginCodeScan {
+                entrypoints: Vec::new(),
+                error: Some("its code was not scanned because the plugin is not enabled".into()),
+            },
+        )
+    }
+
+    /// Worker with a complete bounded scan of the plugin's local code.
     fn new(
         dir: &Path,
         workdir: &Path,
@@ -2566,116 +2665,32 @@ impl PluginWorker {
         settings: Value,
         data_dir: PathBuf,
     ) -> Self {
-        let mut entrypoints = Vec::new();
-        let mut pending = vec![dir.to_path_buf()];
-        // A project plugin can contain a junction/symlink back to its own
-        // directory or to a huge external tree. Bound the total work, not
-        // just the pending stack, and never visit the same canonical folder
-        // twice. Discovery must stay cheap even for a disabled plugin.
-        const MAX_SCAN_ENTRIES: usize = 20_000;
-        const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
-        // Explicit command/args entries are hashed too, so bound that read.
-        const MAX_EXPLICIT_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
-        let mut visited = std::collections::BTreeSet::new();
-        let mut scanned_entries = 0usize;
-        let mut scanned_bytes = 0u64;
-        let mut truncated = false;
-        while let Some(folder) = pending.pop() {
-            let canonical = folder.canonicalize().unwrap_or_else(|_| folder.clone());
-            if !visited.insert(canonical) {
-                continue;
-            }
-            let Ok(entries) = fs::read_dir(&folder) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                if scanned_entries >= MAX_SCAN_ENTRIES || scanned_bytes >= MAX_SCAN_BYTES {
-                    truncated = true;
-                    pending.clear();
-                    break;
-                }
-                scanned_entries += 1;
-                let path = entry.path();
-                if path.is_dir() {
-                    if !matches!(
-                        entry.file_name().to_str(),
-                        Some("node_modules" | ".git" | "target")
-                    ) && pending.len() < 128
-                    {
-                        pending.push(path);
-                    }
-                    continue;
-                }
-                if !matches!(
-                    path.extension().and_then(|ext| ext.to_str()),
-                    Some("js" | "cjs" | "mjs" | "json")
-                ) {
-                    continue;
-                }
-                if let Ok(info) = entry.metadata() {
-                    if info.len() <= 1024 * 1024 {
-                        if scanned_bytes.saturating_add(info.len()) > MAX_SCAN_BYTES {
-                            truncated = true;
-                            pending.clear();
-                            break;
-                        }
-                        // Detect edits even when mtime granularity is coarse
-                        // and a dependency is replaced with the same length.
-                        // An unreadable file records no digest, which keeps the
-                        // plugin unapproved instead of silently trusted.
-                        let digest = match fs::read(&path) {
-                            Ok(bytes) => {
-                                scanned_bytes = scanned_bytes.saturating_add(bytes.len() as u64);
-                                Some(crate::mcp::content_digest(&bytes))
-                            }
-                            Err(_) => None,
-                        };
-                        entrypoints.push((path, digest, info.modified().ok()));
-                    }
-                }
-            }
-        }
-        if truncated {
-            crate::runtime_log!(
-                "[plugin] fingerprint scan for {} stopped at the safety budget ({} entries, {} bytes); nested dependencies may be ignored",
-                dir.display(),
-                scanned_entries,
-                scanned_bytes
-            );
-        }
-        // Also track executable script paths outside the plugin folder.
-        for value in manifest.command.iter().chain(&manifest.args) {
-            let candidate = Path::new(value);
-            let path = if candidate.is_absolute() {
-                candidate.to_path_buf()
-            } else {
-                dir.join(candidate)
-            };
-            if entrypoints.iter().any(|(existing, _, _)| existing == &path) {
-                continue;
-            }
-            if let Ok(info) = fs::metadata(&path) {
-                if info.is_file() {
-                    // A non-JavaScript entry (a Python, PowerShell or shell
-                    // script) is executable code too, so approval covers its
-                    // bytes rather than its length or modification time.
-                    let digest = (info.len() <= MAX_EXPLICIT_ENTRY_BYTES)
-                        .then(|| fs::read(&path).ok())
-                        .flatten()
-                        .map(|bytes| crate::mcp::content_digest(&bytes));
-                    entrypoints.push((path, digest, info.modified().ok()));
-                }
-            }
-        }
-        entrypoints.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let scan = approval::scan(
+            dir,
+            manifest.command.as_deref(),
+            &manifest.args,
+            &PLUGIN_SCAN_LIMITS,
+        );
+        Self::with_scan(dir, workdir, manifest, settings, data_dir, scan)
+    }
+
+    fn with_scan(
+        dir: &Path,
+        workdir: &Path,
+        manifest: &PluginManifest,
+        settings: Value,
+        data_dir: PathBuf,
+        scan: PluginCodeScan,
+    ) -> Self {
         Self {
             directory: dir.to_path_buf(),
             workdir: workdir.to_path_buf(),
             data_dir,
+            protocol_version: manifest.api_version,
             command: manifest.command.clone(),
             args: manifest.args.clone(),
             settings,
-            entrypoints,
+            scan,
             process: Mutex::new(None),
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
@@ -2683,14 +2698,34 @@ impl PluginWorker {
         }
     }
 
+    /// Rescan the current disk state. Approval must never rely on the lazy
+    /// metadata-only worker built by disabled discovery.
+    fn rescanned(&self) -> Self {
+        let scan = approval::scan(
+            &self.directory,
+            self.command.as_deref(),
+            &self.args,
+            &PLUGIN_SCAN_LIMITS,
+        );
+        Self {
+            scan,
+            ..self.isolated()
+        }
+    }
+
+    fn protocol_version(&self) -> u32 {
+        self.protocol_version
+    }
+
     fn same_definition(&self, next: &Self) -> bool {
         self.directory == next.directory
             && self.workdir == next.workdir
             && self.data_dir == next.data_dir
+            && self.protocol_version == next.protocol_version
             && self.command == next.command
             && self.args == next.args
             && self.settings == next.settings
-            && self.entrypoints == next.entrypoints
+            && self.scan.same_content(&next.scan)
     }
 
     async fn invoke_async(self: &Arc<Self>, message: Value) -> Result<PluginResponse> {
@@ -2812,7 +2847,7 @@ impl PluginWorker {
         let request = message.as_object_mut().context("invalid plugin request")?;
         // Extra envelope fields are ignored by legacy V1 JSONL plugins.
         // New plugins may echo request_id/version for response correlation.
-        request.insert("protocol_version".into(), json!(PLUGIN_API_VERSION));
+        request.insert("protocol_version".into(), json!(self.protocol_version));
         request.insert("request_id".into(), json!(id));
         request.insert("config".into(), self.settings.clone());
         request.insert("data_dir".into(), json!(self.data_dir));
@@ -2905,6 +2940,7 @@ impl PluginWorker {
                 child,
                 stdin,
                 stdout: BufReader::new(stdout),
+                protocol_version: self.protocol_version,
                 terminated_pid: Arc::clone(&self.terminated_pid),
             });
         }
@@ -2984,6 +3020,8 @@ struct PluginProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// Worker protocol version echoed by this process's responses.
+    protocol_version: u32,
     terminated_pid: Arc<AtomicU32>,
 }
 
@@ -3030,18 +3068,23 @@ impl PluginProcess {
         serde_json::from_slice(&response).context("invalid plugin JSON-line response")
     }
 
-    fn validate_frame(parsed: &Value, request_id: Option<&Value>, strict: bool) -> Result<()> {
+    fn validate_frame(
+        parsed: &Value,
+        request_id: Option<&Value>,
+        strict: bool,
+        protocol_version: u32,
+    ) -> Result<()> {
         if strict
             && parsed.get("protocol_version").and_then(Value::as_u64)
-                != Some(PLUGIN_API_VERSION as u64)
+                != Some(protocol_version as u64)
         {
-            bail!("streaming plugin must include protocol_version=1");
+            bail!("streaming plugin must include protocol_version={protocol_version}");
         }
         if strict && parsed.get("request_id") != request_id {
             bail!("streaming plugin request_id missing or mismatched");
         }
         if let Some(version) = parsed.get("protocol_version") {
-            if version.as_u64() != Some(PLUGIN_API_VERSION as u64) {
+            if version.as_u64() != Some(protocol_version as u64) {
                 bail!("plugin response protocol version mismatch");
             }
         }
@@ -3057,7 +3100,7 @@ impl PluginProcess {
         let request_id = request.get("request_id").cloned();
         self.write_request(&request)?;
         let parsed = self.read_frame()?;
-        Self::validate_frame(&parsed, request_id.as_ref(), false)?;
+        Self::validate_frame(&parsed, request_id.as_ref(), false, self.protocol_version)?;
         serde_json::from_value(parsed).context("invalid plugin response fields")
     }
 }
@@ -3113,6 +3156,73 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_are_v2_only_and_require_a_command() {
+        let v1: PluginManifest = toml::from_str(
+            "id='memory'
+             name='Memory'
+             command='node'
+             capabilities=['request_context']",
+        )
+        .unwrap();
+        assert!(v1
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("api_version = 2"));
+
+        let v2: PluginManifest = toml::from_str(
+            "api_version = 2
+             id='memory'
+             name='Memory'
+             command='node'
+             capabilities=['request_context','task_summary']",
+        )
+        .unwrap();
+        assert!(v2.validate().is_ok(), "{:?}", v2.validate());
+        assert!(v2.has_capability("request_context"));
+
+        let unknown: PluginManifest = toml::from_str(
+            "api_version = 2
+             id='memory'
+             name='Memory'
+             command='node'
+             capabilities=['memory_forget']",
+        )
+        .unwrap();
+        assert!(unknown
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported capability"));
+
+        let no_command: PluginManifest = toml::from_str(
+            "api_version = 2
+             id='memory'
+             name='Memory'
+             capabilities=['request_context']",
+        )
+        .unwrap();
+        assert!(no_command
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("capabilities require a command"));
+
+        let v3: PluginManifest = toml::from_str(
+            "api_version = 3
+id='memory'
+name='Memory'
+prompt='x'",
+        )
+        .unwrap();
+        assert!(v3
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("API version 3"));
+    }
+
+    #[test]
     fn validates_process_thinking_tiers_and_dynamic_panels() {
         let manifest = r#"
 id = "tiers"
@@ -3130,12 +3240,12 @@ reasoning_level = "high"
         assert_eq!(valid.api_version, 1, "V1 manifests remain compatible");
         assert!(valid.validate().is_ok());
         let unsupported: PluginManifest =
-            toml::from_str(&format!("api_version = 2\n{manifest}")).unwrap();
+            toml::from_str(&format!("api_version = 3\n{manifest}")).unwrap();
         assert!(unsupported
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("API version 2"));
+            .contains("API version 3"));
 
         let duplicate = manifest.replace(r#"["low", "high"]"#, r#"["low", "low"]"#);
         let invalid: PluginManifest = toml::from_str(&duplicate).unwrap();
@@ -3171,7 +3281,7 @@ base_url = "https://example.com""#,
     #[test]
     fn invalid_manifests_rejected() {
         let invalid = PluginManifest {
-            api_version: PLUGIN_API_VERSION,
+            api_version: PLUGIN_API_VERSION_V1,
             id: "../escape".into(),
             name: "Escape".into(),
             version: String::new(),
@@ -3181,6 +3291,7 @@ base_url = "https://example.com""#,
             prompt: Some("x".into()),
             replace_prompt: None,
             hooks: vec![],
+            capabilities: vec![],
             context: None,
             model: None,
             ui: None,
@@ -3333,6 +3444,98 @@ base_url = "https://example.com""#,
     }
 
     #[test]
+    fn approval_covers_python_extensionless_data_and_large_js_helpers() {
+        let root = test_root("all-files");
+        let project = root.join("project");
+        let dir = project.join(".kroma/plugins/demo");
+        let plugins = root.join("plugins");
+        let state = root.join("plugins.toml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            "id='demo'
+name='Demo'
+prompt='audit'
+",
+        )
+        .unwrap();
+        for name in ["helper.py", "helper", "config.custom", "large.js"] {
+            let bytes = if name == "large.js" {
+                vec![b'a'; 1024 * 1024 + 1]
+            } else {
+                b"old".to_vec()
+            };
+            fs::write(dir.join(name), &bytes).unwrap();
+            let catalog =
+                PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
+            catalog.set_enabled("demo", true).unwrap();
+            let approved =
+                PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
+            assert!(approved.plugins[0].enabled);
+            let mut changed = bytes;
+            changed[0] = b'b';
+            fs::write(dir.join(name), changed).unwrap();
+            let catalog =
+                PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
+            assert!(!catalog.plugins[0].enabled, "{name} edit retained approval");
+        }
+        // A broken requested plugin can always be disabled, without approving it.
+        let oversized = fs::File::create(dir.join("oversized")).unwrap();
+        oversized
+            .set_len(PLUGIN_SCAN_LIMITS.max_file_bytes + 1)
+            .unwrap();
+        drop(oversized);
+        let catalog = PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
+        assert!(catalog.set_enabled("demo", true).is_err());
+        catalog.set_enabled("demo", false).unwrap();
+        let disabled = PluginCatalog::discover_at(plugins, state, &project).unwrap();
+        assert!(!disabled.plugins[0].requested);
+        assert!(disabled.plugins[0].worker.scan.entrypoints.is_empty());
+        assert!(disabled.plugins[0]
+            .worker
+            .scan
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("not enabled"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_scans_fail_closed_at_each_bound() {
+        let root = test_root("scan-bounds");
+        fs::write(root.join("helper"), "abcd").unwrap();
+        for limits in [
+            PluginScanLimits {
+                max_entries: 0,
+                ..PLUGIN_SCAN_LIMITS
+            },
+            PluginScanLimits {
+                max_bytes: 3,
+                ..PLUGIN_SCAN_LIMITS
+            },
+            PluginScanLimits {
+                max_file_bytes: 3,
+                ..PLUGIN_SCAN_LIMITS
+            },
+        ] {
+            assert!(approval::scan(&root, None, &[], &limits).error.is_some());
+        }
+        assert!(
+            approval::scan(&root, Some("./missing"), &[], &PLUGIN_SCAN_LIMITS)
+                .error
+                .is_some()
+        );
+        fs::create_dir_all(root.join("__pycache__")).unwrap();
+        fs::write(root.join("__pycache__/helper.pyc"), "cache").unwrap();
+        let scan = approval::scan(&root, None, &[], &PLUGIN_SCAN_LIMITS);
+        assert!(scan.error.is_none());
+        assert_eq!(scan.entrypoints.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn transient_try_is_enabled_but_never_persisted_or_configurable() {
         let root = test_root("try");
         let plugins = root.join("plugins");
@@ -3367,7 +3570,8 @@ prompt='try me'
         let summaries = catalog.summaries().unwrap();
         assert_eq!(summaries[0]["enabled"], true);
         assert_eq!(summaries[0]["transient"], true);
-        assert_eq!(summaries[0]["protocol_version"], PLUGIN_API_VERSION);
+        assert_eq!(summaries[0]["protocol_version"], 1);
+        assert_eq!(summaries[0]["capabilities"], json!([]));
         assert!(catalog.set_enabled("transient-demo", false).is_err());
         assert!(catalog.uninstall("transient-demo").is_err());
         assert!(

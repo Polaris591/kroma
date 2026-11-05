@@ -1,0 +1,158 @@
+[
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-5",
+      "gpt-5-2025-08-07"
+    ],
+    "context": 400000,
+    "input": null,
+    "output": 128000,
+    "image": true,
+    "levels": [
+      "minimal",
+      "low",
+      "medium",
+      "high"
+    ],
+    "source": "https://developers.openai.com/api/docs/models/gpt-5",
+    "notes": "Status: Deprecated (model page badge) - announced 2026-06-11, shutdown 2026-12-11, still callable until then (official deprecations table). `gpt-5-2025-08-07` is both the alias target and the only entry under Snapshots, also marked Deprecated, so the caps apply to both IDs. Model page: 400,000 context window, 128,000 max output, text+image input / text output (audio and video not supported), reasoning.effort supports minimal/low/medium/high. Knowledge cutoff Sep 30, 2024. No separate max-input figure documented, so input=null. Recommended replacement gpt-5.6-sol."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-5-mini",
+      "gpt-5-mini-2025-08-07"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://developers.openai.com/api/docs/deprecations",
+    "notes": "Status: Deprecated - announced 2026-06-11, shutdown 2026-12-11, still callable until then; replacement gpt-5.6-terra. Both IDs are named in the same official row, so the alias/snapshot pairing is verified. Specs were NOT fetched within the 10-call budget (the GPT-5 model page only mentions this model's price, $0.25/1M input in its quick comparison), so context/input/output/image/levels are null rather than inferred from GPT-5 or from memory."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-5-nano",
+      "gpt-5-nano-2025-08-07"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://developers.openai.com/api/docs/deprecations",
+    "notes": "Status: Deprecated - announced 2026-06-11, shutdown 2026-12-11, still callable until then; replacement gpt-5.6-luna. Alias and snapshot IDs verified from the same official row. Specs not fetched within budget, so context/input/output/image/levels are null; do not assume they equal GPT-5's."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-5-pro",
+      "gpt-5-pro-2025-10-06"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://developers.openai.com/api/docs/deprecations",
+    "notes": "Status: Deprecated - announced 2026-06-11, shutdown 2026-12-11, still callable until then; replacement gpt-5.6-sol with reasoning.mode: pro. Alias and snapshot IDs verified from the same official row. The deprecated model page distinguishes the pro variant from plain GPT-5 but its limits were not fetched, so all spec fields are null (the GPT-5 page's 400K/128K must not be carried over)."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-4.1",
+      "gpt-4.1-2025-04-14"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://developers.openai.com/api/docs/deprecations",
+    "notes": "Status: Deprecated - announced 2026-10-14, shutdown 2027-01-14 (standard six-month notice); replacement gpt-6-luna. `gpt-4.1-2025-04-14` is the snapshot named in the official table. Fine-tuned versions follow the same schedule. Specs not fetched within budget, so context/input/output/image/levels are null. Sibling `gpt-4.1-nano` was already shut down on 2026-10-23 and is excluded from this file."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "gpt-4o",
+      "gpt-4o-2024-08-06",
+      "gpt-4o-2024-11-20"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://developers.openai.com/api/docs/deprecations",
+    "notes": "Status: Deprecated - announced 2026-10-14, shutdown 2027-01-14; replacement gpt-6-luna. Two snapshots are still callable per the official table (gpt-4o-2024-08-06, gpt-4o-2024-11-20) plus the gpt-4o alias; the older `gpt-4o-2024-05-13` snapshot was already retired on 2026-10-23 and is deliberately not listed. Specs were not fetched within budget, so context/input/output/image/levels are null (in particular this is a non-reasoning model, but that is not asserted here as a verified effort level set)."
+  },
+  {
+    "provider": "openai",
+    "models": [
+      "o3",
+      "o3-2025-04-16"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://developers.openai.com/api/docs/deprecations",
+    "notes": "Status: Deprecated - announced 2026-06-11, shutdown 2026-12-11, still callable until then; replacement gpt-5.6-sol. `o3-2025-04-16` is the snapshot in the official table. Specs not fetched within budget, so context/input/output/image/levels are null. o3-mini (shutdown 2026-10-23) and o3-deep-research (2026-07-23) are already retired and excluded."
+  },
+  {
+    "provider": "anthropic",
+    "models": [
+      "claude-opus-4-7"
+    ],
+    "context": 1000000,
+    "input": null,
+    "output": 128000,
+    "image": true,
+    "levels": null,
+    "source": "https://platform.claude.com/docs/en/models/opus-4-7/overview",
+    "notes": "Status: Active (legacy) - released 2026-04-16, retirement not sooner than 2027-04-16, confirmed by the official status table. Context 1M, max output 128K (300K only via Batch API extended-output beta), input text and images -> text output, adaptive thinking with default effort `high`. The page names only the default effort, not the full supported set, so levels=null rather than assumed from the 5.x generation. No separate max-input figure documented, so input=null. temperature/top_p/top_k are rejected on Claude 4.7 and later (400 error)."
+  },
+  {
+    "provider": "anthropic",
+    "models": [
+      "claude-opus-4-6"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+    "notes": "Status: Active (legacy) - retirement not sooner than 2027-02-05 per the official status table; the model ID carries no date suffix and is the canonical API alias. Only ID and lifecycle were verified within the 10-call budget (its model page was not fetched), so context/input/output/image/levels are null rather than inherited from Opus 4.7 or Opus 4.8."
+  },
+  {
+    "provider": "anthropic",
+    "models": [
+      "claude-sonnet-4-6"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+    "notes": "Status: Active (legacy) - retirement not sooner than 2027-02-17 per the official status table; canonical API alias, no snapshot suffix. Only ID and lifecycle verified within budget, so context/input/output/image/levels are null. Distinct from claude-sonnet-4-5-20250929, which is separately deprecated with a 2026-11-30 retirement and is not part of this file."
+  },
+  {
+    "provider": "anthropic",
+    "models": [
+      "claude-haiku-4-5-20251001"
+    ],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+    "notes": "Status: Active per the official status table, but its retirement commitment is 'not sooner than October 15, 2026', a floor that has already elapsed as of 2026-11-04 - still callable, yet it can be retired with short notice, so treat it as end-of-life risk. The API ID is dated (claude-haiku-4-5-20251001) and is the only ID listed for this model. Specs were not fetched within budget, so context/input/output/image/levels are null."
+  }
+]

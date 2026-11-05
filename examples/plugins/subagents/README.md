@@ -14,6 +14,11 @@ Kroma binary is not on `PATH`:
 kroma plugins set subagents kroma_bin 'C:\path\to\kroma.exe'
 ```
 
+Use it when side work would flood this conversation with search results, logs
+or file contents, or when independent tasks can run in parallel. Do not use it
+for a single lookup, or for work whose answer depends on this conversation's
+history: a child receives only the task you write.
+
 ## The tool
 
 One tool, `subagent`, takes up to eight independent tasks:
@@ -30,8 +35,10 @@ One tool, `subagent`, takes up to eight independent tasks:
 | `tasks` | 1..8 entries, validated before any child starts |
 | `tasks[].task` | Nonempty UTF-8 string, at most 16 KiB (the child inlines piped stdin only up to that size) |
 | `tasks[].cwd` | Existing directory; defaults to the host working directory |
+| `tasks[].resume` | Optional token from an earlier result; continues that child's saved conversation (see below) |
 
-Results always follow input order, even when tasks finish out of order.
+Results always follow input order, even when tasks finish out of order. A started
+task also returns a `resume` token.
 
 ## What a subtask receives
 
@@ -40,13 +47,15 @@ Results always follow input order, even when tasks finish out of order.
   `KROMA_PLUGIN_ISOLATE_ENV=1` the host removes credential-shaped variables
   from the plugin worker, so children then depend on saved profiles rather than
   an exported API key.
-- The task text only. **It does not inherit the parent conversation.**
+- The task text only. **It does not inherit the parent conversation.** A
+  resumed task also loads that child's own saved conversation, not yours.
 - The child wraps the task as `Piped input:` and expands `@path` references
   against its working directory, so a short task can point at a large file.
 
 Put the goal, relevant files and facts, allowed changes, constraints and the
 evidence you expect directly in the task. Dependent work belongs in later
-calls, after you have read the earlier results.
+calls, after you have read the earlier results; pass `resume` when the later
+step needs that child's saved context.
 
 Nesting stops at one level: a subagent that tries to delegate again is refused.
 The marker is `KROMA_SUBAGENT_DEPTH`, a convention between this plugin and its
@@ -58,16 +67,23 @@ of being read as top level.
 ```json
 {
   "schema_version": 1,
-  "run_id": "20261103T114357-797e06eb",
+  "run_id": "20261106114357-797e06eb",
   "status": "partial",
   "results": [
-    {"index": 0, "status": "completed", "exit_code": 0, "output": "Found one ordering defect ...",
-     "output_truncated": false, "duration_ms": 18420,
+    {"index": 0, "status": "completed", "exit_code": 0,
+     "output": "Found one ordering defect ...", "output_truncated": false,
+     "duration_ms": 18420, "tool_calls": 7,
      "usage": {"requests": 3, "input": 8100, "output": 900, "cached": 0, "reasoning": 120},
+     "resume": "20261106114357-797e06eb/0",
      "artifacts": ".../runs/<run-id>/0"},
-    {"index": 1, "status": "failed", "exit_code": 1,
-     "error": {"code": "CHILD_EXIT", "message": "child exited with code 1: ..."},
-     "usage": {"requests": 1, "input": null, "output": null, "cached": null, "reasoning": null},
+    {"index": 1, "status": "failed", "exit_code": null,
+     "output": "The recovery path replays the journal ...", "output_truncated": false,
+     "partial": true,
+     "error": {"code": "CHILD_TIMEOUT",
+               "message": "child timed out after 300s; partial answer kept in output"},
+     "duration_ms": 300100, "tool_calls": 6,
+     "usage": {"requests": 4, "input": 12000, "output": 1400, "cached": 0, "reasoning": 60},
+     "resume": "20261106114357-797e06eb/1",
      "artifacts": ".../runs/<run-id>/1"}
   ]
 }
@@ -77,9 +93,18 @@ of being read as top level.
   prove the work is correct; verify it yourself.
 - `failed`: start failure, non-zero exit, signal, missing final result, or a
   protocol fault. `error.code` names the cause.
-- `not_started`: the batch stopped before this task began (either because the
-  batch deadline arrived or a fatal fault aborted the batch).
-- Missing provider counters stay `null`; they are never reported as zero. They
+- `not_started`: the batch deadline stopped the queue before this task began.
+  A fatal fault rejects the whole call instead; `batch.json` still records the
+  tasks that never started.
+- `partial`: only on a failed task. `output` is the most recent text the child
+  had already streamed when it was terminated. It is unverified and is also
+  written to `partial.txt`; the error message says the partial answer was kept,
+  and the expanded tool card labels it `partial answer:`.
+- `resume`: a token for continuing that child's saved conversation. It is
+  present when the task has a task directory. See **Resuming a child**.
+- `tool_calls`: how many tool calls the child started.
+- `usage.requests` counts model requests and compaction requests the child
+  reports. Missing provider counters stay `null`; they are never reported as zero. They
   are tracked per field, so a provider that omits `cached` or reasoning tokens
   still reports the input and output it did send.
 
@@ -89,6 +114,29 @@ textless final result, an oversized frame) is different: the batch is rejected
 with one error naming the evidence directory, because partial results from a
 corrupt worker are not trustworthy. The host then discards that worker. Inspect results and evidence before retrying, and
 expect a retry to run again and incur its own model calls.
+
+## Resuming a child
+
+Pass a result's `resume` token as `tasks[].resume` to continue that child with
+its saved conversation:
+
+```json
+{"tasks": [{"task": "Implement the fix you found, then run its test.",
+            "resume": "20261106114357-797e06eb/0"}]}
+```
+
+- The saved snapshot and journal are copied into the new run. The source
+  evidence is untouched, and both runs stay on disk.
+- The child runs in the recorded working directory. A `cwd` that resolves
+  elsewhere is refused; omit `cwd` and the recorded directory is used.
+- Only a task with a final `completed` or `failed` state can be resumed. A
+  `running` record may still own its session lock and is refused with
+  `RESUME_ACTIVE`; a missing snapshot is `RESUME_MISSING`.
+- A resume is a fork, not a retry: two resumes start from the same snapshot,
+  and the child is billed again for the context it loads. Use a fresh task for
+  independent work, and inspect a failure before resuming it.
+- Tokens, working directories and session files are validated before any child
+  starts. A malformed or escaping token rejects the batch.
 
 ## Parallelism and files
 
@@ -124,7 +172,7 @@ task:
 ▷ [1/3] List the failing tests
 ▷ [2/3] Read Cargo.toml
 1▶ 2▶ · 5s/600s · in 0 / out 0
-[1/3] List the failing t… 0:05 ▶ model turn 2 · 5.2k tok
+[1/3] List the failing t… 0:05 ▶ model turn 2 · 5.2k tok · "checking the recovery test"
 [2/3] Read Cargo.toml 0:05 ▶ shell 0:02 · 2.6k tok
 ✓ [2/3]   9.9s · in 5.3k / out 89 · "0.4.0"
 1✓ 2✓ · 10s/600s · in 10.5k / out 164
@@ -135,8 +183,11 @@ task:
 Instead of one row per child event, every five seconds the card prints a roster
 row and then one row per running task: its task label, elapsed time, what it is
 doing right now (model turn, or the tool it is in), how many tokens it has spent
-and, after 90 seconds without an event, a `quiet` marker. Task start and finish
-still print once, and the finish row keeps the first characters of the answer.
+and, after 90 seconds without an event, a `quiet` marker. While the child
+streams assistant text, the row ends with a short preview of what it is
+writing; the preview is shown only while that text is fresh. Task start and
+finish still print once, and the finish row keeps the first characters of the
+answer (or of the recovered partial answer).
 
 The roster row is positional: `1✓ 2▶ 3·` means task 1 finished, task 2 is
 running and task 3 is queued (`·` queued, `▶` running, `✓` completed, `✗` failed,
@@ -144,18 +195,20 @@ running and task 3 is queued (`·` queued, `▶` running, `✓` completed, `✗`
 enforce (the manifest value, capped by `KROMA_PLUGIN_TOOL_TIMEOUT_SECS`) and the
 tokens spent so far.
 
-The host keeps the last eight rows of a running tool and two after it finishes
-(`src/tui/tool_records.rs`), so the last two rows a batch emits are the summary
-and one line of answers. That is what the collapsed card shows after the call;
-the evidence directory keeps the full story. Progress is best effort: a failing
-listener never changes the outcome, and the final result stays authoritative.
+The host keeps the last eight rows of a running tool (`src/tui/tool_records.rs`).
+After the call it renders the result JSON: a summary line and one line of
+failures or answers, with per-task `──` sections when expanded. The evidence
+directory keeps the full story. Progress is best effort: a failing listener
+never changes the outcome, and the final result stays authoritative.
 
 ## Deadline and cancellation
 
 The manifest declares `timeout_secs = 600` for the batch and `task_timeout_secs = 300`
 per task. A task that exceeds `task_timeout_secs` is terminated with `CHILD_TIMEOUT`
 without aborting its siblings, and the batch cuts off stragglers just before
-the host deadline so completed task results are still returned. The
+the host deadline so completed task results are still returned. A task killed
+by its own timeout or by a batch cut-off keeps the text it had streamed as
+`output` with `partial: true`, and `partial.txt` is written for it. The
 host timeout message names the tool call and the evidence root, so the run can
 be located without guessing.
 Ctrl+C or deadline expiry terminates the plugin worker tree, including the
@@ -167,6 +220,31 @@ that already escaped to its own process group then needs the host deadline or
 manual cleanup. Workers are not resumed automatically: after an interruption,
 check the evidence directory before deciding what to run again.
 
+## Failure codes
+
+| Code | Meaning |
+| --- | --- |
+| `INVALID_ARGUMENT` | A task, `cwd` or `resume` was rejected before any child started |
+| `CONFIG_ERROR` | A plugin setting is invalid; no child starts |
+| `DEPTH_LIMIT` | A subagent tried to delegate again; do the work directly |
+| `ARCHIVE_ERROR` | Evidence cannot be written; fatal, the worker is discarded |
+| `CHILD_START` | The `kroma` executable could not be started |
+| `CHILD_EXIT` | The child exited non-zero without a more specific cause |
+| `MODEL_NOT_CONFIGURED` | Child exit 3: no model, profile or model plugin |
+| `AUTH_FAILED` | Child exit 4: the provider rejected the credentials; retrying will not help |
+| `MODEL_REQUEST_FAILED` | Child exit 5: a model request failed; a retry may help |
+| `CONTEXT_LIMIT` | Child exit 6: the context limit was reached |
+| `CHILD_TIMEOUT` | The task or batch deadline expired |
+| `CHILD_SIGNAL` | The child was terminated by a signal |
+| `BATCH_ABORTED` | A sibling fault stopped this task |
+| `CHILD_PROTOCOL` | Invalid child output; fatal, the worker is discarded |
+| `RESUME_MISSING` | The token has no state record or no saved session |
+| `RESUME_ACTIVE` | The source task is still marked running |
+| `RESUME_STALE` | The saved session cannot be copied or its cwd is gone |
+
+Fatal codes reject the whole call with one error instead of returning per-task
+results. Ordinary task failures still return every successful sibling.
+
 ## Evidence
 
 A task records `state.json` with its session path and working directory
@@ -175,18 +253,22 @@ Each task writes under `<plugin-data>/runs/<run-id>/<index>/`:
 
 | File | Content |
 | --- | --- |
-| `request.json` | Call id, parent archive, tasks, working directories |
+| `request.json` | Call id, parent archive, tasks, working directories, resume tokens |
 | `batch.json` | Batch response summary |
-| `state.json` | Status, session path, timing (final record written atomically) |
+| `state.json` | Status, session path, timing, resume source, tool count (final record written atomically) |
 | `answer.txt` | Final answer, when the child produced one |
+| `partial.txt` | Streamed text recovered from a failed task that produced no final result |
 | `stderr.log` | Bounded child diagnostics, appended as they arrive |
-| `events.ndjson` | Filtered lifecycle events, appended as they arrive; no text deltas |
+| `events.ndjson` | Filtered lifecycle events and warnings, appended as they arrive; no text deltas |
 
 The logs are written while the task runs, not at the end, so a host deadline or
 Ctrl+C still leaves the diagnostics that explain what the child was doing.
 
 The session file belongs to the child Kroma, which writes its own snapshot and
 WAL. Evidence may contain repository content; treat it as untrusted data.
+Runs are never pruned automatically: remove old `<run-id>` directories when
+their evidence is no longer needed, remembering that this also removes any
+`resume` source kept there.
 
 ## Limits
 
@@ -197,6 +279,7 @@ WAL. Evidence may contain repository content; treat it as untrusted data.
 | Child JSON line | 2 MiB of UTF-8 (checked per line, before parsing) |
 | Time per task | `task_timeout_secs` (default 300s) |
 | Tailored output per task | `max_output_chars` (default 12000) |
+| In-memory streamed draft | 64 KiB tail per task (never in `events.ndjson`) |
 | Tool response | 512 KiB |
 | Saved stderr | 256 KiB |
 | Saved events | 2 MiB |

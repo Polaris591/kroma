@@ -37,7 +37,7 @@ async function smoke(staged) {
     const packages = [];
     for (const [dir, expected] of [
       [nativeDir, ["package.json", "README.md", "LICENSE", `bin/${executable(platform)}`]],
-      [mainDir, ["package.json", "README.md", "LICENSE", "launcher.cjs", "platforms.cjs"]],
+      [mainDir, ["package.json", "README.md", "LICENSE", "launcher.cjs", "platforms.cjs", "update.cjs"]],
     ]) {
       const [packed] = JSON.parse(npm(["pack", "--json", "--ignore-scripts", "--pack-destination", tarballs], dir));
       assert.deepEqual(packed.files.map(file => file.path).sort(), expected.sort(), "Unexpected files in npm tarball");
@@ -48,10 +48,32 @@ async function smoke(staged) {
       packages.push({...packed, tarball: path.join(tarballs, packed.filename)});
     }
     registry = new Worker(path.join(__dirname, "test", "registry.cjs"), {
-      workerData: {manifest: readManifest(nativeDir), tarball: packages[0].tarball, integrity: packages[0].integrity},
+      workerData: {packages: [
+        {manifest: readManifest(nativeDir), tarball: packages[0].tarball, integrity: packages[0].integrity},
+        {manifest: main, tarball: packages[1].tarball, integrity: packages[1].integrity},
+      ]},
     });
     const [port] = await once(registry, "message", {signal: AbortSignal.timeout(15000)});
     const options = ["--ignore-scripts", "--no-audit", "--no-fund", `--registry=http://127.0.0.1:${port}`, "--fetch-retries=0"];
+    async function upgrade(root, globalPrefix) {
+      // Simulate stale package metadata, then repair through a real npm install.
+      const nativeRoot = path.dirname(require.resolve(`${packageName(platform)}/package.json`, {paths: [root]}));
+      for (const dir of [root, nativeRoot]) {
+        const file = path.join(dir, "package.json"), data = JSON.parse(fs.readFileSync(file, "utf8"));
+        data.version = "0.0.0"; fs.writeFileSync(file, JSON.stringify(data));
+      }
+      fs.rmSync(path.join(path.dirname(root), ".package-lock.json"), {force: true});
+      await require("./update.cjs").runUpdate([], {
+        root, cli: npmCli, log() {},
+        fetchImpl: (url, opts) => { assert.equal(url, "https://registry.npmjs.org/kroma/latest"); return fetch(`http://127.0.0.1:${port}/kroma/latest`, opts); },
+        execute(file, args, opts) {
+          const actual = args.map(arg => arg.startsWith("--registry=") ? `--registry=http://127.0.0.1:${port}` : arg);
+          return spawnSync(file, actual, {...opts, env: {...env, ...(globalPrefix ? {npm_config_prefix: globalPrefix} : {})}});
+        },
+      });
+      assert.equal(readManifest(root).version, main.version);
+      assert.equal(readManifest(path.dirname(require.resolve(`${packageName(platform)}/package.json`, {paths: [root]}))).version, main.version);
+    }
     const mainTarball = packages[1].tarball;
     const local = path.join(temp, "local install");
     fs.mkdirSync(local);
@@ -66,6 +88,7 @@ async function smoke(staged) {
     const badFlag = spawnSync(process.execPath, [installed, "--kroma-smoke-invalid-option"], {cwd: temp, env, encoding: "utf8", timeout: 15000});
     assert.ifError(badFlag.error);
     assert.equal(badFlag.status, 2, `${badFlag.stdout}\n${badFlag.stderr}`);
+    await upgrade(path.dirname(installed));
     assert.equal(npm(["exec", "--offline", "--yes=false", "--", "kroma", "--version"], local), nativeVersion);
     const prefix = path.join(temp, "global install");
     const installArgs = ["install", "--global", "--prefix", prefix, ...options, mainTarball];
@@ -81,6 +104,8 @@ async function smoke(staged) {
     assert.equal(globalVersion(), nativeVersion);
     npm(installArgs);
     assert.equal(globalVersion(), nativeVersion, "Reinstall changed CLI behavior");
+    await upgrade(path.join(prefix, process.platform === "win32" ? "node_modules/kroma" : "lib/node_modules/kroma"), prefix);
+    assert.equal(globalVersion(), nativeVersion, "Global update damaged the command");
     npm(["uninstall", "--global", "--prefix", prefix, ...options, "kroma"]);
     const shim = path.join(prefix, process.platform === "win32" ? "kroma.cmd" : "bin/kroma");
     assert.equal(fs.existsSync(shim), false, "Uninstall left the bin shim behind");
@@ -94,7 +119,7 @@ async function smoke(staged) {
     assert.equal(missing.status, 1);
     assert.equal(missing.stdout, "");
     assert.match(missing.stderr, /optional dependencies enabled/);
-    console.log(`Local-registry npm install, bin shims, reinstall, uninstall and --omit=optional passed: ${platform.id}, kroma ${main.version}`);
+    console.log(`Local-registry npm install, local/global update repair, bin shims, reinstall, uninstall and --omit=optional passed: ${platform.id}, kroma ${main.version}`);
     console.log(`Tarballs: ${tarballs}`);
   } finally {
     if (registry) await registry.terminate();

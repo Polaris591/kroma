@@ -1,6 +1,6 @@
 # Subagent plugin design
 
-Status: implemented in `examples/plugins/subagents` (plugin `0.2.0`) with the
+Status: implemented in `examples/plugins/subagents` (plugin `0.3.0`) with the
 host-side tool deadline in `src/plugins.rs`.
 
 ## Goal
@@ -14,6 +14,10 @@ platform:
 - the plugin performs execution, bounded concurrency, result classification and
   evidence capture;
 - the host owns time and process-tree teardown.
+
+A finished child can be resumed from its saved session. That is one explicit
+continuation with copied evidence, not an agent chat, shared live state or a
+task graph.
 
 Nothing else. No roles, teams, supervisor model, agent chat, automatic task
 graphs, voting, judging, background job center or auto-merge.
@@ -35,10 +39,12 @@ API) would duplicate the Agent Loop before there is evidence it is needed.
 
 ## Interface
 
-`subagent({tasks: [{task, cwd?}]})`, 1..8 tasks, validated before any child
-starts. `cwd` must be an existing directory; relative paths resolve against the
-host working directory. There is no `mode`, `role`, `strategy` or per-task
-timeout: dependent work is a second call, and context is written into the task.
+`subagent({tasks: [{task, cwd?, resume?}]})`, 1..8 tasks, validated before any
+child starts. `cwd` must be an existing directory; relative paths resolve
+against the host working directory. `resume` is a `<run-id>/<index>` token from
+an earlier result. There is no `mode`, `role`, `strategy` or per-task timeout:
+dependent work is a second call, with context written into the task or with the
+child's own saved conversation loaded by `resume`.
 
 ## Lifecycle
 
@@ -50,6 +56,10 @@ timeout: dependent work is a second call, and context is written into the task.
   `@path` references against its working directory.
 - Environment: inherited, plus `KROMA_WORKDIR=<cwd>`,
   `KROMA_SESSION_FILE=<run>/<index>/session.json`, `KROMA_SUBAGENT_DEPTH=1`.
+- A resume token copies the source `session.json` and its journal into the new
+  task directory before the child starts. The source run stays immutable, the
+  child owns a fresh lock, and only a final `completed` or `failed` state is
+  resumable; a `running` record may still own its session.
 - Exactly one level of delegation; a nested attempt is refused.
 - The worker processes lines serially, so two calls cannot interleave.
 
@@ -63,13 +73,16 @@ eight-row window makes that choice sharper here. So the batch prints a
 positional roster (`1✓ 2▶ 3·`; `·` queued, `▶` running, `✓` completed, `✗`
 failed, `–` never started) with batch elapsed and tokens, then one row per
 running task: an 18-character label, task elapsed, the current activity (model
-turn, or the tool it is in with that tool's elapsed), its tokens, and a `quiet`
-marker once the child has been silent for 90 seconds. Task start and finish
-still print once; the finish row carries a 40-character answer preview. Every
+turn, or the tool it is in with that tool's elapsed), its tokens, a short
+preview of fresh streamed text, and a `quiet` marker once the child has been
+silent for 90 seconds. Task start and finish still print once; the finish row
+carries a 40-character answer or partial-answer preview and names the recovered
+partial length. Every
 row is one of at most four per beat, so the eight-row window holds two complete
 beats, and the last two rows a batch emits are the summary and a 160-character
-line of per-task answers, because that is what the collapsed card keeps after
-the call. The evidence directory is the full record. Tokens come from the
+line of per-task answers. After the call the card renders the same summary from
+the result JSON, with per-task sections when expanded. The evidence directory
+is the full record. Tokens come from the
 child's own `model_finished` frames, so they are as fresh as the last model
 turn; the limit is the manifest deadline capped by
 `KROMA_PLUGIN_TOOL_TIMEOUT_SECS`, so the card never promises more time than the
@@ -92,22 +105,26 @@ Each task is bounded by `task_timeout_secs` (default 300s) so one stuck child
 fails with `CHILD_TIMEOUT` and frees its slot without spoiling the batch. The
 batch also cuts off remaining stragglers just before the host deadline so
 completed results are returned in a `partial` response instead of being lost
-to a host worker kill. Nothing is resumed or retried automatically.
-Side effects that already happened are not undone.
+to a host worker kill. A killed task keeps a bounded tail of the text it had
+streamed as `output` with `partial: true`, so the work is not lost with the
+process. Nothing is retried automatically; resuming a finished child is an
+explicit later call with its `resume` token. Side effects that already happened
+are not undone.
 
 ## Result contract
 
 Top-level `{schema_version, run_id, status, results[]}` with `status` in
 `completed | partial | failed`. Per task: `index`, `status`
 (`completed | failed | not_started`), `exit_code`, clipped `output` with
-`output_truncated` for successes, `error {code, message}` for failures,
-`duration_ms`, `usage` and `artifacts`.
+`output_truncated`, `partial` when output was recovered from streamed text,
+`error {code, message}` for failures, `duration_ms`, `tool_calls`, `usage`,
+`resume` (when the task has a directory) and `artifacts`.
 
 `usage` counters are tracked one by one: a provider that omits `cached` or
 reasoning tokens leaves those fields `null` without erasing the input and output
-it did report. `not_started` never reaches the tool response, because a fatal
-fault rejects the call; it is written to `batch.json` so an interrupted batch
-still records which tasks never began.
+it did report. `not_started` reaches the response when the batch deadline stops
+the queue; a fatal fault rejects the call instead, and `batch.json` still
+records which tasks never began.
 
 `completed` requires exit code 0 **and** exactly one final `result`. Zero exit
 without a result, or more than one result, is a failure. The tool response is
@@ -117,10 +134,12 @@ without a result, or more than one result, is a failure. The tool response is
 
 | Situation | Behaviour |
 | --- | --- |
-| Invalid task or `cwd` | Reject the batch before spawning |
+| Invalid task, `cwd` or `resume` | Reject the batch before spawning |
 | Child start failure | That task fails; others continue |
-| Non-zero exit, signal | That task fails; others continue |
+| Non-zero exit, signal | That task fails; others continue; exit 3/4/5/6 becomes `MODEL_NOT_CONFIGURED` / `AUTH_FAILED` / `MODEL_REQUEST_FAILED` / `CONTEXT_LIMIT` |
 | Exit 0 without a result | Protocol failure for that task |
+| Timeout or batch cut-off with streamed text | Task fails with `partial: true` and keeps a bounded `output` |
+| Resume of a running task or missing session | Reject before spawning (`RESUME_ACTIVE` / `RESUME_MISSING`) |
 | Non-JSON stdout, duplicate/textless result, oversized frame | Fatal: abort the batch, reject with the evidence path, discard the worker |
 | Evidence write failure | Fatal: the result would be untrustworthy |
 | Host deadline or Ctrl+C | Host teardown; final results are not guaranteed |
@@ -142,11 +161,14 @@ A task writes `state.json` (session path, working directory, `running`)
 before its child starts, so an interruption leaves a locatable trace without a
 separate index. `stderr.log` and `events.ndjson` are appended as the child runs,
 so a host kill still leaves the diagnostics that matter; `state.json` is only
-rewritten at the end, with a temporary file and rename. `<plugin-data>/runs/<run-id>/<index>/`
-also holds `answer.txt` (when the child produced an answer); the run directory
-holds `request.json` and `batch.json`. A failed evidence write is fatal: the
-result would be untrustworthy. Bounds: 16 KiB task, 2 MiB frame/events, 256 KiB
-stderr, 512 KiB response.
+rewritten at the end, with a temporary file and rename, and records
+`resumed_from`, `tool_calls`, `text_chars` and `partial_chars`.
+`<plugin-data>/runs/<run-id>/<index>/` also holds `answer.txt` (when the child
+produced a final answer) and `partial.txt` (when a failed task was killed after
+streaming text); the run directory holds `request.json` and `batch.json`. A
+failed evidence write is fatal: the result would be untrustworthy. Bounds:
+16 KiB task, 2 MiB frame/events, 256 KiB stderr, 512 KiB response, 64 KiB
+in-memory draft per task.
 
 ## Security boundaries
 
@@ -162,13 +184,19 @@ stderr, 512 KiB response.
 - Model configuration is inherited from the environment and saved profiles;
   a temporary in-session model switch is not forwarded, and the plugin does not
   promise otherwise.
+- `resume` tokens are resolved only inside this plugin's `runs` directory; a
+token that escapes it, references an unfinished task or has no saved session is
+refused before any child starts. A copied session is still the child's private
+conversation, not a permission boundary.
 - Evidence may contain repository content and is untrusted data.
 
 ## Compatibility
 
 `subagent_run` and `subagent_parallel` were transitional adapters over the same
 executor. They are gone: the tool table exposes one `subagent` tool, so the
-model has no near-duplicate entries to choose between.
+model has no near-duplicate entries to choose between. Version 0.3.0 adds the
+optional `resume` input and the `resume`, `partial` and `tool_calls` result
+fields; existing task shapes and result fields are unchanged.
 
 ## Acceptance
 
@@ -180,9 +208,13 @@ outer `is_error` matching task status, a state record that exists before the
 child starts, evidence appended while the task runs, `model_failed` kept and
 text deltas excluded, a failed exit naming the last stderr line, the 16 KiB task
 boundary, SIGINT-then-SIGKILL escalation, a malformed depth value, the
-`not_started` record in `batch.json`, per-field usage, the progress deadline, and
-character-boundary clipping. The suite clears its own plugin environment
-variables, so it also passes inside a subagent.
+`not_started` record in `batch.json`, per-field usage, compaction request
+counts, warning evidence, the progress deadline, live text previews, fair
+response budgeting, streamed partial answers, exit-code classification,
+tool-call counts, resume copying and validation (malformed, missing, active and
+`cwd`-mismatched tokens), and character-boundary clipping. The TUI test renders
+the `partial answer:` section of a failed task. The suite clears its own plugin
+environment variables, so it also passes inside a subagent.
 
 Host tests cover the declared deadline for non-streaming tools, a streaming
 tool whose heartbeats cannot extend the deadline, worker recovery after a

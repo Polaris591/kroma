@@ -36,6 +36,11 @@ but it can still contain secrets found in unignored worktree files; treat it as 
 Each session keeps a bounded snapshot history (at most 200 commits; older batches
 are pruned automatically).
 Deleting the private store reclaims space but also removes all file snapshots.
+Snapshot, list, restore and pruning operations share an OS-backed transaction
+lock per private store, including across Kroma processes. Cancelling a task stops
+its snapshot process tree and releases the lock; it does not replay a command.
+Snapshot failures are nonfatal warnings, shown by terminal/JSONL/Desktop hosts.
+Set `KROMA_PROFILE=1` to include `snapshot_ms` in task timing diagnostics.
 
 List snapshots:
 
@@ -55,6 +60,26 @@ snapshot state. Built-in excluded directories and files ignored by `.gitignore`
 are left alone. Because this can delete new work, run `/checkpoints` first and use
 `/restore-files` deliberately. Conversation history is not changed; use `/rewind`
 for messages.
+
+## Project plugin approval
+
+Project plugin approval is bound to the manifest and a bounded scan of authored
+local files, including Python helpers, extensionless files and files larger than
+1 MiB. The scan covers at most 20,000 entries / 64 MiB total, with an 8 MiB local
+file limit and a 16 MiB explicit entry-point limit. Incomplete or unreadable scans
+cannot be approved. Dependency/cache directories (`node_modules`, `.git`,
+`target`, `__pycache__`, `.pytest_cache`) are deliberately outside this boundary;
+this is change detection, **not a sandbox**. Enabled plugins retain user privileges.
+
+Older project approvals must be renewed with `kroma plugins enable <id>` because
+the fingerprint format changed. Disabled discovery does not scan plugin code;
+disabling a broken or unverifiable plugin does not require approving it.
+
+If an after-tool hook fails, the completed tool's result/status is preserved and
+the failed hook's partial patch is discarded. A separate warning is persisted
+with the tool record before it is emitted to hosts. This warning is not an
+instruction to retry a completed side effect. Before-tool failures still prevent
+execution.
 
 ## What is not undoable
 

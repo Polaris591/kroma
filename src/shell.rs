@@ -91,6 +91,11 @@ fn mcp_image_prefix(session: &Path) -> String {
     )
 }
 
+fn owns_mcp_image(name: &str, prefix: &str) -> bool {
+    // The final two components are PID and counter, not part of the archive stem.
+    name.rsplitn(3, '-').nth(2) == prefix.strip_suffix('-')
+}
+
 fn referenced_mcp_images(messages: &[crate::protocol::Message]) -> HashSet<PathBuf> {
     let mut used = HashSet::new();
     for message in messages.iter().filter(|message| message.role == "tool") {
@@ -118,13 +123,14 @@ pub(crate) fn clone_session_captures(
     source_session: &Path,
     destination_session: &Path,
     messages: &[crate::protocol::Message],
-) -> Result<Vec<crate::protocol::Message>> {
+) -> Result<(Vec<crate::protocol::Message>, Vec<(String, String)>)> {
     let dir = capture_dir(workdir)?;
     let source_prefix = capture_prefix(source_session);
     let destination_prefix = capture_prefix(destination_session);
     let source_images = mcp_image_prefix(source_session);
     let destination_images = mcp_image_prefix(destination_session);
     let mut cloned = messages.to_vec();
+    let mut paths = Vec::new();
     for msg in &mut cloned {
         if msg.role != "tool" {
             continue;
@@ -164,8 +170,9 @@ pub(crate) fn clone_session_captures(
                             format!("unable to preserve MCP image {}", old.display())
                         })?;
                 }
-                item["path"] =
-                    serde_json::Value::String(destination.to_string_lossy().into_owned());
+                let destination = destination.to_string_lossy().into_owned();
+                paths.push((original.to_owned(), destination.clone()));
+                item["path"] = serde_json::Value::String(destination);
             }
         }
         let mut replacements = Vec::new();
@@ -200,6 +207,7 @@ pub(crate) fn clone_session_captures(
         if !replacements.is_empty() {
             for (field, old, new) in replacements {
                 value[field] = serde_json::Value::String(new.clone());
+                paths.push((old.clone(), new.clone()));
                 for preview_field in ["stdout", "stderr"] {
                     if let Some(preview) = value[preview_field].as_str() {
                         value[preview_field] =
@@ -210,7 +218,7 @@ pub(crate) fn clone_session_captures(
         }
         msg.content = Some(value.to_string());
     }
-    Ok(cloned)
+    Ok((cloned, paths))
 }
 
 /// Clean only files that belong to this exact session. A non-referenced file
@@ -260,7 +268,7 @@ pub fn cleanup_session_orphans(
         for entry in fs::read_dir(parent)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(&image_prefix) {
+            if !owns_mcp_image(&name, &image_prefix) {
                 continue;
             }
             let path = entry.path();
@@ -311,7 +319,7 @@ pub fn cleanup_cleared_history(
         if path.parent() == session.parent()
             && path
                 .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(&image_prefix))
+                .is_some_and(|name| owns_mcp_image(&name.to_string_lossy(), &image_prefix))
         {
             let _ = fs::remove_file(path);
         }
@@ -387,7 +395,7 @@ impl Drop for ProcessGroupGuard {
 
 #[derive(Serialize)]
 pub struct ShellOutput {
-    exit_code: Option<i32>,
+    pub(crate) exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     signal: Option<i32>,
     stdout: String,
@@ -1016,11 +1024,18 @@ mod tests {
             }],"isError":false})
             .to_string(),
         )];
-        let cloned = clone_session_captures(&dir, &source, &branch, &history)?;
+        let (cloned, paths) = clone_session_captures(&dir, &source, &branch, &history)?;
         let result: serde_json::Value =
             serde_json::from_str(cloned[0].content.as_deref().unwrap())?;
         let copied = PathBuf::from(result["content"][0]["path"].as_str().unwrap());
         assert_ne!(copied, source_image);
+        assert_eq!(
+            paths,
+            vec![(
+                source_image.to_string_lossy().into_owned(),
+                copied.to_string_lossy().into_owned()
+            )]
+        );
         assert_eq!(fs::read(&copied)?, b"image-data");
         cleanup_cleared_history(&dir, &source, &history);
         assert!(!source_image.exists());

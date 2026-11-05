@@ -34,18 +34,6 @@ pub struct Attachment {
     pub draft_copy: bool,
 }
 
-fn image_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
 fn save(workdir: &Path, bytes: &[u8], suffix: &str) -> Result<PathBuf> {
     // Do not pollute the project worktree (and its git status) with uploads.
     let home = env::var_os("HOME")
@@ -57,56 +45,15 @@ fn save(workdir: &Path, bytes: &[u8], suffix: &str) -> Result<PathBuf> {
 }
 
 impl Attachment {
+    /// Import a file through the shared host importer so Desktop and TUI agree
+    /// on limits, mime sniffing and private storage.
     pub fn from_file(path: &Path, workdir: &Path) -> Result<Self> {
-        let full = path
-            .canonicalize()
-            .with_context(|| format!("file not found: {}", path.display()))?;
-        let stat = full.metadata()?;
-        if !stat.is_file() {
-            bail!("only regular files can be attached");
-        }
-        if stat.len() > MAX_FILE_BYTES {
-            bail!("file is larger than 32 MiB");
-        }
-        let bytes = crate::attachments::read_bounded(&full, MAX_FILE_BYTES)?;
-        if bytes.len() as u64 > MAX_FILE_BYTES {
-            bail!("file changed during import");
-        }
-        let mime = image_type(&bytes);
-        let kind = if mime.is_some() {
-            Kind::Image
-        } else {
-            Kind::File
-        };
-        if kind == Kind::Image && bytes.len() > MAX_IMAGE_BYTES {
-            bail!("image is larger than 8 MiB");
-        }
-        let name = full
-            .file_name()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default()
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(60)
-            .collect::<String>();
-        let extension = match mime {
-            Some("image/png") => "png",
-            Some("image/jpeg") => "jpg",
-            Some("image/webp") => "webp",
-            _ => "file",
-        };
-        let stored = save(workdir, &bytes, extension)?;
-        Ok(Self {
-            kind,
-            name,
-            path: stored,
-            bytes: bytes.len() as u64,
-            lines: None,
-            chars: None,
-            mime,
-            marker: None,
-            draft_copy: true,
-        })
+        let item = crate::host_attachments::import_file(path, workdir)?;
+        let mut attachment =
+            Self::from_item(&item).context("host attachment is not a usable reference")?;
+        // The imported file is a private copy owned by this draft.
+        attachment.draft_copy = true;
+        Ok(attachment)
     }
 
     pub fn from_log(text: &str, workdir: &Path) -> Result<Self> {
@@ -295,6 +242,13 @@ pub enum ClipboardPaste {
     Text(String),
 }
 
+pub fn clipboard_text() -> Result<String> {
+    arboard::Clipboard::new()
+        .context("clipboard unavailable in this terminal environment")?
+        .get_text()
+        .context("clipboard has no text; use Alt+V for images or files")
+}
+
 pub fn clipboard(workdir: &Path) -> Result<ClipboardPaste> {
     let mut clipboard =
         arboard::Clipboard::new().context("clipboard unavailable in this terminal environment")?;
@@ -324,7 +278,7 @@ pub fn clipboard(workdir: &Path) -> Result<ClipboardPaste> {
 }
 
 pub fn long_paste(text: &str) -> bool {
-    text.chars().count() >= 1000 || text.lines().count() > 12
+    text.len() > 4 * 1024
 }
 
 #[cfg(test)]
@@ -351,10 +305,100 @@ mod tests {
         assert!(grouped[0].starts_with("#1 ▤"));
         assert!(grouped[1].starts_with("#2 ▧"));
         assert!(grouped[2].starts_with("#3 ▤"));
-        assert!(long_paste(&"a\n".repeat(13)));
+        assert!(!long_paste(&"a\n".repeat(100)));
+        assert!(!long_paste(&"x".repeat(4096)));
+        assert!(long_paste(&"x".repeat(4097)));
+        assert!(long_paste(&"猫".repeat(1366)));
         assert!(!long_paste("short input"));
         fs::remove_file(log.path)?;
         fs::remove_file(image.path)?;
+        fs::remove_dir_all(workdir)?;
+        Ok(())
+    }
+
+    fn temp_workdir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("kroma-attachment-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn from_file_imports_images_through_the_shared_host_path() -> Result<()> {
+        let workdir = temp_workdir("image");
+        let source = workdir.join("diagram.png");
+        fs::write(&source, b"\x89PNG\r\n\x1a\nimage")?;
+        let image = Attachment::from_file(&source, &workdir)?;
+        assert_eq!(image.kind, Kind::Image);
+        assert_eq!(image.name, "diagram.png");
+        assert_eq!(image.mime, Some("image/png"));
+        assert_eq!(image.bytes, 13);
+        assert!(image.draft_copy, "an imported file is a draft copy");
+        assert_ne!(image.path, source, "the source is copied, not referenced");
+        assert_eq!(fs::read(&image.path)?, b"\x89PNG\r\n\x1a\nimage");
+        let item = image.item();
+        assert_eq!(item["type"], "kroma_attachment");
+        assert_eq!(item["kind"], "image");
+        assert_eq!(item["mime"], "image/png");
+        let mut recalled = Attachment::from_item(&item).expect("recall the sent attachment");
+        assert_eq!(recalled.kind, Kind::Image);
+        assert_eq!(recalled.path, image.path);
+        assert!(!recalled.draft_copy, "a recalled attachment owns no copy");
+        recalled.marker = Some('\u{E001}');
+        assert_eq!(
+            Attachment::from_item(&recalled.item()).unwrap().marker,
+            Some('\u{E001}')
+        );
+        assert!(image.label().contains("diagram.png"));
+        fs::remove_file(&image.path)?;
+        fs::remove_dir_all(workdir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn from_file_keeps_plain_files_as_references() -> Result<()> {
+        let workdir = temp_workdir("file");
+        let source = workdir.join("notes.txt");
+        fs::write(&source, b"hello\n")?;
+        let file = Attachment::from_file(&source, &workdir)?;
+        assert_eq!(file.kind, Kind::File);
+        assert_eq!(file.mime, None);
+        assert_eq!(file.bytes, 6);
+        assert!(file.draft_copy);
+        assert_eq!(fs::read_to_string(&file.path)?, "hello\n");
+        let item = file.item();
+        assert_eq!(item["kind"], "file");
+        assert_eq!(item["mime"], Value::Null);
+        assert_eq!(item["chars"], Value::Null);
+        assert!(labels(Some(&[item]))[0].starts_with("#1 ▣ notes.txt"));
+        fs::remove_file(&file.path)?;
+        fs::remove_dir_all(workdir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn from_file_rejects_directories_missing_paths_and_oversized_images() -> Result<()> {
+        let workdir = temp_workdir("reject");
+        assert!(Attachment::from_file(&workdir, &workdir)
+            .unwrap_err()
+            .to_string()
+            .contains("regular file"));
+        assert!(
+            Attachment::from_file(&workdir.join("missing.txt"), &workdir)
+                .unwrap_err()
+                .to_string()
+                .contains("file not found")
+        );
+        let image = workdir.join("huge.png");
+        fs::write(&image, b"\x89PNG\r\n\x1a\n")?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&image)?
+            .set_len(MAX_IMAGE_BYTES as u64 + 1)?;
+        assert!(Attachment::from_file(&image, &workdir)
+            .unwrap_err()
+            .to_string()
+            .contains("image exceeds 8 MiB"));
         fs::remove_dir_all(workdir)?;
         Ok(())
     }

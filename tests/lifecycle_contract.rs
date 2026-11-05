@@ -251,7 +251,8 @@ impl EventSink for OrderEvents {
                 format!("compaction-usage-{requests}")
             }
             RuntimeEvent::TaskFinished { status } => format!("task-end-{status}"),
-            RuntimeEvent::CompactionStarted
+            RuntimeEvent::Warning { .. }
+            | RuntimeEvent::CompactionStarted
             | RuntimeEvent::TextDelta(_)
             | RuntimeEvent::ReasoningDelta(_)
             | RuntimeEvent::ToolStarted { .. }

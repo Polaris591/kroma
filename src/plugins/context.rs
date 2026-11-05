@@ -272,18 +272,6 @@ impl PluginContextPolicy {
         self.usage.cached = accumulate(self.usage.cached, usage.cached);
     }
 
-    fn update(&mut self, patch: ContextPatch) -> Option<Value> {
-        if let Some(usage) = patch.usage {
-            self.record_usage(usage);
-        }
-        if let Some(data) = patch.state.clone() {
-            self.state.data = data.clone();
-            Some(data)
-        } else {
-            None
-        }
-    }
-
     /// Sync ContextPolicy callbacks never wait for external processes.
     /// Forward measurements to the next async prepare/finish invocation.
     fn observe_plugin(&mut self, name: &str, arguments: Value) {
@@ -291,7 +279,12 @@ impl PluginContextPolicy {
             .push(json!({"type":name,"arguments":arguments}));
     }
 
-    fn commit_patch(&mut self, store: &dyn ContextCommit, patch: ContextPatch) -> Result<()> {
+    fn commit_patch(&mut self, store: &dyn ContextCommit, mut patch: ContextPatch) -> Result<()> {
+        // Usage reports work the plugin already performed. Record it before the
+        // commit so rejected derived state cannot erase the billing.
+        if let Some(usage) = patch.usage.take() {
+            self.record_usage(usage);
+        }
         if let Some(data) = &patch.state {
             let durable = PersistedContext::External(ExternalContextState {
                 strategy: self.state.strategy.clone(),
@@ -300,7 +293,9 @@ impl PluginContextPolicy {
             });
             store.commit(&durable)?;
         }
-        self.update(patch);
+        if let Some(data) = patch.state {
+            self.state.data = data;
+        }
         Ok(())
     }
 }

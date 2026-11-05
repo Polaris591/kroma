@@ -1,0 +1,23 @@
+[package]
+name = "kroma-memory"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Local, workdir-isolated project memory plugin for Kroma"
+
+[dependencies]
+anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"
+toml = "0.8"
+
+[workspace]

@@ -92,6 +92,7 @@ impl EventSink for JsonEvents {
             } => {
                 json!({"type":"session_rewound","id":id,"future":saved_future,"checkpoint":checkpoint})
             }
+            RuntimeEvent::Warning { message } => json!({"type":"warning","message":message}),
         };
         let _ = self.output.line(&value.to_string());
     }

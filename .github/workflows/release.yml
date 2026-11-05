@@ -1,0 +1,143 @@
+name: Prepare or publish release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v<version> tag containing the release implementation
+        required: true
+        type: string
+      channel:
+        description: npm dist-tag (next is the public-test channel)
+        type: choice
+        options: [next, latest]
+        default: next
+      publish:
+        description: Publish npm packages and create the GitHub release
+        type: boolean
+        default: false
+      confirm_ownership:
+        description: I confirmed ownership of all six npm package names
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kroma-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate tag and release intent
+        id: source
+        env:
+          TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+          PUBLISH: ${{ inputs.publish }}
+          OWNERSHIP: ${{ inputs.confirm_ownership }}
+        run: |
+          node -e 'const v=require("./npm/stage.cjs").cargoVersion(); if(process.env.TAG!==`v${v}`) throw Error("Tag must match Cargo.toml"); if(process.env.PUBLISH==="true" && process.env.OWNERSHIP!=="true") throw Error("Confirm package ownership first"); if(process.env.CHANNEL==="latest" && v.includes("-")) throw Error("Prereleases cannot use latest");'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || { echo "Dispatch this workflow from the release tag (--ref), not a different branch commit; provenance must match."; exit 1; }
+          git check-ref-format "refs/tags/$TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$TAG^{commit}")"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    uses: ./.github/workflows/npm.yml
+    with:
+      ref: ${{ needs.prepare.outputs.commit }}
+
+  collect:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kroma-npm-*
+          path: artifacts
+      - name: Validate all tested tarballs and generate checksums
+        env:
+          TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: node npm/release.cjs collect artifacts release-output "$TAG" "$CHANNEL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kroma-release-candidate
+          path: release-output/*
+          if-no-files-found: error
+
+  publish:
+    if: inputs.publish == true
+    needs: [prepare, collect]
+    runs-on: ubuntu-latest
+    environment: npm-release
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global 'npm@^11.5.1' --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@v4
+        with:
+          name: kroma-release-candidate
+          path: release-output
+      - name: Refuse an already-created GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          git fetch --no-tags --depth=1 origin "refs/tags/$TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_COMMIT"
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" = false
+          reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/npm-release" --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[]] | length')
+          test "$reviewers" -gt 0 || { echo "Configure required reviewers on npm-release before publishing."; exit 1; }
+          node -e 'require("node:fs").writeFileSync("release-notes.md", "Public release of Kroma. See README, security guidance and supported-platform limits. No sandbox or per-command approval.\n")'
+          if gh release view "$TAG" > /dev/null 2>&1; then echo "Release already exists; audit publication state before retrying."; exit 1; fi
+      - name: Publish native packages first, main package last
+        env:
+          KROMA_RELEASE_CONFIRMED: '1'
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: node npm/release.cjs publish release-output
+      - name: Create GitHub release with exact npm tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          flags=(--verify-tag --title "$TAG" --notes-file release-notes.md)
+          if test "$CHANNEL" = next; then flags+=(--prerelease --latest=false); else flags+=(--latest); fi
+          gh release create "$TAG" "${flags[@]}" release-output/*

@@ -111,6 +111,7 @@ checked separately using the [live acceptance set](web/evaluation.md).
 | `model-hook` | Enable and send a message | Request projection rewrite without mutating session history |
 | `subagents` | Let the model call `subagent` | Delegated tasks in separate sessions and working directories, bounded parallel queue, per-task evidence |
 | `memory` | `/remember text`, `/memories`, `/forgetnote 1` | Optional cross-session local notes, injected into model request projection |
+| `project-memory` | Build the Rust binary, install `plugin/`, then use normally | Zero-maintenance SQLite memory: automatic recall, quote-verified rules, provisional review notes, automatic expiry; Git worktrees share one identity |
 | `status` | `/plugins view status` | Declarative TUI footer label and an information panel |
 
 To try another plugin, run
@@ -122,6 +123,15 @@ task gets its own session, working directory and evidence directory, and the
 host stops the whole batch at the declared `timeout_secs`. It reuses your
 configured model provider, so running multiple agents incurs the corresponding
 model calls and token costs.
+
+The `project-memory` example is a standalone Rust binary (`cargo install --path
+examples/plugins/project-memory`) that stores private SQLite data under the host
+`data_dir`, isolated per canonical working directory. It exposes
+`project_memory_search`, `project_memory_read` and `project_memory_propose` plus
+`/memory`; proposals remain candidates until `/memory accept`. It registers no
+model hook or context policy, so it never injects notes automatically: the model
+must search. It is not built by the root workspace; see its README for build,
+storage, limits and migration details.
 
 The `memory` plugin stores notes in its installed directory as
 `memory.json`, and does not use an AI model to decide what to remember. Notes
@@ -354,6 +364,18 @@ Modifying hooks:
   remain unchanged. Custom tool names must still be registered as executable
   tools if the provider calls them.
 
+V2 host capabilities (`api_version = 2`):
+
+- `capabilities = ["request_context", "task_summary"]` is opt-in and requires a command.
+  V1 plugins keep the exact V1 frames and behavior.
+- `request_context` is sent once per user task with an intent, project/session fields and a
+  token budget. The plugin returns compact blocks; the host appends them to the current
+  request projection as untrusted reference data. Empty, slow, malformed or failed replies
+  mean no injection and never fail the model request.
+- `task_summary` is sent after a final assistant message with no tool calls, carrying recent
+  user messages (bounded). It is best effort and idempotent; a plugin may use it to verify
+  quote-anchored writes. It never changes the persisted transcript.
+- See `docs/project-memory-v2-contract.md` for the exact fields and limits.
 External context operations (`[context]`):
 
 - `context_prepare`, `context_finish`, and `context_overflow` receive the active

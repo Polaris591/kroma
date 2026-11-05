@@ -1,0 +1,65 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+    Finished `release` profile [optimized] target(s) in 57.60s
+     Running unittests src\lib.rs (target\release\deps\kroma-e42228b31dbdc43b.exe)
+
+running 5 tests
+test checkpoints::tests::perf_file_checkpoint_first_unchanged_and_delta ... PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"bytes_per_file":1024,"cancellable":true,"files":1000,"includes_root_discovery":true,"store_preinitialized":true},"max_ns":1095004300,"min_ns":1095004300,"name":"checkpoint.first_capture","p50_ns":1095004300,"p95_ns":1095004300,"platform":"windows","process_id":16732,"samples":1}
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"bytes_per_file":1024,"cancellable":true,"files":1000,"includes_root_discovery":true,"store_preinitialized":true},"max_ns":691792400,"min_ns":274954200,"name":"checkpoint.unchanged","p50_ns":322711400,"p95_ns":359215900,"platform":"windows","process_id":16732,"samples":21}
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"bytes_per_file":1024,"cancellable":true,"files":1000,"includes_root_discovery":true,"store_preinitialized":true},"max_ns":537220900,"min_ns":479636900,"name":"checkpoint.one_file_delta","p50_ns":501776400,"p95_ns":533519200,"platform":"windows","process_id":16732,"samples":21}
+ok
+test context::tests::perf_context_prepare_and_mock_checkpoint_wait ... [compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"billable_usage":null,"mock_delay_ms":0,"requests_per_prepare":1},"max_ns":360000,"min_ns":192600,"name":"context.prepare.checkpoint","p50_ns":261500,"p95_ns":360000,"platform":"windows","process_id":16732,"samples":7}
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"billable_usage":null,"mock_delay_ms":30,"requests_per_prepare":1},"max_ns":46818800,"min_ns":31007100,"name":"context.prepare.checkpoint","p50_ns":31710000,"p95_ns":46818800,"platform":"windows","process_id":16732,"samples":7}
+ok
+test context::tests::perf_summary_source_shrinking_prefix ... PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"alternating_order":true,"input_cap":1800,"messages":201,"raw_json_bytes":132534},"max_ns":19267900,"min_ns":7894400,"name":"context.summary_source.reference","p50_ns":9114000,"p95_ns":14343000,"platform":"windows","process_id":16732,"samples":21}
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"alternating_order":true,"input_cap":1800,"messages":201,"raw_json_bytes":132534},"max_ns":4713900,"min_ns":3696200,"name":"context.summary_source.current","p50_ns":3827100,"p95_ns":4540800,"platform":"windows","process_id":16732,"samples":21}
+ok
+test tools::tests::perf_tool_dispatch_and_shell_process ... PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"alternating_order":true,"in_process":true,"iterations_per_sample":1000},"max_ns":62,"min_ns":49,"name":"tool.direct","p50_ns":49,"p95_ns":62,"platform":"windows","process_id":16732,"samples":31}
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"alternating_order":true,"in_process":true,"iterations_per_sample":1000},"max_ns":129,"min_ns":87,"name":"tool.registry","p50_ns":87,"p95_ns":110,"platform":"windows","process_id":16732,"samples":31}
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"alternating_order":true,"in_process":true,"iterations_per_sample":1000},"max_ns":360,"min_ns":260,"name":"tool.noop_hook","p50_ns":262,"p95_ns":331,"platform":"windows","process_id":16732,"samples":31}
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"command":"echo perf","includes_process_start":true},"max_ns":55584600,"min_ns":48762400,"name":"tool.shell_echo","p50_ns":51331500,"p95_ns":55584600,"platform":"windows","process_id":16732,"samples":11}
+ok
+test tui::title::tests::perf_title_schedule_and_completion ... PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"billable_usage":null,"mock_delay_ms":30,"output_budget":128,"title_requests":11},"max_ns":26500,"min_ns":3900,"name":"title.schedule","p50_ns":4400,"p95_ns":26500,"platform":"windows","process_id":16732,"samples":11}
+PERF {"arch":"x86_64","debug_assertions":false,"fixture":{"billable_usage":null,"mock_delay_ms":30,"output_budget":128,"title_requests":11},"max_ns":47936700,"min_ns":34764800,"name":"title.completion","p50_ns":46758000,"p95_ns":47936700,"platform":"windows","process_id":16732,"samples":11}
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 619 filtered out; finished in 21.04s
+

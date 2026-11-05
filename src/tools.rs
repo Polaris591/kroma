@@ -161,15 +161,34 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, call: &ToolCall, ctx: ToolContext<'_>) -> ToolResult {
+        let (result, warnings) = self.execute_with_warnings(call, ctx).await;
+        for warning in warnings {
+            crate::runtime_log!("[tool] {warning}");
+        }
+        result
+    }
+
+    /// Execute a tool while keeping interceptor diagnostics separate from the
+    /// real outcome. A failing after hook must not turn a completed side effect
+    /// into an error result, because that invites the model to repeat it.
+    pub(crate) async fn execute_with_warnings(
+        &self,
+        call: &ToolCall,
+        ctx: ToolContext<'_>,
+    ) -> (ToolResult, Vec<String>) {
         if call.kind != "function" {
-            return ToolResult::error(
-                json!({"error": format!("unsupported tool: {}", call.function.name)}).to_string(),
+            return (
+                ToolResult::error(
+                    json!({"error": format!("unsupported tool: {}", call.function.name)})
+                        .to_string(),
+                ),
+                Vec::new(),
             );
         }
         // The default (no-hook) execution path performs no ToolCall clone,
         // allocation or extra IPC. Plugins only pay for their own hooks.
         if self.interceptors.is_empty() {
-            return match self
+            let result = match self
                 .tools
                 .iter()
                 .find(|tool| tool.name() == call.function.name)
@@ -180,17 +199,24 @@ impl ToolRegistry {
                         .to_string(),
                 ),
             };
+            return (result, Vec::new());
         }
         let mut effective = call.clone();
         for hook in &self.interceptors {
             if let Err(error) = hook.before_with_context(&mut effective, ctx).await {
-                return ToolResult::error(format!("before_tool_call failed: {error:#}"));
+                return (
+                    ToolResult::error(format!("before_tool_call failed: {error:#}")),
+                    Vec::new(),
+                );
             }
             if effective.id != call.id
                 || effective.kind != call.kind
                 || effective.function.name != call.function.name
             {
-                return ToolResult::error("tool interceptor cannot change call id, kind or name");
+                return (
+                    ToolResult::error("tool interceptor cannot change call id, kind or name"),
+                    Vec::new(),
+                );
             }
         }
         let mut result = match self
@@ -207,19 +233,20 @@ impl ToolRegistry {
         if effective.function.arguments != call.function.arguments {
             result.executed_arguments = Some(effective.function.arguments.clone());
         }
+        let mut warnings = Vec::new();
         for hook in &self.interceptors {
+            // Hooks receive &mut and may patch the result before failing. Keep
+            // the last committed outcome so a failed hook cannot leave a
+            // partial patch, then stop: later hooks were promised a result
+            // whose provenance has already been disrupted.
+            let committed = result.clone();
             if let Err(error) = hook.after_with_context(&effective, &mut result, ctx).await {
-                return ToolResult {
-                    content: format!(
-                        "after_tool_result failed: {error:#}; original tool returned: {}",
-                        result.content
-                    ),
-                    is_error: true,
-                    executed_arguments: result.executed_arguments,
-                };
+                result = committed;
+                warnings.push(format!("after_tool_result failed: {error:#}"));
+                break;
             }
         }
-        result
+        (result, warnings)
     }
 }
 
@@ -237,19 +264,10 @@ impl Tool for BuiltinShell {
     fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a> {
         Box::pin(async move {
             match execute_inner(call, ctx.workdir, ctx.archive, ctx.on_output).await {
-                Ok(output) => {
-                    // A signal-terminated process has no numeric exit code.
-                    // Treat missing/null as abnormal termination, not success.
-                    let failed = serde_json::from_str::<Value>(&output)
-                        .ok()
-                        .and_then(|value| value.get("exit_code").and_then(Value::as_i64))
-                        != Some(0);
-                    if failed {
-                        ToolResult::error(output)
-                    } else {
-                        ToolResult::ok(output)
-                    }
-                }
+                // Failure comes from the structured exit status, not from
+                // re-parsing the already-serialized tool payload.
+                Ok(output) if output.failed => ToolResult::error(output.content),
+                Ok(output) => ToolResult::ok(output.content),
                 Err(error) => ToolResult::error(json!({"error": error.to_string()}).to_string()),
             }
         })
@@ -297,12 +315,18 @@ pub fn definitions() -> Vec<serde_json::Value> {
     })]
 }
 
+struct ShellExecution {
+    content: String,
+    /// Missing exit codes are signal or abnormal termination, never success.
+    failed: bool,
+}
+
 async fn execute_inner(
     call: &ToolCall,
     workdir: &Path,
     archive: &Path,
     on_output: Option<&shell::OutputCallback<'_>>,
-) -> Result<String> {
+) -> Result<ShellExecution> {
     if call.kind != "function" || call.function.name != "shell" {
         bail!("unsupported tool: {}", call.function.name);
     }
@@ -314,6 +338,7 @@ async fn execute_inner(
     // Large outputs remain file-backed. Inline stdout/stderr bytes are
     // redundant with the complete returned strings and need not occupy
     // model context. Preserve file references and byte totals when omitted.
+    let failed = output.exit_code != Some(0);
     let mut payload = serde_json::to_value(&output)?;
     let object = payload
         .as_object_mut()
@@ -324,13 +349,204 @@ async fn execute_inner(
     if !object.contains_key("stderr_file") {
         object.remove("stderr_bytes");
     }
-    Ok(payload.to_string())
+    Ok(ShellExecution {
+        content: payload.to_string(),
+        failed,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::FunctionCall;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct NoopHook;
+    impl ToolInterceptor for NoopHook {}
+
+    #[tokio::test]
+    #[ignore = "local dispatch/process benchmark; no provider requests"]
+    async fn perf_tool_dispatch_and_shell_process() -> Result<()> {
+        use std::{hint::black_box, time::Instant};
+        let tool = Arc::new(EchoForHook);
+        let mut registry = ToolRegistry::new();
+        registry.register(tool.clone())?;
+        let mut hooked = registry.clone();
+        hooked.register_interceptor(Arc::new(NoopHook));
+        let workdir = std::env::temp_dir();
+        let archive = workdir.join("kroma-perf-unused-session.json");
+        let ctx = ToolContext {
+            workdir: &workdir,
+            archive: &archive,
+            on_output: None,
+        };
+        let call = test_call("echo_hook", r#"{"value":"sample"}"#);
+        let mut samples = [Vec::new(), Vec::new(), Vec::new()];
+        for round in 0..33 {
+            for kind in if round % 2 == 0 { [0, 1, 2] } else { [2, 1, 0] } {
+                let start = Instant::now();
+                for _ in 0..1000 {
+                    let result = match kind {
+                        0 => tool.execute(&call, ctx).await,
+                        1 => registry.execute(&call, ctx).await,
+                        _ => hooked.execute(&call, ctx).await,
+                    };
+                    black_box(result);
+                }
+                if round > 1 {
+                    samples[kind].push(start.elapsed() / 1000);
+                }
+            }
+        }
+        for (name, times) in ["tool.direct", "tool.registry", "tool.noop_hook"]
+            .into_iter()
+            .zip(samples)
+        {
+            crate::performance::report(
+                name,
+                &times,
+                json!({"iterations_per_sample":1000,"in_process":true,"alternating_order":true}),
+            );
+        }
+        let shell = ToolRegistry::builtin();
+        let call = test_call("shell", r#"{"command":"echo perf"}"#);
+        let mut samples = Vec::new();
+        for _ in 0..11 {
+            let start = Instant::now();
+            let result = shell.execute(&call, ctx).await;
+            samples.push(start.elapsed());
+            assert!(!result.is_error, "{}", result.content);
+        }
+        crate::performance::report(
+            "tool.shell_echo",
+            &samples,
+            json!({"command":"echo perf","includes_process_start":true}),
+        );
+        Ok(())
+    }
+
+    fn test_call(name: &str, arguments: &str) -> ToolCall {
+        ToolCall {
+            id: format!("call-{name}"),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        }
+    }
+
+    fn test_context() -> ToolContext<'static> {
+        ToolContext {
+            workdir: Path::new("."),
+            archive: Path::new("session.json"),
+            on_output: None,
+        }
+    }
+
+    struct TestTool {
+        name: &'static str,
+        result: ToolResult,
+        executions: Arc<AtomicUsize>,
+    }
+
+    impl Tool for TestTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn definition(&self) -> Value {
+            json!({"type":"function","function":{"name":self.name,"parameters":{"type":"object"}}})
+        }
+
+        fn execute<'a>(&'a self, _call: &'a ToolCall, _ctx: ToolContext<'a>) -> ToolFuture<'a> {
+            let executions = self.executions.clone();
+            let result = self.result.clone();
+            Box::pin(async move {
+                executions.fetch_add(1, Ordering::SeqCst);
+                result
+            })
+        }
+    }
+
+    struct RewriteBefore(&'static str);
+
+    impl ToolInterceptor for RewriteBefore {
+        fn before<'a>(&'a self, call: &'a mut ToolCall, _workdir: &'a Path) -> HookFuture<'a> {
+            let arguments = self.0.to_owned();
+            Box::pin(async move {
+                call.function.arguments = arguments;
+                Ok(())
+            })
+        }
+    }
+
+    struct RejectBefore;
+
+    impl ToolInterceptor for RejectBefore {
+        fn before<'a>(&'a self, _call: &'a mut ToolCall, _workdir: &'a Path) -> HookFuture<'a> {
+            Box::pin(async { Err(anyhow::anyhow!("rejected by test hook")) })
+        }
+    }
+
+    struct MutatingFailAfter {
+        runs: Arc<AtomicUsize>,
+    }
+
+    impl ToolInterceptor for MutatingFailAfter {
+        fn after<'a>(
+            &'a self,
+            _call: &'a ToolCall,
+            result: &'a mut ToolResult,
+            _workdir: &'a Path,
+        ) -> HookFuture<'a> {
+            let runs = self.runs.clone();
+            Box::pin(async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                result.content = "partial hook mutation".into();
+                result.is_error = !result.is_error;
+                result.executed_arguments = Some("poisoned".into());
+                Err(anyhow::anyhow!("hook exploded"))
+            })
+        }
+    }
+
+    struct CountingPatchAfter {
+        runs: Arc<AtomicUsize>,
+    }
+
+    impl ToolInterceptor for CountingPatchAfter {
+        fn after<'a>(
+            &'a self,
+            _call: &'a ToolCall,
+            result: &'a mut ToolResult,
+            _workdir: &'a Path,
+        ) -> HookFuture<'a> {
+            let runs = self.runs.clone();
+            Box::pin(async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                result.content = "late hook patch".into();
+                Ok(())
+            })
+        }
+    }
+
+    struct LegacyPatchAfter;
+
+    impl ToolInterceptor for LegacyPatchAfter {
+        fn after<'a>(
+            &'a self,
+            _call: &'a ToolCall,
+            result: &'a mut ToolResult,
+            _workdir: &'a Path,
+        ) -> HookFuture<'a> {
+            Box::pin(async move {
+                result.content.push_str("+legacy-after");
+                Ok(())
+            })
+        }
+    }
 
     struct EchoForHook;
     impl Tool for EchoForHook {
@@ -460,5 +676,162 @@ mod tests {
         assert!(result.is_error);
         assert_eq!(data["exit_code"], Value::Null);
         assert_eq!(data["signal"], 15);
+    }
+
+    #[tokio::test]
+    async fn after_hook_failure_keeps_real_success_and_runs_side_effect_once() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let hook_runs = Arc::new(AtomicUsize::new(0));
+        let later_runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TestTool {
+                name: "counted",
+                result: ToolResult::ok("real result"),
+                executions: executions.clone(),
+            }))
+            .unwrap();
+        registry.register_interceptor(Arc::new(RewriteBefore(r#"{"rewritten":true}"#)));
+        registry.register_interceptor(Arc::new(MutatingFailAfter {
+            runs: hook_runs.clone(),
+        }));
+        registry.register_interceptor(Arc::new(CountingPatchAfter {
+            runs: later_runs.clone(),
+        }));
+
+        let (result, warnings) = registry
+            .execute_with_warnings(&test_call("counted", "{}"), test_context())
+            .await;
+
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "side effect runs once"
+        );
+        assert_eq!(hook_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            later_runs.load(Ordering::SeqCst),
+            0,
+            "later after hooks do not run"
+        );
+        assert!(!result.is_error, "real success survives hook diagnostics");
+        assert_eq!(result.content, "real result");
+        assert_eq!(
+            result.executed_arguments.as_deref(),
+            Some(r#"{"rewritten":true}"#)
+        );
+        assert_eq!(
+            warnings,
+            vec!["after_tool_result failed: hook exploded".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn after_hook_failure_does_not_mask_an_original_tool_failure() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TestTool {
+                name: "failing",
+                result: ToolResult::error("real failure"),
+                executions: executions.clone(),
+            }))
+            .unwrap();
+        registry.register_interceptor(Arc::new(MutatingFailAfter {
+            runs: Arc::new(AtomicUsize::new(0)),
+        }));
+
+        let (result, warnings) = registry
+            .execute_with_warnings(&test_call("failing", "{}"), test_context())
+            .await;
+
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(result.is_error);
+        assert_eq!(result.content, "real failure");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_hook_patches_keep_legacy_and_effective_arguments() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoForHook)).unwrap();
+        registry.register_interceptor(Arc::new(LegacyHook));
+        registry.register_interceptor(Arc::new(LegacyPatchAfter));
+
+        let (result, warnings) = registry
+            .execute_with_warnings(&test_call("echo_hook", "{}"), test_context())
+            .await;
+
+        assert!(warnings.is_empty());
+        assert!(!result.is_error);
+        assert_eq!(result.content, r#"{"origin":"legacy"}+legacy-after"#);
+        assert_eq!(
+            result.executed_arguments.as_deref(),
+            Some(r#"{"origin":"legacy"}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn before_hook_failure_prevents_execution_without_a_warning() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TestTool {
+                name: "guarded",
+                result: ToolResult::ok("must not run"),
+                executions: executions.clone(),
+            }))
+            .unwrap();
+        registry.register_interceptor(Arc::new(RejectBefore));
+
+        let (result, warnings) = registry
+            .execute_with_warnings(&test_call("guarded", "{}"), test_context())
+            .await;
+
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            "before_tool_call failed: rejected by test hook"
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_hook_execution_returns_no_warnings() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TestTool {
+                name: "plain",
+                result: ToolResult::ok("plain result"),
+                executions: executions.clone(),
+            }))
+            .unwrap();
+
+        let (result, warnings) = registry
+            .execute_with_warnings(&test_call("plain", "{}"), test_context())
+            .await;
+
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(!result.is_error);
+        assert_eq!(result.content, "plain result");
+        assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn nonzero_shell_exit_is_a_failed_tool_result() {
+        let outcome = execute(
+            &test_call("shell", r#"{"command":"exit 7"}"#),
+            &std::env::temp_dir(),
+            Path::new("/tmp/kroma-exit-test.json"),
+        )
+        .await;
+
+        assert!(outcome.is_error);
+        let data: Value = serde_json::from_str(&outcome.content).unwrap();
+        assert_eq!(data["exit_code"], 7);
+        assert!(data.get("stdout_bytes").is_none());
+        assert!(data.get("stderr_bytes").is_none());
     }
 }

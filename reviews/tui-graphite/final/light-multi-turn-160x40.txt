@@ -1,6 +1,6 @@
                         ◆ Kroma / untitled session                                                                               project                        
                                                                                                                                                                 
-                         ▎  Review the change. 请 检 查 代 码 。                                                                                                      
+                            Review the change. 请 检 查 代 码 。                                                                                                      
                             Preserve Unicode and indentation.                                                                                                   
                                                                                                                                                                 
                          ◆  Updated the implementation.                                                                                                         
@@ -8,11 +8,11 @@
                             • Preserved input and links                                                                                                         
                             • Verified Unicode selection                                                                                                        
                                                                                                                                                                 
-                         ▎  Follow-up 1 · 保 留 上 下 文                                                                                                             
+                            Follow-up 1 · 保 留 上 下 文                                                                                                             
                                                                                                                                                                 
                          ◆  Response 1 with a focused explanation.                                                                                              
                                                                                                                                                                 
-                         ▎  Follow-up 2 · 保 留 上 下 文                                                                                                             
+                            Follow-up 2 · 保 留 上 下 文                                                                                                             
                                                                                                                                                                 
                          ◆  Response 2 with a focused explanation.                                                                                              
                                                                                                                                                                 

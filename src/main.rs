@@ -136,7 +136,6 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
             }
         }
         let mut agent = runtime.agent;
-        agent.set_background_compaction(false);
         let prompt = kroma::convenience::file_reference(&prompt, agent.workdir())?;
         if json_mode {
             let result = drive_task(&mut agent, &prompt, None, &mut |_| {}).await;
@@ -197,16 +196,10 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
     let line_output = kroma::output::CliOutput::new();
 
     if !options.prompt.is_empty() {
-        agent.set_background_compaction(false);
         if !run_task(&mut agent, &task, None, Some(&line_output)).await? {
             bail!("task cancelled");
         }
         return Ok(());
-    }
-    if !io::stdin().is_terminal() {
-        // A piped CLI session has no future interactive turn to collect a
-        // speculative background summary; hard-limit compaction still runs.
-        agent.set_background_compaction(false);
     }
 
     kroma::cli_println!(
@@ -525,18 +518,19 @@ fn handle_running_input(handle: &TaskInput, text: &str) {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(message) = extract_global_options(&mut args) {
-        eprintln!("Error: {message}");
-        return std::process::ExitCode::from(2);
-    }
-    let command = match kroma::cli::parse(&args) {
-        Ok(command) => command,
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (globals, command) = match kroma::cli::parse_with_globals(&args) {
+        Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("Error: {}", error.message);
             return std::process::ExitCode::from(error.code);
         }
     };
+    // Globals belong to every command, so their environment overrides are
+    // applied once here instead of inside `run`.
+    for (key, value) in globals.environment() {
+        env::set_var(key, value);
+    }
     match dispatch(command).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -564,6 +558,7 @@ async fn dispatch(command: kroma::cli::Command) -> Result<()> {
             }
             Ok(())
         }
+        Command::Update { check, channel } => kroma::update::run(check, &channel).await,
         Command::Setup => kroma::setup::run().await,
         Command::Config(args) => {
             if wants_help(&args) {
@@ -628,7 +623,6 @@ async fn dispatch(command: kroma::cli::Command) -> Result<()> {
             Ok(())
         }
         Command::Run(options) => {
-            apply_run_environment(&options)?;
             if let Err(error) = Config::from_env() {
                 let interactive = options.prompt.is_empty()
                     && !options.one_shot()
@@ -648,34 +642,6 @@ async fn dispatch(command: kroma::cli::Command) -> Result<()> {
 
 fn wants_help(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "-h" || arg == "--help")
-}
-
-fn apply_run_environment(options: &kroma::cli::RunOptions) -> Result<()> {
-    if let Some(cwd) = &options.cwd {
-        env::set_var("KROMA_WORKDIR", cwd);
-    }
-    if let Some(path) = &options.config_file {
-        env::set_var("KROMA_CONFIG_FILE", path);
-    }
-    if let Some(language) = &options.language {
-        env::set_var("KROMA_LANG", language);
-    }
-    if options.no_color {
-        env::set_var("NO_COLOR", "1");
-    }
-    if options.quiet {
-        env::set_var("KROMA_QUIET", "1");
-    }
-    if options.verbose {
-        env::set_var("KROMA_VERBOSE", "1");
-    }
-    if options.no_mcp {
-        env::set_var("KROMA_NO_MCP", "1");
-    }
-    if !options.mcp.is_empty() {
-        env::set_var("KROMA_MCP_SERVERS", options.mcp.join(","));
-    }
-    Ok(())
 }
 
 fn prepare_one_shot_session(options: &kroma::cli::RunOptions) -> Result<()> {
@@ -802,92 +768,7 @@ async fn test_profile(name: &str) -> Result<()> {
     );
     Ok(())
 }
-/// Global options may appear before a subcommand (for example
-/// `kroma --config-file work.json config show`). They become environment
-/// variables so every command and profile loader sees the same selection.
-fn extract_global_options(args: &mut Vec<String>) -> Result<(), String> {
-    let mut kept = Vec::with_capacity(args.len());
-    let mut index = 0;
-    let mut mcp_names = Vec::new();
-    let mut mcp_seen = false;
-    while index < args.len() {
-        let arg = args[index].as_str();
-        if arg == "--" {
-            kept.extend(args[index..].iter().cloned());
-            break;
-        }
-        let (name, inline) = arg
-            .split_once('=')
-            .map_or((arg, None), |(name, value)| (name, Some(value)));
-        let takes_value = matches!(name, "--cwd" | "--config-file" | "--language" | "--mcp");
-        if takes_value {
-            let value = inline.map(str::to_owned).or_else(|| {
-                index += 1;
-                args.get(index).cloned()
-            });
-            let Some(value) = value else {
-                return Err(format!("{name} needs a value"));
-            };
-            if value.starts_with('-') && value != "-" {
-                return Err(format!("{name} needs a value, got option '{value}'"));
-            }
-            match name {
-                "--cwd" => {
-                    if value.is_empty() {
-                        return Err("--cwd cannot be empty".into());
-                    }
-                    env::set_var("KROMA_WORKDIR", value);
-                }
-                "--config-file" => {
-                    if value.is_empty() {
-                        return Err("--config-file cannot be empty".into());
-                    }
-                    env::set_var("KROMA_CONFIG_FILE", value);
-                }
-                "--language" => {
-                    if !matches!(value.as_str(), "en" | "zh") {
-                        return Err("--language must be en or zh".into());
-                    }
-                    env::set_var("KROMA_LANG", value);
-                }
-                "--mcp" => {
-                    let names = value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty())
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
-                    if names.is_empty() {
-                        return Err("--mcp needs at least one server name".into());
-                    }
-                    mcp_names.extend(names);
-                    mcp_seen = true;
-                }
-                _ => unreachable!(),
-            }
-        } else if matches!(
-            name,
-            "--no-mcp" | "--quiet" | "-q" | "--verbose" | "-v" | "--no-color"
-        ) && inline.is_none()
-        {
-            match name {
-                "--no-mcp" => env::set_var("KROMA_NO_MCP", "1"),
-                "--quiet" | "-q" => env::set_var("KROMA_QUIET", "1"),
-                "--verbose" | "-v" => env::set_var("KROMA_VERBOSE", "1"),
-                "--no-color" => env::set_var("NO_COLOR", "1"),
-                _ => unreachable!(),
-            }
-        } else {
-            kept.push(args[index].clone());
-        }
-        index += 1;
-    }
-    if mcp_seen {
-        env::set_var("KROMA_MCP_SERVERS", mcp_names.join(","));
-    }
-    *args = kept;
-    Ok(())
-}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,33 +787,5 @@ mod tests {
         handle_running_input(&inbox, "/queue list");
         handle_running_input(&inbox, "/queue clear");
         assert!(inbox.queued().is_empty());
-    }
-}
-
-#[cfg(test)]
-mod global_option_tests {
-    use super::*;
-
-    #[test]
-    fn repeated_mcp_options_accumulate_and_flags_are_removed() {
-        let mut args = ["--mcp", "a,b", "--mcp", "c", "--quiet", "task"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        extract_global_options(&mut args).unwrap();
-        assert_eq!(args, ["task"]);
-        assert_eq!(env::var("KROMA_MCP_SERVERS").unwrap(), "a,b,c");
-        assert!(env::var_os("KROMA_QUIET").is_some());
-        env::remove_var("KROMA_MCP_SERVERS");
-        env::remove_var("KROMA_QUIET");
-    }
-
-    #[test]
-    fn a_global_option_cannot_swallow_another_option() {
-        let mut args = ["--cwd", "--print"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        assert!(extract_global_options(&mut args).is_err());
     }
 }

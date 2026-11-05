@@ -1,0 +1,42 @@
+   Compiling kroma-continuation-audit v0.0.0 (D:\Kroma\kroma-latest\reviews\deep-review\continuation-probe)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.98s
+     Running `target\debug\continuation-audit.exe`
+[compact] requesting one checkpoint for messages 1..17 (3798 source tokens, 224 output target)
+[compact] committed checkpoint through message 17 | before=5560 after=2281 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+SHORTENED_BRANCH_CONTROL rewound_succeeded=true checkpoint_calls=1
+[model] request attempt=1 started
+[model] request attempt=1 failed; usage unknown
+[model] transient request failure; retrying (1/3) after 250ms: model streaming connection failed: error decoding response body: error reading a body from connection: end of file before message length reached
+[model] request attempt=2 started
+[model] request attempt=2 failed; usage unknown
+[model] transient request failure; retrying (2/3) after 500ms: model streaming connection failed: error decoding response body: error reading a body from connection: end of file before message length reached
+[model] request attempt=3 started
+[model] request attempt=3 failed; usage unknown
+[model] transient request failure; retrying (3/3) after 750ms: model streaming connection failed: error decoding response body: error reading a body from connection: end of file before message length reached
+[model] request attempt=4 started
+[model] request attempt=4 failed; usage unknown
+EARLY_BODY_CLOSE heartbeat=false requests=4 error=model streaming connection failed: error decoding response body: error reading a body from connection: end of file before message length reached
+[model] request attempt=1 started
+[model] request attempt=1 failed; usage unknown
+[model] transient request failure; retrying (1/3) after 250ms: model streaming connection failed: error decoding response body: error reading a body from connection: end of file before message length reached
+[model] request attempt=2 started
+[model] request attempt=2 failed; usage unknown
+[model] transient request failure; retrying (2/3) after 500ms: model streaming connection failed: error decoding response body: error reading a body from connection: end of file before message length reached
+[model] request attempt=3 started
+[model] request attempt=3 failed; usage unknown
+[model] transient request failure; retrying (3/3) after 750ms: model streaming connection failed: error decoding response body: error reading a body from connection: end of file before message length reached
+[model] request attempt=4 started
+[model] request attempt=4 failed; usage unknown
+EARLY_BODY_CLOSE heartbeat=true requests=4 error=model streaming connection failed: error decoding response body: error reading a body from connection: end of file before message length reached
+[compact] checkpoint source does not fit the model window
+[compact] checkpoint was not possible; continuing with the full transcript
+SHORTENED_BRANCH consumed_until=3 checkpoint_calls=0 error=context near hard limit (6958 of 3584 estimated input tokens including prompt/tool additions, 512 reserved for output in a 4096 token model window), with no safe checkpoint; history preserved
+PROJECT_PYTHON_SAME_LENGTH_EDIT active_tool_count=0 warnings=[]
+PROJECT_CHANGED_MANIFEST summary_enabled=false actual_tool_count=0
+DESKTOP_QUEUE status_events=513
+DESKTOP_USAGE_AFTER_STORAGE_RECOVERY calls=1 input=123
+PROFILE_TWO_WRITERS retained_profiles=["a", "b"]
+MCP_LATE_RELATIVE_IMPORT changed_dependency_still_trusted=false
+[compact] summary truncated; retrying with a larger completion allowance (attempt 2/4)
+CHECKPOINT_FINAL_FAILURE earlier_reported_usage_preserved=true error=summary request failed after 1 measured attempt(s): text-generation model returned HTTP 401 Unauthorized: {"error":{"message":"audit rejected"}}
+FIXTURE_ROOT=C:\Users\24524\AppData\Local\Temp\kroma-continuation-audit-16988-1793768215795797600

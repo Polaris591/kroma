@@ -96,15 +96,15 @@ fn plain_keeps_code_and_overlays_neutral_except_semantic_diff_markers() {
             }
             let buffer = draw(&mut ui, 100, 35);
             for (index, cell) in buffer.content().iter().enumerate() {
+                let messages = ui.message_colors();
+                let role_rail = index % usize::from(buffer.area.width)
+                    == usize::from(ui.selection_area.x + 1)
+                    && cell.symbol() == " "
+                    && (cell.bg == messages.user_rail || cell.bg == messages.assistant_rail);
                 if !neutral(cell.fg) {
                     let palette = ui.semantic_colors();
-                    let messages = ui.message_colors();
                     let diff = (cell.symbol() == "+" && cell.fg == palette.add)
                         || (cell.symbol() == "-" && cell.fg == palette.remove);
-                    let role_rail = index % usize::from(buffer.area.width)
-                        == usize::from(ui.selection_area.x + 1)
-                        && ((cell.symbol() == "▎" && cell.fg == messages.user_rail)
-                            || (cell.symbol() == "▎" && cell.fg == messages.assistant_rail));
                     let role_label =
                         cell.fg == messages.user_rail || cell.fg == messages.assistant_rail;
                     assert!(
@@ -113,7 +113,11 @@ fn plain_keeps_code_and_overlays_neutral_except_semantic_diff_markers() {
                         cell.symbol()
                     );
                 }
-                assert!(neutral(cell.bg), "{preset} background {:?}", cell.bg);
+                assert!(
+                    neutral(cell.bg) || role_rail,
+                    "{preset} background {:?}",
+                    cell.bg
+                );
             }
         }
     }
@@ -587,7 +591,7 @@ fn export_plain_preview() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("reviews/tui-plain-runtime");
     std::fs::create_dir_all(&root).unwrap();
-    let mut html = String::from("<!doctype html><html lang=zh><meta charset=utf-8><title>Kroma A / Real renderer</title><style>body{background:#111;color:#ddd;font:14px system-ui;margin:30px}h1{font-weight:500}p,summary{color:#aaa}summary{cursor:pointer;padding:12px 0}.frame{overflow:auto}pre{font:13px/1.5 'Cascadia Mono',Consolas,'Microsoft YaHei',monospace;white-space:pre;margin:0;width:max-content}span{display:inline-block}.rail-user,.rail-assistant{position:relative;color:transparent!important}.rail-user::before,.rail-assistant::before{content:'';position:absolute;top:0;bottom:0;background:var(--rail)}.rail-user::before{left:0;width:25%}.rail-assistant::before{left:0;width:25%}details{margin:20px 0;border-top:1px solid #444}</style><h1>A · 留白 / 消息背景与角色竖线（S2）</h1><p>由真实 UiState + TestBackend 离线生成，不是网页重画布局。未调用模型。展开查看各状态；ANSI 文件可在对应尺寸的真彩终端重放。</p>");
+    let mut html = String::from("<!doctype html><html lang=zh><meta charset=utf-8><title>Kroma A / Real renderer</title><style>body{background:#111;color:#ddd;font:14px system-ui;margin:30px}h1{font-weight:500}p,summary{color:#aaa}summary{cursor:pointer;padding:12px 0}.frame{overflow:auto}pre{font:13px/1.5 'Cascadia Mono',Consolas,'Microsoft YaHei',monospace;white-space:pre;margin:0;width:max-content}span{display:inline-block}.rail-user,.rail-assistant{position:relative;color:transparent!important}.rail-user::before,.rail-assistant::before{content:'';position:absolute;top:0;bottom:0;background:var(--rail)}.rail-user::before{left:0;width:100%}.rail-assistant::before{left:0;width:100%}details{margin:20px 0;border-top:1px solid #444}</style><h1>A · 留白 / 消息背景与角色竖线（S2）</h1><p>由真实 UiState + TestBackend 离线生成，不是网页重画布局。未调用模型。展开查看各状态；ANSI 文件可在对应尺寸的真彩终端重放。</p>");
     for preset in ["dark", "light"] {
         for (width, height) in [(120, 36), (80, 24)] {
             for scene in [
@@ -631,19 +635,19 @@ fn export_plain_preview() {
                         let bold = cell.modifier.contains(Modifier::BOLD);
                         let messages = ui.message_colors();
                         let rail_class = if x == ui.selection_area.x + 1
-                            && cell.symbol() == "▎"
-                            && cell.fg == messages.user_rail
+                            && cell.symbol() == " "
+                            && cell.bg == messages.user_rail
                         {
                             "rail-user"
                         } else if x == ui.selection_area.x + 1
-                            && cell.symbol() == "▎"
-                            && cell.fg == messages.assistant_rail
+                            && cell.symbol() == " "
+                            && cell.bg == messages.assistant_rail
                         {
                             "rail-assistant"
                         } else {
                             ""
                         };
-                        write!(html,"<span class=\"{rail_class}\" style=\"width:{columns}ch;--rail:#{r:02x}{g:02x}{b:02x};color:#{r:02x}{g:02x}{b:02x};background:#{br:02x}{bg:02x}{bb:02x};font-weight:{}\">{}</span>",if bold {700}else{400},escape(cell.symbol())).unwrap();
+                        write!(html,"<span class=\"{rail_class}\" style=\"width:{columns}ch;--rail:#{br:02x}{bg:02x}{bb:02x};color:#{r:02x}{g:02x}{b:02x};background:#{br:02x}{bg:02x}{bb:02x};font-weight:{}\">{}</span>",if bold {700}else{400},escape(cell.symbol())).unwrap();
                         write!(
                             ansi,
                             "\x1b[{};{}H\x1b[0;38;2;{r};{g};{b};48;2;{br};{bg};{bb}{}m{}",

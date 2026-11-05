@@ -1,0 +1,26 @@
+[
+  {
+    "provider": "cohere",
+    "models": ["command-a-03-2025"],
+    "context": 256000,
+    "input": null,
+    "output": 8000,
+    "image": true,
+    "levels": null,
+    "source": "https://docs.cohere.com/docs/command-a",
+    "hosts": ["api.cohere.ai/compatibility/v1"],
+    "notes": "Official page (fetched 2026-11-04) states: 'Context Window: 256,000 tokens', 'Max Output Tokens: 8,000 tokens', model ID 'command-a-03-2025', endpoints Chat V2/Chat V1/Chat Completions. Capabilities list includes Reasoning and Image Inputs, so image=true is a documented model fact, not a live content-part validation. levels=null: the page advertises 'Reasoning' but publishes no OpenAI-style effort enumeration for this ID; the none/high mapping documented for the command-a-plus family in the Compatibility API is NOT verified for 03-2025 - confirm before exposing tiers. Host is the Compatibility API base from the existing catalog docs (docs.cohere.com/docs/compatibility-api), not re-fetched in this pass. Distinct from catalog row command-a-plus-05-2026 (no duplicate). Older Command R+/Command R are predecessors, not included."
+  },
+  {
+    "provider": "xiaomi",
+    "models": ["mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.6-pro-ultraspeed"],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://mimo.mi.com/docs/en-US/quick-start/first-api-call",
+    "hosts": ["api.xiaomimimo.com/v1", "api.xiaomimimo.com/anthropic"],
+    "notes": "Vendor + IDs + hosts verified from official mimo.mi.com pages: platform is 'compatible with OpenAI API and Anthropic API formats', OpenAI base https://api.xiaomimimo.com/v1 (auth via api-key header), Anthropic base https://api.xiaomimimo.com/anthropic; an official site notice states MiMo-V2.5 and MiMo-V2.5-Pro were retired 2026-10-21 and instructs migration to the V2.6 series, naming MiMo-V2.6-Pro, MiMo-V2.6-Flash and MiMo-V2.6-Pro-UltraSpeed. Numeric limits left null on purpose: the official model-list page is a JS app that could not be fetched (no readable content), and the only figures seen are third-party (models.dev: 1048576 context / 131072 output per ID). Those are unverified and 131072 may be a default rather than a hard cap, so they are not recorded. image=null and levels=null for the same reason (third-party rows claim 'all-modality' and reasoning, official confirmation missing). Also available via batch-api-cn.xiaomimimo.com and token-plan-cn.xiaomimimo.com (not listed: batch/subscription hosts, not general chat endpoints). Retired V2.5 IDs excluded."
+  }
+]

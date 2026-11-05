@@ -1,7 +1,7 @@
 //! Bounded delivery for synchronous runtime notifications. Accounting is
 //! aggregated separately; presentation overload pauses live transcript updates
 //! until the next turn. The host reloads the durable transcript at turn end.
-use super::view::UiEvent;
+use super::runtime_events::UiEvent;
 use crate::{model::Usage, usage::UsageMeter};
 use std::{
     collections::VecDeque,
@@ -352,7 +352,8 @@ fn title_event_limit() -> usize {
 fn event_bytes(event: &UiEvent) -> usize {
     size_of::<Stamped>()
         + match event {
-            UiEvent::Text(s)
+            UiEvent::Warning(s)
+            | UiEvent::Text(s)
             | UiEvent::ReasoningDelta(s)
             | UiEvent::ReasoningFinal(s)
             | UiEvent::SessionTitleUpdated(s) => s.capacity(),

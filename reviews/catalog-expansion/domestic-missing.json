@@ -1,0 +1,122 @@
+[
+  {
+    "provider": "stepfun",
+    "models": ["step-5-preview"],
+    "context": 1000000,
+    "input": 1000000,
+    "output": 65536,
+    "image": true,
+    "levels": ["low", "medium", "high"],
+    "source": "https://platform.stepfun.com/docs/zh/guides/models/step-5-preview.md",
+    "hosts": ["api.stepfun.com/v1"],
+    "notes": "Official model page (fetched 2026-11-04) spec table: 模型 ID step-5-preview; 上下文窗口 1M; 最大输入 1M; 最大输出 64k; 输入类型 文本/图片/视频, 输出类型 文本. 64k recorded as 65536 (K=1024, catalog convention). levels are the documented enumeration: 推理强度 supports low/medium/high via reasoning_effort (Chat Completions) or output_config.effort (Messages API). max_tokens defaults to INF (model-decided), so output is the documented ceiling, not a request default. Host verified in the same official docs set: quickstart/overview.md shows base_url https://api.stepfun.com/v1 and POST /v1/chat/completions. Caveat: 'Preview' ID, currently top listed flagship on the live 模型列表 page; deprecations.md not opened this pass, so no retirement check."
+  },
+  {
+    "provider": "stepfun",
+    "models": ["step-3.7-flash"],
+    "context": 262144,
+    "input": null,
+    "output": null,
+    "image": true,
+    "levels": ["low", "medium", "high"],
+    "source": "https://platform.stepfun.com/docs/zh/guides/models/list.md",
+    "hosts": ["api.stepfun.com/v1"],
+    "notes": "Current 多模态推理 flagship on the official 模型列表 page (fetched 2026-11-04): 最大上下文256K recorded as 262144; description states 原生多模态输入 with 图片 and 视频 understanding, hence image=true. Page states 支持三档推理强度 low/medium/high, so levels are documented for this ID. input/output null: list page publishes only the 256K window and step-3.7-flash.md was not fetched within the call budget. Host api.stepfun.com/v1 (platform base, verified in quickstart/overview.md)."
+  },
+  {
+    "provider": "stepfun",
+    "models": ["step-3.5-flash"],
+    "context": 262144,
+    "input": null,
+    "output": null,
+    "image": false,
+    "levels": null,
+    "source": "https://platform.stepfun.com/docs/zh/guides/models/list.md",
+    "hosts": ["api.stepfun.com/v1"],
+    "notes": "Listed on the live 模型列表 page (fetched 2026-11-04) as 推理 / 文本 with 最大上下文256K (262144) and tool calling; text-only interface, so image=false. levels=null: page calls it a reasoning model but publishes no effort enum for this ID (the three-tier wording is attached to step-3.7-flash and step-5-preview only). input/output null: no max-input/max-output on the list page and step-3.5-flash.md was not fetched. Omitted rather than guessed on the same page: a 'Step 3.5 Flash 2603' Agent-optimised variant (低推理模式) and 'Step-1o Turbo Vision' (32K, image+video) - neither publishes an explicit API model ID there."
+  },
+  {
+    "provider": "xiaomi",
+    "models": ["mimo-v2.6-pro", "mimo-v2.6-flash"],
+    "context": 1048576,
+    "input": null,
+    "output": 131072,
+    "image": true,
+    "levels": null,
+    "source": "https://mimo.mi.com/static/docs/quick-start/summary/model.md",
+    "hosts": ["api.xiaomimimo.com/v1", "api.xiaomimimo.com/anthropic"],
+    "notes": "Fills the nulls in the existing other-vendors.json xiaomi row (parent can dedupe). The served .md model table (fetched 2026-11-04) lists both IDs with 'Context Window: 1M' and 'Maximum Output: 128K', recorded as 1048576 / 131072. Capability cell for these IDs: Full-modal Understanding, Text Generation, Deep Thinking, Streaming Output, Function Call, Structured Output, Web Search; Full-modal Understanding is the documented basis for image=true (no per-part validation). levels=null: Deep Thinking advertised but no effort tiers enumerated. Same page states mimo-v2.5-pro and mimo-v2.5 were officially deprecated 2026-10-21 10:00 Beijing time, so V2.5 IDs are excluded. Hosts are the two compatibility bases already recorded from the vendor's official first-call doc (OpenAI /v1 with api-key auth, Anthropic /anthropic); not re-fetched this pass."
+  },
+  {
+    "provider": "xiaomi",
+    "models": ["mimo-v2.6-pro-ultraspeed"],
+    "context": 1048576,
+    "input": null,
+    "output": 131072,
+    "image": true,
+    "levels": null,
+    "source": "https://mimo.mi.com/static/docs/quick-start/summary/model.md",
+    "hosts": ["api.xiaomimimo.com/v1", "api.xiaomimimo.com/anthropic"],
+    "notes": "Same served model table (fetched 2026-11-04): 1M context / 128K max output (1048576 / 131072); capability row shared with the other two V2.6 IDs (Full-modal Understanding / Deep Thinking / streaming / function call / structured output), so image=true on the same documented basis. Rate-limit column for this ID reads 'Customized services available, please contact us' (no RPM/TPM), which does not change the caps. levels=null. Hosts as above."
+  },
+  {
+    "provider": "tencent",
+    "models": ["hy3", "hy4-preview"],
+    "context": null,
+    "input": null,
+    "output": null,
+    "image": null,
+    "levels": null,
+    "source": "https://cloud.tencent.com/document/product/1823/130078",
+    "hosts": ["tokenhub.tencentmaas.com", "tokenhub-intl.tencentmaas.com"],
+    "notes": "Current Tencent serving path. The 混元 legacy pages (product/1729) carry a standing notice that 混元 features are migrating to TokenHub and that the old platform will add no new model capability, so current flagship IDs come from the TokenHub API doc (dated 2026-10-26, official rendered text read in this pass): GET /v1/models returns IDs, and the model table lists 'Hy4 preview | hy4-preview' and 'Hy3 | hy3' alongside hy-mt2-*, hunyuan-role-latest, hy-role. Hosts verified there: 广州 https://tokenhub.tencentmaas.com (中国大陆), 新加坡 https://tokenhub-intl.tencentmaas.com (全球); OpenAI + Anthropic protocol compatible, Bearer auth, no cross-region calls. All caps, image and levels null: that table lists IDs only and defers specs to 1823/130079, not fetched within the 12-call budget. Do not infer caps for these IDs from the legacy hunyuan rows."
+  },
+  {
+    "provider": "tencent",
+    "models": ["hunyuan-a13b"],
+    "context": null,
+    "input": 229376,
+    "output": 32768,
+    "image": false,
+    "levels": null,
+    "source": "https://cloud.tencent.com/document/product/1729/104753",
+    "hosts": ["api.hunyuan.cloud.tencent.com/v1"],
+    "notes": "Legacy-but-still-live 混元生文 row, from the official 产品概述 page (updated 2026-06-22) rendered text: hunyuan-a13b (2025-06-25), 混元第一个混合推理模型, hunyuan-standard-256K successor, MoE 总参数80B/激活13B, '最大输入224k 最大输出32k' recorded as 229376 / 32768. context null because the page states input and output ceilings separately, never a combined window; input is the documented max-input field. image=false: row sits in the 通用文生文 table (text in/out). levels=null: fast/slow thinking is a mode switch (default slow thinking; /no_think prefix or a parameter) with no effort tiers. Host api.hunyuan.cloud.tencent.com/v1 verified on product/1729/111007 (OpenAI-compatible, POST /v1/chat/completions; model values point back to this overview's 模型列表). Caveat: platform is migrating to TokenHub with no new capability; the ID is still served for existing subscriptions, so current-callable but not a good default. Other rows on the page (hunyuan-translation 4k/4k, hunyuan-translation-lite 28k/4k) not recorded: narrow translation endpoints, and the table was truncated mid-page this pass."
+  },
+  {
+    "provider": "baidu",
+    "models": ["ernie-5.1"],
+    "context": 131072,
+    "input": 121856,
+    "output": 65536,
+    "image": null,
+    "levels": null,
+    "source": "https://cloud.baidu.com/doc/qianfan/s/rmh4stp0j",
+    "hosts": ["qianfan.baidubce.com/v2"],
+    "notes": "Current flagship on the official 千帆 模型列表 for 文本生成 (updated 2026-10-18, official rendered text read in this pass): 'ERNIE 5.1 | ernie-5.1 | 128k | 119k | [1, 65536] | RPM = 60 TPM = 150000'. 128k / 119k / 65536 recorded as 131072 / 121856 / 65536 (K=1024); input is the documented 最大输入 column, which Baidu enforces per request. Same numbers appear on the international mirror (intl.cloud.baidu.com/en/doc/qianfan/s/7m95lyy43-intl-en) and AI Studio's 大模型API page. image=null: the 视觉理解 table in these extracts lists ernie-5.0, not 5.1, and the flagship summary calls 5.0 the 原生全模态 model - nothing claimed for 5.1. levels=null: no OpenAI-style effort enum; Deep Thinking docs state ERNIE thinking models do NOT support thinking_budget and that max_tokens bounds reasoning_content + content together. Host verified on the text-generation API reference (qianfan-api/s/3m7of64lb): POST https://qianfan.baidubce.com/v2/chat/completions, API-Key auth."
+  },
+  {
+    "provider": "baidu",
+    "models": ["ernie-5.0"],
+    "context": 131072,
+    "input": 121856,
+    "output": 65536,
+    "image": true,
+    "levels": null,
+    "source": "https://cloud.baidu.com/doc/qianfan/s/rmh4stp0j",
+    "hosts": ["qianfan.baidubce.com/v2"],
+    "notes": "Same official 模型列表 page (updated 2026-10-18): the flagship summary calls 文心5.0 the 原生全模态 model (text/image/audio/video jointly modelled) and the 文本生成 table gives ernie-5.0 = 128k / 119k / [1, 65536]. image=true is grounded in the page's own 视觉理解 table, which lists 'ERNIE 5.0 | ernie-5.0 | 128k | 119k | [1, 65536]' - the same ID documented as accepting image input - while output stays text through the documented endpoint. Caps 131072 / 121856 / 65536. levels=null: no effort enum and thinking_budget unsupported; ernie-5.0 also appears in the Deep Thinking table with a 60k CoT allowance. Host qianfan.baidubce.com/v2 from the API reference page. Not retired: still listed as a 推荐模型 next to 5.1."
+  },
+  {
+    "provider": "baidu",
+    "models": ["ernie-5.0-thinking-preview", "ernie-5.0-thinking-latest"],
+    "context": 131072,
+    "input": 121856,
+    "output": 65536,
+    "image": null,
+    "levels": null,
+    "source": "https://cloud.baidu.com/doc/qianfan/s/rmh4stp0j",
+    "hosts": ["qianfan.baidubce.com/v2"],
+    "notes": "Explicit thinking-mode endpoint IDs on the same official 模型列表 page (updated 2026-10-18), both listed with 128k / 119k / [1, 65536]: 'ernie-5.0-thinking-preview' and 'ernie-5.0-thinking-latest'. AI Studio's 大模型API page corroborates ernie-5.0-thinking-preview with the same numbers plus a 60k 思维链 length. levels=null: no effort tiers, thinking_budget unsupported, max_tokens caps reasoning + answer together. image=null: no visual-understanding entry read for these two IDs (only plain ernie-5.0 appears there). Host qianfan.baidubce.com/v2. The '-preview' ID is included because Baidu still lists it as callable; flag for parent review if catalog policy excludes preview IDs."
+  }
+]

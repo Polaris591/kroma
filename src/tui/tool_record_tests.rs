@@ -566,6 +566,9 @@ fn subagent_live_and_completed_records_render_clean_dashboard_not_raw_json() {
                 "index": 1,
                 "status": "failed",
                 "exit_code": null,
+                "output": "已保留的片段",
+                "output_truncated": false,
+                "partial": true,
                 "error": {"code": "CHILD_TIMEOUT", "message": "child timed out after 300s"},
                 "duration_ms": 300000,
                 "usage": {"requests": 1, "input": 1200, "output": 20, "cached": 0, "reasoning": 0},
@@ -591,5 +594,7 @@ fn subagent_live_and_completed_records_render_clean_dashboard_not_raw_json() {
     assert!(expanded.contains("── [1/2] ✓ completed · 8.2s"));
     assert!(expanded.contains("WAL 顺序已验证"));
     assert!(expanded.contains("── [2/2] ✗ failed (CHILD_TIMEOUT) · 300.0s"));
+    assert!(expanded.contains("partial answer:"));
+    assert!(expanded.contains("已保留的片段"));
     assert!(expanded.contains("artifacts: /tmp/runs/1"));
 }

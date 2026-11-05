@@ -1,0 +1,15 @@
+[package]
+name = "kroma-continuation-audit"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "continuation-audit"
+path = "../continuation_probe.rs"
+
+[dependencies]
+kroma = { path = "../../.." }
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

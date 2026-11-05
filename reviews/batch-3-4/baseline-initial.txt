@@ -1,0 +1,74 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+    Finished `release` profile [optimized] target(s) in 46.03s
+     Running unittests src\lib.rs (target\release\deps\kroma-e42228b31dbdc43b.exe)
+
+running 5 tests
+test checkpoints::tests::perf_file_checkpoint_first_unchanged_and_delta ... 
+thread 'checkpoints::tests::perf_file_checkpoint_first_unchanged_and_delta' (14776) panicked at src\checkpoints.rs:861:13:
+assertion `left == right` failed
+  left: Some("\\\\?\\C:\\Users\\24524\\AppData\\Local\\Temp\\kroma-checkpoint-perf-3320-1793868003510064800")
+ right: Some("C:\\Users\\24524\\AppData\\Local\\Temp\\kroma-checkpoint-perf-3320-1793868003510064800")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test context::tests::perf_context_prepare_and_mock_checkpoint_wait ... [compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+PERF {"fixture":{"billable_usage":null,"mock_delay_ms":0,"requests_per_prepare":1},"max_ns":850800,"min_ns":370500,"name":"context.prepare.checkpoint","p50_ns":446700,"p95_ns":850800,"samples":7}
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+[compact] requesting one checkpoint for messages 1..27 (7937 source tokens, 896 output target)
+[compact] committed checkpoint through message 27 | before=13042 after=5697 estimated tokens | 1 request(s), 0.00s | input=n/a output=n/a cached=n/a
+PERF {"fixture":{"billable_usage":null,"mock_delay_ms":30,"requests_per_prepare":1},"max_ns":47450400,"min_ns":31730400,"name":"context.prepare.checkpoint","p50_ns":46352900,"p95_ns":47450400,"samples":7}
+ok
+test context::tests::perf_summary_source_shrinking_prefix ... PERF {"fixture":{"alternating_order":true,"input_cap":1800,"messages":201,"raw_json_bytes":132534},"max_ns":24071000,"min_ns":10649400,"name":"context.summary_source.reference","p50_ns":13199800,"p95_ns":18586500,"samples":21}
+PERF {"fixture":{"alternating_order":true,"input_cap":1800,"messages":201,"raw_json_bytes":132534},"max_ns":24434900,"min_ns":10638200,"name":"context.summary_source.current","p50_ns":13204600,"p95_ns":19683000,"samples":21}
+ok
+test tools::tests::perf_tool_dispatch_and_shell_process ... PERF {"fixture":{"alternating_order":true,"in_process":true,"iterations_per_sample":1000},"max_ns":471,"min_ns":49,"name":"tool.direct","p50_ns":69,"p95_ns":168,"samples":31}
+PERF {"fixture":{"alternating_order":true,"in_process":true,"iterations_per_sample":1000},"max_ns":211,"min_ns":85,"name":"tool.registry","p50_ns":109,"p95_ns":182,"samples":31}
+PERF {"fixture":{"alternating_order":true,"in_process":true,"iterations_per_sample":1000},"max_ns":771,"min_ns":264,"name":"tool.noop_hook","p50_ns":381,"p95_ns":667,"samples":31}
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+[shell] echo perf
+PERF {"fixture":{"command":"echo perf","includes_process_start":true},"max_ns":83677700,"min_ns":68523700,"name":"tool.shell_echo","p50_ns":71319900,"p95_ns":83677700,"samples":11}
+ok
+test tui::title::tests::perf_title_schedule_and_completion ... PERF {"fixture":{"billable_usage":null,"mock_delay_ms":30,"output_budget":128,"title_requests":11},"max_ns":34200,"min_ns":5800,"name":"title.schedule","p50_ns":7300,"p95_ns":34200,"samples":11}
+PERF {"fixture":{"billable_usage":null,"mock_delay_ms":30,"output_budget":128,"title_requests":11},"max_ns":47326600,"min_ns":39233200,"name":"title.completion","p50_ns":46101400,"p95_ns":47326600,"samples":11}
+ok
+
+failures:
+
+failures:
+    checkpoints::tests::perf_file_checkpoint_first_unchanged_and_delta
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 616 filtered out; finished in 2.89s
+
+error: test failed, to rerun pass `--lib`

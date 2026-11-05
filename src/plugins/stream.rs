@@ -161,6 +161,7 @@ impl PluginWorker {
             cancelled: cancelled.clone(),
             armed: true,
         };
+        let protocol_version = self.protocol_version();
         let worker = self.clone();
         let result = tokio::task::spawn_blocking(move || {
             worker.invoke_with(message, Some((id, &cancelled)), |process, request| {
@@ -168,7 +169,7 @@ impl PluginWorker {
                 let request_id = request.get("request_id");
                 loop {
                     let frame = process.read_frame()?;
-                    PluginProcess::validate_frame(&frame, request_id, true)?;
+                    PluginProcess::validate_frame(&frame, request_id, true, protocol_version)?;
                     let event = frame
                         .get("event")
                         .and_then(Value::as_str)

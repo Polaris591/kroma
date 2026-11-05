@@ -22,6 +22,12 @@ on:
       - 'npm/**'
       - '.github/workflows/npm.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+
 
 permissions:
   contents: read
@@ -66,10 +72,21 @@ jobs:
             binary: target/release/kroma
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Tagged release regressions
+        if: inputs.ref != ''
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked --tests
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Verify native runner and Rust host
         shell: bash
         run: |

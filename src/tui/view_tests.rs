@@ -1,4 +1,5 @@
 use super::*;
+use crate::{events::RuntimeEvent, tui::runtime_events::UiSink};
 use ratatui::{backend::TestBackend, Terminal};
 
 #[test]
@@ -289,8 +290,8 @@ fn header_separation_and_role_body_columns_are_consistent() {
     );
     assert_eq!(ui.selection_area.y, 2);
     for (needle, mark) in [
-        ("example user line", "▎"),
-        ("Example assistant response", "◆"),
+        ("example user line", None),
+        ("Example assistant response", Some("◆")),
     ] {
         let row = rows
             .iter()
@@ -300,10 +301,12 @@ fn header_separation_and_role_body_columns_are_consistent() {
             UnicodeWidthStr::width(&row[..row.find(needle).unwrap()]),
             usize::from(ui.selection_area.x) + 4
         );
-        assert_eq!(
-            UnicodeWidthStr::width(&row[..row.find(mark).unwrap()]),
-            usize::from(ui.selection_area.x) + 1
-        );
+        if let Some(mark) = mark {
+            assert_eq!(
+                UnicodeWidthStr::width(&row[..row.find(mark).unwrap()]),
+                usize::from(ui.selection_area.x) + 1
+            );
+        }
     }
     assert!(!ui
         .selection_rows
@@ -2188,6 +2191,9 @@ fn borrowed_viewport_renders_the_same_cells_as_original_paragraph() {
                         Decor::Surface(_) => {
                             cell.set_bg(theme.surface);
                         }
+                        Decor::Rail { column, color, .. } if x == area.x + column => {
+                            cell.set_symbol(" ").set_bg(*color);
+                        }
                         Decor::Gutter {
                             column,
                             glyph,
@@ -2991,6 +2997,7 @@ fn screenshot_regressions_compact_tools_localized_labels_and_single_history_hint
     ui.editor.insert_attachment(
         char::from_u32(super::super::editor::ATTACHMENT_START).unwrap(),
         "Clipboard image".into(),
+        None,
     );
     ui.note("已添加 【Clipboard image】");
     let output = rendered_rows(&mut ui, 100, 26).join("\n");

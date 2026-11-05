@@ -22,9 +22,17 @@ fn rails(ui: &UiState, role: MessageRole) -> Vec<usize> {
         MessageRole::User => p.user_rail,
         MessageRole::Assistant => p.assistant_rail,
     };
-    let mut rows=ui.history_cache.as_ref().unwrap().decor.iter().filter_map(|(row,item)| {
-        matches!(item,Decor::Gutter {column:1,glyph:"▎",color,first_only:false} if *color==expected).then_some(*row)
-    }).collect::<Vec<_>>();
+    let mut rows = ui
+        .history_cache
+        .as_ref()
+        .unwrap()
+        .decor
+        .iter()
+        .filter_map(|(row, item)| {
+            matches!(item,Decor::Rail {column:1,color,first_only:false} if *color==expected)
+                .then_some(*row)
+        })
+        .collect::<Vec<_>>();
     rows.sort_unstable();
     rows.dedup();
     rows
@@ -53,7 +61,7 @@ fn contrast(a: Color, b: Color) -> f64 {
 }
 
 #[test]
-fn both_speakers_use_the_same_rail_glyph_and_text_column() {
+fn both_speakers_use_blank_background_rails_and_the_same_text_column() {
     let mut ui = ui();
     ui.add_user("user aligned");
     ui.event(UiEvent::Text("assistant aligned".into()));
@@ -64,7 +72,7 @@ fn both_speakers_use_the_same_rail_glyph_and_text_column() {
             let y = visible_y(&ui, row).unwrap();
             assert_eq!(
                 buffer.cell((ui.selection_area.x + 1, y)).unwrap().symbol(),
-                "▎"
+                " "
             );
         }
     }
@@ -102,11 +110,11 @@ fn surface_has_one_padding_row_each_side_and_a_continuous_rail() {
     for &row in &rows {
         let y = visible_y(&ui, row).unwrap();
         let area = ui.message_surface_area(ui.selection_area, y);
-        for x in area.x..area.right() {
+        for x in area.x + 1..area.right() {
             assert_eq!(buffer.cell((x, y)).unwrap().bg, ui.message_colors().surface);
         }
         assert_eq!(
-            buffer.cell((area.x, y)).unwrap().fg,
+            buffer.cell((area.x, y)).unwrap().bg,
             ui.message_colors().user_rail
         );
     }
@@ -135,9 +143,8 @@ fn assistant_rail_covers_paragraphs_code_and_all_soft_wraps() {
     for row in rows {
         if let Some(y) = visible_y(&ui, row) {
             let cell = buffer.cell((ui.selection_area.x + 1, y)).unwrap();
-            assert_eq!(cell.symbol(), "▎");
-            assert_eq!(cell.fg, ui.message_colors().assistant_rail);
-            assert_eq!(cell.bg, ui.message_colors().surface);
+            assert_eq!(cell.symbol(), " ");
+            assert_eq!(cell.bg, ui.message_colors().assistant_rail);
         }
     }
     assert_ne!(
@@ -166,7 +173,7 @@ fn user_background_and_rails_follow_unicode_wraps_after_resize() {
         let y = visible_y(&ui, row).unwrap();
         let area = ui.message_surface_area(ui.selection_area, y);
         assert_eq!(
-            buffer.cell((area.x, y)).unwrap().bg,
+            buffer.cell((area.x + 1, y)).unwrap().bg,
             ui.message_colors().surface
         );
         assert_eq!(
@@ -208,6 +215,75 @@ fn role_decoration_does_not_pollute_copy_links_or_code_source() {
     );
 }
 
+// Skip the continuation cells of wide graphemes, as a terminal copy does.
+fn native_row(buffer: &Buffer, area: Rect, y: u16) -> String {
+    let mut text = String::new();
+    let mut x = area.x;
+    while x < area.right() {
+        let symbol = buffer.cell((x, y)).unwrap().symbol();
+        text.push_str(symbol);
+        x += UnicodeWidthStr::width(symbol).max(1) as u16;
+    }
+    text
+}
+
+#[test]
+fn native_terminal_copy_sees_spaces_instead_of_message_rails() {
+    for preset in ["dark", "light", "mono"] {
+        for plain in [false, true] {
+            let mut ui = ui();
+            ui.plain_style = plain;
+            ui.themes.select(preset).unwrap();
+            ui.add_user("user 中文🙂\nsecond user line");
+            ui.event(UiEvent::Text("assistant 中文🙂\n\nsecond paragraph".into()));
+            ui.finish_task();
+            let buffer = draw(&mut ui, 60, 40);
+            // Native terminal selection reads displayed cells, not selected_text().
+            let native = (ui.selection_area.y..ui.selection_area.bottom())
+                .map(|y| native_row(&buffer, ui.selection_area, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(native.contains("user 中文🙂"));
+            assert!(native.contains("assistant 中文🙂"));
+            assert!(!native.contains('▎'), "{preset}, plain={plain}: {native}");
+            let mut count = 0;
+            for (row, item) in &ui.history_cache.as_ref().unwrap().decor {
+                if let Decor::Rail { column, color, .. } = item {
+                    let y = visible_y(&ui, *row).unwrap();
+                    let cell = buffer.cell((ui.selection_area.x + column, y)).unwrap();
+                    assert_eq!(cell.symbol(), " ");
+                    assert_eq!(cell.bg, *color);
+                    count += 1;
+                }
+            }
+            assert!(count > 0);
+        }
+    }
+}
+
+#[test]
+fn copy_preserves_rail_characters_that_belong_to_the_message() {
+    let mut ui = ui();
+    let original = "literal ▎ in source 中文🙂";
+    ui.add_user(original);
+    ui.finish_task();
+    let buffer = draw(&mut ui, 80, 30);
+    let cache = ui.history_cache.as_ref().unwrap();
+    let row = cache
+        .text
+        .lines
+        .iter()
+        .position(|line| line.to_string().contains(original))
+        .unwrap();
+    ui.selection_start = Some((row, 4));
+    ui.selection_end = Some((row, 79));
+    assert_eq!(ui.selected_text().unwrap(), original);
+    let y = visible_y(&ui, row).unwrap();
+    let native = native_row(&buffer, ui.selection_area, y);
+    assert!(native.contains(original));
+    assert_eq!(native.matches('▎').count(), 1);
+}
+
 #[test]
 fn streaming_extends_rails_without_moving_pinned_history() {
     let mut ui = ui();
@@ -234,7 +310,7 @@ fn streaming_extends_rails_without_moving_pinned_history() {
         if let Some(y) = visible_y(&ui, row) {
             assert_eq!(
                 buffer.cell((ui.selection_area.x + 1, y)).unwrap().symbol(),
-                "▎"
+                " "
             );
         }
     }
@@ -254,7 +330,7 @@ fn message_surfaces_leave_a_visible_terminal_right_gutter() {
                 let area = ui.message_surface_area(ui.selection_area, y);
                 assert_eq!(area.width, ui.selection_area.width - 1 - PLAIN_RIGHT_GUTTER);
                 assert_eq!(area.right(), ui.selection_area.right() - PLAIN_RIGHT_GUTTER);
-                for x in area.x..area.right() {
+                for x in area.x + 1..area.right() {
                     assert_eq!(buffer.cell((x, y)).unwrap().bg, ui.message_colors().surface);
                 }
                 for x in area.right()..ui.selection_area.right() {
@@ -383,10 +459,10 @@ fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
             .cell((ui.selection_area.x + 1, tool_row))
             .unwrap()
             .symbol(),
-        "▎"
+        " "
     );
     assert_eq!(
-        buffer.cell((ui.selection_area.x + 1, tool_row)).unwrap().fg,
+        buffer.cell((ui.selection_area.x + 1, tool_row)).unwrap().bg,
         ui.message_colors().assistant_rail
     );
     // Message prose and the tool state marker share the body indent.
@@ -497,7 +573,7 @@ fn consecutive_turns_are_separated_by_a_terminal_background_row() {
     assert!(!cache.decor.iter().any(|(row, item)| *row == boundary
         && matches!(
             item,
-            Decor::Surface(Surface::Message) | Decor::Gutter { column: 1, .. }
+            Decor::Surface(Surface::Message) | Decor::Rail { column: 1, .. }
         )));
 }
 
@@ -607,7 +683,7 @@ fn connecting_after_a_user_turn_starts_its_own_assistant_block() {
     let last_user_y = history.y + (last_user - ui.history_top_row) as u16;
     assert!(last_user_y + 1 < status_y);
     assert_eq!(
-        buffer.cell((history.x + 1, last_user_y)).unwrap().fg,
+        buffer.cell((history.x + 1, last_user_y)).unwrap().bg,
         ui.message_colors().user_rail
     );
 }

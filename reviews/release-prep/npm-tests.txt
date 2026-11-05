@@ -1,0 +1,164 @@
+
+> test
+> node --test test/*.test.cjs
+
+TAP version 13
+# Subtest: launcher preserves literal arguments, cwd, environment, all stdio and exit code
+ok 1 - launcher preserves literal arguments, cwd, environment, all stdio and exit code
+  ---
+  duration_ms: 858.1554
+  type: 'test'
+  ...
+# Subtest: launcher reports an omitted optional package without downloading anything
+ok 2 - launcher reports an omitted optional package without downloading anything
+  ---
+  duration_ms: 95.6086
+  type: 'test'
+  ...
+# Subtest: launcher rejects mismatched platform package versions
+ok 3 - launcher rejects mismatched platform package versions
+  ---
+  duration_ms: 86.7435
+  type: 'test'
+  ...
+# Subtest: launcher reports a missing native executable
+ok 4 - launcher reports a missing native executable
+  ---
+  duration_ms: 102.4553
+  type: 'test'
+  ...
+# Subtest: launcher reports a native spawn failure without an unhandled exception
+ok 5 - launcher reports a native spawn failure without an unhandled exception
+  ---
+  duration_ms: 270.6835
+  type: 'test'
+  ...
+# Subtest: POSIX launcher forwards interruption and preserves signal termination
+ok 6 - POSIX launcher forwards interruption and preserves signal termination # SKIP
+  ---
+  duration_ms: 0.5462
+  type: 'test'
+  ...
+# Subtest: launcher refuses unsupported architectures and musl before resolving packages
+ok 7 - launcher refuses unsupported architectures and musl before resolving packages
+  ---
+  duration_ms: 169.5524
+  type: 'test'
+  ...
+# Subtest: update help works before native resolution and invalid update arguments are usage errors
+ok 8 - update help works before native resolution and invalid update arguments are usage errors
+  ---
+  duration_ms: 150.4115
+  type: 'test'
+  ...
+# Subtest: every declared target has a unique platform package and executable
+ok 9 - every declared target has a unique platform package and executable
+  ---
+  duration_ms: 5.4873
+  type: 'test'
+  ...
+# Subtest: unsupported hosts fail rather than selecting a wrong binary
+ok 10 - unsupported hosts fail rather than selecting a wrong binary
+  ---
+  duration_ms: 0.6242
+  type: 'test'
+  ...
+# Subtest: staging takes its version from Cargo and strictly parses arguments
+ok 11 - staging takes its version from Cargo and strictly parses arguments
+  ---
+  duration_ms: 5.8033
+  type: 'test'
+  ...
+# Subtest: staging rejects unsupported targets, cross-host binaries and version mismatches
+ok 12 - staging rejects unsupported targets, cross-host binaries and version mismatches
+  ---
+  duration_ms: 61.4182
+  type: 'test'
+  ...
+# Subtest: collector requires all platforms, exact version and fresh output
+ok 13 - collector requires all platforms, exact version and fresh output
+  ---
+  duration_ms: 3334.4624
+  type: 'test'
+  ...
+# Subtest: identical duplicate main tarballs are deduplicated, native duplicates rejected
+ok 14 - identical duplicate main tarballs are deduplicated, native duplicates rejected
+  ---
+  duration_ms: 3438.6401
+  type: 'test'
+  ...
+# Subtest: publishing requires confirmation, publishes main last and stops on failure
+ok 15 - publishing requires confirmation, publishes main last and stops on failure
+  ---
+  duration_ms: 5605.9205
+  type: 'test'
+  ...
+# Subtest: semantic ordering handles prereleases, numbers and ignores build metadata
+ok 16 - semantic ordering handles prereleases, numbers and ignores build metadata
+  ---
+  duration_ms: 5.7975
+  type: 'test'
+  ...
+# Subtest: update parsing is strict and does not hijack task text
+ok 17 - update parsing is strict and does not hijack task text
+  ---
+  duration_ms: 4.8649
+  type: 'test'
+  ...
+# Subtest: unpublished, malformed, wrong-package, oversized and prerelease-latest fail closed
+ok 18 - unpublished, malformed, wrong-package, oversized and prerelease-latest fail closed
+  ---
+  duration_ms: 52.3151
+  type: 'test'
+  ...
+# Subtest: check and help never execute npm or modify installation
+ok 19 - check and help never execute npm or modify installation
+  ---
+  duration_ms: 15.0246
+  type: 'test'
+  ...
+# Subtest: same/newer installed versions do not downgrade or invoke npm
+ok 20 - same/newer installed versions do not downgrade or invoke npm
+  ---
+  duration_ms: 11.8013
+  type: 'test'
+  ...
+# Subtest: global update is pinned, shell-free, script-free and explicitly scoped
+ok 21 - global update is pinned, shell-free, script-free and explicitly scoped
+  ---
+  duration_ms: 14.6007
+  type: 'test'
+  ...
+# Subtest: local update uses owning project, never current cwd or global scope
+ok 22 - local update uses owning project, never current cwd or global scope
+  ---
+  duration_ms: 29.8622
+  type: 'test'
+  ...
+# Subtest: ambiguous and other-package-manager installations never invoke install
+ok 23 - ambiguous and other-package-manager installations never invoke install
+  ---
+  duration_ms: 13.3035
+  type: 'test'
+  ...
+# Subtest: registry and npm failures surface without claiming an upgrade
+ok 24 - registry and npm failures surface without claiming an upgrade
+  ---
+  duration_ms: 10.88
+  type: 'test'
+  ...
+# Subtest: npm exit zero is not reported as success without verified installed versions
+ok 25 - npm exit zero is not reported as success without verified installed versions
+  ---
+  duration_ms: 12.8662
+  type: 'test'
+  ...
+1..25
+# tests 25
+# suites 0
+# pass 24
+# fail 0
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 12580.5576

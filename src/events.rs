@@ -88,6 +88,12 @@ pub enum RuntimeEvent<'a> {
         saved_future: &'a str,
         checkpoint: usize,
     },
+    /// A non-fatal runtime problem that the host should surface, for example
+    /// a skipped file snapshot or a plugin hook warning. It is not part of the
+    /// model transcript and never turns a successful call into a failure.
+    Warning {
+        message: &'a str,
+    },
     /// Final foreground task notification. For `completed`, the assistant
     /// turn is durable and any required checkpoint has already completed; for
     /// `failed`/`cancelled`, the durable interruption/cancel records were

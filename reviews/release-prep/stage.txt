@@ -1,0 +1,6 @@
+{
+  "version": "0.4.0",
+  "platform": "win32-x64",
+  "mainDir": "D:\\Kroma\\kroma-latest\\target\\npm-release-prep\\kroma",
+  "nativeDir": "D:\\Kroma\\kroma-latest\\target\\npm-release-prep\\kroma-win32-x64"
+}

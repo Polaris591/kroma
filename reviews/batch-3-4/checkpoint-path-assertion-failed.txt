@@ -1,0 +1,21 @@
+   Compiling kroma v0.4.0 (D:\Kroma\kroma-latest)
+    Finished `release` profile [optimized] target(s) in 55.24s
+     Running unittests src\lib.rs (target\release\deps\kroma-e42228b31dbdc43b.exe)
+
+running 1 test
+test checkpoints::tests::perf_file_checkpoint_first_unchanged_and_delta ... 
+thread 'checkpoints::tests::perf_file_checkpoint_first_unchanged_and_delta' (17648) panicked at src\checkpoints.rs:861:13:
+assertion `left == right` failed
+  left: Some("\\\\?\\C:\\Users\\24524\\AppData\\Local\\Temp\\kroma-checkpoint-perf-11024-1793868129917568200")
+ right: Some("C:\\Users\\24524\\AppData\\Local\\Temp\\kroma-checkpoint-perf-11024-1793868129917568200")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    checkpoints::tests::perf_file_checkpoint_first_unchanged_and_delta
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 620 filtered out; finished in 0.58s
+
+error: test failed, to rerun pass `--lib`

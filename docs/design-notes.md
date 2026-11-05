@@ -215,7 +215,22 @@ default, conversation scrolling, persisted
 sessions and the existing slash commands. Shortcuts:
 
 - **Enter** sends; **Shift+Enter**, **Alt+Enter** or **Ctrl+J** insert a newline.
-  Bracketed multi-line paste is supported; Up/Down navigate input and history.
+  Prefer **Ctrl+J** when the terminal cannot distinguish Shift+Enter from
+  Enter. Multi-line drafts show their line count and newline/send hint.
+  Bracketed multi-line paste is supported where the terminal/backend emits
+  paste events; Up/Down navigate input and history.
+- **Draft selection:** Shift+arrows/Home/End selects text;
+  Ctrl+Shift+Home/End selects to the beginning/end of the entire draft, even
+  beyond the visible input area. Typing, deleting or pasting replaces the
+  selection as one undoable edit. Copy preserves original tabs, blank lines
+  and Unicode; tabs display as four spaces without changing the draft.
+- **Text paste:** ordinary multi-line text up to **4 KiB of UTF-8** remains
+  editable, regardless of its line count. Larger text retains the compact
+  attachment path. Ctrl+V / Shift+Insert reads the local text clipboard only
+  if the terminal forwards those keys. Over SSH, use the terminal's own
+  paste action; it must supply bracketed paste events. For local Windows
+  terminals that split pasted text into key events, use **Alt+V** while idle
+  to read the clipboard in one operation, or **Ctrl+G** for an external editor.
 - **PgUp/PgDn** or mouse wheel scroll conversation; scrolling up pins the
   reading position even as the model streams, and **Ctrl+End** returns to the
   latest output. **Alt+↑ / Alt+↓** jumps between user turns, including after
@@ -313,10 +328,10 @@ sessions and the existing slash commands. Shortcuts:
   not project files.
 - **Alt+V** pastes a desktop clipboard image or text. When the clipboard is
   unavailable, a separate path prompt accepts a file accessible to Kroma
-  without destroying the unfinished message. Alt+V explicitly folds pasted
-  text into an inline attachment; ordinary terminal paste is folded only for
-  long text (at least 1000 characters or more than 12 lines),
-  e.g. `你看看【ui.png】怎么样，分析一下【180字符】`. The chip is one
+  without destroying the unfinished message. Alt+V uses the same text-size
+  policy as ordinary terminal paste: up to 4 KiB stays editable; text over
+  4 KiB becomes an inline attachment,
+  e.g. `你看看【ui.png】怎么样，分析一下【6000字符】`. The chip is one
   editable unit: Backspace/Delete removes it along with its pending file
   reference, while plain text can be typed before, between or after chips.
   The visible labels are not the identity keys; the WAL stores an opaque
@@ -334,8 +349,10 @@ sessions and the existing slash commands. Shortcuts:
   and base64 encoding, but does not change the images sent or billed tokens.
   Up-arrow input recall preserves the original media references; removing
   a recalled chip or clearing the draft never deletes a previously submitted
-  image. While an Agent task is running, new media/long-log pastes are
-  deferred with a visible notice instead of being silently ignored.
+  image. While an Agent task is running, new media/large-log pastes are
+  refused with a visible notice instead of being silently ignored; the
+  existing draft and selection are preserved. Small terminal/text-clipboard
+  pastes can still edit a follow-up draft, but Alt+V remains idle-only.
   When the upstream
   declares the selected model text-only, even active images are replaced by
   explicit image-omission references instead of sending unsupported media.
@@ -547,8 +564,10 @@ longer installed; this **retains full raw history**, but resets derived
 summaries. See `benchmarks/P12_ARCHITECTURE_REVIEW_REPAIRS.md`.
 
 Kroma now exposes a Rust library as well as its original CLI. The default
-implementation still runs **one Shell** and the same OpenAI-compatible
-provider, stable prompt and lazy single-pass compaction.
+composition registers Shell plus history/skills and lazy MCP tools. Chat,
+Responses, Anthropic and optional process-backed models use the same Agent,
+request projection and lazy single-pass compaction. CLI/TUI and Desktop are
+hosts of this runtime, not separate execution loops.
 
 - `app::default_agent` combines the built-in implementations.
 - `model::ModelBackend` accepts tool definitions supplied by the runtime;
@@ -562,9 +581,10 @@ provider, stable prompt and lazy single-pass compaction.
   request projection; `events::EventSink` exposes optional lightweight
   runtime notifications. Without a subscriber no event queue is created.
 
-These are **internal integration interfaces**, not a plugin ABI or plugin
-loader. No approval layer, service container or new background worker was
-introduced. See `benchmarks/P11_ARCHITECTURE_FOUNDATION_REPORT.md` for
+These are **Rust integration interfaces**, separate from the optional JSONL
+process-plugin protocol. They do not provide a generic tool permission layer
+or a service container. Project MCP/plugin activation has its own content-bound
+approval boundary; that boundary is not a process sandbox. See `benchmarks/P11_ARCHITECTURE_FOUNDATION_REPORT.md` for
 invariants, isolated replacement tests and regression commands.
 
 ## Core-efficiency measurements and opt-in profiling
@@ -573,8 +593,8 @@ Set `KROMA_PROFILE=1` when running a real task to print lightweight
 `[profile] model_start/model_done/tool_start/tool_done` phase markers, plus a
 task-total `[profile]` line at completion, failure or cancellation. Phase markers help
 identify the last active phase if a long task is interrupted. The total includes wall time,
-context preparation (including any asynchronous compaction waits/checkpoints),
-model-response time, tool execution time, session journal writes, checkpoint finalization,
+context preparation (including awaited compaction requests), file snapshots
+(`snapshot_ms`), model-response time, tool execution time, session journal writes, checkpoint finalization,
 request/tool counts, and JSON byte counts for original history versus model
 request messages. The optional byte measurement adds a serialization pass per
 request, so leave profiling off for normal low-latency operation. Existing
@@ -598,12 +618,13 @@ The optional ignored long-history CPU/IO benchmarks can be slow; run only
 the desired named benchmark with `cargo test --release --locked <name> --
 --ignored --nocapture`. The opt-in P9/P10 experiments skip live model calls
 unless their dedicated environment variable is explicitly enabled.
-The ignored long-history benchmarks compare the previous full-serialization
-TRC/APEC algorithms against the new incremental JSON-size planning on identical
-data, then assert identical TRC clearing decisions and summary boundaries.
-See `reviews/KROMA-E1-CORE-EFFICIENCY-2026-10-26.md` for measurement details.
-That E1 optimization retained the existing cache-aware TRC + raw-history APEC
-policy and thresholds. In P10 the standalone, zero-hit first-use
+Current offline microbenchmarks and the paired checkpoint-planner ablation are
+documented in [performance](performance.md). They measure local CPU/filesystem
+work or deterministic fake requests, not real provider latency or billed costs.
+The TRC/APEC E1 comparisons in
+[the archived E1 report](../reviews/KROMA-E1-CORE-EFFICIENCY-2026-10-26.md)
+describe an earlier context implementation; they are not measurements of the
+current lazy single-pass policy. In P10 the standalone, zero-hit first-use
 duplicate-line filter was removed after checking retained Rust/Python task
 outputs; the original raw outputs and overflow recovery are unchanged.
 
@@ -722,7 +743,7 @@ exists.
 
 ## P2: Lean modules and multiple conversations
 
-The runtime is split by responsibility: `provider.rs` (HTTP/SSE and API request mapping), `protocol.rs` (shared messages), `context.rs` (lazy single-pass compaction), `tools.rs` (tool dispatch/schema), `shell.rs` (process execution), `session.rs` (checkpoint/WAL/lock), `sessions.rs` (session directory and IDs), and `agent.rs` (small execution loop). Optional process plugins are hosted at the application boundary; there is no new provider registry or database.
+The runtime is split by responsibility: `provider.rs` (HTTP/SSE and API request mapping), `protocol.rs` (shared messages), `context.rs` (lazy single-pass compaction), `tools.rs` (tool dispatch/schema), `shell.rs` (process execution), `session.rs` (checkpoint/WAL/lock), `sessions.rs` (session directory and IDs), and `agent.rs` (foreground orchestration). Optional process plugins are hosted at the application boundary; there is no new provider registry or database.
 
 Interactive commands:
 
@@ -1041,3 +1062,7 @@ cargo clippy -- -D warnings
 ## License
 
 MIT. See [LICENSE](../LICENSE).
+
+Current module ownership and safe extension points are summarized in
+[architecture](architecture.md); historical phase reports above are not a promise
+that every measured optimization is still present.

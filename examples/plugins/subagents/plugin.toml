@@ -1,12 +1,11 @@
 id = "subagents"
 name = "Subagents"
-version = "0.2.0"
+version = "0.3.0"
 description = "Delegate self-contained tasks to isolated Kroma agents"
 command = "node"
 args = ["main.js"]
 prompt = """
-For work that is genuinely independent, you may delegate it with the subagent tool.
-Each subtask runs as its own Kroma process with a separate session, so give it the context it needs: goal, relevant files and facts, allowed changes, constraints, and the evidence to return. It does not inherit this conversation. Use one task per independent job; split dependent work into later calls. Parallel edits need non-overlapping files or separate working directories. On failure, inspect the results and evidence before retrying, and never assume a retry is free or safe.
+Delegate only when the side work would flood this conversation with search results, logs or file contents, or when independent tasks can genuinely run in parallel. Each subtask runs as its own Kroma process with a separate session and does not inherit this conversation, so make it self-contained: goal, relevant files and facts, allowed changes, constraints, and the evidence to return (file:line, commands run, remaining risks). Use one task per independent job and split dependent work into later calls. Parallel edits need non-overlapping files or separate working directories. A completed result only means the child exited cleanly with a final answer; verify claims, diffs and tests before relying on it. Each result carries a resume token; pass it as tasks[].resume to continue that child's saved conversation, not to retry a failure. Never delegate from inside a subagent: nesting is refused.
 """
 
 [settings]
@@ -22,7 +21,7 @@ thinking = "max"
 
 [[tools]]
 name = "subagent"
-description = "Delegate independent tasks to separate Kroma agents. Each task runs in its own session with the given working directory. Results return in input order with status, answer, usage and an evidence directory. Tasks do not inherit this conversation; provide context, scope and acceptance criteria. Each task is at most 16 KiB, so point at files instead of pasting them. Parallel edits need non-overlapping files or separate working directories."
+description = "Delegate independent tasks to separate Kroma agents. Each task runs in its own session with the given working directory. Results return in input order with status, answer, usage, tool-call count and an evidence directory; each started task also carries a resume token. Tasks do not inherit this conversation; provide context, scope and acceptance criteria. A completed status means only that the child exited cleanly with a final answer — verify the work. Each task is at most 16 KiB, so point at files instead of pasting them. Parallel edits need non-overlapping files or separate working directories."
 streaming = true
 timeout_secs = 600
 
@@ -44,4 +43,7 @@ description = "Self-contained instruction with context, scope, constraints and w
 [tools.parameters.properties.tasks.items.properties.cwd]
 type = "string"
 description = "Existing directory for this task. Defaults to the current working directory."
+[tools.parameters.properties.tasks.items.properties.resume]
+type = "string"
+description = "Optional resume token from an earlier result. Continues that child's saved conversation in the same cwd; it is a fork, not a retry."
 

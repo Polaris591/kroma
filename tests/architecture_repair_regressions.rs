@@ -9,7 +9,7 @@ use kroma::{
     prompt::PromptComposer,
     protocol::{FunctionCall, Message, ToolCall},
     sessions::SessionCatalog,
-    tools::{Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult},
+    tools::{HookFuture, Tool, ToolContext, ToolFuture, ToolInterceptor, ToolRegistry, ToolResult},
 };
 use serde_json::{json, Value};
 use std::{
@@ -192,6 +192,7 @@ struct DurableEventObserver {
     wal: PathBuf,
     saw_committed_tool: Mutex<bool>,
     saw_committed_model: Mutex<bool>,
+    saw_committed_warning: Mutex<bool>,
 }
 
 impl EventSink for DurableEventObserver {
@@ -200,6 +201,11 @@ impl EventSink for DurableEventObserver {
             RuntimeEvent::ModelFinished { request: 1, .. } => {
                 let journal = std::fs::read_to_string(&self.wal).unwrap_or_default();
                 *self.saw_committed_model.lock().unwrap() = journal.contains("repair-tool-1");
+            }
+            RuntimeEvent::Warning { message } if message.contains("after_tool_result") => {
+                let journal = std::fs::read_to_string(&self.wal).unwrap_or_default();
+                *self.saw_committed_warning.lock().unwrap() =
+                    journal.contains("kroma_tool_warning") && journal.contains("durable-result");
             }
             RuntimeEvent::ToolFinished { id, result, .. } => {
                 let journal = std::fs::read_to_string(&self.wal).unwrap_or_default();
@@ -323,6 +329,7 @@ async fn tool_finished_and_model_finished_events_follow_wal_commits() -> Result<
         wal: PathBuf::from(format!("{}.wal", catalog.default_path().display())),
         saw_committed_tool: Mutex::new(false),
         saw_committed_model: Mutex::new(false),
+        saw_committed_warning: Mutex::new(false),
     });
     let backend = Arc::new(MockModel::new(true));
     let mut registry = ToolRegistry::new();
@@ -339,6 +346,85 @@ async fn tool_finished_and_model_finished_events_follow_wal_commits() -> Result<
     assert!(*watcher.saw_committed_model.lock().unwrap());
     assert!(*watcher.saw_committed_tool.lock().unwrap());
     drop(agent);
+    remove_session(&dir);
+    Ok(())
+}
+
+struct CountedTool(Arc<AtomicUsize>);
+impl Tool for CountedTool {
+    fn name(&self) -> &str {
+        "test_tool"
+    }
+    fn definition(&self) -> Value {
+        FakeTool { huge_schema: false }.definition()
+    }
+    fn execute<'a>(&'a self, _: &'a ToolCall, _: ToolContext<'a>) -> ToolFuture<'a> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ToolResult::ok("durable-result")
+        })
+    }
+}
+struct FailingAfter;
+impl ToolInterceptor for FailingAfter {
+    fn after<'a>(
+        &'a self,
+        _: &'a ToolCall,
+        result: &'a mut ToolResult,
+        _: &'a Path,
+    ) -> HookFuture<'a> {
+        Box::pin(async move {
+            *result = ToolResult::error("partial hook mutation");
+            anyhow::bail!("hook unavailable")
+        })
+    }
+}
+
+#[tokio::test]
+async fn after_hook_warning_is_durable_without_reclassifying_or_replaying_success() -> Result<()> {
+    let dir = isolated_dir("hook-warning")?;
+    let catalog = SessionCatalog::new(&dir)?;
+    let watcher = Arc::new(DurableEventObserver {
+        wal: PathBuf::from(format!("{}.wal", catalog.default_path().display())),
+        saw_committed_model: Mutex::new(false),
+        saw_committed_tool: Mutex::new(false),
+        saw_committed_warning: Mutex::new(false),
+    });
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(CountedTool(executions.clone())))?;
+    tools.register_interceptor(Arc::new(FailingAfter));
+    let backend = Arc::new(MockModel::new(true));
+    let mut agent = Agent::with_runtime(
+        backend.clone(),
+        tools.clone(),
+        Arc::new(BuiltinContextFactory),
+        PromptComposer::default(),
+        Some(watcher.clone()),
+        dir.clone(),
+    )?;
+    assert_eq!(agent.run("execute once", &mut |_| {}).await?, "done");
+    assert!(*watcher.saw_committed_warning.lock().unwrap());
+    assert!(*watcher.saw_committed_tool.lock().unwrap());
+    drop(agent);
+    let mut resumed =
+        Agent::with_components(backend, tools, Arc::new(BuiltinContextFactory), dir.clone())?;
+    let tool = resumed
+        .messages()
+        .iter()
+        .find(|message| message.role == "tool")
+        .unwrap();
+    assert!(!tool.tool_failed());
+    assert_eq!(tool.content.as_deref(), Some("durable-result"));
+    assert!(tool
+        .provider_items
+        .as_ref()
+        .unwrap()
+        .iter()
+        .any(|item| item["type"] == "kroma_tool_warning"));
+    resumed.run("continue", &mut |_| {}).await?;
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    drop(resumed);
     remove_session(&dir);
     Ok(())
 }

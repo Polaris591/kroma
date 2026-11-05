@@ -20,6 +20,8 @@ const LIMITS = Object.freeze({
   stderrBytes: 256 * 1024,
   eventBytes: 2 * 1024 * 1024,
   evidenceChars: 2000,
+  // In-memory tail of streamed assistant text; never written to events.ndjson.
+  draftChars: 64 * 1024,
   taskTimeoutSecs: 300,
   timeoutSecs: 600,
 });
@@ -30,6 +32,8 @@ const DEFAULT_KILL_GRACE_MS = 2000;
 // A running task silent for this long is shown as quiet, so a stuck child
 // looks different from one that is thinking hard.
 const QUIET_MS = 90_000;
+// Show streamed text in a live row only while it is fresh.
+const PREVIEW_MS = 30_000;
 
 class SubagentError extends Error {
   // fatal errors abort the whole batch and are reported as a stream error, so
@@ -41,11 +45,36 @@ class SubagentError extends Error {
   }
 }
 
+// Code-point clipping: callers bound bytes where a transport requires it,
+// while answers and evidence fields are bounded in characters.
+function sliceChars(text, limit) {
+  if (limit <= 0) return {text: "", truncated: text.length > 0};
+  if (text.length <= limit) return {text, truncated: false};
+  let end = 0;
+  let count = 0;
+  while (end < text.length && count < limit) {
+    const code = text.charCodeAt(end);
+    const pair = code >= 0xd800 && code <= 0xdbff && end + 1 < text.length
+      && text.charCodeAt(end + 1) >= 0xdc00 && text.charCodeAt(end + 1) <= 0xdfff;
+    end += pair ? 2 : 1;
+    count++;
+  }
+  return {text: text.slice(0, end), truncated: end < text.length};
+}
+
 function clip(text, limit) {
+  return sliceChars(String(text), limit);
+}
+
+// Partial answers are the most recent text, so keep the tail rather than the
+// beginning when a failed task streamed more than the output budget.
+function tailClip(text, limit) {
+  if (limit <= 0) return {text: "", truncated: text.length > 0};
+  if (text.length <= limit) return {text, truncated: false};
   const chars = Array.from(text);
   return chars.length <= limit
     ? {text, truncated: false}
-    : {text: chars.slice(0, limit).join(""), truncated: true};
+    : {text: chars.slice(-limit).join(""), truncated: true};
 }
 
 function integer(value, name, min, max, fallback) {
@@ -86,9 +115,75 @@ function directory(value, workdir) {
   }
 }
 
+// A resume token is `<run_id>/<index>` and resolves only inside this plugin's
+// own runs directory. It continues a child that already finished; a running or
+// interrupted task is refused because its session may still be in use.
+function resumeSource(value, dataDir, workdir) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new SubagentError("INVALID_ARGUMENT", "resume must be a nonempty string");
+  }
+  const token = value.trim();
+  if (token.length > 80) {
+    throw new SubagentError("INVALID_ARGUMENT", "resume is too long");
+  }
+  const match = /^([A-Za-z0-9][A-Za-z0-9_-]{0,63})\/(0|[1-9][0-9]{0,2})$/.exec(token);
+  if (!match) {
+    throw new SubagentError("INVALID_ARGUMENT",
+      "resume must be a task token such as <run_id>/<index>");
+  }
+  const runsDir = path.join(dataDir, "runs");
+  const source = path.join(runsDir, match[1], match[2]);
+  let root;
+  let real;
+  try {
+    root = fs.realpathSync(runsDir);
+    real = fs.realpathSync(source);
+  } catch {
+    throw new SubagentError("RESUME_MISSING", `no evidence for resumed task '${token}'`);
+  }
+  if (real !== root && !real.startsWith(root + path.sep)) {
+    throw new SubagentError("INVALID_ARGUMENT", `resume '${token}' leaves the run directory`);
+  }
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(path.join(real, "state.json"), "utf8"));
+  } catch {
+    throw new SubagentError("RESUME_MISSING", `resumed task '${token}' has no state record`);
+  }
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    throw new SubagentError("RESUME_MISSING", `resumed task '${token}' has an invalid state record`);
+  }
+  if (state.status === "running") {
+    throw new SubagentError("RESUME_ACTIVE",
+      `task '${token}' is still marked running; inspect its evidence instead of resuming it`);
+  }
+  if (state.status !== "completed" && state.status !== "failed") {
+    throw new SubagentError("RESUME_MISSING", `resumed task '${token}' never finished`);
+  }
+  let cwd;
+  try {
+    if (typeof state.cwd !== "string" || !state.cwd.trim()) throw new Error("missing cwd");
+    cwd = directory(state.cwd, workdir);
+  } catch {
+    throw new SubagentError("RESUME_STALE", `resumed task '${token}' has no usable working directory`);
+  }
+  const session = path.join(real, "session.json");
+  let info;
+  try {
+    info = fs.statSync(session);
+  } catch {
+    throw new SubagentError("RESUME_MISSING", `resumed task '${token}' has no saved session`);
+  }
+  if (!info.isFile()) {
+    throw new SubagentError("RESUME_MISSING", `resumed task '${token}' has no saved session`);
+  }
+  return {token, source: real, session, cwd};
+}
+
 // Validate the whole batch before spawning anything: a bad task later in the
 // list must not leave earlier child agents running.
-function tasks(request, workdir) {
+function tasks(request, workdir, dataDir) {
   const value = request?.arguments?.tasks;
   if (!Array.isArray(value) || value.length === 0) {
     throw new SubagentError("INVALID_ARGUMENT", "tasks must be a nonempty array");
@@ -107,7 +202,13 @@ function tasks(request, workdir) {
     if (entry.cwd !== undefined && (typeof entry.cwd !== "string" || !entry.cwd.trim())) {
       throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].cwd must be a nonempty string`);
     }
-    return {index, task, cwd: directory(entry.cwd, workdir)};
+    const cwd = entry.cwd === undefined ? null : directory(entry.cwd, workdir);
+    const resume = resumeSource(entry.resume, dataDir, workdir);
+    if (resume && cwd && cwd !== resume.cwd) {
+      throw new SubagentError("INVALID_ARGUMENT",
+        `tasks[${index}].cwd must match the resumed task directory: ${resume.cwd}`);
+    }
+    return {index, task, cwd: resume ? resume.cwd : (cwd ?? directory(undefined, workdir)), resume};
   });
 }
 
@@ -124,19 +225,36 @@ function newRunId() {
 
 const USAGE_FIELDS = [["input", "input"], ["output", "output"],
   ["cached", "cached"], ["reasoning", "reasoning_tokens"]];
+// Each frame reports its own counters. `apec_usage` has no reasoning counter,
+// so it must not erase reasoning that a model frame already reported.
+const USAGE_FRAME_FIELDS = Object.freeze({
+  model_finished: new Set(["input", "output", "cached", "reasoning"]),
+  failed_request_usage: new Set(["input", "output", "cached", "reasoning"]),
+  apec_usage: new Set(["input", "output", "cached"]),
+});
 
 function emptyUsage() {
-  const total = {requests: 0, input: 0, output: 0, cached: 0, reasoning: 0, known: {}};
-  for (const [field] of USAGE_FIELDS) total.known[field] = true;
+  const total = {requests: 0, input: 0, output: 0, cached: 0, reasoning: 0,
+    seen: {}, known: {}};
+  for (const [field] of USAGE_FIELDS) {
+    total.seen[field] = false;
+    total.known[field] = true;
+  }
   return total;
 }
 
 // Each counter stands on its own: a provider that omits one optional field
 // must not erase the input and output it did report.
 function recordUsage(total, frame) {
-  total.requests++;
+  const fields = USAGE_FRAME_FIELDS[frame.type];
+  if (!fields) return;
+  // Compaction frames may cover several requests; model frames cover one.
+  const count = Number.isInteger(frame.requests) && frame.requests > 0 ? frame.requests : 1;
+  total.requests += count;
   for (const [field, key] of USAGE_FIELDS) {
+    if (!fields.has(field)) continue;
     if (typeof frame[key] === "number") {
+      total.seen[field] = true;
       if (total.known[field]) total[field] += frame[key];
     } else {
       total.known[field] = false;
@@ -146,9 +264,16 @@ function recordUsage(total, frame) {
 
 function usageReport(total) {
   const known = total.requests > 0;
-  const value = field => (known && total.known[field] ? total[field] : null);
+  const value = field => (known && total.known[field] && total.seen[field]
+    ? total[field] : null);
   return {requests: total.requests, input: value("input"), output: value("output"),
     cached: value("cached"), reasoning: value("reasoning")};
+}
+
+function compactChars(value) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m ch`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k ch`;
+  return `${value} ch`;
 }
 
 function compactTokens(value) {
@@ -166,14 +291,31 @@ function usageLine(usage) {
 }
 
 function createTrace(eventsPath) {
-  return {answer: null, results: 0, reported: null, fault: null, taskStatus: null, usage: emptyUsage(),
-    tools: new Map(), eventsPath, eventBytes: 0, eventsTruncated: false};
+  return {answer: null, results: 0, reported: null, fault: null, taskStatus: null,
+    usage: emptyUsage(), tools: new Map(), toolCalls: 0, textChars: 0, draft: "",
+    lastTextAt: 0, eventsPath, eventBytes: 0, eventsTruncated: false};
+}
+
+// A bounded tail of streamed assistant text. It is never written to
+// events.ndjson, but it is what lets a failed task keep the work it produced
+// and lets the live card show that a child is writing.
+function appendDraft(trace, text) {
+  if (!text) return;
+  trace.textChars += text.length;
+  trace.lastTextAt = Date.now();
+  trace.draft += text;
+  const cap = LIMITS.draftChars;
+  if (trace.draft.length > cap * 2) {
+    let start = trace.draft.length - cap;
+    const code = trace.draft.charCodeAt(start);
+    if (code >= 0xdc00 && code <= 0xdfff) start += 1;
+    trace.draft = trace.draft.slice(start);
+  }
 }
 
 const EVIDENCE_EVENTS = new Set(["task_started", "model_started", "model_finished", "model_failed",
-  "tool_started", "tool_finished", "task_finished", "error", "failed_request_usage", "apec_usage",
-  "context"]);
-
+  "tool_started", "tool_finished", "task_finished", "warning", "error", "failed_request_usage",
+  "apec_usage", "context"]);
 // Evidence is appended while the task runs, so a host deadline or Ctrl+C still
 // leaves a diagnosable trace. A write failure is fatal: the result would then
 // be untrustworthy.
@@ -195,14 +337,44 @@ function record(trace, frame) {
     if (trace.results === 1) trace.answer = typeof frame.text === "string" ? frame.text : "";
     return;
   }
-  if (frame.type === "model_finished" || frame.type === "failed_request_usage") {
+  if (USAGE_FRAME_FIELDS[frame.type]) {
     recordUsage(trace.usage, frame);
   }
+  if (frame.type === "tool_started") trace.toolCalls++;
+  if (frame.type === "text_delta") appendDraft(trace, frame.text);
   if (frame.type === "error" && trace.reported === null) {
     trace.reported = typeof frame.message === "string" ? frame.message : "child reported an error";
   }
   if (frame.type === "task_finished") trace.taskStatus = frame.status ?? null;
   traceEvent(trace, frame);
+}
+
+// A resume copies the snapshot and journal into the new task directory: the
+// source evidence stays immutable and the child owns its new lock.
+function copySession(source, destination) {
+  const copy = (from, to) => {
+    const temp = `${to}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+    fs.copyFileSync(from, temp);
+    fs.renameSync(temp, to);
+  };
+  copy(source, destination);
+  const wal = `${source}.wal`;
+  if (fs.existsSync(wal)) copy(wal, `${destination}.wal`);
+}
+
+// Exit codes documented by `kroma --reference/cli.md`: a parent can tell an
+// auth failure that will fail again from a transient model request failure.
+const EXIT_CODES = new Map([
+  [3, "MODEL_NOT_CONFIGURED"],
+  [4, "AUTH_FAILED"],
+  [5, "MODEL_REQUEST_FAILED"],
+  [6, "CONTEXT_LIMIT"],
+]);
+
+function exitFailure(code, reason) {
+  const name = EXIT_CODES.get(code) ?? "CHILD_EXIT";
+  return {status: "failed", code: name, exit_code: code,
+    message: `child exited with code ${code}${reason ? `: ${reason}` : ""}`};
 }
 
 const terminated = new WeakSet();
@@ -242,8 +414,9 @@ function terminate(child, graceMs = DEFAULT_KILL_GRACE_MS) {
 function lastStderrLine(buffer) {
   const text = buffer.toString("utf8").trim();
   if (!text) return "";
-  const line = text.slice(text.lastIndexOf("\n") + 1).trim();
-  return line.length > 300 ? `${line.slice(0, 300)}…` : line;
+  const line = text.slice(text.lastIndexOf(String.fromCharCode(10)) + 1).trim();
+  const clipped = sliceChars(line, 300);
+  return clipped.truncated ? `${clipped.text}…` : clipped.text;
 }
 
 // The host enforces the smaller of the manifest deadline and its own
@@ -296,7 +469,17 @@ function optionalThinking(value) {
 
 function oneLine(text, max) {
   const line = String(text ?? "").replace(/\s+/g, " ").trim();
-  return line.length > max ? `${line.slice(0, max)}…` : line;
+  const clipped = sliceChars(line, max);
+  return clipped.truncated ? `${clipped.text}…` : clipped.text;
+}
+
+// Last characters without starting inside a surrogate pair.
+function tailChars(text, limit) {
+  if (text.length <= limit) return text;
+  let start = text.length - limit;
+  const code = text.charCodeAt(start);
+  if (code >= 0xdc00 && code <= 0xdfff) start += 1;
+  return text.slice(start);
 }
 
 function clock(ms) {
@@ -313,6 +496,8 @@ async function runTask(entry, context) {
   const session = path.join(dir, "session.json");
   const stderrPath = path.join(dir, "stderr.log");
   const eventsPath = path.join(dir, "events.ndjson");
+  const answerPath = path.join(dir, "answer.txt");
+  const partialPath = path.join(dir, "partial.txt");
   const started = Date.now();
   const trace = createTrace(eventsPath);
   trace.startedAt = started;
@@ -327,6 +512,7 @@ async function runTask(entry, context) {
     // Locatable before it starts: a host kill cannot skip this record.
     writeFile(path.join(dir, "state.json"), JSON.stringify({
       index: entry.index, status: "running", session, cwd: entry.cwd,
+      resumed_from: entry.resume?.token ?? null,
       started_at: new Date().toISOString(),
     }));
   } catch (error) {
@@ -335,7 +521,7 @@ async function runTask(entry, context) {
     context.run.abort(failure);
     return {index: entry.index, status: "failed", exit_code: null,
       error: {code: "ARCHIVE_ERROR", message: failure.message},
-      duration_ms: 0, usage: usageReport(trace.usage)};
+      duration_ms: Date.now() - started, tool_calls: 0, usage: usageReport(trace.usage)};
   }
   context.run.status[entry.index] = "running";
   context.run.live[entry.index] = trace;
@@ -355,36 +541,16 @@ async function runTask(entry, context) {
   }
 
   return new Promise(resolve => {
-    let child;
-    try {
-      child = context.run.spawn(context.executable, ["--json"], {
-        cwd: entry.cwd,
-        env: {
-          ...process.env,
-          KROMA_WORKDIR: entry.cwd,
-          KROMA_SESSION_FILE: session,
-          KROMA_SUBAGENT_DEPTH: String(context.depth),
-          ...(context.model ? {KROMA_MODEL: context.model} : {}),
-          ...(context.thinking ? {KROMA_DEEPSEEK_THINKING: context.thinking} : {}),
-        },
-        windowsHide: true,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-    } catch (error) {
-      // The directory can disappear between validation and spawn.
-      finish({status: "failed", code: "CHILD_START",
-        message: `cannot start '${context.executable}': ${error.message}`});
-      return;
-    }
-    context.run.children.add(child);
+    let child = null;
     let timedOut = null;
     let closeTimer = null;
+    let taskTimer = null;
 
     const armCloseFallback = outcome => {
       if (closeTimer || finished) return;
       closeTimer = setTimeout(() => {
-        child.stdout?.destroy?.();
-        child.stderr?.destroy?.();
+        child?.stdout?.destroy?.();
+        child?.stderr?.destroy?.();
         finish(outcome);
       }, context.killGraceMs + 100);
     };
@@ -395,12 +561,6 @@ async function runTask(entry, context) {
       context.run.terminate(child);
       armCloseFallback(timedOut);
     };
-
-    const taskTimer = setTimeout(
-      () => failByTimeout(`child timed out after ${formatTimeout(context.taskTimeoutMs)}`),
-      context.taskTimeoutMs,
-    );
-    context.run.timeouts.add(failByTimeout);
 
     const fault = error => {
       if (trace.fault) return;
@@ -430,7 +590,7 @@ async function runTask(entry, context) {
         fault(new SubagentError("ARCHIVE_ERROR", `cannot write evidence: ${error.message}`, true));
         return;
       }
-      if (frame.type === "model_finished" || frame.type === "failed_request_usage") {
+      if (USAGE_FRAME_FIELDS[frame.type]) {
         recordUsage(context.run.usage, frame);
       }
       // Live state only: the heartbeat renders one row per running task, so
@@ -439,6 +599,7 @@ async function runTask(entry, context) {
       if (frame.type === "model_started") {
         trace.phase = "model";
         trace.turn = frame.request ?? trace.turn;
+        trace.lastTextAt = 0;
       } else if (frame.type === "tool_started") {
         const at = Date.now();
         trace.tools.set(frame.id, {name: frame.name ?? "tool", at});
@@ -447,10 +608,10 @@ async function runTask(entry, context) {
         trace.phase = "tool";
       } else if (frame.type === "tool_finished") {
         trace.tools.delete(frame.id);
-        const pending = [...trace.tools.values()].at(-1);
-        trace.tool = pending ? pending.name : null;
-        trace.toolStartedAt = pending ? pending.at : 0;
-        trace.phase = pending ? "tool" : "model";
+        const pendingTool = [...trace.tools.values()].at(-1);
+        trace.tool = pendingTool ? pendingTool.name : null;
+        trace.toolStartedAt = pendingTool ? pendingTool.at : 0;
+        trace.phase = pendingTool ? "tool" : "model";
       }
       if (trace.results > 1) {
         fault(new SubagentError("CHILD_PROTOCOL", "child returned more than one final result", true));
@@ -458,6 +619,46 @@ async function runTask(entry, context) {
         fault(new SubagentError("CHILD_PROTOCOL", "child returned a result without text", true));
       }
     };
+
+    // The source evidence stays immutable: only the snapshot and its journal
+    // are copied, so a resumed child owns a fresh lock and its own run files.
+    if (entry.resume) {
+      try {
+        copySession(entry.resume.session, session);
+      } catch (error) {
+        finish({status: "failed", code: "RESUME_STALE",
+          message: `cannot copy the saved session for resume: ${error.message}`});
+        return;
+      }
+    }
+
+    try {
+      child = context.run.spawn(context.executable, ["--json"], {
+        cwd: entry.cwd,
+        env: {
+          ...process.env,
+          KROMA_WORKDIR: entry.cwd,
+          KROMA_SESSION_FILE: session,
+          KROMA_SUBAGENT_DEPTH: String(context.depth),
+          ...(context.model ? {KROMA_MODEL: context.model} : {}),
+          ...(context.thinking ? {KROMA_DEEPSEEK_THINKING: context.thinking} : {}),
+        },
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      // The directory can disappear between validation and spawn.
+      finish({status: "failed", code: "CHILD_START",
+        message: `cannot start '${context.executable}': ${error.message}; set kroma_bin if Kroma is not on PATH`});
+      return;
+    }
+    context.run.children.add(child);
+
+    taskTimer = setTimeout(
+      () => failByTimeout(`child timed out after ${formatTimeout(context.taskTimeoutMs)}`),
+      context.taskTimeoutMs,
+    );
+    context.run.timeouts.add(failByTimeout);
 
     child.stdout?.on("data", chunk => {
       pending += decoder.write(chunk);
@@ -485,7 +686,7 @@ async function runTask(entry, context) {
     child.stdin?.on("error", () => {});
     child.on("error", error => finish({
       status: "failed", code: "CHILD_START",
-      message: `cannot start '${context.executable}': ${error.message}`,
+      message: `cannot start '${context.executable}': ${error.message}; set kroma_bin if Kroma is not on PATH`,
     }));
     child.on("close", (code, signal) => {
       if (finished) return;
@@ -500,12 +701,9 @@ async function runTask(entry, context) {
         message: `child was terminated by ${signal}`});
       else if (code !== 0) {
         // Startup failures happen before the child can emit an error frame.
-        const reason = trace.reported ?? lastStderrLine(stderr);
-        finish({status: "failed", code: "CHILD_EXIT", exit_code: code,
-          message: `child exited with code ${code}${reason ? `: ${reason}` : ""}`});
-      }
-      else if (trace.results === 0) finish({status: "failed", code: "CHILD_PROTOCOL", exit_code: 0,
-        message: "child exited without a final result"});
+        finish(exitFailure(code, trace.reported ?? lastStderrLine(stderr)));
+      } else if (trace.results === 0) finish({status: "failed", code: "CHILD_PROTOCOL", exit_code: 0,
+        message: `child exited without a final result${trace.reported ? `: ${trace.reported}` : ""}`});
       else finish({status: "completed", code: "COMPLETED", exit_code: 0});
     });
 
@@ -525,8 +723,14 @@ async function runTask(entry, context) {
       context.run.children.delete(child);
       const answer = trace.answer ?? "";
       const clipped = clip(answer, context.maxOutput);
+      // A failed child often produced useful text before the deadline. Keep a
+      // bounded tail as `output` with `partial: true`; never present it as a
+      // verified answer, and never write text deltas into events.ndjson.
+      const draft = outcome.status !== "completed" && !answer && trace.draft.trim()
+        ? tailClip(trace.draft, context.maxOutput) : null;
       try {
-        if (answer) writeFile(path.join(dir, "answer.txt"), answer);
+        if (answer) writeFile(answerPath, answer);
+        if (draft) writeFile(partialPath, draft.text);
         // The logs are already on disk; only guarantee the artifacts exist.
         for (const file of [stderrPath, eventsPath]) {
           if (!fs.existsSync(file)) writeFile(file, "");
@@ -534,6 +738,9 @@ async function runTask(entry, context) {
         writeFile(path.join(dir, "state.json"), JSON.stringify({
           index: entry.index, status: outcome.status, code: outcome.code,
           session, cwd: entry.cwd, task_status: trace.taskStatus,
+          resumed_from: entry.resume?.token ?? null,
+          tool_calls: trace.toolCalls, text_chars: trace.textChars,
+          partial_chars: draft ? draft.text.length : 0,
           duration_ms: Date.now() - started,
         }));
       } catch (error) {
@@ -549,17 +756,30 @@ async function runTask(entry, context) {
         result.output = clipped.text;
         result.output_truncated = clipped.truncated;
       } else {
-        result.error = {code: outcome.code, message: outcome.message};
+        if (draft) {
+          result.output = draft.text;
+          result.output_truncated = draft.truncated;
+          result.partial = true;
+        } else if (answer) {
+          result.output = clipped.text;
+          result.output_truncated = clipped.truncated;
+        }
+        const detail = draft ? `${outcome.message ?? outcome.code}; partial answer kept in output`
+          : (outcome.message ?? outcome.code ?? outcome.status);
+        result.error = {code: outcome.code ?? "FAILED", message: detail};
       }
       result.duration_ms = Date.now() - started;
       result.usage = usageReport(trace.usage);
+      result.tool_calls = trace.toolCalls;
+      result.resume = `${context.runId}/${entry.index}`;
       result.artifacts = dir;
       const seconds = ((Date.now() - started) / 1000).toFixed(1).padStart(5);
       const mark = outcome.status === "completed" ? "✓" : "✗";
       const detail = outcome.status === "completed"
-        ? usageLine(trace.usage) : (outcome.code ?? outcome.status);
-      const preview = outcome.status === "completed" && answer.trim()
-        ? ` · "${oneLine(answer, 40)}"` : "";
+        ? usageLine(trace.usage)
+        : `${outcome.code ?? outcome.status}${draft ? ` · partial ${compactChars(draft.text.length)}` : ""}`;
+      const previewText = outcome.status === "completed" ? answer : (draft?.text ?? "");
+      const preview = previewText.trim() ? ` · "${oneLine(previewText, 40)}"` : "";
       context.run.status[entry.index] = outcome.status;
       context.run.live[entry.index] = null;
       progress(context, `${mark} [${entry.index + 1}/${context.count}] ${seconds}s · ${detail}${preview}`);
@@ -568,19 +788,52 @@ async function runTask(entry, context) {
   });
 }
 
+// The host reads one bounded response, so a large batch must share the budget
+// instead of collapsing every answer to the same fixed floor. Binary-search
+// the largest per-field character limit that fits the pretty JSON actually
+// sent to the host, then mark exactly the outputs that were shortened.
 function fit(response) {
-  const size = text => Buffer.byteLength(text, "utf8");
-  if (size(JSON.stringify(response)) <= LIMITS.responseBytes) return response;
-  for (const result of response.results) {
-    if (typeof result.output === "string") {
-      result.output = clip(result.output, LIMITS.evidenceChars).text;
-      result.output_truncated = true;
+  const target = LIMITS.responseBytes;
+  const fields = [];
+  const measure = limit => {
+    for (const field of fields) {
+      const shorten = field.tail ? tailClip : clip;
+      field.owner[field.key] = shorten(field.original, limit).text;
     }
-    if (result.error && typeof result.error.message === "string") {
-      result.error.message = clip(result.error.message, LIMITS.evidenceChars).text;
+    return Buffer.byteLength(JSON.stringify(response, null, 2), "utf8");
+  };
+  if (Buffer.byteLength(JSON.stringify(response, null, 2), "utf8") <= target) {
+    return response;
+  }
+  for (const result of response.results) {
+    if (typeof result.output === "string" && result.output) {
+      fields.push({owner: result, key: "output", original: result.output,
+        output: true, tail: Boolean(result.partial)});
+    }
+    if (result.error && typeof result.error.message === "string" && result.error.message) {
+      fields.push({owner: result.error, key: "message", original: result.error.message,
+        output: false, tail: false});
     }
   }
-  // Per-task fields are already clipped, so clipping is the final stage.
+  if (!fields.length) return response;
+  let high = 0;
+  for (const field of fields) high = Math.max(high, field.original.length);
+  let low = 0;
+  if (measure(0) <= target) {
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (measure(mid) <= target) low = mid;
+      else high = mid - 1;
+    }
+  }
+  measure(low);
+  for (const field of fields) {
+    if (field.output) {
+      const shorten = field.tail ? tailClip : clip;
+      const shortened = shorten(field.original, low).truncated;
+      field.owner.output_truncated = Boolean(field.owner.output_truncated || shortened);
+    }
+  }
   return response;
 }
 
@@ -611,10 +864,10 @@ async function runBatch(request, options = {}) {
   const executable = String(config.kroma_bin || process.env.KROMA_BIN || "kroma");
   const model = optionalModel(config.model);
   const thinking = optionalThinking(config.thinking);
-  const entries = tasks(request, workdir);
   const rawDataDir = options.dataDir ?? request?.data_dir;
   const dataDir = rawDataDir ? localPath(rawDataDir) : null;
   if (!dataDir) throw new SubagentError("ARCHIVE_ERROR", "plugin data directory is unavailable", true);
+  const entries = tasks(request, workdir, dataDir);
 
   const id = newRunId();
   const runDir = path.join(dataDir, "runs", id);
@@ -624,7 +877,8 @@ async function runBatch(request, options = {}) {
       call_id: request?.call_id ?? null, archive: request?.archive ?? null, workdir,
       max_parallel: maxParallel, max_output_chars: maxOutput,
       task_timeout_secs: taskTimeoutSecs, model, thinking,
-      tasks: entries.map(entry => ({index: entry.index, task: entry.task, cwd: entry.cwd})),
+      tasks: entries.map(entry => ({index: entry.index, task: entry.task, cwd: entry.cwd,
+        resume: entry.resume?.token ?? null})),
     }, null, 2));
   } catch (error) {
     throw new SubagentError("ARCHIVE_ERROR", `cannot create the run directory: ${error.message}`, true);
@@ -648,8 +902,9 @@ async function runBatch(request, options = {}) {
     run.reason = new SubagentError("CHILD_TIMEOUT", message, false);
     for (const stop of [...run.timeouts]) stop(message);
   };
-  const context = {runDir, executable, model, thinking, maxOutput, count: entries.length, depth: depth + 1,
-    deadlineSecs, taskTimeoutMs, killGraceMs, run, onProgress: options.onProgress};
+  const context = {runId: id, runDir, executable, model, thinking, maxOutput,
+    count: entries.length, depth: depth + 1, deadlineSecs, taskTimeoutMs, killGraceMs, run,
+    onProgress: options.onProgress};
 
   const results = new Array(entries.length);
   let next = 0;
@@ -667,8 +922,11 @@ async function runBatch(request, options = {}) {
       ? ` · quiet ${clock(now - live.lastEventAt)}` : "";
     const report = usageReport(live.usage);
     const tokens = (report.input ?? 0) + (report.output ?? 0);
+    const preview = live.phase === "model" && live.lastTextAt && live.draft.trim()
+      && now - live.lastTextAt < PREVIEW_MS
+      ? ` · "${oneLine(tailChars(live.draft, 120), 36)}"` : "";
     return `[${index + 1}/${context.count}] ${oneLine(live.label, 18)} ${clock(now - live.startedAt)}`
-      + ` ▶ ${phase} · ${compactTokens(tokens)} tok${quiet}`;
+      + ` ▶ ${phase} · ${compactTokens(tokens)} tok${preview}${quiet}`;
   };
   const beat = () => {
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
@@ -702,7 +960,7 @@ async function runBatch(request, options = {}) {
   for (let index = 0; index < entries.length; index++) {
     if (!results[index]) {
       run.status[index] = "not_started";
-      results[index] = {index, status: "not_started", exit_code: null, error: {
+      results[index] = {index, status: "not_started", exit_code: null, tool_calls: 0, error: {
         code: run.timedOut ? "CHILD_TIMEOUT" : "BATCH_ABORTED",
         message: run.reason?.message ?? "batch aborted",
       }};
