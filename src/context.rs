@@ -944,40 +944,42 @@ impl Compression {
             if state.cleared_tools.contains(&index) {
                 item.content = Some(self.tool_preview(msg, index));
             }
-            // Anthropic signed thinking binds to the exact preceding wire
-            // prefix. A checkpoint or TRC edit invalidates signatures from
-            // earlier revisions without changing the durable raw transcript.
-            if item.role == "assistant" && state.revision > 0 {
-                if let Some(parts) = &mut item.provider_items {
-                    let signed_revision = parts
-                        .iter()
-                        .find(|part| part["type"] == "kroma_context_revision")
-                        .and_then(|part| part["revision"].as_u64());
-                    if signed_revision != Some(state.revision) {
-                        for part in parts.iter_mut() {
-                            if part["type"] == "kroma_anthropic_content_blocks" {
-                                if let Some(blocks) = part["blocks"].as_array_mut() {
-                                    blocks.retain(|block| {
-                                        !matches!(
-                                            block["type"].as_str(),
-                                            Some("thinking" | "redacted_thinking")
-                                        )
-                                    });
-                                }
-                            }
-                        }
-                        parts.retain(|part| {
-                            !matches!(
-                                part["type"].as_str(),
-                                Some("thinking" | "redacted_thinking")
-                            )
-                        });
-                    }
-                }
-            }
+            Self::clear_stale_signed_thinking(&mut item, state.revision);
             view.push(item);
         }
         view
+    }
+
+    fn clear_stale_signed_thinking(message: &mut Message, revision: u64) {
+        if message.role != "assistant" || revision == 0 {
+            return;
+        }
+        if let Some(parts) = &mut message.provider_items {
+            let signed_revision = parts
+                .iter()
+                .find(|part| part["type"] == "kroma_context_revision")
+                .and_then(|part| part["revision"].as_u64());
+            if signed_revision != Some(revision) {
+                for part in parts.iter_mut() {
+                    if part["type"] == "kroma_anthropic_content_blocks" {
+                        if let Some(blocks) = part["blocks"].as_array_mut() {
+                            blocks.retain(|block| {
+                                !matches!(
+                                    block["type"].as_str(),
+                                    Some("thinking" | "redacted_thinking")
+                                )
+                            });
+                        }
+                    }
+                }
+                parts.retain(|part| {
+                    !matches!(
+                        part["type"].as_str(),
+                        Some("thinking" | "redacted_thinking")
+                    )
+                });
+            }
+        }
     }
 
     /// The checkpoint must read the original tool evidence, not a legacy TRC
@@ -988,7 +990,13 @@ impl Compression {
         };
         let mut view = vec![first.clone()];
         self.push_summary_messages(&mut view, state);
-        view.extend(messages.iter().skip(state.covered_until).cloned());
+        // Summary requests must obey the same signed-thinking revision rule
+        // as normal requests, while retaining original tool evidence.
+        for message in messages.iter().skip(state.covered_until) {
+            let mut item = message.clone();
+            Self::clear_stale_signed_thinking(&mut item, state.revision);
+            view.push(item);
+        }
         view
     }
 
@@ -2233,6 +2241,64 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn later_checkpoint_does_not_reintroduce_old_anthropic_signatures() {
+        let mut old = Message::new("assistant", "old answer");
+        old.provider_items = Some(vec![
+            json!({"type":"kroma_anthropic_content_blocks","blocks":[
+                {"type":"thinking","thinking":"private","signature":"old"},
+                {"type":"redacted_thinking","data":"opaque"},
+                {"type":"text","text":"old answer"}]}),
+            json!({"type":"kroma_context_revision","revision":1}),
+        ]);
+        let mut current = Message::new("assistant", "new answer");
+        current.provider_items = Some(vec![
+            json!({"type":"kroma_anthropic_content_blocks","blocks":[
+                {"type":"thinking","thinking":"new","signature":"new"},
+                {"type":"text","text":"new answer"}]}),
+            json!({"type":"kroma_context_revision","revision":2}),
+        ]);
+        let raw = vec![
+            Message::new("system", "system"),
+            Message::new("user", "first"),
+            old,
+            Message::tool("tool".into(), "original evidence".into()),
+            current,
+        ];
+        let state = CompactionState {
+            revision: 2,
+            covered_until: 1,
+            ..Default::default()
+        };
+        let context = Compression::new(state.clone(), budget(), Path::new("/tmp/test.json"));
+        let normal = context.view_with_state(&raw, &state);
+        let checkpoint = context.summary_source_view(&raw, &state);
+        for projection in [&normal, &checkpoint] {
+            let blocks = projection[2].provider_items.as_ref().unwrap()[0]["blocks"]
+                .as_array()
+                .unwrap();
+            assert_eq!(blocks.len(), 1, "old signature must not be replayed");
+            assert_eq!(blocks[0]["type"], "text");
+            assert_eq!(projection[3].content.as_deref(), Some("original evidence"));
+            assert_eq!(
+                projection[4].provider_items.as_ref().unwrap()[0]["blocks"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2,
+                "current signature remains intact"
+            );
+        }
+        assert_eq!(
+            raw[2].provider_items.as_ref().unwrap()[0]["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3,
+            "durable transcript must stay untouched"
         );
     }
 

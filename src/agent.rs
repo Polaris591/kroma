@@ -1305,7 +1305,10 @@ impl Agent {
                 trace.record(
                     self.session.archive_path(),
                     snapshot,
-                    completion.as_ref().ok().and_then(|c| c.usage.as_ref()),
+                    match &completion {
+                        Ok(c) => c.usage.as_ref(),
+                        Err(error) => crate::provider::reported_error_usage(error),
+                    },
                     completion.is_ok(),
                 );
             }
