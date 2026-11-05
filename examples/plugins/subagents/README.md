@@ -36,6 +36,19 @@ One tool, `subagent`, takes up to eight independent tasks:
 | `tasks[].task` | Nonempty UTF-8 string, at most 16 KiB (the child inlines piped stdin only up to that size) |
 | `tasks[].cwd` | Existing directory; defaults to the host working directory |
 | `tasks[].resume` | Optional token from an earlier result; continues that child's saved conversation (see below) |
+| `tasks[].profile` | `general` (default), `explore`, `planner`, `reviewer`, `verifier`, or a project/user Markdown profile |
+| `tasks[].label` | Optional progress label, 1..60 printable characters |
+| `tasks[].complexity` | `light`, `medium`, `heavy`; model tier when the selected profile uses `auto` |
+
+Profiles are Markdown files with strict frontmatter. Built-ins live in
+`profiles/`; user overrides in `~/.kroma/agents/` and project overrides in
+`<workdir>/.kroma/agents/` take precedence, in that order. The profile's
+prompt, tool allowlist, shell mode and next-request turn/token limits are
+applied by the child Kroma runtime, not merely suggested in the task text.
+Read-only and test shell modes allow only a deliberately limited set of simple
+commands, rejecting pipes, redirections, shell substitutions and other syntax.
+This is tool-level control, **not** an operating-system filesystem sandbox;
+tests and build scripts can execute repository code.
 
 Results always follow input order, even when tasks finish out of order. A started
 task also returns a `resume` token.
@@ -148,14 +161,17 @@ its saved conversation:
 
 ## Model
 
-- `model` (default `deepseek-v4.1-flash`) sets `KROMA_MODEL` for every child
+- `model` (default empty/inherit) sets `KROMA_MODEL` for every child
   process. It must be an id the parent's endpoint serves: children keep the
   parent's endpoint, key and protocol, and only the model id changes.
-- `thinking` (default `max`, one of `off`, `enabled`, `high`, `max`) sets
+- `thinking` (default empty/inherit, one of `off`, `enabled`, `high`, `max`) sets
   `KROMA_DEEPSEEK_THINKING`, the DeepSeek reasoning tier. It applies to
   DeepSeek-compatible endpoints; other providers ignore it.
 - Remove either setting or set it empty to let children inherit the parent
   conversation's model and profile.
+- Optional `model_light`, `model_medium`, and `model_heavy` settings map profile
+  tiers to models on the same configured endpoint. An unset tier inherits the
+  legacy `model` setting; the child never invents a model identifier.
 - `/plugins set subagents model <id>` (or `kroma plugins set subagents model
   <id>`) changes it for this installation without editing the manifest; the
   manifest value is the default a fresh install starts from.

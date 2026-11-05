@@ -148,7 +148,7 @@ impl UiState {
                 let Some(line) = document.lines.get_mut(row) else {
                     continue;
                 };
-                if !line.spans.first().is_some_and(|span| span.content == "│ ") {
+                if line.spans.first().is_none_or(|span| span.content != "│ ") {
                     continue;
                 }
                 let source = line

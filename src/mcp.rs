@@ -223,10 +223,13 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 
 /// Stable content digest used wherever an approval is bound to code bytes.
 pub(crate) fn content_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     sha256(bytes)
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 fn is_js_module(path: &Path) -> bool {

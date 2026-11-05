@@ -800,7 +800,7 @@ test("live progress shows a roster row, one row per running task and the answers
     h.calls[0].finish({frames: [{type: "result", text: "done\nand dusted"}]});
     const response = await run;
     assert.equal(response.status, "completed");
-    assert.ok(seen.includes("▷ [1/1] count files"), JSON.stringify(seen));
+    assert.ok(seen.includes("▷ [1/1] count"), JSON.stringify(seen));
     assert.ok(seen.some(line => line.startsWith("1▶ · ")), JSON.stringify(seen));
     const live = seen.find(line => line.startsWith("[1/1] ") && line.includes("▶ shell "));
     assert.ok(live, JSON.stringify(seen));
@@ -845,6 +845,20 @@ test("without a configured model the child inherits the parent profile", async (
     assert.equal(h.calls[0].options.env.KROMA_DEEPSEEK_THINKING, undefined);
     h.calls[0].finish({frames: [{type: "result", text: "one"}]});
     assert.equal(await settled, null);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("unsupported task fields are rejected before any child starts", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    await assert.rejects(
+      runBatch(batch([{task: "valid"}, {task: "invalid", unsupportedField: "surprise"}],
+        {workdir: dir}), {spawn: h.spawn, dataDir: dir}),
+      {code: "INVALID_ARGUMENT", message: /unsupportedField is not supported/});
+    assert.equal(h.calls.length, 0);
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }

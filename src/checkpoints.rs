@@ -257,7 +257,7 @@ impl Repo {
             let (mut child, _tree) = crate::winsys::ChildTreeGuard::spawn(&mut command)?;
             #[cfg(not(windows))]
             let mut child = command.spawn()?;
-            let status = loop {
+            loop {
                 if self.cancelled() {
                     #[cfg(windows)]
                     _tree.terminate();
@@ -278,8 +278,7 @@ impl Repo {
                     Some(status) => break status,
                     None => std::thread::sleep(Duration::from_millis(5)),
                 }
-            };
-            status
+            }
         };
         checked_output(Output {
             status,
@@ -1204,8 +1203,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn cancelled_snapshot_stops_before_ref_mutation_and_releases_the_lock() -> Result<()> {
+    // The cancellable path uses Tokio's process reaper, so the fixture must
+    // provide the same runtime that production's spawned checkpoint has.
+    #[tokio::test]
+    async fn cancelled_snapshot_stops_before_ref_mutation_and_releases_the_lock() -> Result<()> {
         let (root, repo) = initialized("cancel")?;
         fs::write(root.join("base.txt"), "base\n")?;
         let cancel = Arc::new(AtomicBool::new(false));

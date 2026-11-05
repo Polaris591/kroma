@@ -224,7 +224,8 @@ function tasks(request, workdir, dataDir, profiles) {
     if (!["light", "medium", "heavy"].includes(complexity)) {
       throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].complexity must be light, medium or heavy`);
     }
-    const label = entry.label ?? task.split(/\r?\n/)[0].trim().slice(0, 60);
+    const label = entry.label ?? Array.from(task.split(/\r?\n/).find(line => line.trim())?.trim() ?? "")
+      .slice(0, 60).join("");
     if (typeof label !== "string" || !label.trim() || Array.from(label).length > 60
       || /[\x00-\x1f\x7f]/.test(label)) {
       throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].label must have 1..60 printable characters`);

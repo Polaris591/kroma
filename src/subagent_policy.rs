@@ -219,12 +219,13 @@ fn allowed_command(command: &str, mode: &str) -> bool {
     }
     if mode == "test" {
         return match *first {
-            "cargo" => parts
-                .get(1)
-                .is_some_and(|verb| matches!(*verb, "test" | "check" | "clippy" | "fmt")),
-            "npm" => parts
-                .get(1)
-                .is_some_and(|verb| matches!(*verb, "test" | "run")),
+            "cargo" => parts.get(1).is_some_and(|verb| {
+                matches!(*verb, "test" | "check" | "clippy")
+                    || (*verb == "fmt" && parts.iter().any(|arg| *arg == "--check"))
+            }),
+            "npm" => parts.get(1).is_some_and(|verb| {
+                *verb == "test" || (*verb == "run" && parts.get(2) == Some(&"test"))
+            }),
             "node" => parts.get(1) == Some(&"--test"),
             "pytest" => true,
             "go" => parts.get(1) == Some(&"test"),
@@ -266,6 +267,9 @@ mod tests {
         }
         assert!(allowed_command("cargo test --locked", "test"));
         assert!(!allowed_command("cargo test --locked", "read-only"));
+        assert!(!allowed_command("cargo fmt", "test"));
+        assert!(allowed_command("cargo fmt --check", "test"));
+        assert!(!allowed_command("npm run arbitrary-script", "test"));
     }
 
     #[test]
@@ -288,5 +292,45 @@ mod tests {
             .unwrap()
             .contains("Restricted subagent"));
         assert_eq!(policy.limits().max_turns, 20);
+    }
+
+    #[tokio::test]
+    async fn restricted_shell_is_enforced_during_dispatch_not_just_advertised() {
+        use crate::protocol::FunctionCall;
+        let policy = SubagentPolicy {
+            profile: "reviewer".into(),
+            prompt: "Review without edits".into(),
+            tools: Some(vec!["shell".into()]),
+            disallowed_tools: vec![],
+            shell: "read-only".into(),
+            max_turns: 5,
+            max_tokens: 1_000,
+        };
+        let mut tools = ToolRegistry::builtin();
+        policy
+            .apply(&mut tools, &mut PromptComposer::default())
+            .unwrap();
+        let cwd = std::env::temp_dir();
+        let call = ToolCall {
+            id: "attempt".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "shell".into(),
+                arguments: serde_json::json!({"command":"touch kroma-denied-test-file"})
+                    .to_string(),
+            },
+        };
+        let outcome = tools
+            .execute(
+                &call,
+                ToolContext {
+                    workdir: &cwd,
+                    archive: &cwd,
+                    on_output: None,
+                },
+            )
+            .await;
+        assert!(outcome.is_error);
+        assert!(outcome.content.contains("policy refused"));
     }
 }
