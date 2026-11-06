@@ -1,6 +1,6 @@
 id = "web"
 name = "Web Search & Fetch"
-version = "1.7.0"
+version = "2.0.0"
 description = "Search the web and fetch readable text from webpages"
 command = "node"
 args = ["main.js"]
@@ -10,6 +10,7 @@ prompt = "\nUse web_search for source discovery; call web_fetch only when full-p
 provider = "auto"
 max_results = 6
 max_chars = 12000
+render_fallback = "off"
 timeout_ms = 15000
 fetch_provider = "http"
 paid_fallback = false
@@ -60,3 +61,7 @@ maximum = 30000
 type = "integer"
 minimum = 0
 description = "Character offset for continuation; use next_start from the previous result with the same URL. Defaults to 0 (fresh read)."
+[tools.parameters.properties.find]
+type = "string"
+description = "Optional exact phrase to find; returns up to 5 bounded surrounding passages and offsets, avoiding full-page token cost. Do not combine with start_char."
+maxLength = 200

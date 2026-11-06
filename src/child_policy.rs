@@ -12,31 +12,33 @@ use serde::Deserialize;
 use std::{collections::HashSet, fs, path::Path, sync::Arc};
 
 #[derive(Clone, Copy, Debug)]
-pub struct AgentLimits {
+pub struct ExecutionLimits {
     pub max_turns: usize,
     pub max_tokens: u64,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SubagentPolicy {
+pub struct ChildPolicy {
     profile: String,
     prompt: String,
     tools: Option<Vec<String>>,
     #[serde(default)]
     disallowed_tools: Vec<String>,
+    #[serde(default)]
+    host_denied_tools: Vec<String>,
     shell: String,
     max_turns: usize,
     max_tokens: u64,
 }
 
-impl SubagentPolicy {
+impl ChildPolicy {
     pub fn from_env() -> Result<Option<Self>> {
-        let Some(path) = std::env::var_os("KROMA_SUBAGENT_POLICY_FILE") else {
+        let Some(path) = std::env::var_os("KROMA_CHILD_POLICY_FILE") else {
             return Ok(None);
         };
-        if std::env::var("KROMA_SUBAGENT_DEPTH").ok().as_deref() != Some("1") {
-            bail!("subagent policy requires KROMA_SUBAGENT_DEPTH=1");
+        if std::env::var("KROMA_CHILD_DEPTH").ok().as_deref() != Some("1") {
+            bail!("child policy requires KROMA_CHILD_DEPTH=1");
         }
         let path = Path::new(&path);
         let metadata = fs::metadata(path).context("subagent policy file unavailable")?;
@@ -60,8 +62,8 @@ impl SubagentPolicy {
         Ok(Some(policy))
     }
 
-    pub fn limits(&self) -> AgentLimits {
-        AgentLimits {
+    pub fn limits(&self) -> ExecutionLimits {
+        ExecutionLimits {
             max_turns: self.max_turns,
             max_tokens: self.max_tokens,
         }
@@ -78,15 +80,14 @@ impl SubagentPolicy {
             .as_ref()
             .map(|names| names.iter().map(String::as_str).collect());
         let deny: HashSet<&str> = self.disallowed_tools.iter().map(String::as_str).collect();
+        let host_deny: HashSet<&str> = self.host_denied_tools.iter().map(String::as_str).collect();
         let mut enabled = 0;
         for name in &names {
             if allow
                 .as_ref()
                 .is_some_and(|only| !only.contains(name.as_str()))
                 || deny.contains(name.as_str())
-                // Child project memory is read-only; no nested delegation.
-                // A permissive custom profile cannot override this boundary.
-                || matches!(name.as_str(), "subagent" | "memory_remember" | "memory_forget")
+                || host_deny.contains(name.as_str())
                 || (name == "shell" && self.shell == "deny")
             {
                 tools.disable(name)?;
@@ -288,11 +289,12 @@ mod tests {
 
     #[test]
     fn policy_filters_advertised_tools_and_adds_profile_prompt() {
-        let policy = SubagentPolicy {
+        let policy = ChildPolicy {
             profile: "explore".into(),
             prompt: "Inspect only".into(),
             tools: Some(vec!["shell".into()]),
             disallowed_tools: vec![],
+            host_denied_tools: vec![],
             shell: "read-only".into(),
             max_turns: 20,
             max_tokens: 10000,
@@ -319,11 +321,16 @@ mod tests {
         ] {
             tools.register(Arc::new(NamedTool(name))).unwrap();
         }
-        let policy = SubagentPolicy {
+        let policy = ChildPolicy {
             profile: "general".into(),
             prompt: "Finish the task".into(),
             tools: None,
             disallowed_tools: vec![],
+            host_denied_tools: vec![
+                "subagent".into(),
+                "memory_remember".into(),
+                "memory_forget".into(),
+            ],
             shell: "inherit".into(),
             max_turns: 40,
             max_tokens: 0,

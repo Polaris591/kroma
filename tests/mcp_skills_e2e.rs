@@ -90,6 +90,8 @@ for line in sys.stdin:
             &invoke("mcp__local__echo", r#"{"text":"hello"}"#),
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
@@ -226,6 +228,8 @@ async fn http_integration(version: &str, sse: bool) -> Result<()> {
             &invoke("mcp__remote__echo", r#"{"text":"hello"}"#),
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
@@ -343,6 +347,8 @@ async fn skills_expose_metadata_and_load_on_demand() -> Result<()> {
             &invoke("load_skill", r#"{"name":"code-review"}"#),
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
@@ -521,6 +527,8 @@ async fn lazy_mcp_search_and_call_share_one_connection() -> Result<()> {
     assert_eq!(report.tools, 2);
     let context = || ToolContext {
         model_connection: None,
+        user_message: None,
+        user_turn: None,
         workdir: &dir,
         archive: Path::new("/tmp/test.json"),
         on_output: None,

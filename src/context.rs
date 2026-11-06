@@ -3762,6 +3762,8 @@ mod tests {
                 &search,
                 ToolContext {
                     model_connection: None,
+                    user_message: None,
+                    user_turn: None,
                     workdir: &dir,
                     archive: &archive,
                     on_output: None,
@@ -3785,6 +3787,8 @@ mod tests {
                 &read,
                 ToolContext {
                     model_connection: None,
+                    user_message: None,
+                    user_turn: None,
                     workdir: &dir,
                     archive: &archive,
                     on_output: None,

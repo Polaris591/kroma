@@ -12,6 +12,7 @@ on:
       - 'Cargo.lock'
       - 'build.rs'
       - 'npm/**'
+      - 'examples/plugins/**'
       - '.github/workflows/npm.yml'
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - 'Cargo.lock'
       - 'build.rs'
       - 'npm/**'
+      - 'examples/plugins/**'
       - '.github/workflows/npm.yml'
   workflow_dispatch:
   workflow_call:
@@ -95,8 +97,14 @@ jobs:
         run: npm --prefix npm test
       - name: Build binary
         run: cargo build --release --locked --bin kroma
+      - name: Build official project-memory worker
+        run: cargo build --release --locked --manifest-path examples/plugins/project-memory/Cargo.toml
       - name: Stage npm packages
-        run: node npm/stage.cjs --target ${{ matrix.target }} --binary ${{ matrix.binary }} --out .npm-dist
+        shell: bash
+        run: |
+          memory_bin="examples/plugins/project-memory/target/release/kroma-memory"
+          if [ "${{ matrix.host_platform }}" = "win32" ]; then memory_bin="$memory_bin.exe"; fi
+          node npm/stage.cjs --target "${{ matrix.target }}" --binary "${{ matrix.binary }}" --memory-binary "$memory_bin" --out .npm-dist
       - name: Smoke-test installation
         run: npm --prefix npm run smoke -- ../.npm-dist
       - name: Upload npm tarballs

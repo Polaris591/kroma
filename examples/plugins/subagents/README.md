@@ -21,7 +21,27 @@ history: a child receives only the task you write.
 
 ## The tool
 
-One tool, `subagent`, takes up to eight independent tasks:
+One tool, `subagent`, supports both foreground legacy batches and a
+**Session-as-Job** lifecycle. The host holds jobs only while its plugin worker
+is alive; there is no remote queue or hidden scheduler. All jobs share a global
+three-child concurrency cap. The original synchronous interface remains:
+
+```json
+{"action":"run","task":"Explore the repository and report file:line evidence","profile":"explore"}
+{"action":"status","job_id":"returned-run-id"}
+{"action":"wait","job_id":"returned-run-id","wait_ms":500}
+{"action":"continue","resume":"returned-run-id/0","task":"Continue the same investigation"}
+{"action":"cancel","job_id":"returned-run-id"}
+```
+
+`run` starts quickly without waiting for the child. `status` and `wait` return
+one bounded snapshot; `wait` is at most 750 ms, so the same plugin host can
+process `cancel` on the next call. `continue` forks the saved child session,
+not the parent session. After worker restart, completed results remain readable
+from evidence; an unfinished run is marked interrupted and must be manually
+resumed. No claims of persistent background execution across host shutdown.
+
+Legacy foreground batches accept up to eight independent tasks:
 
 ```json
 {"tasks": [

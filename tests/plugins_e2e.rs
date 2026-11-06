@@ -203,6 +203,8 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
                 &call,
                 ToolContext {
                     model_connection: None,
+                    user_message: None,
+                    user_turn: None,
                     workdir: &workspace,
                     archive: &archive,
                     on_output: None,
@@ -216,6 +218,8 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
                 &call,
                 ToolContext {
                     model_connection: None,
+                    user_message: None,
+                    user_turn: None,
                     workdir: &workspace,
                     archive: &archive,
                     on_output: None,
@@ -383,6 +387,8 @@ async fn tool_replacement_prompt_override_and_hooks_execute() -> Result<()> {
                 &call,
                 ToolContext {
                     model_connection: None,
+                    user_message: None,
+                    user_turn: None,
                     workdir: &workdir,
                     archive: temp.path(),
                     on_output: None,
@@ -1172,6 +1178,8 @@ async fn plugin_jsonl_rejects_incorrect_response_correlation() -> Result<()> {
             &call,
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir: temp.path(),
                 archive: temp.path(),
                 on_output: None,
@@ -1461,6 +1469,8 @@ process.stdout.write(JSON.stringify({content:"recovered"})+"\n");}});"#,
     };
     let ctx = ToolContext {
         model_connection: None,
+        user_message: None,
+        user_turn: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1518,6 +1528,8 @@ frame({event:"complete",result:{content:"ok",is_error:false}});});"#,
     loaded.contribute(&mut tools, &mut prompt);
     let ctx = ToolContext {
         model_connection: None,
+        user_message: None,
+        user_turn: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1612,6 +1624,8 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
     };
     let ctx = ToolContext {
         model_connection: None,
+        user_message: None,
+        user_turn: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1687,6 +1701,8 @@ frame({event:"error",message:"worker is unusable"});});"#,
     };
     let ctx = ToolContext {
         model_connection: None,
+        user_message: None,
+        user_turn: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1750,6 +1766,8 @@ process.stdout.write(JSON.stringify({content:"recovered"})+String.fromCharCode(1
     };
     let ctx = ToolContext {
         model_connection: None,
+        user_message: None,
+        user_turn: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1821,6 +1839,8 @@ setInterval(()=>frame({event:"output_delta",stream:"stdout",delta:"."}),50);});"
     };
     let ctx = ToolContext {
         model_connection: None,
+        user_message: None,
+        user_turn: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -1934,6 +1954,8 @@ async fn web_tools_roundtrip_through_kroma_to_local_http_server() -> Result<()> 
         .any(|schema| schema["function"]["name"] == "web_fetch"));
     let ctx = ToolContext {
         model_connection: None,
+        user_message: None,
+        user_turn: None,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
@@ -2592,6 +2614,8 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
             &call,
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir: temp.path(),
                 archive: &archive,
                 on_output: None,
@@ -2924,6 +2948,8 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
                     &call,
                     ToolContext {
                         model_connection: None,
+                        user_message: None,
+                        user_turn: None,
                         workdir: &workdir,
                         archive: temp.path(),
                         on_output: None,
@@ -3254,6 +3280,8 @@ async fn process_plugin_tool_streams_progress_without_changing_final_result() ->
             &call,
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir: temp.path(),
                 archive: temp.path(),
                 on_output: Some(&callback),

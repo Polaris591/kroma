@@ -16,7 +16,9 @@ use sha2::{Digest, Sha256};
 use crate::model::{self, Memory, NewMemory, SearchHit, Settings, Source, Stats, KINDS};
 use crate::scope::{self, Scope};
 use crate::store::Store;
-use crate::store::{now_ts, PENDING_TTL_SECS, REVIEW_TTL_SECS, STATE_ACCEPTED, STATE_PENDING};
+use crate::store::{
+    now_ts, VerifiedClaim, PENDING_TTL_SECS, REVIEW_TTL_SECS, STATE_ACCEPTED, STATE_PENDING,
+};
 
 pub const PROTOCOL_VERSION: u64 = 2;
 /// Maximum request line, excluding the terminating newline.
@@ -261,8 +263,13 @@ fn open_storage(object: &Map<String, Value>) -> Result<Storage, String> {
         .ok_or_else(|| "Request is missing its data directory".to_string())?;
     let scope = scope::resolve(Path::new(&data_dir), Path::new(&workdir))
         .map_err(|_| "Memory storage is unavailable for this workspace".to_string())?;
-    let store = Store::open(&scope.database, &scope.id)
+    let mut store = Store::open(&scope.database, &scope.id)
         .map_err(|_| "Memory storage is unavailable for this workspace".to_string())?;
+    // Bounded, local maintenance: never inject a review about a source file
+    // whose content has changed or disappeared since evidence was recorded.
+    store
+        .refresh_file_states(Path::new(&scope.workdir))
+        .map_err(|_| "Memory maintenance failed".to_string())?;
     Ok(Storage { scope, store })
 }
 
@@ -582,6 +589,7 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
             "evidence",
             "evidence_refs",
             "supersedes",
+            "topic",
         ],
     )?;
     let kind = match arguments.get("kind") {
@@ -605,6 +613,21 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
     let evidence = optional_evidence_refs(arguments)?;
     let quote = optional_quote(arguments)?;
     let supersedes = optional_supersedes(arguments)?;
+    let topic = match arguments.get("topic") {
+        None => None,
+        Some(Value::String(value))
+            if !value.trim().is_empty()
+                && value.len() <= 100
+                && !value.chars().any(char::is_control) =>
+        {
+            Some(value.trim().to_lowercase())
+        }
+        _ => {
+            return Err(ToolFailure::invalid(
+                "topic must be a short nonempty string",
+            ))
+        }
+    };
     let is_review = kind == "review";
     if is_review {
         if paths.is_empty() {
@@ -625,6 +648,41 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
 
     let source = envelope_source(object, "model_proposal")
         .map_err(|message| ToolFailure::new("invalid_request", message))?;
+    // The host's opt-in tool context is not an agent-provided argument. It
+    // proves a quote belongs to the CURRENT user turn, not an earlier message
+    // and does not persist the entire raw request in the memory database.
+    let trusted = object
+        .get("trusted_user_context")
+        .and_then(Value::as_object);
+    let verified_turn = if !is_review {
+        if let Some(trusted) = trusted {
+            let message = trusted
+                .get("message")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ToolFailure::invalid("missing trusted user message"))?;
+            let turn = trusted
+                .get("turn")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| ToolFailure::invalid("missing current user turn"))?;
+            if !model::quote_matches(quote.as_deref().unwrap_or(""), &[message.to_string()]) {
+                return Err(ToolFailure::invalid(
+                    "quote does not appear in the current user instruction",
+                ));
+            }
+            let archive = object.get("archive").and_then(Value::as_str).unwrap_or("");
+            let key = format!("{archive}:{turn}");
+            Some(format!("{:x}", Sha256::digest(key.as_bytes())))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if verified_turn.is_some() && topic.is_none() {
+        return Err(ToolFailure::invalid(
+            "a short stable topic is required to accept a durable rule without silently missing conflicts",
+        ));
+    }
     let input = NewMemory {
         kind: kind.clone(),
         text,
@@ -648,6 +706,8 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
     let now = now_ts();
     let (state, expires_at) = if is_review {
         (STATE_ACCEPTED, Some(now + REVIEW_TTL_SECS))
+    } else if verified_turn.is_some() {
+        (STATE_ACCEPTED, None)
     } else {
         (STATE_PENDING, Some(now + PENDING_TTL_SECS))
     };
@@ -659,19 +719,31 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
             quote.as_deref(),
             expires_at,
             supersedes.as_deref(),
+            VerifiedClaim {
+                turn: verified_turn.as_deref(),
+                topic: topic.as_deref(),
+            },
         )
         .map_err(|error| ToolFailure::new("storage_error", store_message(&error)))?;
+    if !memory.paths.is_empty() && memory.state == STATE_ACCEPTED {
+        storage
+            .store
+            .stamp_paths(&memory.id, Path::new(&storage.scope.workdir))
+            .map_err(|_| {
+                ToolFailure::new("storage_error", "Could not fingerprint project evidence")
+            })?;
+    }
     let active = memory.state == STATE_ACCEPTED;
     let note = if active {
         "Stored as an active, unverified review note with a 30-day expiry. It is navigation data, not proof that code is safe."
     } else {
-        "Stored as pending. It becomes searchable only after the user restates this quote in a later message; never present it as an accepted rule."
+        "Stored as pending for compatibility with a host that cannot provide a verified current-user turn."
     };
     Ok(json!({
         "id": memory.id,
         "kind": memory.kind,
         "state": memory.state,
-        "status": if active { "active" } else { "pending" },
+        "status": if active { "active" } else { memory.state.as_str() },
         "searchable": active,
         "unverified": is_review,
         "expires_at": memory.expires_at,
@@ -769,7 +841,7 @@ fn build_context(object: &Map<String, Value>) -> Result<Value, String> {
             value.clamp(256, MAX_CONTEXT_BYTES as u64) as usize
         });
 
-    let storage = open_storage(object)?;
+    let mut storage = open_storage(object)?;
     let settings = storage
         .store
         .settings()
@@ -801,6 +873,45 @@ fn build_context(object: &Map<String, Value>) -> Result<Value, String> {
             "paths": memory.paths,
         }));
     }
+    if let Some(notice) = storage
+        .store
+        .take_conflict_notice(&intent)
+        .map_err(|_| "Memory conflict check failed".to_string())?
+    {
+        let size = notice.len();
+        if bytes.saturating_add(size) <= max_bytes
+            && tokens.saturating_add(size / 4 + 12) <= max_tokens
+        {
+            blocks.push(json!({"kind":"conflict","text":notice,"trust":"unverified-reference"}));
+        }
+    }
+    if [
+        "上次",
+        "上一次",
+        "刚才",
+        "last task",
+        "last time",
+        "previous task",
+        "resume",
+    ]
+    .iter()
+    .any(|needle| intent.to_lowercase().contains(needle))
+    {
+        if let Some(activity) = storage
+            .store
+            .last_activity(now_ts())
+            .map_err(|_| "Memory activity lookup failed".to_string())?
+        {
+            let size = activity.len();
+            if blocks.len() < MAX_BLOCKS
+                && bytes.saturating_add(size) <= max_bytes
+                && tokens.saturating_add(size / 4 + 12) <= max_tokens
+            {
+                blocks.push(json!({"kind":"last_activity","text":activity,
+                    "trust":"unverified-reference"}));
+            }
+        }
+    }
     Ok(json!({ "blocks": blocks }))
 }
 
@@ -822,6 +933,17 @@ fn build_summary(object: &Map<String, Value>) -> Result<String, String> {
     let current: &[String] = recent.last().map(std::slice::from_ref).unwrap_or(&[]);
     // Promotion is best effort: a storage failure still acknowledges the task.
     let _ = storage.store.promote_pending(current, now_ts());
+    let status = object
+        .get("arguments")
+        .and_then(Value::as_object)
+        .and_then(|args| args.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let _ = storage.store.record_last_activity(
+        current.first().map_or("", String::as_str),
+        status,
+        now_ts(),
+    );
     Ok(TASK_SUMMARY_OK.to_string())
 }
 
@@ -914,10 +1036,7 @@ fn run_command(object: &Map<String, Value>, arguments: &str) -> Result<String, S
 }
 
 fn usage() -> String {
-    "Usage: /memory [status|remember [kind] TEXT|review TEXT|search TEXT|show ID|\
-     candidates [offset]|accept ID|correct ID TEXT|forget ID|purge ID --confirm|\
-     use on|off|capture on|off|off|export [offset]|import FILE --confirm|doctor]"
-        .to_string()
+    "Usage: /memory [forget ID|TEXT|off|on]. Normal use is automatic; advanced maintenance commands remain available for migration.".to_string()
 }
 
 fn command_status(object: &Map<String, Value>) -> Result<String, String> {
@@ -935,23 +1054,19 @@ fn command_status(object: &Map<String, Value>) -> Result<String, String> {
 
 fn format_status(scope: &Scope, settings: &Settings, stats: &Stats) -> String {
     format!(
-        "Project memory - automation {}\n\
-         Scope: {} ({})\n\
-         Storage: private local SQLite, no network\n\
-         Recall: {}  Capture: {}\n\
-         Active: {}  Pending: {}  Legacy candidates: {}\n\
-         Review notes expire after 30 days; pending rules drop after 7.\n\
-         Commands: /memory off|on, forget ID|TEXT, search TEXT, show ID, doctor\n\
-         Model tools: memory_search, memory_read, memory_remember, memory_forget.\n\
-         Recall text is untrusted reference data sent to the configured provider, never instructions.",
+        "Project memory: {}\n\
+         Project: {} ({})\n\
+         Stored locally; recall {}, automatic capture {}\n\
+         Recent active rules: {}\n\
+         Review notes expire or become stale when files change; conflicts are paused.\n\
+         Say 'forget that' or use /memory forget <id|text>; /memory off|on.\n\
+         Recalled facts are untrusted references, sent to the configured provider.",
         on_off(settings.use_enabled && settings.capture_enabled),
         short_id(&scope.id),
         scope.workdir,
         on_off(settings.use_enabled),
         on_off(settings.capture_enabled),
         stats.accepted,
-        stats.pending,
-        stats.candidates,
     )
 }
 
@@ -1749,6 +1864,240 @@ mod tests {
     fn reply_content(reply: &Value) -> Value {
         serde_json::from_str(reply["content"].as_str().expect("string content"))
             .expect("json content")
+    }
+
+    #[test]
+    fn trusted_current_user_quote_is_accepted_immediately_and_only_once_per_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let quote = "This repository will use pnpm for dependencies";
+        let args = json!({"kind":"decision","text":"Use pnpm for dependencies","quote":quote,"topic":"dependency manager"});
+        let mut first = storage_request(tmp.path(), "tool", "memory_remember", args.clone());
+        first["archive"] = json!("/tmp/conversation-a");
+        first["trusted_user_context"] =
+            json!({"message":format!("User instructed: {quote}"),"turn":5});
+        let accepted = handle(first.clone());
+        assert_eq!(accepted["is_error"], false, "{accepted}");
+        assert_eq!(reply_content(&accepted)["state"], "accepted");
+        let duplicate = handle(first.clone());
+        assert_eq!(duplicate["is_error"], true);
+        let context = handle(storage_request(
+            tmp.path(),
+            "request_context",
+            "request_context",
+            json!({"intent":"pnpm dependencies"}),
+        ));
+        assert_eq!(
+            reply_content(&context)["blocks"].as_array().unwrap().len(),
+            1
+        );
+        first["trusted_user_context"] =
+            json!({"message":"A different current user request","turn":6});
+        assert_eq!(handle(first.clone())["is_error"], true);
+        first["trusted_user_context"] = json!({"message":quote,"turn":6});
+        assert_eq!(handle(first)["is_error"], false);
+    }
+
+    #[test]
+    fn code_review_memory_becomes_stale_when_file_changes_or_disappears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "fn old() {}\n").unwrap();
+        let review = handle(storage_request(
+            tmp.path(),
+            "tool",
+            "memory_remember",
+            json!({"kind":"review", "text":"legacy parser has no EOF handling",
+                "paths":["src/lib.rs"], "evidence":["cargo test parser_failure"]}),
+        ));
+        assert_eq!(review["is_error"], false, "{review}");
+        let id = reply_content(&review)["id"].as_str().unwrap().to_owned();
+        let search = || {
+            handle(storage_request(
+                tmp.path(),
+                "tool",
+                "memory_search",
+                json!({"query":"legacy parser"}),
+            ))
+        };
+        assert_eq!(
+            reply_content(&search())["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::write(project.join("src/lib.rs"), "fn rewritten() {}\n").unwrap();
+        assert!(reply_content(&search())["results"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let stored = open_storage(
+            storage_request(tmp.path(), "command", "memory", json!("status"))
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let memory = crate::store::load_memory(&stored.store.conn, &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(memory.state, "stale");
+    }
+
+    #[test]
+    fn contradictory_topic_rules_stop_injection_and_prompt_once_on_relevant_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let first_quote = "This project uses pnpm for the package manager";
+        let second_quote = "This project uses bun for the package manager";
+        let make = |quote: &str, text: &str, turn: u64| {
+            let mut request = storage_request(
+                tmp.path(),
+                "tool",
+                "memory_remember",
+                json!({"kind":"decision","text":text,"quote":quote,"topic":"package manager"}),
+            );
+            request["archive"] = json!("/tmp/topic-a");
+            request["trusted_user_context"] = json!({"message":quote,"turn":turn});
+            handle(request)
+        };
+        assert_eq!(make(first_quote, "Use pnpm", 3)["is_error"], false);
+        assert_eq!(make(second_quote, "Use bun", 4)["is_error"], false);
+        let query = || {
+            handle(storage_request(
+                tmp.path(),
+                "request_context",
+                "request_context",
+                json!({"intent":"What is the package manager for this project?"}),
+            ))
+        };
+        let first = reply_content(&query());
+        let blocks = first["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["kind"], "conflict");
+        assert!(blocks[0]["text"].as_str().unwrap().contains("pnpm"));
+        assert_eq!(
+            reply_content(&query())["blocks"].as_array().unwrap().len(),
+            0,
+            "do not nag the user on subsequent tasks about the same conflict"
+        );
+        let search = handle(storage_request(
+            tmp.path(),
+            "tool",
+            "memory_search",
+            json!({"query":"package manager"}),
+        ));
+        assert!(reply_content(&search)["results"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn one_explicit_user_correction_resolves_the_whole_disputed_topic() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let save = |text: &str, quote: &str, turn: u64, old: Option<&str>| {
+            let mut args = json!({"kind":"decision","text":text,"quote":quote,
+                "topic":"package manager"});
+            if let Some(old) = old {
+                args["supersedes"] = json!(old);
+            }
+            let mut request = storage_request(tmp.path(), "tool", "memory_remember", args);
+            request["archive"] = json!("/tmp/correction-session");
+            request["trusted_user_context"] = json!({"message":quote,"turn":turn});
+            handle(request)
+        };
+        let a = save(
+            "Use pnpm",
+            "The project must use pnpm instead of npm",
+            1,
+            None,
+        );
+        assert_eq!(a["is_error"], false);
+        let old = reply_content(&a)["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            save(
+                "Use npm",
+                "The project must use npm instead of pnpm",
+                2,
+                None
+            )["is_error"],
+            false
+        );
+        let corrected = save(
+            "Use bun",
+            "Correction: from now on the project uses bun",
+            3,
+            Some(&old),
+        );
+        assert_eq!(corrected["is_error"], false, "{corrected}");
+        assert_eq!(reply_content(&corrected)["state"], "accepted");
+        let search = handle(storage_request(
+            tmp.path(),
+            "tool",
+            "memory_search",
+            json!({"query":"bun"}),
+        ));
+        let hits = reply_content(&search);
+        assert_eq!(hits["results"].as_array().unwrap().len(), 1);
+        let context = handle(storage_request(
+            tmp.path(),
+            "request_context",
+            "request_context",
+            json!({"intent":"package manager bun"}),
+        ));
+        let blocks = reply_content(&context);
+        assert_eq!(blocks["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(blocks["blocks"][0]["kind"], "decision");
+    }
+
+    #[test]
+    fn task_summary_remembers_only_a_bounded_expiring_last_activity() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let summary = handle(storage_request(
+            tmp.path(),
+            "task_summary",
+            "task_summary",
+            json!({"status":"completed","recent_users":["Investigate build failures in src/lib.rs"]}),
+        ));
+        assert_eq!(summary["is_error"], false);
+        let query = handle(storage_request(
+            tmp.path(),
+            "request_context",
+            "request_context",
+            json!({"intent":"上次任务做到哪儿了"}),
+        ));
+        let blocks = reply_content(&query);
+        assert_eq!(blocks["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(blocks["blocks"][0]["kind"], "last_activity");
+        assert!(blocks["blocks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("build failures"));
+        let mut store = open_storage(
+            storage_request(tmp.path(), "command", "memory", json!("status"))
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(store
+            .store
+            .last_activity(now_ts() + 8 * 24 * 60 * 60)
+            .unwrap()
+            .is_none());
+        store
+            .store
+            .record_last_activity(
+                "token sk-abcdefghijklmnopqrstuvwxyz123456789",
+                "completed",
+                now_ts(),
+            )
+            .unwrap();
+        let activity = store.store.last_activity(now_ts()).unwrap().unwrap();
+        assert!(!activity.contains("abcdefghijklmnopqrstuvwxyz"));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! Read methods live in `store_read.rs`. Every mutation runs inside an
 //! IMMEDIATE transaction so writers serialise on an early reserved lock.
 
+use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,6 +16,7 @@ use crate::model::*;
 pub(crate) const SCHEMA_VERSION: i64 = 2;
 pub(crate) const MAX_ROWS: i64 = 10_000;
 pub(crate) const MAX_CANDIDATES: i64 = 200;
+pub(crate) const MAX_ACTIVE: i64 = 200;
 const MAX_IMPORT_NOTES: usize = 2_000;
 const BUSY_TIMEOUT_MS: u64 = 1_000;
 
@@ -25,6 +27,14 @@ pub(crate) const STATE_FORGOTTEN: &str = "forgotten";
 pub(crate) const STATE_PURGED: &str = "purged";
 pub(crate) const STATE_DROPPED: &str = "dropped";
 pub(crate) const STATE_EXPIRED: &str = "expired";
+pub(crate) const STATE_STALE: &str = "stale";
+pub(crate) const STATE_ARCHIVED: &str = "archived";
+pub(crate) const STATE_DISPUTED: &str = "disputed";
+
+pub struct VerifiedClaim<'a> {
+    pub turn: Option<&'a str>,
+    pub topic: Option<&'a str>,
+}
 
 /// A remembered rule stays pending for one week waiting for the user to
 /// restate its quote; a review note is active but expires after 30 days.
@@ -34,6 +44,8 @@ pub(crate) const REVIEW_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 const META_IDENTITY: &str = "identity";
 const META_USE: &str = "use_enabled";
 const META_CAPTURE: &str = "capture_enabled";
+const META_LAST_ACTIVITY: &str = "last_activity";
+const ACTIVITY_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS memories (
@@ -68,6 +80,18 @@ CREATE TABLE IF NOT EXISTS imports (
 CREATE TABLE IF NOT EXISTS tombstones (
     fingerprint TEXT PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS memory_files (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relative_path TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    PRIMARY KEY(memory_id, relative_path)
+);
+CREATE TABLE IF NOT EXISTS memory_topics (
+    memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    topic TEXT NOT NULL,
+    notified INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS memory_topics_topic ON memory_topics(topic);
 "#;
 
 const INDEXES: &str = r#"
@@ -179,6 +203,9 @@ impl Store {
                 }
                 _ => existing,
             };
+            if accepted {
+                enforce_active_limit(&tx)?;
+            }
             tx.commit()?;
             return Ok(memory);
         }
@@ -193,6 +220,9 @@ impl Store {
             supersedes: None,
         };
         let memory = insert_row(&tx, input, &text, fingerprint, &row)?;
+        if accepted {
+            enforce_active_limit(&tx)?;
+        }
         tx.commit()?;
         Ok(memory)
     }
@@ -208,6 +238,7 @@ impl Store {
             STATE_PURGED => bail!("Memory was purged"),
             _ => bail!("Only pending candidates can be accepted"),
         };
+        enforce_active_limit(&tx)?;
         tx.commit()?;
         Ok(memory)
     }
@@ -384,7 +415,10 @@ impl Store {
         quote: Option<&str>,
         expires_at: Option<i64>,
         supersedes: Option<&str>,
+        verified: VerifiedClaim<'_>,
     ) -> Result<Memory> {
+        let verified_turn = verified.turn;
+        let topic = verified.topic;
         validate_input(input)?;
         if state != STATE_PENDING && state != STATE_ACCEPTED {
             bail!("Unsupported memory state");
@@ -400,6 +434,18 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(turn) = verified_turn {
+            let previous: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='last_verified_user_turn'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if previous.as_deref() == Some(turn) {
+                bail!("Only one durable memory may be accepted per user message");
+            }
+        }
         if is_tombstoned(&tx, &fingerprint)? {
             bail!("Identical content was forgotten or purged and cannot be re-created");
         }
@@ -409,19 +455,92 @@ impl Store {
             expires_at,
             supersedes,
         };
-        if let Some(existing) = load_by_fingerprint(&tx, &fingerprint)? {
+        let mut memory = if let Some(existing) = load_by_fingerprint(&tx, &fingerprint)? {
             let memory = match existing.state.as_str() {
                 STATE_PURGED => bail!("Memory was purged"),
                 STATE_FORGOTTEN => {
                     bail!("Identical content was forgotten and cannot be re-created")
                 }
-                STATE_ACCEPTED | STATE_PENDING => existing,
+                STATE_ACCEPTED => existing,
+                STATE_PENDING if state == STATE_ACCEPTED => promote_row(&tx, &existing)?,
+                STATE_PENDING => existing,
                 _ => revive_row(&tx, &existing, &row)?,
             };
-            tx.commit()?;
-            return Ok(memory);
+            memory
+        } else {
+            insert_row(&tx, input, &text, fingerprint, &row)?
+        };
+        if state == STATE_ACCEPTED {
+            if let Some(old_id) = supersedes.filter(|old| *old != memory.id) {
+                let old = load_memory(&tx, old_id)?.context("Superseded memory not found")?;
+                if old.state != STATE_ACCEPTED && old.state != STATE_DISPUTED {
+                    bail!("Superseded memory is not an active rule");
+                }
+                record_version_tombstones(&tx, &old)?;
+                set_state(&tx, &old, STATE_FORGOTTEN)?;
+            }
         }
-        let memory = insert_row(&tx, input, &text, fingerprint, &row)?;
+        if state == STATE_ACCEPTED && matches!(memory.kind.as_str(), "preference" | "decision") {
+            if let Some(topic) = topic {
+                tx.execute(
+                    "INSERT INTO memory_topics(memory_id,topic,notified) VALUES (?1,?2,0)
+                    ON CONFLICT(memory_id) DO UPDATE SET topic=excluded.topic, notified=0",
+                    params![memory.id, topic],
+                )?;
+                let mut stmt = tx.prepare(
+                    "SELECT m.id FROM memory_topics t
+                    JOIN memories m ON m.id=t.memory_id WHERE t.topic=?1 AND m.id != ?2
+                    AND m.state IN (?3,?4) AND m.text != ?5",
+                )?;
+                let conflicts = stmt
+                    .query_map(
+                        params![
+                            topic,
+                            memory.id,
+                            STATE_ACCEPTED,
+                            STATE_DISPUTED,
+                            memory.text
+                        ],
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+                if !conflicts.is_empty() {
+                    for id in conflicts {
+                        if let Some(other) = load_memory(&tx, &id)? {
+                            if supersedes.is_some() {
+                                // A verified user correction explicitly selects the
+                                // replacement rule for this topic. Resolve the whole
+                                // paused topic in one action, not one id at a time.
+                                record_version_tombstones(&tx, &other)?;
+                                set_state(&tx, &other, STATE_FORGOTTEN)?;
+                            } else if other.state != STATE_DISPUTED {
+                                set_state(&tx, &other, STATE_DISPUTED)?;
+                            }
+                        }
+                        if supersedes.is_none() {
+                            tx.execute(
+                                "UPDATE memory_topics SET notified=0 WHERE memory_id=?1",
+                                params![id],
+                            )?;
+                        }
+                    }
+                    if supersedes.is_none() {
+                        memory = set_state(&tx, &memory, STATE_DISPUTED)?;
+                    }
+                }
+            }
+        }
+        if let Some(turn) = verified_turn {
+            tx.execute(
+                "INSERT INTO metadata (key,value) VALUES ('last_verified_user_turn',?1)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![turn],
+            )?;
+        }
+        if state == STATE_ACCEPTED {
+            enforce_active_limit(&tx)?;
+        }
         tx.commit()?;
         Ok(memory)
     }
@@ -473,8 +592,182 @@ impl Store {
                 }
             }
         }
+        enforce_active_limit(&tx)?;
         tx.commit()?;
         Ok(report)
+    }
+
+    /// Snapshot only path fingerprints, never source code. A memory anchored
+    /// to a missing/out-of-scope/very large file cannot become an active code
+    /// fact. This maintenance is local and runs at write/recall boundaries.
+    pub fn stamp_paths(&mut self, id: &str, root: &Path) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let memory = require_memory(&tx, id)?;
+        if memory.state != STATE_ACCEPTED {
+            return Ok(());
+        }
+        let mut missing = false;
+        for path in &memory.paths {
+            if let Some(digest) = digest_project_file(root, path) {
+                tx.execute(
+                    "INSERT INTO memory_files(memory_id,relative_path,digest)
+                    VALUES (?1,?2,?3) ON CONFLICT(memory_id,relative_path)
+                    DO UPDATE SET digest=excluded.digest",
+                    params![id, path, digest],
+                )?;
+            } else {
+                missing = true;
+            }
+        }
+        if missing {
+            set_state(&tx, &memory, STATE_STALE)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn refresh_file_states(&mut self, root: &Path) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = tx.prepare(
+            "SELECT m.id, f.relative_path, f.digest
+              FROM memory_files f JOIN memories m ON m.id=f.memory_id
+              WHERE m.state='accepted'",
+        )?;
+        let entries = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let mut invalid = std::collections::HashSet::new();
+        for (id, path, digest) in entries {
+            if digest_project_file(root, &path).as_deref() != Some(&digest) {
+                invalid.insert(id);
+            }
+        }
+        // Old records with paths but no baseline fingerprint are uncertain.
+        // Keep them in the database but exclude them from automatic recall.
+        let mut statement = tx.prepare("SELECT id FROM memories WHERE state='accepted'
+            AND paths != '[]' AND NOT EXISTS (SELECT 1 FROM memory_files WHERE memory_id=memories.id)")?;
+        for id in statement.query_map([], |row| row.get::<_, String>(0))? {
+            invalid.insert(id?);
+        }
+        drop(statement);
+        for id in invalid {
+            if let Some(memory) = load_memory(&tx, &id)? {
+                set_state(&tx, &memory, STATE_STALE)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Recent task context is an expiring navigation hint, never a durable
+    /// preference or an automatically accepted project rule. Do not store raw
+    /// tool results or assistant conclusions.
+    pub fn record_last_activity(&mut self, request: &str, status: &str, now: i64) -> Result<()> {
+        let status = match status {
+            "completed" => "completed",
+            "failed" => "failed",
+            "cancelled" => "cancelled",
+            _ => "unknown",
+        };
+        let request: String = request.chars().take(300).collect();
+        let request = if crate::privacy::check_text(&request).is_ok() {
+            request
+        } else {
+            "(user request withheld by local privacy guard)".to_string()
+        };
+        let value = serde_json::json!({"request":request,"status":status,
+            "expires_at":now.saturating_add(ACTIVITY_TTL_SECS)})
+        .to_string();
+        self.conn.execute(
+            "INSERT INTO metadata(key,value) VALUES (?1,?2)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![META_LAST_ACTIVITY, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn last_activity(&self, now: i64) -> Result<Option<String>> {
+        let saved: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key=?1",
+                params![META_LAST_ACTIVITY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(saved) = saved else { return Ok(None) };
+        let value: serde_json::Value = serde_json::from_str(&saved)?;
+        if value["expires_at"]
+            .as_i64()
+            .is_none_or(|expiry| expiry <= now)
+        {
+            return Ok(None);
+        }
+        let status = value["status"].as_str().unwrap_or("unknown");
+        let request = value["request"].as_str().unwrap_or("");
+        Ok(Some(format!(
+            "Previous task status: {status}; most recent user request: {request}"
+        )))
+    }
+
+    /// Once-per-topic conflict hint. Conflicting claims are never injected as
+    /// trusted facts; only a relevant user task can surface a bounded notice.
+    pub fn take_conflict_notice(&mut self, intent: &str) -> Result<Option<String>> {
+        let intent = intent.to_lowercase();
+        if intent.trim().is_empty() {
+            return Ok(None);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT t.topic FROM memory_topics t
+            JOIN memories m ON m.id=t.memory_id WHERE m.state=?1 AND t.notified=0
+            ORDER BY t.topic ASC LIMIT 100",
+        )?;
+        let topics = stmt
+            .query_map(params![STATE_DISPUTED], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for topic in topics {
+            if !intent.contains(&topic) {
+                continue;
+            }
+            let mut stmt = tx.prepare(
+                "SELECT m.text FROM memory_topics t JOIN memories m ON m.id=t.memory_id
+                WHERE t.topic=?1 AND m.state=?2 LIMIT 3",
+            )?;
+            let texts = stmt
+                .query_map(params![topic, STATE_DISPUTED], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            tx.execute(
+                "UPDATE memory_topics SET notified=1 WHERE topic=?1",
+                params![topic],
+            )?;
+            tx.commit()?;
+            let summary = texts
+                .iter()
+                .map(|s| s.chars().take(100).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            return Ok(Some(format!("Conflicting project memories about '{topic}' were paused; ask the user which rule applies: {summary}")));
+        }
+        tx.commit()?;
+        Ok(None)
     }
 
     pub fn set_mode(
@@ -573,6 +866,60 @@ fn insert_row(
     )?;
     put_snapshot(conn, &memory)?;
     Ok(memory)
+}
+
+fn enforce_active_limit(conn: &Connection) -> Result<()> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE state=?1",
+        params![STATE_ACCEPTED],
+        |row| row.get(0),
+    )?;
+    if count <= MAX_ACTIVE {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id FROM memories WHERE state=?1
+        ORDER BY CASE WHEN kind='review' THEN 0 ELSE 1 END, updated_at ASC, id ASC
+        LIMIT ?2",
+    )?;
+    let ids = stmt
+        .query_map(params![STATE_ACCEPTED, count - MAX_ACTIVE], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    for id in ids {
+        if let Some(memory) = load_memory(conn, &id)? {
+            set_state(conn, &memory, STATE_ARCHIVED)?;
+        }
+    }
+    Ok(())
+}
+
+fn digest_project_file(root: &Path, relative: &str) -> Option<String> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let target = std::fs::canonicalize(root.join(relative)).ok()?;
+    if !target.starts_with(&root) || !target.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(target).ok()?;
+    if file.metadata().ok()?.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    let digest = Sha256::digest(&bytes);
+    let mut out = String::with_capacity(64);
+    use std::fmt::Write as _;
+    for byte in digest {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    Some(out)
 }
 
 /// Reuse an existing row's identity when the same content is remembered again
@@ -929,6 +1276,44 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(store.insert(&input("use WAL", "manual"), true).is_err());
+    }
+
+    #[test]
+    fn more_than_two_hundred_active_notes_are_archived_without_manual_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        for i in 0..202 {
+            let input = NewMemory {
+                kind: "decision".into(),
+                text: format!("distinct durable rule {i}"),
+                paths: vec![],
+                evidence_refs: vec![],
+                source: Source {
+                    origin: "manual".into(),
+                    session_id: None,
+                    call_id: None,
+                },
+            };
+            store.insert(&input, true).unwrap();
+        }
+        let active: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE state=?1",
+                params![STATE_ACCEPTED],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let archived: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE state=?1",
+                params![STATE_ARCHIVED],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, 200);
+        assert_eq!(archived, 2);
     }
 
     #[test]

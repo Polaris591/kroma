@@ -195,10 +195,22 @@ impl Store {
             let mut terms = Vec::new();
             for word in query.split(|ch: char| !ch.is_alphanumeric()) {
                 let word = word.to_lowercase();
-                if word.chars().count() < 4
+                // Three-letter tooling tokens such as bun, npm, git and SQL
+                // can be decisive; do not discard them as generic noise.
+                if word.chars().count() < 3
                     || matches!(
                         word.as_str(),
-                        "this"
+                        "the"
+                            | "and"
+                            | "for"
+                            | "not"
+                            | "use"
+                            | "are"
+                            | "was"
+                            | "how"
+                            | "can"
+                            | "now"
+                            | "this"
                             | "that"
                             | "with"
                             | "from"

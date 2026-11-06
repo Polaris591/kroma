@@ -3,6 +3,7 @@ pub const TASK_CANCELLED_PREFIX: &str = "[Task cancelled by user.";
 
 use crate::{
     cache_trace::{CacheSnapshot, CacheTrace},
+    child_policy::ExecutionLimits,
     context::{
         BuiltinContextFactory, CompactionUsage, ContextConfig, ContextFactory, ContextPolicy,
     },
@@ -17,7 +18,6 @@ use crate::{
     sessions::SessionCatalog,
     shell,
     steering::TaskInput,
-    subagent_policy::AgentLimits,
     token_estimate::bytes_to_tokens,
     tools::{ToolContext, ToolRegistry},
     usage::UsageMeter,
@@ -78,7 +78,7 @@ pub struct Agent {
     cache_trace: Option<CacheTrace>,
     checkpoints: bool,
     checkpoint_turn: u64,
-    subagent_limits: Option<AgentLimits>,
+    execution_limits: Option<ExecutionLimits>,
 }
 
 /// The tool call Kroma dispatched but has not yet recorded a result for.
@@ -360,7 +360,7 @@ impl Agent {
             cache_trace: CacheTrace::from_env(),
             checkpoints: false,
             checkpoint_turn: 0,
-            subagent_limits: None,
+            execution_limits: None,
         };
         agent.sync_session_context();
         if new_session && !defer_initial_save {
@@ -381,8 +381,8 @@ impl Agent {
 
     /// Only the child-process composition path installs these limits. The
     /// default user Agent Loop remains unchanged when no subagent is active.
-    pub fn set_subagent_limits(&mut self, limits: AgentLimits) {
-        self.subagent_limits = Some(limits);
+    pub fn set_execution_limits(&mut self, limits: ExecutionLimits) {
+        self.execution_limits = Some(limits);
     }
 
     pub fn reset(&mut self) -> Result<()> {
@@ -1200,10 +1200,10 @@ impl Agent {
             // Steering is a durable new user instruction, delivered only
             // after the preceding model turn and all its tool results.
             self.append_pending_steering()?;
-            if let Some(limits) = self.subagent_limits {
+            if let Some(limits) = self.execution_limits {
                 if stats.calls >= limits.max_turns {
                     bail!(
-                        "SUBAGENT_TURN_LIMIT: completed {} model requests; child session can be resumed",
+                        "EXECUTION_TURN_LIMIT: completed {} model requests; child session can be resumed",
                         stats.calls
                     );
                 }
@@ -1246,7 +1246,7 @@ impl Agent {
             let (estimated_input_tokens, budget_view_bytes) = self
                 .context_budget
                 .validate_with_tool_bytes(&budget_view, tool_schema_bytes, calibrated_input)?;
-            if let Some(limits) = self.subagent_limits {
+            if let Some(limits) = self.execution_limits {
                 if limits.max_tokens > 0 {
                     // Cached input is a subset of input; never count it twice.
                     // A provider can exceed its requested output allowance,
@@ -1258,7 +1258,7 @@ impl Agent {
                         .saturating_add(stats.output.unwrap_or(0));
                     if spent.saturating_add(estimated_input_tokens as u64) >= limits.max_tokens {
                         bail!(
-                            "SUBAGENT_TOKEN_LIMIT: request would exceed {} input+output tokens; child session can be resumed",
+                            "EXECUTION_TOKEN_LIMIT: request would exceed {} input+output tokens; child session can be resumed",
                             limits.max_tokens
                         );
                     }
@@ -1575,6 +1575,9 @@ impl Agent {
                     }
                 };
                 let mut active_model = self.model.connection_info();
+                let current_user = self.messages.iter().rev().find(|m| m.role == "user");
+                let current_user_text = current_user.and_then(|m| m.content.as_deref());
+                let current_user_turn = self.messages.iter().filter(|m| m.role == "user").count();
                 if let Some(model) = &mut active_model {
                     model.provider_profile = self
                         .catalog
@@ -1589,6 +1592,8 @@ impl Agent {
                         &call,
                         ToolContext {
                             model_connection: active_model.as_ref(),
+                            user_message: current_user_text,
+                            user_turn: Some(current_user_turn),
                             workdir: &self.workdir,
                             archive: self.session.archive_path(),
                             on_output: self

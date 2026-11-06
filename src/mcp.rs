@@ -2195,6 +2195,8 @@ mod tests {
             &call_a,
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir: &dir,
                 archive: &archive_a,
                 on_output: None,
@@ -2231,6 +2233,8 @@ mod tests {
                     &call,
                     ToolContext {
                         model_connection: None,
+                        user_message: None,
+                        user_turn: None,
                         workdir: &waiting_dir,
                         archive: &archive,
                         on_output: None,
@@ -2298,6 +2302,8 @@ mod tests {
                     &call,
                     ToolContext {
                         model_connection: None,
+                        user_message: None,
+                        user_turn: None,
                         workdir: &dir,
                         archive: &dir.join("session.json"),
                         on_output: None,
@@ -2340,6 +2346,8 @@ mod tests {
             &call,
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir: &dir,
                 archive: &archive,
                 on_output: None,
