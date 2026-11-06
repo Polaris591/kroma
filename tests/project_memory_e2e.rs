@@ -135,6 +135,18 @@ async fn call_tool(
     workdir: &Path,
     archive: &Path,
 ) -> (String, bool) {
+    call_tool_with_user(tools, name, arguments, workdir, archive, None, None).await
+}
+
+async fn call_tool_with_user(
+    tools: &ToolRegistry,
+    name: &str,
+    arguments: Value,
+    workdir: &Path,
+    archive: &Path,
+    user: Option<&str>,
+    turn: Option<usize>,
+) -> (String, bool) {
     let call = ToolCall {
         id: format!("e2e-{}", NEXT_CALL.fetch_add(1, Ordering::Relaxed)),
         kind: "function".into(),
@@ -148,6 +160,8 @@ async fn call_tool(
             &call,
             ToolContext {
                 model_connection: None,
+                user_message: user,
+                user_turn: turn,
                 workdir,
                 archive,
                 on_output: None,
@@ -285,6 +299,35 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         hits["results"].as_array().is_some_and(Vec::is_empty),
         "pending rules must not be searchable"
     );
+
+    // New host contract: verified current-user text is supplied out-of-band,
+    // not by the model's function arguments, and writes become active NOW.
+    let current = "这个项目每次提交前必须运行 clippy";
+    let (content, error) = call_tool_with_user(
+        &tools,
+        "memory_remember",
+        json!({"kind":"decision","text":"Run clippy before commits",
+            "quote":current,"topic":"commit checks"}),
+        &workspace_a,
+        &archive,
+        Some(current),
+        Some(2),
+    )
+    .await;
+    assert!(!error, "{content}");
+    let accepted: Value = serde_json::from_str(&content)?;
+    assert_eq!(accepted["state"], "accepted");
+    let (content, error) = call_tool(
+        &tools,
+        "memory_search",
+        json!({"query":"clippy"}),
+        &workspace_a,
+        &archive,
+    )
+    .await;
+    assert!(!error, "{content}");
+    let hits: Value = serde_json::from_str(&content)?;
+    assert_eq!(hits["results"].as_array().unwrap().len(), 1);
 
     let captured = Arc::new(EchoModel::default());
     let model = enabled.model_hooks(

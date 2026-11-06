@@ -17,7 +17,7 @@ function cargoVersion() {
   return version;
 }
 
-function stage({target, binary, out}) {
+function stage({target, binary, out, memoryBinary}) {
   const platform = platforms.find(item => item.targets.includes(target));
   if (!platform) throw new Error(`Unsupported Rust target: ${target}`);
   if (platform.id !== forHost().id) {
@@ -56,6 +56,27 @@ function stage({target, binary, out}) {
   const destination = path.join(nativeDir, "bin", executable(platform));
   fs.copyFileSync(source, destination);
   fs.chmodSync(destination, 0o755);
+  // Official plugins ship with the platform package, default DISABLED. No
+  // network install hook, runtime Cargo build, or change to ~/.kroma is needed
+  // to list them. User/project-installed plugins retain precedence.
+  const pluginRoot = path.join(nativeDir, "share", "kroma", "plugins");
+  fs.mkdirSync(pluginRoot, {recursive: true});
+  for (const id of ["web", "subagents"]) {
+    fs.cpSync(path.join(root, "examples", "plugins", id), path.join(pluginRoot, id),
+      {recursive:true,filter:entry=>!entry.endsWith(".test.js")});
+  }
+  if (memoryBinary) {
+    const bin = path.resolve(memoryBinary);
+    const expected = platform.os === "win32" ? "kroma-memory.exe" : "kroma-memory";
+    if (!fs.statSync(bin).isFile() || path.basename(bin) !== expected) {
+      throw new Error(`Expected a compiled ${expected} for the native platform`);
+    }
+    fs.cpSync(path.join(root,"examples","plugins","project-memory","plugin"),
+      path.join(pluginRoot,"project-memory"),{recursive:true});
+    const outputMemory=path.join(nativeDir,"bin",expected);
+    fs.copyFileSync(bin,outputMemory);
+    fs.chmodSync(outputMemory,0o755);
+  }
   const main = {
     ...shared,
     name: "kroma",
@@ -72,7 +93,7 @@ function stage({target, binary, out}) {
     os: [platform.os],
     cpu: [platform.cpu],
     ...(platform.os === "linux" ? {libc: ["glibc"]} : {}),
-    files: ["bin", "LICENSE", "README.md"],
+    files: ["bin", "share", "LICENSE", "README.md"],
   };
   for (const [dir, manifest] of [[mainDir, main], [nativeDir, native]]) {
     fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -85,10 +106,10 @@ function parseArgs(args) {
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (!["--target", "--binary", "--out"].includes(key) || !value || value.startsWith("--") || options[key.slice(2)]) {
-      throw new Error("Usage: npm run stage -- --target <Rust triple> --binary <executable> --out <fresh directory>");
+    if (!["--target", "--binary", "--out", "--memory-binary"].includes(key) || !value || value.startsWith("--") || options[key.slice(2).replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase())]) {
+      throw new Error("Usage: npm run stage -- --target <Rust triple> --binary <executable> --out <fresh directory> [--memory-binary <compiled memory executable>]");
     }
-    options[key.slice(2)] = value;
+    options[key.slice(2).replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase())] = value;
   }
   if (!options.target || !options.binary || !options.out) throw new Error("--target, --binary and --out are required.");
   return options;

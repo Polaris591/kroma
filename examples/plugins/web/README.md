@@ -1,4 +1,4 @@
-# Web Search & Fetch 1.7
+# Web Search & Fetch 2.0
 
 Dependency-free process plugin for Node.js 20+. Two tools: `web_search` finds
 sources; `web_fetch` reads them. The agent decides which queries/pages to use.
@@ -46,7 +46,7 @@ changes need a restart or `/plugins reload` while the TUI is idle.
   skipping those without credentials. Only **one paid request** is attempted
   by default. Enable `paid_fallback` explicitly to allow multiple paid calls
   on transient errors.
-  Default order: **Parallel → You.com → Exa → Tavily**. An empty configured chain
+  Default order: **Parallel Fast → Brave → Exa**. An empty configured chain
   returns `CONFIG_ERROR` before any request. Brave, Firecrawl and SearXNG can be
   used explicitly or added to the priority list; they are not silently appended.
 - `mwmbl`, `bing`, `duckduckgo` and `duckduckgo_lite`: keyless engines. They can be
@@ -121,7 +121,7 @@ To enable prioritized automatic search:
 
 ```text
 kroma plugins set web provider auto
-kroma plugins set web search_priority parallel,you,exa,tavily
+kroma plugins set web search_priority parallel,brave,exa
 kroma plugins set web search_attempt_timeout_ms 8000
 # Optional: explicit permission for repeated paid provider calls
 kroma plugins set web paid_fallback true
@@ -161,6 +161,18 @@ JSON/provider data returns `INVALID_RESPONSE`. No invented results or relevance
 claims. Refine the query if sources are poor; read authoritative pages to verify.
 
 ## Read and continue
+
+`web_fetch` supports `find` to retrieve a few relevant passages from a cached
+page instead of inserting its full text into the conversation. A first `find`
+on a URL fetches it once, and subsequent `find` requests reuse that document
+snapshot until expiry. `find` cannot be combined with `start_char`.
+
+`render_fallback` defaults to `off`: static HTTP and main-text extraction remain
+the cheapest path. Owners may set `kroma plugins set web render_fallback firecrawl`
+to enable remote rendering only after static extraction identifies an unreadable
+JavaScript page or bot challenge. The model cannot enable paid rendering itself;
+ordinary network errors do not trigger it. The separate `fetch_provider=firecrawl`
+setting deliberately skips static extraction.
 
 ```json
 {"url":"https://nodejs.org/api/globals.html","max_chars":12000}

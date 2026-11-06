@@ -64,6 +64,41 @@ test("fetch truncation returns bounded text",async()=>{
   assert.equal(result.truncated,true);
   assert.equal(result.text.length,1000);
 });
+test("web_fetch find returns bounded matching passages without a second request", async () => {
+  let calls = 0;
+  global.fetch = async () => { calls++; return mock(`<main><h1>Heading</h1><p>${"unrelated ".repeat(110)}</p><h2>Timeout policy</h2><p>The timeout is adaptive.</p><p>${"padding ".repeat(90)}</p></main>`); };
+  const url = "https://example.org/find-case";
+  await fetchPage(url);
+  const found = JSON.parse(await dispatch({type:"tool",name:"web_fetch",arguments:{url,find:"timeout",max_chars:1000}}));
+  assert.equal(found.provider,"http");
+  assert.ok(found.match_count >= 1);
+  assert.match(found.text,/timeout/i);
+  assert.ok(found.text.length < found.total_chars);
+  assert.ok(found.matches[0].start_char >= 0);
+  assert.equal(calls,1);
+  await assert.rejects(fetchPage(url,{},1000,10,"timeout"),{code:"INVALID_ARGUMENT"});
+  await assert.rejects(fetchPage(url,{},1000,0,""),{code:"INVALID_ARGUMENT"});
+});
+
+test("static-first render retries only an unreadable page and only with owner opt-in", async () => {
+  const calls=[];
+  global.fetch=async (url,options) => {
+    calls.push(new URL(url).hostname);
+    if(new URL(url).hostname === "api.firecrawl.dev") {
+      assert.equal(options.method,"POST");
+      return mock(JSON.stringify({success:true,data:{markdown:"# Rendered\nUseful content",metadata:{title:"Rendered"}}}),"application/json");
+    }
+    return mock('<html><title>Just a moment</title><body>Checking your browser</body></html>');
+  };
+  await assert.rejects(fetchPage("https://example.org/render-off",{render_fallback:"off"}),{code:"UNREADABLE_PAGE"});
+  assert.deepEqual(calls,["example.org"]);
+  const page=JSON.parse(await fetchPage("https://example.org/render-on",{
+    render_fallback:"firecrawl",firecrawl_api_key:"test-key"
+  }));
+  assert.equal(page.provider,"firecrawl");
+  assert.match(page.text,/Useful content/);
+  assert.deepEqual(calls,["example.org","example.org","api.firecrawl.dev"]);
+});
 test("rejects unsupported URL and missing key",async()=>{
   await assert.rejects(fetchPage("file:///etc/passwd"),/HTTP/);
   await assert.rejects(search("x",{provider:"brave",brave_api_key:""}),/BRAVE_SEARCH_API_KEY/);
@@ -393,7 +428,7 @@ for (const provider of ["tavily", "you", "parallel", "firecrawl"]) {
       } else if (provider === "parallel") {
         assert.equal(options.headers["x-api-key"], "fake-secret");
         assert.deepEqual(body, {objective: "API docs site:example.org -site:private.example.org", search_queries: ["API docs"],
-          mode: "basic", max_chars_total: 3600, advanced_settings: {max_results: 2,
+          mode: "fast", max_chars_total: 3600, advanced_settings: {max_results: 2,
             source_policy: {include_domains: ["example.org"], exclude_domains: ["private.example.org"]}}});
         response = {results: entries};
       } else {
@@ -499,7 +534,9 @@ test("Firecrawl reads apply the same target check instead of forwarding a privat
   }
 });
 
-const priorityKeys = {parallel_api_key: "fake-p", you_api_key: "fake-y", exa_api_key: "fake-e", tavily_api_key: "fake-t", paid_fallback: true};
+// Legacy custom priority is still valid; production default is Fast/Brave/Exa.
+const priorityKeys = {parallel_api_key: "fake-p", you_api_key: "fake-y", exa_api_key: "fake-e", tavily_api_key: "fake-t", paid_fallback: true,
+  search_priority:["parallel","you","exa","tavily"]};
 const found = {title: "Docs", url: "https://nodejs.org/api/globals.html", snippets: ["Source"], highlights: ["Source"], content: "Source", excerpts: ["Source"]};
 function priorityResponse(host) {
   return mock(JSON.stringify(host === "ydc-index.io" ? {results: {web: [found]}} : {results: [found]}), "application/json");

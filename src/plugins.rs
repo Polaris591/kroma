@@ -246,6 +246,8 @@ pub struct PluginToolSpec {
     pub streaming: bool,
     #[serde(default)]
     pub invalidates_context: bool,
+    #[serde(default)]
+    pub requires_user_context: bool,
     /// Optional whole-call deadline for this tool, enforced by the host for
     /// streaming and non-streaming calls alike. A global
     /// `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` value caps it when smaller.
@@ -827,6 +829,20 @@ impl PluginCatalog {
         workdir: &Path,
         transient: Option<PathBuf>,
     ) -> Result<Self> {
+        let bundled = env::var_os("KROMA_OFFICIAL_PLUGIN_DIR").map(PathBuf::from);
+        Self::discover_at_with_bundled(directory, state_path, workdir, transient, bundled)
+    }
+
+    /// Official bundles are read-only inventory, not an extra install step.
+    /// User-installed plugins win an ID conflict, and all bundles remain
+    /// disabled unless the ordinary user settings explicitly enable them.
+    fn discover_at_with_bundled(
+        directory: PathBuf,
+        state_path: PathBuf,
+        workdir: &Path,
+        transient: Option<PathBuf>,
+        bundled: Option<PathBuf>,
+    ) -> Result<Self> {
         let mut warnings = Vec::new();
         let mut invalid_enabled = Vec::new();
         let state = match PluginState::load(&state_path) {
@@ -840,7 +856,13 @@ impl PluginCatalog {
         };
         let mut plugins = Vec::new();
         let mut seen = BTreeSet::new();
-        for source in [&directory, &workdir.join(".kroma").join("plugins")] {
+        let project_plugins = workdir.join(".kroma").join("plugins");
+        let mut sources = vec![directory.clone()];
+        if let Some(bundle) = bundled {
+            sources.push(bundle);
+        }
+        sources.push(project_plugins.clone());
+        for source in &sources {
             let mut entries = match fs::read_dir(source) {
                 Ok(entries) => entries
                     .collect::<std::io::Result<Vec<_>>>()
@@ -867,14 +889,14 @@ impl PluginCatalog {
                             ));
                             continue;
                         }
-                        let project_key = if source == &directory {
-                            None
-                        } else {
+                        let project_key = if source == &project_plugins {
                             Some(format!(
                                 "{}::{}",
                                 source.canonicalize()?.display(),
                                 manifest.id
                             ))
+                        } else {
+                            None
                         };
                         let mut settings = manifest.settings.clone();
                         settings.extend(
@@ -977,10 +999,10 @@ impl PluginCatalog {
                     Err(error) => {
                         let label = format!("{}: {error:#}", dir.display());
                         let id = entry.file_name().to_string_lossy().to_string();
-                        let project_key = if source == &directory {
-                            None
-                        } else {
+                        let project_key = if source == &project_plugins {
                             Some(format!("{}::{id}", source.canonicalize()?.display()))
+                        } else {
+                            None
                         };
                         if state.enabled.contains(&id)
                             || project_key
@@ -1615,6 +1637,7 @@ impl PluginCatalog {
                     parameters: tool.parameters.clone(),
                     streaming: tool.streaming,
                     invalidates_context: tool.invalidates_context,
+                    requires_user_context: tool.requires_user_context,
                     timeout: effective_tool_timeout(tool.timeout_secs, plugin_tool_timeout()),
                     data_dir: plugin.worker.data_dir.clone(),
                     worker: plugin.worker.clone(),
@@ -1677,12 +1700,14 @@ impl PluginCatalog {
         let summary_workers = self
             .plugins
             .iter()
-            // A child agent inherits project memory for read-only context.
-            // Suppress end-of-task promotion to avoid child-memory pollution.
+            // Generic child processes can opt out of post-task plugin writes.
             .filter(|plugin| {
                 plugin.enabled
                     && plugin.has_task_summary()
-                    && std::env::var("KROMA_SUBAGENT_DEPTH").ok().as_deref() != Some("1")
+                    && std::env::var("KROMA_CHILD_SKIP_TASK_SUMMARY")
+                        .ok()
+                        .as_deref()
+                        != Some("1")
             })
             .map(|plugin| plugin.worker.clone())
             .collect::<Vec<_>>();
@@ -2224,6 +2249,7 @@ struct PluginToolAdapter {
     parameters: Value,
     streaming: bool,
     invalidates_context: bool,
+    requires_user_context: bool,
     timeout: Option<Duration>,
     data_dir: PathBuf,
     worker: Arc<PluginWorker>,
@@ -2254,6 +2280,19 @@ impl Tool for PluginToolAdapter {
         let workdir = context.workdir.to_path_buf();
         let archive = context.archive.to_path_buf();
         let model_connection = context.model_connection.cloned();
+        // Explicitly declared opt-in only. This is a generic host proof for
+        // plugins that must anchor a write to the actual current user turn.
+        let user_context = self
+            .requires_user_context
+            .then(|| {
+                context.user_message.map(|message| {
+                    json!({
+                        "message":message.chars().take(4096).collect::<String>(),
+                        "turn":context.user_turn
+                    })
+                })
+            })
+            .flatten();
         let call_id = call.id.clone();
         Box::pin(async move {
             let Ok(arguments) = arguments else {
@@ -2264,7 +2303,8 @@ impl Tool for PluginToolAdapter {
             };
             let payload = json!({"type":if streaming {"tool_stream"} else {"tool"},
                 "name":name, "arguments":arguments, "workdir":workdir,
-                "archive":archive, "call_id":call_id.clone(), "model_connection":model_connection});
+                "archive":archive, "call_id":call_id.clone(), "model_connection":model_connection,
+                "trusted_user_context":user_context});
             if streaming {
                 let mut stream = worker.start_stream(payload);
                 let consumed = async {
@@ -3323,6 +3363,7 @@ base_url = "https://example.com""#,
             description: "hello".into(),
             streaming: false,
             invalidates_context: false,
+            requires_user_context: false,
             timeout_secs: None,
             replace: false,
             parameters: empty_parameters(),

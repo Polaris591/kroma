@@ -133,6 +133,26 @@ platform/architecture and the `rustc` host before building so a runner that is
 actually the wrong operating system or architecture cannot produce a
 false-positive package.
 
+## Official plugins bundled with the native package
+
+Every supported native npm release builds and bundles the three official
+plugins as **disabled, read-only inventory** under
+`share/kroma/plugins/`: Web Search, Subagents and Project Memory. Kroma's npm
+launcher passes that directory through `KROMA_OFFICIAL_PLUGIN_DIR`; the normal
+plugin catalog lists these manifests but never enables them automatically.
+User-installed plugins with the same ID take priority. Enable only the plugin
+you want with `kroma plugins enable web`, `... subagents`, or
+`... project-memory`; there is no extra `plugins install`, `cargo install`,
+postinstall script or runtime network download. The memory worker is separately
+compiled by the platform release workflow and packaged alongside Kroma under
+`bin/kroma-memory[.exe]` on the same process PATH. A source-built Kroma can use
+the same generic `KROMA_OFFICIAL_PLUGIN_DIR` opt-in to an explicit bundle.
+
+The npm release smoke test verifies that installed packages contain all three
+manifests and the memory executable and that `plugins list` discovers them. A
+CI staging success is not a substitute for a published-release validation on
+each supported OS and architecture.
+
 ## Credential-free commands and working directories
 
 All commands below are run from the repository root and require no npm login,

@@ -43,7 +43,17 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  const child = spawn(binary, process.argv.slice(2), {stdio: "inherit", shell: false});
+  const nativeDir = path.dirname(path.dirname(binary));
+  const childEnv = {...process.env};
+  const bundled = path.join(nativeDir, "share", "kroma", "plugins");
+  if (fs.existsSync(bundled) && !childEnv.KROMA_OFFICIAL_PLUGIN_DIR) {
+    childEnv.KROMA_OFFICIAL_PLUGIN_DIR = bundled;
+  }
+  // The separately compiled local SQLite memory worker is a platform binary,
+  // not an npm install script or a runtime download. It is found on PATH when
+  // the official project-memory plugin is explicitly enabled by the user.
+  childEnv.PATH = path.join(nativeDir,"bin") + path.delimiter + (childEnv.PATH ?? "");
+  const child = spawn(binary, process.argv.slice(2), {stdio: "inherit", shell: false, env:childEnv});
   const handlers = new Map();
   for (const signal of ["SIGINT", "SIGTERM"]) {
     const handler = () => {

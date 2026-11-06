@@ -42,6 +42,10 @@ impl ToolResult {
 #[derive(Clone, Copy)]
 pub struct ToolContext<'a> {
     pub model_connection: Option<&'a crate::model::ModelConnection>,
+    /// Optional current user instruction, provided by the host, never by
+    /// tool arguments. A plugin must explicitly opt in to receive it.
+    pub user_message: Option<&'a str>,
+    pub user_turn: Option<usize>,
     pub workdir: &'a Path,
     pub archive: &'a Path,
     pub on_output: Option<&'a shell::OutputCallback<'a>>,
@@ -298,6 +302,8 @@ pub async fn execute(call: &ToolCall, workdir: &Path, archive: &Path) -> ToolRes
             call,
             ToolContext {
                 model_connection: None,
+                user_message: None,
+                user_turn: None,
                 workdir,
                 archive,
                 on_output: None,
@@ -392,6 +398,8 @@ mod tests {
         let archive = workdir.join("kroma-perf-unused-session.json");
         let ctx = ToolContext {
             model_connection: None,
+            user_message: None,
+            user_turn: None,
             workdir: &workdir,
             archive: &archive,
             on_output: None,
@@ -455,6 +463,8 @@ mod tests {
     fn test_context() -> ToolContext<'static> {
         ToolContext {
             model_connection: None,
+            user_message: None,
+            user_turn: None,
             workdir: Path::new("."),
             archive: Path::new("session.json"),
             on_output: None,
@@ -605,6 +615,8 @@ mod tests {
                 &call,
                 ToolContext {
                     model_connection: None,
+                    user_message: None,
+                    user_turn: None,
                     workdir: Path::new("."),
                     archive: Path::new("session.json"),
                     on_output: None,

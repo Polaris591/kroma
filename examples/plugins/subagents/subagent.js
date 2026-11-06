@@ -39,6 +39,52 @@ const PREVIEW_MS = 30_000;
 // forever as unattended subprocesses create sessions. No user knobs needed.
 const RUN_RETENTION_DAYS = 30;
 const RUN_RETENTION_COUNT = 150;
+// In-process jobs are intentionally tied to the plugin host lifetime. WAL and
+// evidence live on disk; no detached daemon, second agent loop or task center.
+const jobs = new Map();
+const MAX_ACTIVE_JOBS = 32;
+const GLOBAL_CHILD_LIMIT = 3;
+const globalSlots = {active:0,waiting:[]};
+
+function childSlotRelease() {
+  let released=false;
+  return () => {
+    if (released) return;
+    released=true;
+    while (globalSlots.waiting.length) {
+      const next=globalSlots.waiting.shift();
+      next.run.waitingSlots.delete(next);
+      if (next.run.aborted) {next.resolve(null);continue;}
+      next.resolve(childSlotRelease());
+      return;
+    }
+    globalSlots.active--;
+  };
+}
+
+function reserveChildSlot(run) {
+  // Preserve the original synchronous spawn path when capacity is available:
+  // tests and tool UX depend on starting children without a scheduler tick.
+  if (run.aborted) return null;
+  if (globalSlots.active < GLOBAL_CHILD_LIMIT) {
+    globalSlots.active++;
+    return childSlotRelease();
+  }
+  return new Promise(resolve => {
+    const ticket={run,resolve};
+    run.waitingSlots.add(ticket);
+    globalSlots.waiting.push(ticket);
+  });
+}
+
+function cancelWaitingSlots(run) {
+  for(const ticket of run.waitingSlots) {
+    const index=globalSlots.waiting.indexOf(ticket);
+    if(index>=0) globalSlots.waiting.splice(index,1);
+    ticket.resolve(null);
+  }
+  run.waitingSlots.clear();
+}
 
 // Delegation results are lower-trust reports, not a new user instruction.
 // Flag only obvious attempts to redirect the parent's instruction hierarchy;
@@ -200,7 +246,7 @@ function resumeSource(value, dataDir, workdir) {
     throw new SubagentError("RESUME_ACTIVE",
       `task '${token}' is still marked running; inspect its evidence instead of resuming it`);
   }
-  if (state.status !== "completed" && state.status !== "failed") {
+  if (!["completed", "failed", "paused"].includes(state.status)) {
     throw new SubagentError("RESUME_MISSING", `resumed task '${token}' never finished`);
   }
   let cwd;
@@ -446,6 +492,10 @@ const EXIT_CODES = new Map([
 ]);
 
 function exitFailure(code, reason) {
+  if (/(?:SUBAGENT|EXECUTION)_(?:TOKEN|TURN)_LIMIT/.test(reason ?? "")) {
+    return {status:"paused",code:"BUDGET_EXHAUSTED",exit_code:code,
+      message:"child reached its model budget; continue using the returned resume token"};
+  }
   const name = EXIT_CODES.get(code) ?? "CHILD_EXIT";
   return {status: "failed", code: name, exit_code: code,
     message: `child exited with code ${code}${reason ? `: ${reason}` : ""}`};
@@ -712,6 +762,7 @@ async function runTask(entry, context) {
       writeFile(policyPath, JSON.stringify({
         profile: entry.profile.name, prompt: entry.profile.prompt,
         tools: entry.profile.tools, disallowedTools: entry.profile.disallowedTools,
+        hostDeniedTools: ["subagent","memory_remember","memory_forget"],
         shell: entry.profile.shell, maxTurns: entry.profile.maxTurns,
         maxTokens: entry.profile.maxTokens,
       }));
@@ -729,7 +780,9 @@ async function runTask(entry, context) {
           KROMA_WORKDIR: entry.cwd,
           KROMA_SESSION_FILE: session,
           KROMA_SUBAGENT_DEPTH: String(context.depth),
-          KROMA_SUBAGENT_POLICY_FILE: policyPath,
+          KROMA_CHILD_POLICY_FILE: policyPath,
+          KROMA_CHILD_DEPTH: "1",
+          KROMA_CHILD_SKIP_TASK_SUMMARY: "1",
           ...(context.connection?.base_url ?
             {KROMA_BASE_URL: context.connection.base_url} : {}),
           ...(context.connection?.api_protocol ?
@@ -872,6 +925,7 @@ async function runTask(entry, context) {
         result.error = {code: outcome.code ?? "FAILED", message: detail};
       }
       result.duration_ms = Date.now() - started;
+      if (outcome.status === "paused") result.partial = true;
       result.suspicious_instructions = instructionShaped(result.output ?? "");
       result.usage = usageReport(trace.usage);
       result.tool_calls = trace.toolCalls;
@@ -1009,6 +1063,7 @@ async function runBatch(request, options = {}) {
 
   const terminateChild = options.terminate ?? terminate;
   const run = {aborted: false, timedOut: false, reason: null, children: new Set(),
+    waitingSlots: new Set(),
     timeouts: new Set(), usage: emptyUsage(),
     status: entries.map(() => "queued"), live: entries.map(() => null),
     spawn: options.spawn ?? spawn, terminate: child => terminateChild(child, killGraceMs)};
@@ -1016,6 +1071,7 @@ async function runBatch(request, options = {}) {
     if (run.aborted) return;
     run.aborted = true;
     run.reason = error;
+    cancelWaitingSlots(run);
     for (const child of run.children) run.terminate(child);
   };
   run.timeout = message => {
@@ -1023,11 +1079,13 @@ async function runBatch(request, options = {}) {
     run.aborted = true;
     run.timedOut = true;
     run.reason = new SubagentError("CHILD_TIMEOUT", message, false);
+    cancelWaitingSlots(run);
     for (const stop of [...run.timeouts]) stop(message);
   };
   const context = {runId: id, runDir, executable, model, thinking, config, connection, maxOutput,
     count: entries.length, depth: depth + 1, deadlineSecs, taskTimeoutMs, killGraceMs, run,
     onProgress: options.onProgress};
+  options.onStart?.({id, run, status: () => [...run.status], dir: runDir});
 
   const results = new Array(entries.length);
   let next = 0;
@@ -1069,7 +1127,13 @@ async function runBatch(request, options = {}) {
   async function worker() {
     while (!run.aborted && next < entries.length) {
       const entry = entries[next++];
-      results[entry.index] = await runTask(entry, context);
+      const reservation=reserveChildSlot(run);
+      const release=typeof reservation === "function" ? reservation : await reservation;
+      if (!release) break;
+      try {
+        if (run.aborted) break;
+        results[entry.index] = await runTask(entry, context);
+      } finally { release(); }
     }
   }
   try {
@@ -1090,7 +1154,8 @@ async function runBatch(request, options = {}) {
     }
   }
   const completed = results.filter(result => result.status === "completed").length;
-  const status = completed === results.length ? "completed" : completed > 0 ? "partial" : "failed";
+  const status = completed === results.length ? "completed" :
+    completed > 0 || results.some(result=>result.status === "paused") ? "partial" : "failed";
   const mark = status === "completed" ? "✓" : status === "partial" ? "△" : "✗";
   progress(context, `${mark} ${completed}/${results.length} done · `
     + `${((Date.now() - startedAt) / 1000).toFixed(1)}s · ${usageLine(run.usage)}`);
@@ -1123,6 +1188,83 @@ async function dispatch(request, options = {}) {
     throw new SubagentError("INVALID_REQUEST", "only tool requests are supported");
   }
   if (request.name === "subagent") {
+    const args = request.arguments ?? {};
+    const action = args.action ?? "legacy";
+    if (!["legacy", "run", "status", "wait", "continue", "cancel"].includes(action)) {
+      throw new SubagentError("INVALID_ARGUMENT", "unsupported subagent action");
+    }
+    const dataDir = options.dataDir ?? request.data_dir;
+    if (action === "status" || action === "wait" || action === "cancel") {
+      if (!dataDir) throw new SubagentError("ARCHIVE_ERROR", "plugin data directory is required");
+      const id = args.job_id;
+      if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) {
+        throw new SubagentError("INVALID_ARGUMENT", "job_id must be a valid run identifier");
+      }
+      const job = jobs.get(id);
+      if (action === "cancel") {
+        if (!job || job.status !== "running") {
+          throw new SubagentError("NOT_RUNNING", "job is not running in this host; cannot cancel a completed or orphaned task");
+        }
+        job.run?.abort(new SubagentError("JOB_CANCELLED", "job cancelled by parent", false));
+        return {content: JSON.stringify({job_id:id,status:"cancelling"}),is_error:false};
+      }
+      if (action === "wait" && job?.status === "running") {
+        const ms = integer(args.wait_ms,"wait_ms",0,750,500);
+        await Promise.race([job.promise, new Promise(resolve => setTimeout(resolve,ms))]);
+      }
+      if (job) {
+        const view = job.response ? {job_id:id,...job.response} :
+          {job_id:id,status:job.status,tasks:job.statuses?.() ?? [],started_at:job.startedAt};
+        return {content:JSON.stringify(view),is_error:false};
+      }
+      const root = path.resolve(dataDir, "runs");
+      const file = path.join(root,id,"batch.json");
+      try {
+        const view = JSON.parse(fs.readFileSync(file,"utf8"));
+        return {content:JSON.stringify({job_id:id,...view}),is_error:false};
+      } catch {
+        if (fs.existsSync(path.join(root,id,"request.json"))) {
+          return {content:JSON.stringify({job_id:id,status:"interrupted",resumable:true}),is_error:false};
+        }
+        throw new SubagentError("NOT_FOUND","no job with this id");
+      }
+    }
+    if (action === "run" || action === "continue") {
+      if (jobs.size >= MAX_ACTIVE_JOBS) {
+        for (const [id,entry] of jobs) {
+          if (entry.status !== "running") jobs.delete(id);
+          if (jobs.size < MAX_ACTIVE_JOBS) break;
+        }
+        if (jobs.size >= MAX_ACTIVE_JOBS) throw new SubagentError("JOB_LIMIT","too many retained jobs");
+      }
+      const prior = args.job_id ? jobs.get(args.job_id)?.response : null;
+      const sourceResume = args.resume ?? (prior?.results?.length === 1 ? prior.results[0].resume : null);
+      if (action === "continue" && (typeof sourceResume !== "string" || !sourceResume)) {
+        throw new SubagentError("RESUME_MISSING", "continue needs a finished child's resume token or a completed single-task job_id");
+      }
+      const tasks = action === "continue" ? [{task:args.task, resume:sourceResume,
+        ...(args.profile ? {profile:args.profile} : {})}] :
+        (args.tasks ?? (args.task ? [{task:args.task,profile:args.profile??"general",
+          ...(args.cwd ? {cwd:args.cwd} : {}),...(args.label ? {label:args.label} : {})}] : null));
+      const req = {...request,arguments:{tasks}};
+      let id = null;
+      const job = {status:"running",run:null,response:null,startedAt:Date.now(),statuses:()=>[]};
+      const task = runBatch(req,{...options,onProgress:null,onStart: state=>{
+        id=state.id;job.run=state.run;job.statuses=state.status;
+        jobs.set(id,job);
+      }});
+      job.promise = task.then(result=>{
+        job.status=result.status;
+        job.response=result;
+      },error=>{
+        job.status="failed";
+        job.response={status:"failed",error:{code:error.code??"JOB_FAILED",message:error.message}};
+      });
+      // runBatch invokes onStart before its first child await. If validation
+      // failed, surface the precise error rather than creating a phantom job.
+      if (!id) await task;
+      return {content:JSON.stringify({job_id:id,status:"running",session_as_job:true}),is_error:false};
+    }
     const response = await runBatch(request, options);
     return {content: JSON.stringify(response, null, 2),
       is_error: response.status !== "completed"};

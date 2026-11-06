@@ -178,6 +178,117 @@ test("instruction-shaped child report is flagged but preserved as untrusted data
   } finally { fs.rmSync(dir, {recursive:true, force:true}); }
 });
 
+test("session-as-job run/status/wait/continue/cancel uses original Kroma sessions", async () => {
+  const dir=workspace();
+  const h=harness();
+  const opts={spawn:h.spawn,terminate:child=>child.kill(),dataDir:dir};
+  const call=async arguments_ => JSON.parse((await dispatch({type:"tool",name:"subagent",workdir:dir,
+    arguments:arguments_},opts)).content);
+  try {
+    const started=await call({action:"run",task:"inspect project"});
+    assert.equal(started.status,"running");
+    assert.equal(h.calls.length,1);
+    const id=started.job_id;
+    assert.match(id,/^[A-Za-z0-9_-]+$/);
+    const status=await call({action:"status",job_id:id});
+    assert.equal(status.status,"running");
+    assert.deepEqual(status.tasks,["running"]);
+    const waiting=await call({action:"wait",job_id:id,wait_ms:0});
+    assert.equal(waiting.status,"running");
+    fs.writeFileSync(h.calls[0].options.env.KROMA_SESSION_FILE,'{"version":1,"messages":[]}');
+    h.calls[0].finish({frames:[{type:"result",text:"checked"}]});
+    await tick(); await tick();
+    const completed=await call({action:"wait",job_id:id,wait_ms:100});
+    assert.equal(completed.status,"completed");
+    assert.equal(completed.results[0].output,"checked");
+    const resume=completed.results[0].resume;
+    const next=await call({action:"continue",resume,task:"verify again"});
+    assert.equal(next.status,"running");
+    assert.equal(h.calls.length,2);
+    assert.match(h.calls[1].stdin.text,/verify again/);
+    await call({action:"cancel",job_id:next.job_id});
+    await tick(); await tick();
+    const cancelled=await call({action:"wait",job_id:next.job_id,wait_ms:100});
+    assert.notEqual(cancelled.status,"running");
+    await assert.rejects(dispatch({type:"tool",name:"subagent",data_dir:dir,
+      arguments:{action:"status",job_id:"../escape"}},opts),{code:"INVALID_ARGUMENT"});
+    await assert.rejects(dispatch({type:"tool",name:"subagent",data_dir:dir,
+      arguments:{action:"continue",task:"not a fresh task"}},opts),{code:"RESUME_MISSING"});
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test("background jobs share one global maximum of three running child processes", async () => {
+  const dir=workspace();const h=harness();
+  const opts={spawn:h.spawn,terminate:child=>child.kill(),dataDir:dir};
+  const call=async tasks=>JSON.parse((await dispatch({type:"tool",name:"subagent",
+    workdir:dir,arguments:{action:"run",tasks}},opts)).content);
+  try {
+    const a=await call([{task:"a1"},{task:"a2"},{task:"a3"}]);
+    const b=await call([{task:"b1"},{task:"b2"},{task:"b3"}]);
+    assert.equal(a.status,"running");
+    assert.equal(b.status,"running");
+    assert.equal(h.calls.length,3,"second job must wait for capacity");
+    h.calls[0].finish({frames:[{type:"result",text:"a1 done"}]});
+    await tick();await tick();await tick();
+    assert.equal(h.calls.length,4,"released slot must start the next queued child");
+    assert.ok(h.peak()<=3);
+    const seen=new Set([h.calls[0]]);
+    // Drain newly admitted children as each slot becomes available.
+    for(let attempt=0;attempt<20;attempt++) {
+      for(const item of h.calls) if(!seen.has(item)) {
+        seen.add(item);
+        item.finish({frames:[{type:"result",text:"done"}]});
+      }
+      await tick();await tick();
+      if(seen.size===6) break;
+    }
+    assert.equal(seen.size,6);
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test("cancel on a job waiting for global slots finishes without waiting for other jobs", async () => {
+  const dir=workspace(), h=harness();
+  const opts={spawn:h.spawn,terminate:child=>child.kill(),dataDir:dir};
+  const call=async action=>JSON.parse((await dispatch({type:"tool",name:"subagent",
+    workdir:dir,arguments:action},opts)).content);
+  try {
+    const holding=await call({action:"run",tasks:[{task:"hold-1"},{task:"hold-2"},{task:"hold-3"}]});
+    const waiting=await call({action:"run",task:"queued-never-started"});
+    assert.equal(h.calls.length,3);
+    assert.equal((await call({action:"cancel",job_id:waiting.job_id})).status,"cancelling");
+    await tick();await tick();
+    const ended=await call({action:"wait",job_id:waiting.job_id,wait_ms:100});
+    assert.notEqual(ended.status,"running");
+    assert.equal(h.calls.length,3,"cancellation must not start queued children");
+    for(const child of h.calls) child.finish({frames:[{type:"result",text:"done"}]});
+    await tick();await tick();
+    assert.equal((await call({action:"wait",job_id:holding.job_id,wait_ms:100})).status,"completed");
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test("a model budget rejection yields a resumable paused partial result", async () => {
+  const dir=workspace();const h=harness();
+  try {
+    const task=runBatch(batch([{task:"long investigation"}],{workdir:dir}),
+      {spawn:h.spawn,terminate:child=>child.kill(),dataDir:dir});
+    h.calls[0].finish({code:5,stderr:"SUBAGENT_TURN_LIMIT: completed 20 model requests"});
+    const result=await task;
+    assert.equal(result.status,"partial");
+    assert.equal(result.results[0].status,"paused");
+    assert.equal(result.results[0].error.code,"BUDGET_EXHAUSTED");
+    assert.equal(result.results[0].partial,true);
+    assert.match(result.results[0].resume,/\/0$/);
+    // A pause is intentionally a finished, resumable child session, not an
+    // opaque error that refuses its own returned continuation token.
+    fs.writeFileSync(h.calls[0].options.env.KROMA_SESSION_FILE,'{"version":1,"messages":[]}');
+    const resumed=runBatch(batch([{task:"continue",resume:result.results[0].resume}],{workdir:dir}),
+      {spawn:h.spawn,terminate:child=>child.kill(),dataDir:dir});
+    assert.equal(h.calls.length,2);
+    h.calls[1].finish({frames:[{type:"result",text:"verified"}]});
+    assert.equal((await resumed).results[0].status,"completed");
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 test("child inherits the active session endpoint, protocol, profile and reasoning without exposing a key", async () => {
   const dir = workspace();
   const h = harness();
@@ -196,7 +307,7 @@ test("child inherits the active session endpoint, protocol, profile and reasonin
     assert.equal(env.KROMA_REASONING_EFFORT, "xhigh");
     assert.equal(env.KROMA_PROVIDER_PROFILE, "current-session");
     assert.equal(env.KROMA_API_KEY, undefined);
-    const policy = JSON.parse(fs.readFileSync(env.KROMA_SUBAGENT_POLICY_FILE, "utf8"));
+    const policy = JSON.parse(fs.readFileSync(env.KROMA_CHILD_POLICY_FILE, "utf8"));
     assert.equal(policy.profile, "reviewer");
     assert.equal(policy.shell, "read-only");
     h.calls[0].finish({frames: [{type: "result", text: "reviewed"}]});
@@ -577,7 +688,16 @@ test("the whole response stays bounded even for large outputs", async () => {
     const run = runBatch(batch(tasks, {workdir: dir,
       config: {max_parallel: 8, max_output_chars: 100000}}),
     {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
-    h.calls.forEach(call => call.finish({frames: [{type: "result", text: "x".repeat(100000)}]}));
+    const completed=new Set();
+    for(let attempt=0;attempt<40;attempt++) {
+      for(const call of h.calls) if(!completed.has(call)) {
+        completed.add(call);
+        call.finish({frames:[{type:"result",text:"x".repeat(100000)}]});
+      }
+      await tick();await tick();
+      if(completed.size===8) break;
+    }
+    assert.equal(completed.size,8,"queued children must run under the global slot cap");
     const response = await run;
     assert.equal(response.status, "completed");
     assert.ok(Buffer.byteLength(JSON.stringify(response), "utf8") <= 512 * 1024);
@@ -1099,7 +1219,15 @@ test("child exit codes become actionable error codes", async () => {
     const tasks = [3, 4, 5, 6].map(code => ({task: `exit-${code}`}));
     const run = runBatch(batch(tasks, {workdir: dir, config: {max_parallel: 4}}),
       {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
-    h.calls.forEach((call, index) => call.finish({code: [3, 4, 5, 6][index]}));
+    const done=new Set();
+    for(let attempt=0;attempt<20;attempt++) {
+      for(const [index,call] of h.calls.entries()) if(!done.has(call)) {
+        done.add(call);call.finish({code:[3,4,5,6][index]});
+      }
+      await tick();await tick();
+      if(done.size===4) break;
+    }
+    assert.equal(done.size,4);
     const response = await run;
     assert.deepEqual(response.results.map(result => result.error.code),
       ["MODEL_NOT_CONFIGURED", "AUTH_FAILED", "MODEL_REQUEST_FAILED", "CONTEXT_LIMIT"]);
@@ -1156,7 +1284,15 @@ test("a large batch shares the response budget instead of a fixed floor", async 
     const run = runBatch(batch(tasks, {workdir: dir,
       config: {max_parallel: 8, max_output_chars: 100000}}),
     {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
-    h.calls.forEach(call => call.finish({frames: [{type: "result", text: "x".repeat(100000)}]}));
+    const done=new Set();
+    for(let attempt=0;attempt<40;attempt++) {
+      for(const call of h.calls) if(!done.has(call)) {
+        done.add(call);call.finish({frames:[{type:"result",text:"x".repeat(100000)}]});
+      }
+      await tick();await tick();
+      if(done.size===8) break;
+    }
+    assert.equal(done.size,8);
     const response = await run;
     assert.ok(Buffer.byteLength(JSON.stringify(response, null, 2), "utf8") <= 512 * 1024);
     assert.ok(response.results.every(result => result.output_truncated));

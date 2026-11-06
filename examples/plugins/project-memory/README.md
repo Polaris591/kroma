@@ -4,8 +4,8 @@ Zero-maintenance, project-scoped memory for Kroma. It remembers durable user
 rules and provisional review findings, recalls them automatically at the start
 of a task, and expires or drops what no longer applies.
 
-Status: **R0 + R1 implemented** (Kroma plugin API 2). R2 (richer review ledger /
-maintenance) and R3 (embeddings, team sharing) are deliberately not enabled yet.
+Status: **R0 + R1 with expanded maintenance** (Kroma plugin API 2). R3
+(embeddings, team sharing) is deliberately not enabled.
 See [the zero-maintenance design](../../../docs/project-memory-zero-maintenance.md)
 and the [V2 contract](../../../docs/project-memory-v2-contract.md).
 
@@ -14,14 +14,17 @@ and the [V2 contract](../../../docs/project-memory-v2-contract.md).
 - **Automatic recall.** The host asks for a small pack at the start of a task and
   injects it as untrusted reference data. The model does not have to remember to
   search.
-- **Quote-anchored rules.** When the user states a durable preference, decision
-  or rule, the model calls `memory_remember` with a verbatim quote. The entry is
-  pending until the task summary verifies that quote; then it becomes active.
-  There is no approval queue.
+- **Quote-anchored rules.** A `memory_remember` quote verified against the
+  host-supplied **current user turn** becomes active immediately (at most one
+  per user turn). Legacy hosts lacking trusted turn context retain a pending
+  compatibility path until `task_summary`; there is no approval queue.
 - **Provisional review notes.** `kind=review` requires a path and an evidence
   reference, is labeled unverified, and expires after 30 days.
 - **Self-maintenance.** Pending rules not verified within 7 days are dropped;
-  review notes expire; forget/purge tombstones block exact re-creation.
+  review notes expire, and review notes with changed/missing source files become
+  stale before recall. At most 200 active entries remain; older notes are
+  archived automatically. Same-topic conflicting rules are held back, with a
+  single on-topic conflict hint, until a user correction resolves them.
 - **Project identity.** Git repositories use a local `kroma-memory-id` in the
   Git common directory, so all worktrees share memory and moving the repository
   keeps it. Different clones/repositories are isolated. Non-Git projects use a
@@ -63,7 +66,7 @@ user-level install above or keep the binary in a trusted location.
 
 | Tool | Purpose |
 | --- | --- |
-| `memory_remember(kind, text, quote?, paths?, evidence?, supersedes?)` | `preference`/`decision` require a 8–500 char verbatim user quote and become pending until verified. `review` requires a relative path and evidence and is active-but-unverified for 30 days. |
+| `memory_remember(kind, text, quote?, topic?, paths?, evidence?, supersedes?)` | `preference`/`decision` require a 8–500 char verbatim user quote and a short model-generated topic for conflict isolation, accepted as soon as the current host turn verifies them. `review` requires path and evidence, and expires after 30 days or when source files change. |
 | `memory_search(query, paths?, limit?)` | Active entries only; compact ids, kinds, summaries and path hints. |
 | `memory_read(ids)` | 1–8 active entries; any unknown/pending/deleted id fails the whole batch. |
 | `memory_forget(id)` | Immediate tombstone; excluded from search, read and recall. |
@@ -91,9 +94,11 @@ for migration and debugging, but are not part of the normal workflow.
 
 1. The user says something durable: “这个项目用 pnpm，不要用 npm”.
 2. The model calls `memory_remember` with a short restatement and the verbatim
-   quote. The plugin stores it as `pending` (not searchable, not injected).
-3. At the end of the task the host sends `task_summary` with recent user
-   messages. The plugin promotes the entry only if the quote appears verbatim.
+   quote. The host provides the current user message separately, not as
+   model-controlled function arguments. The plugin validates it and stores an
+   active memory immediately; an unverified older host uses the pending path.
+3. `task_summary` promotes any legacy pending entry only when its quote
+   matches the latest user instruction, at most one per summary.
 4. The next task's automatic recall can include it. A pending entry that is
    never verified is dropped after 7 days.
 

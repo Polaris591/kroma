@@ -28,7 +28,33 @@ timeout_secs = 600
 [tools.parameters]
 type = "object"
 additionalProperties = false
-required = ["tasks"]
+[tools.parameters.properties.action]
+type = "string"
+enum = ["run", "status", "wait", "continue", "cancel"]
+description = "Session-as-Job lifecycle action. Omit for backward-compatible synchronous tasks."
+[tools.parameters.properties.job_id]
+type = "string"
+description = "Job identifier returned by run, used by status, wait and cancel."
+[tools.parameters.properties.wait_ms]
+type = "integer"
+minimum = 0
+maximum = 750
+description = "One short nonblocking wait poll (0..750 ms). Poll again rather than holding the plugin worker."
+[tools.parameters.properties.task]
+type = "string"
+description = "Single-task shorthand for run or new instruction for continue."
+[tools.parameters.properties.resume]
+type = "string"
+description = "Session resume token required by continue."
+[tools.parameters.properties.profile]
+type = "string"
+description = "Optional profile used for single-task run or continue."
+[tools.parameters.properties.label]
+type = "string"
+description = "Optional single-task label."
+[tools.parameters.properties.cwd]
+type = "string"
+description = "Optional working directory for a new single-task run."
 [tools.parameters.properties.tasks]
 type = "array"
 minItems = 1

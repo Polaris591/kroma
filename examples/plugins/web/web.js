@@ -1,8 +1,8 @@
 "use strict";
 const {WebError, httpUrl, download, assertPublicTarget} = require("./http");
 const {extractPage, plainText, entities} = require("./page");
-const DEFAULTS = Object.freeze({provider: "auto", paid_fallback: false, max_results: 6, max_chars: 12000, timeout_ms: 15000,
-  search_priority: Object.freeze(["parallel", "you", "exa", "tavily"]), search_attempt_timeout_ms: 8000});
+const DEFAULTS = Object.freeze({provider: "auto", paid_fallback: false, render_fallback: "off", max_results: 5, max_chars: 12000, timeout_ms: 15000,
+  search_priority: Object.freeze(["parallel", "brave", "exa"]), search_attempt_timeout_ms: 8000});
 
 // Keyless engines cannot honour every ranking signal, so say what each one is
 // bad at instead of presenting their output as equivalent to a keyed API.
@@ -178,7 +178,7 @@ async function searchProvider(provider, query, settings, timeout, count, sites) 
     url = new URL("https://api.parallel.ai/v1/search");
     headers = {"x-api-key": apiKey(provider, settings), "Content-Type": "application/json"};
     types = ["application/json"];
-    body = JSON.stringify({objective: query, search_queries: [keywords], mode: "basic",
+    body = JSON.stringify({objective: query, search_queries: [keywords], mode: "fast",
       max_chars_total: count * 1800,
       advanced_settings: {max_results: count, ...(sites.length ? {source_policy: {
         ...(includes.length ? {include_domains: includes} : {}),
@@ -332,7 +332,37 @@ function cachePage(key, page) {
   }
 }
 
-async function fetchPage(address, config = {}, requestedChars, startChar = 0) {
+function findPassages(page, needle, maxChars) {
+  if (typeof needle !== "string" || !needle.trim() || needle.length > 200 || /[\x00-\x1f\x7f]/.test(needle)) {
+    throw new WebError("INVALID_ARGUMENT", "find must be a nonempty, printable phrase of at most 200 characters");
+  }
+  const query = needle.trim().toLocaleLowerCase();
+  const lower = page.text.toLocaleLowerCase();
+  const offsets = [];
+  let cursor = 0;
+  while (offsets.length < 50) {
+    const index = lower.indexOf(query, cursor);
+    if (index < 0) break;
+    offsets.push(index);
+    cursor = index + Math.max(1, query.length);
+  }
+  const chunks = [];
+  let used = 0;
+  for (const offset of offsets) {
+    if (chunks.length >= 5) break;
+    const before = Math.max(0, page.text.lastIndexOf("\n", Math.max(0, offset - 500)) + 1);
+    const start = Math.max(before, offset - 240);
+    const end = Math.min(page.text.length, offset + query.length + 340);
+    const snippet = page.text.slice(start, end).trim();
+    if (used + snippet.length > maxChars && chunks.length) break;
+    chunks.push({start_char: start, text: snippet.slice(0, Math.max(0, maxChars - used))});
+    used += snippet.length;
+  }
+  return {find: needle.trim(), match_count: offsets.length, matches_capped: offsets.length === 50,
+    matches: chunks, text: chunks.map(chunk => chunk.text).join("\n\n---\n\n")};
+}
+
+async function fetchPage(address, config = {}, requestedChars, startChar = 0, find = null) {
   const url = httpUrl(address);
   const settings = {...DEFAULTS, ...config};
   const maxChars = bounded(requestedChars ?? settings.max_chars, 12000, 1000, 30000);
@@ -340,11 +370,14 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0) {
   if (!Number.isSafeInteger(startChar) || startChar < 0) {
     throw new WebError("INVALID_OFFSET", "start_char must be a nonnegative integer");
   }
+  if (find !== null && startChar !== 0) {
+    throw new WebError("INVALID_ARGUMENT", "find and start_char are separate modes; set start_char = 0 when using find");
+  }
   const provider = String(settings.fetch_provider || "http").toLowerCase();
   if (!["http", "firecrawl"].includes(provider)) throw new WebError("CONFIG_ERROR", "fetch_provider must be http or firecrawl");
   const key = provider + ":" + url.href;
   const cached = pages.get(key);
-  let page = startChar > 0 && cached && Date.now() - cached.time < CACHE_TTL ? cached.page : null;
+  let page = (startChar > 0 || find !== null) && cached && Date.now() - cached.time < CACHE_TTL ? cached.page : null;
   if (startChar > 0 && !page) {
     pages.delete(key);
     throw new WebError("CACHE_MISS", "Continuation snapshot expired or is unavailable; read the same URL from start_char = 0 and use its new next_start.");
@@ -354,8 +387,17 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0) {
     cachePage(key, page);
   }
   if (!page) {
-    const response = await download(url.href, {timeout, bytes: 1500000,
+    let response;
+    try {
+      response = await download(url.href, {timeout, bytes: 1500000,
       types: ["text/html", "text/plain", "text/markdown", "application/json", "application/xhtml+xml", "application/xml", "text/xml"]});
+    } catch (error) {
+      const fallback = String(settings.render_fallback ?? "off");
+      if (fallback !== "off" && fallback !== "firecrawl") throw new WebError("CONFIG_ERROR", "render_fallback must be off or firecrawl");
+      // Only a readable-page failure is evidence that rendering is useful.
+      // Transport failures should remain errors, never trigger an extra paid call.
+      throw error;
+    }
     const isHTML = response.contentType.includes("html") || !response.contentType && /^\s*(?:<!doctype html|<html\b|<head\b|<title\b|<main\b|<article\b)/i.test(response.text);
     const extracted = isHTML ? extractPage(response.text, response.url) : {title: response.url, text: response.text};
     if (!response.contentType && /^(%PDF-|PK\x03\x04|\x89PNG)/.test(response.text)) {
@@ -363,19 +405,34 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0) {
     }
     if (!extracted.text.trim() || (isHTML && (/^(just a moment|attention required|access denied|verify you are human)/i.test(extracted.title)
       || (extracted.text.length < 800 && /enable javascript|checking your browser|verify (?:that )?you are (?:a )?human/i.test(extracted.text))))) {
-      throw new WebError("UNREADABLE_PAGE", "No readable page content; a JavaScript app, login or bot challenge may require a browser or a direct documentation/raw URL");
+      const fallback = String(settings.render_fallback ?? "off");
+      if (!['off', 'firecrawl'].includes(fallback)) throw new WebError("CONFIG_ERROR", "render_fallback must be off or firecrawl");
+      if (fallback === "firecrawl") {
+        // A paid render occurs only after static extraction fails and only
+        // after the owner explicitly chooses it in plugin configuration.
+        page = await fetchFirecrawl(url, settings, timeout);
+        page.provider = "firecrawl";
+      } else {
+        throw new WebError("UNREADABLE_PAGE", "No readable static page content; configure render_fallback=firecrawl to opt in to a paid remote render");
+      }
+    } else {
+      page = {...extracted, title: extracted.title.slice(0, 1000), url: response.url, source_truncated: response.truncated, provider: "http"};
     }
-    page = {...extracted, title: extracted.title.slice(0, 1000), url: response.url, source_truncated: response.truncated};
     cachePage(key, page);
   }
   if (startChar > page.text.length) {
     throw new WebError("INVALID_OFFSET", `start_char exceeds document length (${page.text.length}); read from 0`);
   }
+  if (find !== null) {
+    const found = findPassages(page, find, maxChars);
+    return JSON.stringify({provider: page.provider ?? provider, url: page.url, title: page.title,
+      ...found, total_chars: page.text.length, next_start: null, truncated: false}, null, 2);
+  }
   let end = Math.min(page.text.length, startChar + maxChars);
   // Avoid breaking a UTF-16 surrogate pair at the continuation boundary.
   if (end < page.text.length && /[\uD800-\uDBFF]/.test(page.text[end - 1])) end--;
   const text = page.text.slice(startChar, end);
-  return JSON.stringify({provider, url: page.url, title: page.title, text, chars: text.length,
+  return JSON.stringify({provider: page.provider ?? provider, url: page.url, title: page.title, text, chars: text.length,
     start_char: startChar, total_chars: page.text.length,
     truncated: end < page.text.length || page.source_truncated,
     next_start: end < page.text.length ? end : null,
@@ -405,7 +462,7 @@ async function fetchFirecrawl(url, settings, timeout) {
     throw new WebError("UNREADABLE_PAGE", "Firecrawl returned no readable Markdown");
   }
   return {url: url.href, title: typeof metadata?.title === "string" ? metadata.title.slice(0, 1000) : url.href,
-    text: data.markdown, source_truncated: false};
+    text: data.markdown, source_truncated: false, provider: "firecrawl"};
 }
 
 async function dispatch(req) {
@@ -417,7 +474,7 @@ async function dispatch(req) {
     throw new WebError("INVALID_ARGUMENT", "Select a web provider in the plugin settings, not in tool arguments");
   }
   if (req.name === "web_search") return search(req.arguments?.query, req.config, req.arguments?.count);
-  if (req.name === "web_fetch") return fetchPage(req.arguments?.url, req.config, req.arguments?.max_chars, req.arguments?.start_char);
+  if (req.name === "web_fetch") return fetchPage(req.arguments?.url, req.config, req.arguments?.max_chars, req.arguments?.start_char, req.arguments?.find ?? null);
   throw new WebError("UNKNOWN_TOOL", "Unknown tool " + req.name);
 }
 

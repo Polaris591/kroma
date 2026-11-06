@@ -34,9 +34,27 @@ async function smoke(staged) {
   const npm = (args, cwd = temp) => run(process.execPath, [npmCli, ...args], {cwd, env});
   let registry;
   try {
+    const nativeBundle = path.join(nativeDir,"share","kroma","plugins");
+    for (const [id,entrypoint] of [["web","main.js"],["subagents","main.js"],
+      ["project-memory","plugin.toml"]]) {
+      assert.ok(fs.existsSync(path.join(nativeBundle,id,"plugin.toml")),
+        `Native package must bundle disabled official plugin: ${id}`);
+      assert.ok(fs.existsSync(path.join(nativeBundle,id,entrypoint)),
+        `Native package is missing official plugin entrypoint: ${id}`);
+    }
+    const memoryExe=platform.os === "win32" ? "kroma-memory.exe" : "kroma-memory";
+    assert.ok(fs.existsSync(path.join(nativeDir,"bin",memoryExe)),
+      "Official project-memory must ship as a native binary with no Rust installation required");
+    const packageFiles=(dir,prefix="")=>fs.readdirSync(dir,{withFileTypes:true})
+      .flatMap(item=>{
+        const relative=prefix ? `${prefix}/${item.name}` : item.name;
+        return item.isDirectory() ? packageFiles(path.join(dir,item.name),relative) : [relative];
+      });
+    const expectedNative=["package.json","README.md","LICENSE",`bin/${executable(platform)}`,
+      `bin/${memoryExe}`,...packageFiles(nativeBundle,"share/kroma/plugins")];
     const packages = [];
     for (const [dir, expected] of [
-      [nativeDir, ["package.json", "README.md", "LICENSE", `bin/${executable(platform)}`]],
+      [nativeDir, expectedNative],
       [mainDir, ["package.json", "README.md", "LICENSE", "launcher.cjs", "platforms.cjs", "update.cjs"]],
     ]) {
       const [packed] = JSON.parse(npm(["pack", "--json", "--ignore-scripts", "--pack-destination", tarballs], dir));
@@ -84,6 +102,10 @@ async function smoke(staged) {
     const nativeVersion = run(path.join(nativeDir, "bin", executable(platform)), ["--version"]);
     assert.ok(nativeVersion.startsWith(`kroma ${main.version} (`), nativeVersion);
     assert.equal(run(process.execPath, [installed, "--version"], {cwd: temp, env}), nativeVersion);
+    const official = run(process.execPath,[installed,"plugins","list"],{cwd:temp,env});
+    for(const id of ["web","subagents","project-memory"]) {
+      assert.match(official,new RegExp(id),`Bundled plugin ${id} should appear in discovery`);
+    }
     assert.match(run(process.execPath, [installed, "--help"], {cwd: temp, env}), /Usage:/);
     const badFlag = spawnSync(process.execPath, [installed, "--kroma-smoke-invalid-option"], {cwd: temp, env, encoding: "utf8", timeout: 15000});
     assert.ifError(badFlag.error);
