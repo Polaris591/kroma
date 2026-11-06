@@ -1,0 +1,142 @@
+name: One-time legacy reference cleanup
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-time-legacy-ref-cleanup.yml
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    if: "${{ github.repository == 'Polaris591/kroma' && github.event.head_commit.message == 'chore: one-time Kroma legacy ref cleanup' }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and back up historical tag objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Polaris591/kroma"
+          test "$(git for-each-ref refs/tags --format='%(refname)' | wc -l | xargs)" = "18"
+          while IFS='|' read -r name sha; do
+            actual="$(git rev-parse "refs/tags/$name")"
+            test "$actual" = "$sha" || { echo "::error::Tag mismatch: $name"; exit 1; }
+          done <<'TAGS'
+          v0.8.1|ca68d8b553745dac111058466c2f333193c3c447
+          v0.9.0|67095e06395b31397c422bb3a5bf7583e5f2a9b1
+          v0.10.0|aed0ab3a8577ab93c9d11df0f2cfe31ae259da8c
+          v0.11.0|2f264e9e8a009a0df951b023937c3b3351543bef
+          v0.12.0|ae7f6349f94d02c4bf687b772bf33f2a057e5697
+          v0.13.0|fd2966e52253d510989f9d5785f7b985eec8023a
+          v1.0.0|676241b7d7f913f64f4f6982ea05e76ae3bcaf19
+          v1.1.0|0497be53c125c3d6007b32ae294734019e1ded47
+          v1.2.0|d94cc738d40548ab1ac7bbf2249f3ef371b1ad17
+          v1.2.0-kroma|dcdc8c727d5a9232f526150a35225f51d2a2d4e9
+          v1.3.0|01c9599a35e4376760018661b49c3baeb82e80cd
+          v1.4.0|0932d6810b0f2d650ac9dbcf69c6add5527a66c0
+          v1.5.0|90665ff839c7ced8da2b683e215cd866ae4f9fe2
+          v1.5.0-reviewfix.1|676df1181b135cb4fb387f212e944788c06b6ffc
+          v1.5.0-reviewfix.2|9a4278ce6cb12458d2044dff34b6284d8b4b44c3
+          v1.5.0-reviewfix.3|92038954ae30795a42022d23703aad6fecf0cace
+          v1.5.0-refactor.1|401d2d8b843514bcbb6158d1ef4f9933ac4453af
+          v1.5.0-hardening.1|08ce4c82e182e046b26d0bc26a93e4734a94c24c
+          TAGS
+          git bundle create "$RUNNER_TEMP/kroma-legacy-tags-202610.bundle" --tags
+          test -s "$RUNNER_TEMP/kroma-legacy-tags-202610.bundle"
+          git bundle verify "$RUNNER_TEMP/kroma-legacy-tags-202610.bundle"
+          echo "Legacy tag history bundled for recovery"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kroma-legacy-tags-before-cleanup
+          path: ${{ runner.temp }}/kroma-legacy-tags-202610.bundle
+          retention-days: 90
+          if-no-files-found: error
+      - name: Verify and delete pinned obsolete refs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Polaris591/kroma"
+          verify_ref() {
+            local ref="$1" expected="$2" actual
+            actual="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/$ref" --jq '.object.sha')"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::Ref moved or missing: $ref ($actual != $expected)"
+              exit 1
+            fi
+          }
+          while IFS='|' read -r name sha; do
+            verify_ref "heads/$name" "$sha"
+          done <<'BRANCHES'
+          docs/project-governance-20261106|b7bcf9271032f0cb554e2e6338f83faf43677ecc
+          feat/complete-three-plugins-final-design-20261106|95070657e28ece2971e57da8889fe456f27162c3
+          feat/kroma-audit-official-plugins-20261106|cc2bfafdfa8ecfa631a05bf5bfef8c54525ef922
+          feat/plugin-architecture-final-audit-20261106|a9cf81e674cabb0194a960c7da6b4918bcc41398
+          fix/audit-four-core-modules-20261106|a6a854f433a1d3b1084abdb601e47c49024cc85e
+          test/macos-e2e-fixture-stability-20261106|ad2c8303dfc89c31bbd0e1314f45077e095528e7
+          BRANCHES
+          while IFS='|' read -r name sha; do
+            verify_ref "tags/$name" "$sha"
+          done <<'TAGS'
+          v0.8.1|ca68d8b553745dac111058466c2f333193c3c447
+          v0.9.0|67095e06395b31397c422bb3a5bf7583e5f2a9b1
+          v0.10.0|aed0ab3a8577ab93c9d11df0f2cfe31ae259da8c
+          v0.11.0|2f264e9e8a009a0df951b023937c3b3351543bef
+          v0.12.0|ae7f6349f94d02c4bf687b772bf33f2a057e5697
+          v0.13.0|fd2966e52253d510989f9d5785f7b985eec8023a
+          v1.0.0|676241b7d7f913f64f4f6982ea05e76ae3bcaf19
+          v1.1.0|0497be53c125c3d6007b32ae294734019e1ded47
+          v1.2.0|d94cc738d40548ab1ac7bbf2249f3ef371b1ad17
+          v1.2.0-kroma|dcdc8c727d5a9232f526150a35225f51d2a2d4e9
+          v1.3.0|01c9599a35e4376760018661b49c3baeb82e80cd
+          v1.4.0|0932d6810b0f2d650ac9dbcf69c6add5527a66c0
+          v1.5.0|90665ff839c7ced8da2b683e215cd866ae4f9fe2
+          v1.5.0-reviewfix.1|676df1181b135cb4fb387f212e944788c06b6ffc
+          v1.5.0-reviewfix.2|9a4278ce6cb12458d2044dff34b6284d8b4b44c3
+          v1.5.0-reviewfix.3|92038954ae30795a42022d23703aad6fecf0cace
+          v1.5.0-refactor.1|401d2d8b843514bcbb6158d1ef4f9933ac4453af
+          v1.5.0-hardening.1|08ce4c82e182e046b26d0bc26a93e4734a94c24c
+          TAGS
+          echo "All 24 references match pinned SHA; deleting"
+          while IFS='|' read -r name sha; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$name" >/dev/null
+            echo "Deleted branch: $name"
+          done <<'BRANCHES'
+          docs/project-governance-20261106|b7bcf9271032f0cb554e2e6338f83faf43677ecc
+          feat/complete-three-plugins-final-design-20261106|95070657e28ece2971e57da8889fe456f27162c3
+          feat/kroma-audit-official-plugins-20261106|cc2bfafdfa8ecfa631a05bf5bfef8c54525ef922
+          feat/plugin-architecture-final-audit-20261106|a9cf81e674cabb0194a960c7da6b4918bcc41398
+          fix/audit-four-core-modules-20261106|a6a854f433a1d3b1084abdb601e47c49024cc85e
+          test/macos-e2e-fixture-stability-20261106|ad2c8303dfc89c31bbd0e1314f45077e095528e7
+          BRANCHES
+          while IFS='|' read -r name sha; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$name" >/dev/null
+            echo "Deleted tag: $name"
+          done <<'TAGS'
+          v0.8.1|ca68d8b553745dac111058466c2f333193c3c447
+          v0.9.0|67095e06395b31397c422bb3a5bf7583e5f2a9b1
+          v0.10.0|aed0ab3a8577ab93c9d11df0f2cfe31ae259da8c
+          v0.11.0|2f264e9e8a009a0df951b023937c3b3351543bef
+          v0.12.0|ae7f6349f94d02c4bf687b772bf33f2a057e5697
+          v0.13.0|fd2966e52253d510989f9d5785f7b985eec8023a
+          v1.0.0|676241b7d7f913f64f4f6982ea05e76ae3bcaf19
+          v1.1.0|0497be53c125c3d6007b32ae294734019e1ded47
+          v1.2.0|d94cc738d40548ab1ac7bbf2249f3ef371b1ad17
+          v1.2.0-kroma|dcdc8c727d5a9232f526150a35225f51d2a2d4e9
+          v1.3.0|01c9599a35e4376760018661b49c3baeb82e80cd
+          v1.4.0|0932d6810b0f2d650ac9dbcf69c6add5527a66c0
+          v1.5.0|90665ff839c7ced8da2b683e215cd866ae4f9fe2
+          v1.5.0-reviewfix.1|676df1181b135cb4fb387f212e944788c06b6ffc
+          v1.5.0-reviewfix.2|9a4278ce6cb12458d2044dff34b6284d8b4b44c3
+          v1.5.0-reviewfix.3|92038954ae30795a42022d23703aad6fecf0cace
+          v1.5.0-refactor.1|401d2d8b843514bcbb6158d1ef4f9933ac4453af
+          v1.5.0-hardening.1|08ce4c82e182e046b26d0bc26a93e4734a94c24c
+          TAGS
+          echo "Branches remaining: $(gh api "repos/$GITHUB_REPOSITORY/branches?per_page=100" --jq 'length')"
+          echo "Tags remaining: $(gh api "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq 'length')"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches?per_page=100" --jq 'length')" = "1"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq 'length')" = "0"
