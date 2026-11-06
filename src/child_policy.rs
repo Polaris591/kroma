@@ -223,12 +223,13 @@ fn allowed_command(command: &str, mode: &str) -> bool {
     }
     if mode == "test" {
         return match *first {
-            "cargo" => parts
-                .get(1)
-                .is_some_and(|verb| matches!(*verb, "test" | "check" | "clippy" | "fmt")),
-            "npm" => parts
-                .get(1)
-                .is_some_and(|verb| matches!(*verb, "test" | "run")),
+            "cargo" => parts.get(1).is_some_and(|verb| {
+                matches!(*verb, "test" | "check" | "clippy")
+                    || (*verb == "fmt" && parts.iter().any(|arg| *arg == "--check"))
+            }),
+            "npm" => parts.get(1).is_some_and(|verb| {
+                *verb == "test" || (*verb == "run" && parts.get(2) == Some(&"test"))
+            }),
             "node" => parts.get(1) == Some(&"--test"),
             "pytest" => true,
             "go" => parts.get(1) == Some(&"test"),
