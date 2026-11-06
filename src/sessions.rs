@@ -94,7 +94,15 @@ impl SessionCatalog {
 
     fn usage_map(&self) -> Result<std::collections::BTreeMap<String, SessionUsage>> {
         match fs::read(self.usage_path()) {
-            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid session usage ledger"),
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(map) => Ok(map),
+                Err(error) => {
+                    // Usage is display-only; a damaged sidecar cannot make an
+                    // otherwise healthy WAL/session unusable.
+                    crate::runtime_log!("[session] ignoring invalid usage sidecar: {error}");
+                    Ok(Default::default())
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
             Err(error) => Err(error.into()),
         }
@@ -163,7 +171,13 @@ impl SessionCatalog {
 
     fn models(&self) -> Result<std::collections::BTreeMap<String, SessionModel>> {
         match fs::read(self.models_path()) {
-            Ok(raw) => serde_json::from_slice(&raw).context("invalid session model choices"),
+            Ok(raw) => match serde_json::from_slice(&raw) {
+                Ok(map) => Ok(map),
+                Err(error) => {
+                    crate::runtime_log!("[session] ignoring invalid model sidecar: {error}");
+                    Ok(Default::default())
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
             Err(error) => Err(error.into()),
         }
@@ -197,7 +211,13 @@ impl SessionCatalog {
     }
     fn names(&self) -> Result<std::collections::BTreeMap<String, String>> {
         match fs::read(self.names_path()) {
-            Ok(raw) => Ok(serde_json::from_slice(&raw)?),
+            Ok(raw) => match serde_json::from_slice(&raw) {
+                Ok(map) => Ok(map),
+                Err(error) => {
+                    crate::runtime_log!("[session] ignoring invalid names sidecar: {error}");
+                    Ok(Default::default())
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
             Err(error) => Err(error.into()),
         }
@@ -389,6 +409,39 @@ fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_display_sidecars_do_not_block_transcript_or_new_metrics() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-corrupt-sidecars-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let catalog = SessionCatalog::from_default(root.join("main.json"))?;
+        fs::write(catalog.default_path(), "{}")?;
+        fs::write(catalog.names_path(), "not JSON")?;
+        fs::write(catalog.usage_path(), "not JSON")?;
+        fs::write(catalog.models_path(), "not JSON")?;
+        assert_eq!(catalog.list()?.len(), 1);
+        assert!(catalog.list()?[0].name.is_none());
+        assert_eq!(catalog.usage("default")?.coding.calls, 0);
+        assert!(catalog.model_choice("default")?.is_none());
+        catalog.name_session("default", "Recovered")?;
+        assert_eq!(catalog.list()?[0].name.as_deref(), Some("Recovered"));
+        let saved = catalog.add_usage(
+            "default",
+            &[crate::model::Usage {
+                input: Some(14),
+                ..Default::default()
+            }],
+            &[],
+        )?;
+        assert_eq!(saved.coding.calls, 1);
+        assert_eq!(saved.coding.input, 14);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn ai_title_can_only_fill_an_unnamed_session() -> Result<()> {
