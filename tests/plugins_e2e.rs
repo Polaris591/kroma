@@ -332,8 +332,12 @@ require("node:readline").createInterface({input:process.stdin}).on("line", line 
     let mut received = None;
     for _ in 0..100 {
         if let Ok(text) = fs::read_to_string(&log) {
-            received = Some(text);
-            break;
+            // File creation precedes completion of the plugin's first write.
+            // A newly created, still-empty file is not a received event.
+            if text.ends_with('\n') && !text.trim().is_empty() {
+                received = Some(text);
+                break;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(15)).await;
     }

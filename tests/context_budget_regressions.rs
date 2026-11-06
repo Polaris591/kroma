@@ -385,50 +385,57 @@ fn capture_provider() -> Result<(String, std::sync::mpsc::Receiver<Value>)> {
     let url = format!("http://{}/v1", listener.local_addr()?);
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let start = std::time::Instant::now();
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && start.elapsed() < Duration::from_secs(10) =>
-                {
+        let started = std::time::Instant::now();
+        // A connection may close before sending an HTTP body. Do not let that
+        // consume the only capture slot and make subsequent retries hit
+        // ConnectionRefused on a now-closed test listener (seen on macOS CI).
+        while started.elapsed() < Duration::from_secs(10) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(2));
+                    continue;
                 }
                 Err(_) => return,
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let parsed = (|| -> Result<Value> {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line)? == 0 {
+                    bail!("empty HTTP request");
+                }
+                let mut length = None;
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = Some(value.trim().parse::<usize>()?);
+                    }
+                }
+                let length = length.ok_or_else(|| anyhow::anyhow!("missing content length"))?;
+                if length > 65_536 {
+                    bail!("unexpectedly large mock model payload");
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body)?;
+                Ok(serde_json::from_slice(&body)?)
+            })();
+            let text = "audit stop";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                text.len(),
+                text
+            );
+            let _ = stream.flush();
+            if let Ok(request) = parsed {
+                let _ = sender.send(request);
+                return;
             }
-        };
-        let mut reader = BufReader::new(&stream);
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() {
-            return;
         }
-        let mut length = 0;
-        loop {
-            line.clear();
-            if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() {
-                break;
-            }
-            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                length = value.trim().parse().unwrap_or(0);
-            }
-        }
-        let mut body = vec![0; length];
-        if reader.read_exact(&mut body).is_err() {
-            return;
-        }
-        drop(reader);
-        if let Ok(value) = serde_json::from_slice(&body) {
-            let _ = sender.send(value);
-        }
-        let text = "audit stop";
-        let _ = write!(
-            stream,
-            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            text.len(),
-            text
-        );
-        let _ = stream.flush();
     });
     Ok((url, receiver))
 }
