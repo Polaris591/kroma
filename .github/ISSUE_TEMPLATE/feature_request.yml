@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a focused improvement consistent with Kroma's minimal runtime
+title: "feat: "
+labels: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the user-facing limitation before proposing a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Minimal proposed change
+      description: Prefer the smallest built-in or opt-in plugin solution. Explain why existing interfaces are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and tradeoffs
+      description: Include complexity, compatibility and possible performance/cache effects.
+  - type: textarea
+    id: validation
+    attributes:
+      label: How would we verify it?
+      description: Describe a test or observable success criterion.

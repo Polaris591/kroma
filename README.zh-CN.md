@@ -103,6 +103,13 @@ npm 包（`kroma` 与五个 `kroma-<platform>`）目前均未发布，名称在�
 - 架构与生命周期：[docs/architecture.md](docs/architecture.md)、[docs/lifecycle.md](docs/lifecycle.md)
 - 许可：MIT，见 [LICENSE](LICENSE)
 
+## 项目文档与参与贡献
+
+- [文档导航](docs/README.md)：使用指南、技术架构、插件与历史设计资料。
+- [贡献指南](CONTRIBUTING.md)：开发检查、PR 规范与简约架构原则。
+- [变更记录](CHANGELOG.md)：尚未发布版本的整理记录，不代表已经发布安装包。
+- [Issues](https://github.com/Polaris591/kroma/issues)：报告问题和提出功能建议。
+
 ## 反馈
 
 请通过 <https://github.com/Polaris591/kroma> 的 issue 反馈问题；不要在 issue、日志或

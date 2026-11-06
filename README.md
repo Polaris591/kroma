@@ -143,6 +143,13 @@ supported by the npm packages; source builds remain available. See
 [the distribution guide](docs/npm-distribution.md) for packaging, CI baselines and
 local checks, and [releasing](docs/releasing.md) for the maintainer checklist.
 
+## Project documentation and contributing
+
+- [Documentation index](docs/README.md) — user guides, architecture, extension references and historical research.
+- [Contributing](CONTRIBUTING.md) — development checks and change scope.
+- [Changelog](CHANGELOG.md) — curated changes and release status; not a published-release claim.
+- [Issues](https://github.com/Polaris591/kroma/issues) — reproducible bugs and focused feature proposals.
+
 ## Development
 
 ```bash
