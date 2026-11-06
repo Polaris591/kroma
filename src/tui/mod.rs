@@ -12,6 +12,8 @@ mod input_tests;
 mod links;
 mod logo;
 mod markdown;
+#[cfg(any(windows, test))]
+mod paste;
 mod picker;
 mod preferences;
 mod runtime_events;
@@ -642,6 +644,49 @@ fn text_paste_shortcut(key: &KeyEvent) -> bool {
             || (key.code == KeyCode::Insert && key.modifiers == KeyModifiers::SHIFT))
 }
 
+/// On Windows, Crossterm's native event source sees terminal paste as keys,
+/// not `Event::Paste`. Confirm injected Enter against the multiline clipboard
+/// before inserting a newline rather than submitting the first pasted line.
+#[cfg(any(windows, test))]
+fn native_pasted_newline(
+    state: &mut UiState,
+    event: &Event,
+    clipboard: impl FnOnce() -> Option<String>,
+) -> bool {
+    use std::time::Instant;
+    let Event::Key(key) = event else {
+        if matches!(event, Event::Paste(_)) {
+            state.native_paste_keys.reset();
+        }
+        return false;
+    };
+    if key.kind == KeyEventKind::Release {
+        return false;
+    }
+    let now = Instant::now();
+    match key.code {
+        KeyCode::Char(ch)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            state.native_paste_keys.record_char(ch, now);
+        }
+        KeyCode::Enter if key.modifiers.is_empty() => {
+            let confirmed = state.native_paste_keys.recent(now)
+                && clipboard()
+                    .is_some_and(|text| state.native_paste_keys.pasted_newline(&text, now));
+            if confirmed {
+                state.paste_text("\n");
+                return true;
+            }
+            state.native_paste_keys.reset();
+        }
+        _ => state.native_paste_keys.reset(),
+    }
+    false
+}
+
 fn input_event(
     state: &mut UiState,
     event: Event,
@@ -662,6 +707,8 @@ fn input_event(
     // The on-demand plugin panel owns navigation until Esc closes it.
     // No key may leak through to the draft editor while this overlay is up.
     if state.has_plugin_panel() {
+        #[cfg(windows)]
+        state.native_paste_keys.reset();
         if let Event::Key(key) = &event {
             if key.kind != KeyEventKind::Release && state.panel_search_key(*key) {
                 return InputAction::None;
@@ -727,7 +774,15 @@ fn input_event(
         return InputAction::Cancel;
     }
     if state.picker.is_some() {
+        #[cfg(windows)]
+        state.native_paste_keys.reset();
         return picker_event(state, event, workdir);
+    }
+    #[cfg(windows)]
+    if !state.attach_mode
+        && native_pasted_newline(state, &event, || attachments::clipboard_text().ok())
+    {
+        return InputAction::None;
     }
     match event {
         // Ctrl+Shift+C and Ctrl+Insert copy the draft selection without
@@ -3189,6 +3244,79 @@ mod tests {
         ));
         assert!(ui.attachments.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn two_line_paste_stays_in_the_editor_until_enter_is_pressed() {
+        let (mut ui, model) = setup();
+        let path = std::path::Path::new(".");
+        assert!(matches!(
+            input_event(
+                &mut ui,
+                Event::Paste("第一行\r\n第二行".to_owned()),
+                false,
+                &model,
+                path
+            ),
+            InputAction::None
+        ));
+        assert_eq!(ui.editor.text(), "第一行\n第二行");
+        assert!(ui.attachments.is_empty());
+        let submit = input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            false,
+            &model,
+            path,
+        );
+        assert!(matches!(submit, InputAction::Submit(text) if text == "第一行\n第二行"));
+    }
+
+    // Windows emits unbracketed terminal paste as Char/Enter key records.
+    // Drive that exact event sequence with a supplied clipboard, without
+    // requiring a desktop clipboard or a live Windows console in unit tests.
+    #[cfg(not(windows))]
+    #[test]
+    fn native_windows_multiline_key_paste_does_not_submit_its_first_line() {
+        let (mut ui, model) = setup();
+        let paste = "first\r\nsecond";
+        let mut send = |event: Event| {
+            if native_pasted_newline(&mut ui, &event, || Some(paste.to_owned())) {
+                InputAction::None
+            } else {
+                input_event(&mut ui, event, false, &model, std::path::Path::new("."))
+            }
+        };
+
+        for ch in "first".chars() {
+            assert!(matches!(
+                send(Event::Key(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE
+                ))),
+                InputAction::None
+            ));
+        }
+        assert!(matches!(
+            send(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE
+            ))),
+            InputAction::None,
+        ));
+        for ch in "second".chars() {
+            assert!(matches!(
+                send(Event::Key(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE
+                ))),
+                InputAction::None
+            ));
+        }
+        assert!(matches!(
+            send(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+            InputAction::Submit(text) if text == "first\nsecond"
+        ));
     }
 
     #[test]
