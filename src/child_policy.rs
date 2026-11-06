@@ -285,6 +285,9 @@ mod tests {
             assert!(!allowed_command(forbidden, "read-only"), "{forbidden}");
         }
         assert!(allowed_command("cargo test --locked", "test"));
+        assert!(!allowed_command("cargo fmt", "test"));
+        assert!(allowed_command("cargo fmt --check", "test"));
+        assert!(!allowed_command("npm run arbitrary-script", "test"));
         assert!(!allowed_command("cargo test --locked", "read-only"));
     }
 
