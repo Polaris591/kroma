@@ -225,7 +225,7 @@ fn allowed_command(command: &str, mode: &str) -> bool {
         return match *first {
             "cargo" => parts.get(1).is_some_and(|verb| {
                 matches!(*verb, "test" | "check" | "clippy")
-                    || (*verb == "fmt" && parts.iter().any(|arg| *arg == "--check"))
+                    || (*verb == "fmt" && parts.contains(&"--check"))
             }),
             "npm" => parts.get(1).is_some_and(|verb| {
                 *verb == "test" || (*verb == "run" && parts.get(2) == Some(&"test"))
