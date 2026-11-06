@@ -13,6 +13,19 @@ keeps the agent's work visible, snapshots files automatically in Git worktrees, 
 makes rollback explicit. Read [docs/security.md](docs/security.md) before running it
 on a repository you care about.
 
+## Project status
+
+| Component | Current state | More information |
+| --- | --- | --- |
+| Rust CLI, JSONL and TUI | Public Beta; build from source | [Quickstart](docs/quickstart.md) |
+| MCP, Agent Skills and process plugins | Implemented; extensions remain opt-in | [Plugins](examples/plugins/README.md) |
+| Official Web, Subagents and Project Memory plugins | Source available; disabled by default | [Plugin examples](examples/plugins/README.md) |
+| Desktop | Separate preview, not part of the CLI npm installer | [Desktop](desktop/README.md) |
+| npm distribution | Five native build targets prepared; not published | [Distribution status](docs/npm-distribution.md) |
+
+See the [project documentation](docs/README.md) for the maintained guides and the
+[change history](CHANGELOG.md) for what is still unreleased.
+
 ## Quick start
 
 Source installation:
@@ -142,6 +155,14 @@ packages. Alpine/musl, Windows ARM64, 32-bit systems and other architectures are
 supported by the npm packages; source builds remain available. See
 [the distribution guide](docs/npm-distribution.md) for packaging, CI baselines and
 local checks, and [releasing](docs/releasing.md) for the maintainer checklist.
+
+## Project documentation and contributing
+
+- [Documentation index](docs/README.md) — user guides, architecture, extension references and historical research.
+- [Contributing](CONTRIBUTING.md) — development checks and change scope.
+- [Changelog](CHANGELOG.md) — curated changes and release status; not a published-release claim.
+- [Issues](https://github.com/Polaris591/kroma/issues) — reproducible bugs and focused feature proposals.
+- [Maintainer operations](docs/maintainer-operations.md) — release gates and GitHub settings.
 
 ## Development
 

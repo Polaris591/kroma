@@ -31,7 +31,7 @@ The model receives two new tools:
   keys. Only network errors, timeouts, HTTP 429 or 5xx advance to the next
   configured provider, within one total deadline. Explicit providers never switch.
   `site:domain` and `-site:domain` restrictions are checked against returned URLs.
-  Optional `provider` selects another backend for a single call.
+  The model cannot select a paid provider through tool arguments; change the plugin settings instead.
 - `web_fetch({ "url": "https://www.rust-lang.org/", "max_chars": 12000 })`:
   page title and structured text (headings, code, tables and links), plus
   `next_start` for continuing a long page with `start_char` and the same URL.
@@ -68,15 +68,16 @@ of the two wins. Unset preserves the unlimited default for non-streaming tools.
 SearXNG must enable JSON search. Mwmbl, Bing RSS and DuckDuckGo HTML/Lite
 are keyless best-effort engines with unequal ranking quality; see the web plugin
 guide for the measured results on one network. Configure at least one keyed
-provider in the priority list, or select a backend explicitly. Auto may incur
-multiple API charges; its default per-attempt cap is 8 seconds, total 15 seconds.
+provider in the priority list, or select a backend explicitly. Auto uses at most one paid backend by default; additional paid fallback requires the owner to
+set `paid_fallback=true`. Each attempt is capped at 8 seconds within the 15-second total deadline.
 
 The fetcher uses HTTP(S) only; no headless browser, JS rendering or PDF parsing.
 It selects static main/article content, removes navigation, preserves code and
 links, and decodes declared character sets (including Chinese GBK/GB2312).
 Blocked/empty pages fail explicitly rather than masquerading as readable content.
-Optional `provider: "firecrawl"` uses a remote, separately billed Markdown
-extraction service. Local HTTP remains the default. Credentials can be stored
+An owner-configured `fetch_provider=firecrawl` uses a remote, separately billed Markdown
+extraction service. Local HTTP remains the default; the model cannot turn paid
+fetching on through tool arguments. Credentials can be stored
 outside the plugin in a private user-data JSON file; see the web plugin guide.
 Webpage text is untrusted data, not instructions.
 

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability (private reporting)
+    url: https://github.com/Polaris591/kroma/security/advisories/new
+    about: Use private reporting if available. If disabled, follow SECURITY.md; do not publish exploit details.
+  - name: Documentation and getting started
+    url: https://github.com/Polaris591/kroma/blob/main/docs/README.md
+    about: Check the guides and reference docs before opening an issue.

@@ -1,0 +1,46 @@
+name: Documentation links
+
+on:
+  push:
+    paths:
+      - 'README*.md'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'SECURITY.md'
+      - 'PLUGIN_ROADMAP.md'
+      - 'docs/**'
+      - 'desktop/**/*.md'
+      - 'examples/plugins/**/*.md'
+      - 'npm/**/*.md'
+      - 'reviews/README.md'
+      - 'benchmarks/README.md'
+      - 'scripts/check_doc_links.py'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'README*.md'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'SECURITY.md'
+      - 'PLUGIN_ROADMAP.md'
+      - 'docs/**'
+      - 'desktop/**/*.md'
+      - 'examples/plugins/**/*.md'
+      - 'npm/**/*.md'
+      - 'reviews/README.md'
+      - 'benchmarks/README.md'
+      - 'scripts/check_doc_links.py'
+      - '.github/workflows/docs.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify maintained Markdown link targets
+        run: python3 scripts/check_doc_links.py

@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible problem with Kroma
+title: "bug: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security vulnerabilities, follow [SECURITY.md](https://github.com/Polaris591/kroma/blob/main/SECURITY.md) and **do not** open a public issue. Never paste API keys, credentials, private conversations or proprietary source.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Explain the observed behavior and how it differs from expectations.
+      placeholder: Describe the bug, not only the desired fix.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide a minimal, sanitized reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Kroma version / commit
+      description: Output of kroma --version, or the commit SHA for source builds.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - CLI / JSONL
+        - TUI
+        - Provider / model protocol
+        - Context / caching
+        - Session / checkpoints
+        - Plugins / MCP / Skills
+        - Desktop preview
+        - Installation / release
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, installation method, protocol and model family (no keys or private endpoints).
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized logs or evidence
+      description: Paste only minimal, redacted snippets. Never attach full sessions or credential-bearing bundles.
+      render: text

@@ -3,7 +3,7 @@
 ## 1. Install and start
 
 ```bash
-cargo build --release
+cargo build --release --locked
 ./target/release/kroma
 ```
 
