@@ -40,7 +40,7 @@ test("profile layers use project over user over bundled, without merging policie
 test("invalid profiles and duplicate names cannot silently widen child permissions", () => {
   for (const malformed of [
     profile("test").replace("maxTurns: 20", "maxTurns: 0"),
-    profile("test").replace("model: auto", "thinking: turbo"),
+    profile("test").replace("model: light", "model: light\\nthinking: turbo"),
     profile("test").replace("shell: read-only", "shell: unrestricted"),
     profile("test").replace("tools: [shell]", "tools: [shell, shell]"),
     profile("test").replace("maxTokens: 500", "hooks: everything"),
