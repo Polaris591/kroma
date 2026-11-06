@@ -221,7 +221,9 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
         config.deepseek_thinking.clone(),
     )
     .with_output_tokens(config.max_output_tokens)
-    .with_thinking_levels(config.thinking_levels.clone());
+    .with_thinking_levels(config.thinking_levels.clone())
+    // Endpoint capability, never inferred from the model name.
+    .with_native_web_search(config.native_web_search);
     // Validate an explicit alias before doing any optional network work.
     let catalog = model_catalog::select(
         &config.base_url,
@@ -368,6 +370,7 @@ mod tests {
             max_output_tokens: Some(128_000),
             thinking_levels: Some(vec!["medium".into(), "high".into(), "xhigh".into()]),
             catalog_model: None,
+            native_web_search: None,
         };
         let (model, budget, report) = model_from_profile(&profile).await.unwrap();
         assert_eq!(budget.window(), 500_000);
@@ -399,6 +402,7 @@ mod tests {
                 max_output_tokens: Some(8192),
                 thinking_levels: Some(vec!["medium".into(), "high".into()]),
                 catalog_model: None,
+                native_web_search: None,
             };
             let (_, budget, _) = tokio::time::timeout(
                 std::time::Duration::from_millis(200),
@@ -432,6 +436,7 @@ mod tests {
                 max_output_tokens: None,
                 thinking_levels: None,
                 catalog_model: None,
+                native_web_search: None,
             };
             let (_, budget, report) = model_from_profile(&profile).await?;
             assert_eq!(budget.output_reserve(), 4096, "{protocol}");
@@ -456,6 +461,7 @@ mod tests {
                 max_output_tokens: None,
                 thinking_levels: None,
                 catalog_model: None,
+                native_web_search: None,
             };
             let config = Config::from_profile(&profile, Default::default(), None)?;
             let (offline, offline_report) = config.resolved_limits_without_probe()?;
@@ -491,6 +497,7 @@ mod tests {
             max_output_tokens: None,
             thinking_levels: None,
             catalog_model: None,
+            native_web_search: None,
         };
         let (_, budget, _) = tokio::time::timeout(
             std::time::Duration::from_millis(200),

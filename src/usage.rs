@@ -11,6 +11,9 @@ pub struct UsageMeter {
     pub output: u64,
     pub cached: u64,
     pub reasoning: u64,
+    /// Endpoint-reported server-side search requests, when it reports them.
+    pub web_searches: u64,
+    unknown_web_searches: usize,
     /// Last completed foreground model request, separate from process totals.
     last: Option<Usage>,
     unknown_input: usize,
@@ -85,6 +88,11 @@ impl UsageMeter {
             self.reasoning = self.reasoning.saturating_add(value);
         } else {
             self.unknown_reasoning += requests;
+        }
+        if let Some(value) = usage.and_then(|u| u.web_searches) {
+            self.web_searches = self.web_searches.saturating_add(value);
+        } else {
+            self.unknown_web_searches += requests;
         }
     }
 
@@ -175,7 +183,7 @@ impl UsageMeter {
                         };
                     format!("{}{percent}", if partial { "~" } else { "" })
                 });
-        format!(
+        let mut line = format!(
             "{label}: {} call(s) | In {} | Out {} | Cache read {} | Hit {} | Reasoning {}",
             self.calls,
             measured(self.input, self.unknown_input),
@@ -183,7 +191,15 @@ impl UsageMeter {
             measured(self.cached, self.unknown_cached),
             cache_rate,
             measured(self.reasoning, self.unknown_reasoning),
-        )
+        );
+        // Only a real provider measurement is shown; silence beats a guess.
+        if self.web_searches > 0 || self.unknown_web_searches > 0 {
+            line.push_str(&format!(
+                " | Web searches {}",
+                measured(self.web_searches, self.unknown_web_searches)
+            ));
+        }
+        line
     }
 
     /// Merge batches without losing unknown counters or the latest request.
@@ -200,12 +216,16 @@ impl UsageMeter {
         self.output = self.output.saturating_add(other.output);
         self.cached = self.cached.saturating_add(other.cached);
         self.reasoning = self.reasoning.saturating_add(other.reasoning);
+        self.web_searches = self.web_searches.saturating_add(other.web_searches);
         self.unknown_input = self.unknown_input.saturating_add(other.unknown_input);
         self.unknown_output = self.unknown_output.saturating_add(other.unknown_output);
         self.unknown_cached = self.unknown_cached.saturating_add(other.unknown_cached);
         self.unknown_reasoning = self
             .unknown_reasoning
             .saturating_add(other.unknown_reasoning);
+        self.unknown_web_searches = self
+            .unknown_web_searches
+            .saturating_add(other.unknown_web_searches);
         self.paired_cache_input = self
             .paired_cache_input
             .saturating_add(other.paired_cache_input);
@@ -300,6 +320,7 @@ mod tests {
             cached: Some(80),
             total: None,
             reasoning: Some(8),
+            web_searches: None,
         }));
         meter.record(None);
         assert_eq!(meter.calls, 2);

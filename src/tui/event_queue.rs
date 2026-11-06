@@ -226,6 +226,7 @@ impl State {
                     cached,
                     reasoning,
                     total: None,
+                    web_searches: None,
                 }));
             }
             UiEvent::ApecUsage {
@@ -245,6 +246,7 @@ impl State {
                         cached,
                         reasoning: None,
                         total: None,
+                        web_searches: None,
                     }),
                 );
             }

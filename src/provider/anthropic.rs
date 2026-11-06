@@ -400,6 +400,7 @@ impl Stream {
             total: input.and_then(|i| output.and_then(|o| i.checked_add(o))),
             cached: self.input.read,
             reasoning: None,
+            web_searches: None,
         })
     }
 
@@ -490,6 +491,7 @@ impl Stream {
                 total,
                 cached: self.input.read,
                 reasoning: None,
+                web_searches: None,
             }),
         ))
     }
@@ -508,6 +510,7 @@ pub(super) fn parse_text(body: &str) -> Result<ApecTextAttempt> {
         total: input.and_then(|i| output.and_then(|o| i.checked_add(o))),
         cached: breakdown.read,
         reasoning: None,
+        web_searches: None,
     });
     if v["stop_reason"] == "max_tokens" {
         return Ok(ApecTextAttempt::Truncated(stats));

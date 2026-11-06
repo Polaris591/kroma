@@ -73,6 +73,7 @@ fn profile(
         max_output_tokens,
         thinking_levels: None,
         catalog_model: catalog_model.map(str::to_owned),
+        native_web_search: None,
     }
 }
 

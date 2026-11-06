@@ -13,9 +13,20 @@ pub(super) fn payload(
     effort: &str,
     origin: &str,
 ) -> Result<Value> {
-    payload_with_cache(model, messages, tools, max_output, effort, origin, None)
+    payload_with_cache_at(
+        model,
+        messages,
+        tools,
+        max_output,
+        effort,
+        origin,
+        None,
+        None,
+        &[],
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn payload_with_cache(
     model: &str,
     messages: &[Message],
@@ -24,6 +35,7 @@ pub(super) fn payload_with_cache(
     effort: &str,
     origin: &str,
     image_cache: Option<&crate::model::TaskImageCache>,
+    native_tools: &[Value],
 ) -> Result<Value> {
     payload_with_cache_at(
         model,
@@ -34,6 +46,7 @@ pub(super) fn payload_with_cache(
         origin,
         image_cache,
         None,
+        native_tools,
     )
 }
 
@@ -47,6 +60,10 @@ pub(super) fn payload_with_cache_at(
     origin: &str,
     image_cache: Option<&crate::model::TaskImageCache>,
     active_turn_override: Option<usize>,
+    // Server-side tools the endpoint executes itself (for example
+    // `web_search`). They are appended verbatim and never become function
+    // definitions the local ToolRegistry could execute.
+    native_tools: &[Value],
 ) -> Result<Value> {
     let mut input = Vec::new();
     let active_turn = active_turn_override.unwrap_or_else(|| {
@@ -92,10 +109,11 @@ pub(super) fn payload_with_cache_at(
             other => bail!("unsupported role for Responses: {other}"),
         }
     }
-    let definitions = tools.iter().map(|tool| {
+    let mut definitions = tools.iter().map(|tool| {
         let f = &tool["function"];
         Ok(json!({"type":"function","name":f["name"],"description":f["description"],"parameters":f["parameters"]}))
     }).collect::<Result<Vec<Value>>>()?;
+    definitions.extend(native_tools.iter().cloned());
     let mut request = json!({"model":model,"input":input,"tools":definitions,
         "stream":true,"store":false,"include":["reasoning.encrypted_content"]});
     if let Some(n) = max_output {
@@ -112,6 +130,19 @@ pub(super) fn payload_with_cache_at(
     Ok(request)
 }
 
+/// A server-side tool call the endpoint executed itself. The local
+/// ToolRegistry never sees it; it exists for display and for the persisted
+/// source list.
+#[derive(Default)]
+struct NativeCall {
+    id: String,
+    arguments: String,
+    summary: String,
+    reported: bool,
+    finished: bool,
+    failed: bool,
+}
+
 #[derive(Default)]
 pub(super) struct Stream {
     items: BTreeMap<usize, Value>,
@@ -121,6 +152,10 @@ pub(super) struct Stream {
     reasoning_summary: String,
     usage: Option<Usage>,
     status: Option<String>,
+    native: BTreeMap<usize, NativeCall>,
+    /// Real sources the endpoint cited, kept in the assistant turn.
+    citations: Vec<Value>,
+    citation_keys: std::collections::BTreeSet<String>,
     pub received_delta: bool,
     pub done: bool,
 }
@@ -128,7 +163,7 @@ pub(super) struct Stream {
 impl Stream {
     #[cfg(test)]
     pub fn apply(&mut self, data: &str, on_text: &mut (impl FnMut(&str) + Send)) -> Result<()> {
-        self.apply_with_reasoning(data, on_text, &mut |_| {})
+        self.apply_with_reasoning(data, on_text, &mut |_| {}, &mut |_| {})
     }
 
     pub fn apply_with_reasoning(
@@ -136,6 +171,7 @@ impl Stream {
         data: &str,
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
+        on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
     ) -> Result<()> {
         if data == "[DONE]" {
             return Ok(());
@@ -145,13 +181,18 @@ impl Stream {
             "response.output_item.added" => {
                 if let Some(index) = v["output_index"].as_u64() {
                     self.items.insert(index as usize, v["item"].clone());
+                    self.observe_native(index as usize, &v["item"], on_activity);
                 }
             }
             "response.output_item.done" => {
                 if let Some(index) = v["output_index"].as_u64() {
                     self.items.insert(index as usize, v["item"].clone());
+                    self.observe_native(index as usize, &v["item"], on_activity);
                 }
             }
+            // Sources are cited while the answer streams; the final message
+            // item repeats them. Store both, ignore unrelated annotations.
+            "response.output_text.annotation.added" => self.record_citation(&v["annotation"]),
             "response.function_call_arguments.delta" => {
                 let index = v["output_index"]
                     .as_u64()
@@ -209,6 +250,26 @@ impl Stream {
             "response.completed" | "response.incomplete" | "response.failed" => {
                 self.status = v["response"]["status"].as_str().map(str::to_owned);
                 self.usage = Usage::from_value(&v["response"]["usage"]);
+                // Server-side search counts are a provider measurement, never
+                // derived from the number of observed calls.
+                if let Some(count) = v["response"]
+                    .pointer("/tool_usage/web_search/num_requests")
+                    .and_then(Value::as_u64)
+                {
+                    self.usage.get_or_insert_with(Usage::default).web_searches = Some(count);
+                }
+                if let Some(output) = v["response"]["output"].as_array() {
+                    for item in output {
+                        if item["type"] != "message" {
+                            continue;
+                        }
+                        for part in item["content"].as_array().into_iter().flatten() {
+                            for annotation in part["annotations"].as_array().into_iter().flatten() {
+                                self.record_citation(annotation);
+                            }
+                        }
+                    }
+                }
                 // The final Responses output, when supplied, is authoritative.
                 // A stream may carry only deltas for one message and a full
                 // output item for a second; do not silently drop that second
@@ -225,6 +286,107 @@ impl Stream {
         }
         Ok(())
     }
+    /// Track one server-side tool item. The query or URL is only known once
+    /// the endpoint finishes the call, so progress is reported from there;
+    /// the result and sources follow when the stream ends.
+    fn observe_native(
+        &mut self,
+        index: usize,
+        item: &Value,
+        on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
+    ) {
+        if item["type"] != "web_search_call" {
+            return;
+        }
+        let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let call = self.native.entry(index).or_insert_with(|| NativeCall {
+            id: id.to_owned(),
+            arguments: "{}".into(),
+            ..NativeCall::default()
+        });
+        if item["action"].is_object() {
+            call.arguments = native_arguments(item);
+            call.summary = native_summary(item);
+        }
+        call.failed |= item["status"] == "failed";
+        if call.reported || !item["action"].is_object() {
+            return;
+        }
+        call.reported = true;
+        on_activity(crate::model::NativeActivity {
+            name: "web_search".into(),
+            id: call.id.clone(),
+            arguments: call.arguments.clone(),
+            result: None,
+            done: false,
+            failed: false,
+        });
+    }
+
+    /// Keep the first occurrence of each cited source, with its position.
+    fn record_citation(&mut self, annotation: &Value) {
+        if annotation["type"] != "url_citation" {
+            return;
+        }
+        let Some(url) = annotation["url"].as_str().filter(|url| !url.is_empty()) else {
+            return;
+        };
+        let title = annotation["title"].as_str().unwrap_or("");
+        if !self.citation_keys.insert(format!("{url}|{title}")) {
+            return;
+        }
+        let mut item = json!({"type":"url_citation","url":url,"title":title});
+        for (key, field) in [("start_index", "start_index"), ("end_index", "end_index")] {
+            if let Some(value) = annotation[key].as_u64() {
+                item[field] = json!(value);
+            }
+        }
+        self.citations.push(item);
+    }
+
+    /// Finish every server-side call whose progress was already shown. Called
+    /// once the stream ends, including after a failure, so no display record
+    /// stays open and no source list is invented.
+    pub(super) fn drain_finished_native(&mut self) -> Vec<crate::model::NativeActivity> {
+        let citations = self.citations.clone();
+        let mut finished = Vec::new();
+        for call in self.native.values_mut() {
+            if !call.reported || call.finished {
+                continue;
+            }
+            call.finished = true;
+            let mut lines = Vec::new();
+            if !call.summary.is_empty() {
+                lines.push(call.summary.clone());
+            }
+            if !citations.is_empty() {
+                lines.push("Sources:".into());
+                for citation in &citations {
+                    let url = citation["url"].as_str().unwrap_or("");
+                    let title = citation["title"].as_str().unwrap_or("");
+                    lines.push(match title.is_empty() {
+                        true => format!("- {url}"),
+                        false => format!("- {url} ({title})"),
+                    });
+                }
+            }
+            finished.push(crate::model::NativeActivity {
+                name: "web_search".into(),
+                id: call.id.clone(),
+                arguments: call.arguments.clone(),
+                result: Some(lines.join(
+                    "
+",
+                )),
+                done: true,
+                failed: call.failed,
+            });
+        }
+        finished
+    }
+
     pub(super) fn reported_usage(&self) -> Option<Usage> {
         self.usage.clone()
     }
@@ -304,6 +466,10 @@ impl Stream {
         if calls.is_empty() && content.trim().is_empty() {
             bail!("Responses returned neither text nor tools");
         }
+        // Cited sources stay with the turn they belong to. They are never
+        // replayed upstream: the request builder only forwards reasoning
+        // items from an assistant message.
+        opaque.extend(self.citations.iter().cloned());
         Ok((
             Message {
                 role: "assistant".into(),
@@ -316,6 +482,48 @@ impl Stream {
             },
             self.usage,
         ))
+    }
+}
+
+fn native_query(item: &Value) -> String {
+    let action = &item["action"];
+    let queries = action["queries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    if queries.is_empty() {
+        action["query"].as_str().unwrap_or("").to_owned()
+    } else {
+        queries.join(", ")
+    }
+}
+
+/// Compact JSON arguments for the existing tool activity display.
+fn native_arguments(item: &Value) -> String {
+    match item["action"]["type"].as_str() {
+        Some("open_page") => {
+            json!({"url": item["action"]["url"].as_str().unwrap_or("")}).to_string()
+        }
+        Some("search") => json!({"query": native_query(item)}).to_string(),
+        _ => "{}".into(),
+    }
+}
+
+fn native_summary(item: &Value) -> String {
+    match item["action"]["type"].as_str() {
+        Some("open_page") => {
+            format!("opened {}", item["action"]["url"].as_str().unwrap_or(""))
+        }
+        _ => {
+            let query = native_query(item);
+            if query.is_empty() {
+                "searched".into()
+            } else {
+                format!("searched {query}")
+            }
+        }
     }
 }
 
@@ -516,6 +724,7 @@ mod tests {
                     &value.to_string(),
                     &mut |text| answer.push_str(text),
                     &mut |text| summary.lock().unwrap().push_str(text),
+                    &mut |_| {},
                 )
                 .unwrap();
         };
@@ -538,6 +747,167 @@ mod tests {
         assert_eq!(
             message.provider_items.as_ref().unwrap()[0]["encrypted_content"],
             "secret"
+        );
+    }
+
+    #[test]
+    fn server_side_search_tool_is_forwarded_verbatim() {
+        let request = payload_with_cache_at(
+            "mock",
+            &[Message::new("user", "search")],
+            &[],
+            Some(512),
+            "high",
+            "test-origin",
+            None,
+            None,
+            &[json!({"type":"web_search"})],
+        )
+        .unwrap();
+        assert_eq!(request["tools"][0], json!({"type":"web_search"}));
+        assert_eq!(request["store"], false);
+        assert_eq!(request["stream"], true);
+        assert_eq!(request["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn server_side_search_citations_and_function_calls_stay_separate() {
+        let mut stream = Stream::default();
+        let mut text = String::new();
+        let mut activities = Vec::new();
+        let events = vec![
+            json!({"type":"response.output_item.added","output_index":0,
+                "item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}),
+            json!({"type":"response.web_search_call.searching","item_id":"ws_1","output_index":0}),
+            json!({"type":"response.output_item.done","output_index":0,
+                "item":{"id":"ws_1","type":"web_search_call","status":"completed",
+                    "action":{"type":"search","queries":["rust stable version"],
+                        "query":"rust stable version"}}}),
+            json!({"type":"response.output_item.added","output_index":1,
+                "item":{"type":"function_call","call_id":"call_1","name":"shell","arguments":""}}),
+            json!({"type":"response.function_call_arguments.delta","output_index":1,
+                "delta":"{\"command\":\"pwd\"}"}),
+            json!({"type":"response.output_text.delta","output_index":2,"delta":"Rust 1.99"}),
+            json!({"type":"response.output_text.annotation.added","output_index":2,
+                "annotation":{"type":"url_citation","start_index":0,"end_index":4,
+                    "title":"Rust releases","url":"https://blog.rust-lang.org/releases/"}}),
+            json!({"type":"response.completed","response":{"status":"completed",
+            "tool_usage":{"web_search":{"num_requests":1}},
+            "usage":{"input_tokens":120,"output_tokens":8},
+            "output":[
+                {"type":"web_search_call","id":"ws_1","status":"completed",
+                 "action":{"type":"search","queries":["rust stable version"]}},
+                {"type":"function_call","call_id":"call_1","name":"shell",
+                 "arguments":"{\"command\":\"pwd\"}"},
+                {"type":"message","content":[{"type":"output_text","text":"Rust 1.99",
+                    "annotations":[{"type":"url_citation","start_index":0,"end_index":4,
+                        "title":"Rust releases","url":"https://blog.rust-lang.org/releases/"}]}]}
+            ]}}),
+        ];
+        for event in events {
+            stream
+                .apply_with_reasoning(
+                    &event.to_string(),
+                    &mut |delta| text.push_str(delta),
+                    &mut |_| {},
+                    &mut |activity| activities.push(activity),
+                )
+                .unwrap();
+        }
+        activities.extend(stream.drain_finished_native());
+        let (message, usage) = stream.finish().unwrap();
+        assert_eq!(text, "Rust 1.99");
+        assert_eq!(message.content.as_deref(), Some("Rust 1.99"));
+        let calls = message.tool_calls.unwrap_or_default();
+        assert_eq!(calls.len(), 1, "a server-side call is never a local tool");
+        assert_eq!(calls[0].function.name, "shell");
+        let usage = usage.unwrap();
+        assert_eq!(usage.web_searches, Some(1));
+        assert_eq!(usage.input, Some(120));
+        let items = message.provider_items.unwrap_or_default();
+        let citation = items
+            .iter()
+            .find(|item| item["type"] == "url_citation")
+            .expect("the cited source must stay with the turn");
+        assert_eq!(citation["url"], "https://blog.rust-lang.org/releases/");
+        assert_eq!(citation["title"], "Rust releases");
+        assert_eq!(citation["start_index"], 0);
+        assert_eq!(citation["end_index"], 4);
+
+        assert_eq!(activities.len(), 2, "{activities:?}");
+        assert!(!activities[0].done);
+        assert_eq!(activities[0].name, "web_search");
+        assert_eq!(
+            activities[0].arguments,
+            "{\"query\":\"rust stable version\"}"
+        );
+        assert!(activities[1].done);
+        let result = activities[1].result.as_deref().unwrap_or("");
+        assert!(result.contains("searched rust stable version"), "{result}");
+        assert!(
+            result.contains("https://blog.rust-lang.org/releases/"),
+            "the source must reach the existing tool display: {result}"
+        );
+    }
+
+    #[test]
+    fn unknown_server_tool_items_never_break_or_become_tools() {
+        let mut stream = Stream::default();
+        let mut text = String::new();
+        let events = vec![
+            json!({"type":"response.output_item.added","output_index":0,
+                "item":{"id":"ig_1","type":"image_generation_call","status":"in_progress"}}),
+            json!({"type":"response.output_item.done","output_index":1,
+                "item":{"id":"x_1","type":"mystery_gateway_tool"}}),
+            json!({"type":"response.output_text.delta","output_index":2,"delta":"answer"}),
+            json!({"type":"response.completed","response":{"status":"completed",
+            "usage":{"input_tokens":5,"output_tokens":2},
+            "output":[
+                {"id":"ig_1","type":"image_generation_call","status":"completed"},
+                {"id":"x_1","type":"mystery_gateway_tool"},
+                {"type":"message","content":[{"type":"output_text","text":"answer"}]}
+            ]}}),
+        ];
+        for event in events {
+            stream
+                .apply_with_reasoning(
+                    &event.to_string(),
+                    &mut |delta| text.push_str(delta),
+                    &mut |_| {},
+                    &mut |_| {},
+                )
+                .unwrap();
+        }
+        let (message, usage) = stream.finish().unwrap();
+        assert_eq!(message.content.as_deref(), Some("answer"));
+        assert!(message.tool_calls.is_none());
+        assert!(message.provider_items.is_none());
+        assert_eq!(usage.and_then(|u| u.web_searches), None);
+    }
+
+    #[test]
+    fn cited_sources_persist_with_the_turn_but_are_never_replayed() {
+        let mut answer = Message::new("assistant", "answer");
+        answer.provider_items = Some(vec![
+            json!({"type":"url_citation","url":"https://example.com/a","title":"A"}),
+        ]);
+        let history = vec![Message::new("user", "question"), answer];
+        let request = payload("mock", &history, &[], None, "high", "test-origin").unwrap();
+        assert_eq!(request["input"][1]["role"], "assistant");
+        assert!(
+            request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["type"] != "url_citation"),
+            "stored citations must not be replayed upstream: {}",
+            request["input"]
+        );
+        let restored: Message =
+            serde_json::from_str(&serde_json::to_string(&history[1]).unwrap()).unwrap();
+        assert_eq!(
+            restored.provider_items.as_ref().unwrap()[0]["url"],
+            "https://example.com/a"
         );
     }
 

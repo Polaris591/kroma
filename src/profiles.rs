@@ -46,9 +46,19 @@ pub struct ProviderProfile {
     /// endpoint. Never inferred from a same-named model ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_model: Option<String>,
+    /// Opt-in for the endpoint's server-side `web_search` tool on the
+    /// Responses protocol. Off unless a profile enables it; never inferred
+    /// from a model name or host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_web_search: Option<bool>,
 }
 
 impl ProviderProfile {
+    /// Server-side search is off unless this profile explicitly enables it.
+    pub fn native_web_search(&self) -> bool {
+        self.native_web_search.unwrap_or(false)
+    }
+
     /// Per-profile context window, unless an environment override exists.
     pub fn context_limit(&self) -> Option<usize> {
         self.context_window
@@ -570,7 +580,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "auto".into());
             crate::cli_println!(
-                "model={} | host={} | protocol={} | reasoning={} | deepseek_thinking={} | context={} | output={} | levels={} | key={} (environment overrides saved profile)",
+                "model={} | host={} | protocol={} | reasoning={} | deepseek_thinking={} | context={} | output={} | levels={} | native_web_search={} | key={} (environment overrides saved profile)",
                 config.model,
                 host,
                 config.api_protocol,
@@ -579,6 +589,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                 context,
                 output,
                 display_levels((!config.thinking_levels.is_empty()).then_some(&config.thinking_levels[..])),
+                if config.native_web_search { "on" } else { "off" },
                 if config.api_key.is_some() {
                     config
                         .api_key_env
@@ -661,6 +672,22 @@ pub fn cli(args: &[String]) -> Result<()> {
                     .transpose()?;
             let thinking_levels = prompt_levels(original.thinking_levels.as_deref())?;
             let catalog_model = prompt_catalog_model(original.catalog_model.as_deref())?;
+            let native_web_search = match prompt_value(
+                "Server-side web search for Responses models (on/off)",
+                if original.native_web_search() {
+                    "on"
+                } else {
+                    "off"
+                },
+            )?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+            {
+                "on" | "yes" | "true" | "enabled" => Some(true),
+                "off" | "no" | "false" | "disabled" => None,
+                other => bail!("server-side web search must be on or off, got {other}"),
+            };
             let api_key = match prompt_key(original.api_key.is_some())? {
                 None => original.api_key,
                 Some(key) if key.is_empty() => None,
@@ -686,6 +713,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                         max_output_tokens,
                         thinking_levels,
                         catalog_model,
+                        native_web_search,
                     },
                 );
                 if profiles.active.is_none() {
@@ -782,6 +810,7 @@ mod tests {
                 max_output_tokens: None,
                 thinking_levels: None,
                 catalog_model: None,
+                native_web_search: None,
             },
         );
         profiles

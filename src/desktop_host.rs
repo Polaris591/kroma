@@ -167,6 +167,7 @@ impl EventSink for DesktopEvents {
                         cached: cached_tokens,
                         reasoning: reasoning_tokens,
                         total: None,
+                        web_searches: None,
                     });
                 self.push(
                     json!({"kind":"model_finished","request":request,"tools":tools,
@@ -192,6 +193,7 @@ impl EventSink for DesktopEvents {
                             cached: cached_tokens,
                             reasoning: None,
                             total: None,
+                            web_searches: None,
                         },
                     ));
                 self.push(
@@ -215,6 +217,7 @@ impl EventSink for DesktopEvents {
                         cached: cached_tokens,
                         reasoning: reasoning_tokens,
                         total: None,
+                        web_searches: None,
                     });
                 self.push(json!({"kind":"failed_request_usage","input":input_tokens,
                     "output":output_tokens,"cached":cached_tokens,

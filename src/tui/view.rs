@@ -1274,6 +1274,7 @@ impl UiState {
                     cached,
                     reasoning,
                     total: None,
+                    web_searches: None,
                 }));
             }
             UiEvent::TitleUsage {
@@ -1290,6 +1291,7 @@ impl UiState {
                     cached,
                     reasoning,
                     total: None,
+                    web_searches: None,
                 };
                 if let Some(catalog) = &self.model_catalog {
                     if let Err(error) =
@@ -1309,6 +1311,7 @@ impl UiState {
                         cached,
                         reasoning,
                         total: None,
+                        web_searches: None,
                     }),
                 );
             }
@@ -1326,6 +1329,7 @@ impl UiState {
                         cached,
                         reasoning: None,
                         total: None,
+                        web_searches: None,
                     }),
                 );
             }

@@ -29,6 +29,9 @@ pub struct Config {
     /// this, only an exact known provider host and exact model ID may match.
     pub catalog_model: Option<String>,
     pub catalog_model_source: Option<FieldSource>,
+    /// Endpoint capability opt-in: send the Responses server-side
+    /// `web_search` tool. Off unless the saved profile enables it.
+    pub native_web_search: bool,
     /// Saved profile name, not credentials, for session-scoped TUI restoration.
     pub selected_profile: Option<String>,
 }
@@ -276,6 +279,8 @@ impl Config {
             thinking_levels_source,
             catalog_model,
             catalog_model_source,
+            // A capability switch, not a guess from the model name or host.
+            native_web_search: profile.is_some_and(|p| p.native_web_search()),
             selected_profile,
         })
     }

@@ -493,7 +493,7 @@ impl Agent {
         self.session.ensure_writable()?;
         self.prompt.refresh_for_task(&self.workdir, "")?;
         self.compression.set_event_sink(self.events.clone());
-        let tools = self.tools.definitions();
+        let tools = self.model_tool_definitions();
         self.compression.set_request_context(&self.model, &tools);
         let mut system = vec![self.messages[0].clone()];
         self.prompt.apply(&mut system);
@@ -605,6 +605,17 @@ impl Agent {
             .into_iter()
             .filter_map(|definition| definition["function"]["name"].as_str().map(str::to_owned))
             .collect()
+    }
+
+    /// Tool schemas for one model request. A backend that runs its own
+    /// server-side search owns that capability, so the duplicate local search
+    /// tool is not offered next to it.
+    fn model_tool_definitions(&self) -> Vec<serde_json::Value> {
+        let mut definitions = self.tools.definitions();
+        if self.model.native_web_search() {
+            definitions.retain(|tool| tool["function"]["name"] != "web_search");
+        }
+        definitions
     }
 
     /// Atomically switch tool/Prompt/event contributions at an idle task
@@ -1214,7 +1225,7 @@ impl Agent {
         // Tools and prompt contributions cannot change during one run.
         // Calculate the extra budget once, rather than rebuilding the tool
         // schema and serializing it on every model round trip.
-        let tool_definitions = self.tools.definitions();
+        let tool_definitions = self.model_tool_definitions();
         let tool_schema_bytes = serde_json::to_vec(&tool_definitions)?.len();
         // Checkpoints must reuse the same endpoint, model and tool prefix as
         // the coding request. This also invalidates stale measured water
@@ -1355,9 +1366,12 @@ impl Agent {
             let event_sink = self.events.clone();
             self.model_in_flight = true;
             stats.model_started = Some(Instant::now());
+            // Server-side calls the endpoint ran itself. They are display-only:
+            // their results never enter the transcript or the tool loop.
+            let mut open_native: Vec<(String, String)> = Vec::new();
             let completion = self
                 .model
-                .complete_with_task_images(
+                .complete_with_activity(
                     &view,
                     &tool_definitions,
                     &task_images,
@@ -1374,10 +1388,44 @@ impl Agent {
                             events.on_event(RuntimeEvent::ReasoningDelta(delta));
                         }
                     },
+                    &mut |activity| {
+                        if activity.done {
+                            open_native.retain(|(id, _)| id != &activity.id);
+                        } else {
+                            open_native.push((activity.id.clone(), activity.name.clone()));
+                        }
+                        let Some(events) = &event_sink else {
+                            return;
+                        };
+                        if activity.done {
+                            events.on_event(RuntimeEvent::ToolFinished {
+                                name: &activity.name,
+                                id: &activity.id,
+                                result: activity.result.as_deref().unwrap_or(""),
+                                is_error: activity.failed,
+                            });
+                        } else {
+                            events.on_event(RuntimeEvent::ToolStarted {
+                                name: &activity.name,
+                                id: &activity.id,
+                                arguments: &activity.arguments,
+                            });
+                        }
+                    },
                 )
                 .await;
             self.model_in_flight = false;
             stats.model_started = None;
+            if let Some(events) = &self.events {
+                for (id, name) in open_native.drain(..) {
+                    events.on_event(RuntimeEvent::ToolFinished {
+                        name: &name,
+                        id: &id,
+                        result: "Server-side call ended without a reported result.",
+                        is_error: true,
+                    });
+                }
+            }
             if let (Some(trace), Some(snapshot)) = (&mut self.cache_trace, cache_snapshot) {
                 trace.record(
                     self.session.archive_path(),
@@ -1786,6 +1834,8 @@ struct TaskStats {
     output: Option<u64>,
     cached: Option<u64>,
     reasoning: Option<u64>,
+    /// Endpoint-reported server-side searches, when it reports them.
+    web_searches: Option<u64>,
     compaction: CompactionUsage,
     failed_attempts: usize,
     profile: bool,
@@ -1858,6 +1908,11 @@ impl TaskStats {
         self.output = add_reported(self.output, output, self.calls == 0);
         self.cached = add_reported(self.cached, cached, self.calls == 0);
         self.reasoning = add_reported(self.reasoning, reasoning, self.calls == 0);
+        self.web_searches = add_reported(
+            self.web_searches,
+            usage.and_then(|v| v.web_searches),
+            self.calls == 0,
+        );
         self.calls += 1;
         self.elapsed += completion.elapsed;
     }
@@ -1886,6 +1941,11 @@ impl TaskStats {
             display_count(self.cached),
             display_count(self.reasoning)
         );
+        if let Some(searches) = self.web_searches {
+            crate::runtime_log!(
+                "[usage] server-side web searches: reported by the endpoint as {searches}"
+            );
+        }
         if self.compaction.requests > 0 {
             crate::runtime_log!(
                 "[usage] checkpoint: {} request(s) ({} without reported usage), {:.2}s model time | observed input: {} | observed output: {} | observed cached: {}{}",

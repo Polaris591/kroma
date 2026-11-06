@@ -498,6 +498,7 @@ impl Usage {
                 .or_else(|| value.pointer("/output_tokens_details/reasoning_tokens"))
                 .or_else(|| value.get("reasoning_tokens"))
                 .and_then(Value::as_u64),
+            web_searches: None,
         };
         if usage.reasoning.is_some()
             || usage.input.is_some()
@@ -645,7 +646,15 @@ fn process_sse_line(
     result: &mut CompletionStream,
     on_text: &mut (impl FnMut(&str) + Send),
 ) -> Result<()> {
-    process_sse_line_with_reasoning(line, data_lines, data_bytes, result, on_text, &mut |_| {})
+    process_sse_line_with_reasoning(
+        line,
+        data_lines,
+        data_bytes,
+        result,
+        on_text,
+        &mut |_| {},
+        &mut |_| {},
+    )
 }
 
 fn process_sse_line_with_reasoning(
@@ -655,11 +664,17 @@ fn process_sse_line_with_reasoning(
     result: &mut CompletionStream,
     on_text: &mut (impl FnMut(&str) + Send),
     on_reasoning: &mut (impl FnMut(&str) + Send),
+    on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
 ) -> Result<()> {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if line.is_empty() {
         if !data_lines.is_empty() {
-            result.apply_with_reasoning(&data_lines.join("\n"), on_text, on_reasoning)?;
+            result.apply_with_reasoning(
+                &data_lines.join("\n"),
+                on_text,
+                on_reasoning,
+                on_activity,
+            )?;
             data_lines.clear();
             *data_bytes = 0;
         }
@@ -734,6 +749,11 @@ pub struct ModelClient {
     output_limit: Option<usize>,
     requested_output: Option<usize>,
     stream_idle_timeout: Duration,
+    /// Endpoint-executed server-side search; enabled by a saved profile only.
+    native_web_search: bool,
+    /// Sticky within this client: a gateway that refused the field once keeps
+    /// receiving a request without it.
+    native_web_search_rejected: Arc<AtomicBool>,
 }
 
 enum CompletionStream {
@@ -748,10 +768,13 @@ impl CompletionStream {
         data: &str,
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
+        on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
     ) -> Result<()> {
         match self {
             Self::Chat(stream) => stream.apply_with_reasoning(data, on_text, on_reasoning),
-            Self::Responses(stream) => stream.apply_with_reasoning(data, on_text, on_reasoning),
+            Self::Responses(stream) => {
+                stream.apply_with_reasoning(data, on_text, on_reasoning, on_activity)
+            }
             Self::Anthropic(stream) => stream.apply_with_reasoning(data, on_text, on_reasoning),
         }
     }
@@ -862,6 +885,7 @@ fn combine_apec_usage(first: Option<Usage>, second: Option<Usage>) -> Option<Usa
         total: add(first.total, second.total),
         cached: add(first.cached, second.cached),
         reasoning: add(first.reasoning, second.reasoning),
+        web_searches: None,
     })
 }
 
@@ -1022,6 +1046,8 @@ impl ModelClient {
             output_limit: None,
             requested_output: None,
             stream_idle_timeout: Duration::from_secs(300),
+            native_web_search: false,
+            native_web_search_rejected: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1055,6 +1081,26 @@ impl ModelClient {
     pub fn with_output_tokens(mut self, requested: Option<usize>) -> Self {
         self.requested_output = requested;
         self
+    }
+
+    /// Opt in to the endpoint's own web_search tool. A profile must enable it
+    /// explicitly; nothing here guesses capability from a model name.
+    pub fn with_native_web_search(mut self, enabled: bool) -> Self {
+        self.native_web_search = enabled;
+        self
+    }
+
+    /// Server-side tools to append to the next request. Empty unless the
+    /// profile enabled them, the protocol can carry them and the endpoint has
+    /// not already refused them.
+    fn server_side_tools(&self) -> Vec<Value> {
+        if !self.native_web_search
+            || self.protocol != ApiProtocol::Responses
+            || self.native_web_search_rejected.load(Ordering::Relaxed)
+        {
+            return Vec::new();
+        }
+        vec![json!({"type":"web_search"})]
     }
 
     /// Fields absent from the current endpoint may use the verified catalog.
@@ -1257,6 +1303,7 @@ impl ModelClient {
                         .unwrap_or(&self.reasoning_effort),
                     &self.opaque_reasoning_origin(),
                     images,
+                    &self.server_side_tools(),
                 )?;
                 if self.reasoning_summary_rejected.load(Ordering::Relaxed) {
                     if let Some(reasoning) =
@@ -1506,7 +1553,7 @@ impl ModelClient {
         tools: &[Value],
         on_text: &mut (impl FnMut(&str) + Send),
     ) -> Result<Completion> {
-        self.complete_with_tools_stream(messages, tools, None, on_text, &mut |_| {})
+        self.complete_with_tools_stream(messages, tools, None, on_text, &mut |_| {}, &mut |_| {})
             .await
     }
 
@@ -1517,6 +1564,7 @@ impl ModelClient {
         images: Option<&TaskImageCache>,
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
+        on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
     ) -> Result<Completion> {
         // Only retry while the response carried no protocol event at all.
         // Heartbeat comments and other body bytes without a `data:` field are
@@ -1534,6 +1582,7 @@ impl ModelClient {
                     images,
                     on_text,
                     on_reasoning,
+                    on_activity,
                     &mut received_protocol_data,
                 )
                 .await
@@ -1549,6 +1598,21 @@ impl ModelClient {
                     // it; never replay a partially delivered stream.
                     self.anthropic_cache_rejected.store(true, Ordering::Relaxed);
                     crate::runtime_log!("[model] gateway rejected Anthropic cache_control; retrying without prompt caching");
+                }
+                Err(error)
+                    if !received_protocol_data
+                        && self.native_web_search
+                        && !self.native_web_search_rejected.load(Ordering::Relaxed)
+                        && rejected_request_field(&error, &["web_search"]) =>
+                {
+                    // The endpoint refused server-side search before doing any
+                    // work. Retry the same request without it instead of
+                    // repeating a billed search attempt.
+                    self.native_web_search_rejected
+                        .store(true, Ordering::Relaxed);
+                    crate::runtime_log!(
+                        "[model] gateway rejected server-side web_search; retrying without it"
+                    );
                 }
                 Err(error)
                     if !received_protocol_data
@@ -1964,6 +2028,8 @@ impl ModelClient {
                     &self.opaque_reasoning_origin(),
                     None,
                     Some(active_turn),
+                    // Checkpoints never repeat a paid server-side search.
+                    &[],
                 )?;
                 payload["stream"] = json!(false);
                 if self.reasoning_summary_rejected.load(Ordering::Relaxed) {
@@ -2000,6 +2066,7 @@ impl ModelClient {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_once(
         &self,
         messages: &[Message],
@@ -2007,6 +2074,7 @@ impl ModelClient {
         images: Option<&TaskImageCache>,
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
+        on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
         received_protocol_data: &mut bool,
     ) -> Result<Completion> {
         let started = Instant::now();
@@ -2078,6 +2146,7 @@ impl ModelClient {
                         &mut result,
                         on_text,
                         on_reasoning,
+                        on_activity,
                     )?;
                     if first_token.is_none() && result.received_delta() {
                         first_token = Some(started.elapsed());
@@ -2101,6 +2170,7 @@ impl ModelClient {
                         &mut result,
                         on_text,
                         on_reasoning,
+                        on_activity,
                     )?;
                 }
                 process_sse_line_with_reasoning(
@@ -2110,11 +2180,15 @@ impl ModelClient {
                     &mut result,
                     on_text,
                     on_reasoning,
+                    on_activity,
                 )?;
             }
             Ok(())
         }
         .await;
+        // Close any server-side search record, including after a failure, so
+        // the display never shows a call that is still running.
+        drain_native_activity(&mut result, on_activity);
         if let Err(error) = stream_result {
             // SSE error events, idle timeouts and connection failures can
             // occur after the provider already reported input/output usage.
@@ -2140,6 +2214,18 @@ impl ModelClient {
             elapsed: started.elapsed(),
             first_token,
         })
+    }
+}
+
+/// Report completion of the server-side calls already shown to the user.
+fn drain_native_activity(
+    result: &mut CompletionStream,
+    on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
+) {
+    if let CompletionStream::Responses(stream) = result {
+        for activity in stream.drain_finished_native() {
+            on_activity(activity);
+        }
     }
 }
 
@@ -2330,6 +2416,7 @@ impl ModelBackend for ModelClient {
                 None,
                 &mut |delta| on_text(delta),
                 &mut |delta| on_reasoning(delta),
+                &mut |_| {},
             )
             .await
         })
@@ -2350,9 +2437,40 @@ impl ModelBackend for ModelClient {
                 Some(images),
                 &mut |delta| on_text(delta),
                 &mut |delta| on_reasoning(delta),
+                &mut |_| {},
             )
             .await
         })
+    }
+
+    fn complete_with_activity<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        images: &'a TaskImageCache,
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+        on_activity: &'a mut (dyn FnMut(crate::model::NativeActivity) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        Box::pin(async move {
+            self.complete_with_tools_stream(
+                messages,
+                tools,
+                Some(images),
+                &mut |delta| on_text(delta),
+                &mut |delta| on_reasoning(delta),
+                &mut |activity| on_activity(activity),
+            )
+            .await
+        })
+    }
+
+    fn native_web_search(&self) -> bool {
+        // Report only what this client will really send: the Responses
+        // protocol, an opt-in profile and an endpoint that never refused it.
+        self.protocol == ApiProtocol::Responses
+            && self.native_web_search
+            && !self.native_web_search_rejected.load(Ordering::Relaxed)
     }
 
     fn generate_text<'a>(
@@ -3350,6 +3468,43 @@ mod tests {
         (text, result)
     }
 
+    fn responses_client(base: &str) -> ModelClient {
+        ModelClient::new(&format!("{base}/v1"), None, "mock".into())
+            .unwrap()
+            .with_protocol("responses")
+            .unwrap()
+    }
+
+    #[test]
+    fn server_side_search_is_opt_in_and_responses_only() {
+        let responses = responses_client("http://127.0.0.1:9");
+        let plain = responses
+            .payload(&[Message::new("user", "hi")], &[], Some(64))
+            .unwrap();
+        assert!(!plain.to_string().contains("web_search"), "{plain}");
+        assert!(!responses.native_web_search());
+
+        let enabled = responses.clone().with_native_web_search(true);
+        let request = enabled
+            .payload(&[Message::new("user", "hi")], &[], Some(64))
+            .unwrap();
+        let tools = request["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|tool| tool["type"] == "web_search"));
+        assert_eq!(request["store"], false);
+        assert!(enabled.native_web_search());
+
+        // A chat-protocol endpoint cannot carry the native tool, even when a
+        // profile enabled the capability for a different protocol.
+        let chat = ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())
+            .unwrap()
+            .with_native_web_search(true);
+        let chat_payload = chat
+            .payload(&[Message::new("user", "hi")], &[], Some(64))
+            .unwrap();
+        assert!(!chat_payload.to_string().contains("web_search"));
+        assert!(!chat.native_web_search());
+    }
+
     #[tokio::test]
     async fn a_body_truncated_before_any_event_is_retried_on_a_new_connection() {
         let (text, result) = truncated_first_attempt("").await;
@@ -3899,6 +4054,7 @@ mod tests {
                 r#"{"choices":[{"delta":{"reasoning_content":"Need to "},"finish_reason":null}]}"#,
                 &mut |text| visible.push_str(text),
                 &mut |text| live_reasoning.push_str(text),
+                &mut |_| {},
             )
             .unwrap();
         assert_eq!(
@@ -3910,6 +4066,7 @@ mod tests {
                 r#"{"choices":[{"delta":{"reasoning_content":"inspect files","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}"#,
                 &mut |text| visible.push_str(text),
                 &mut |text| live_reasoning.push_str(text),
+                &mut |_| {},
             )
             .unwrap();
         let (assistant, _) = stream.finish().unwrap();

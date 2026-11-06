@@ -67,6 +67,7 @@ fn overload_keeps_exact_accounting_latest_context_and_final_idle() {
             cached: (i % 2 == 0).then_some(i / 2),
             reasoning: (i % 3 == 0).then_some(4),
             total: None,
+            web_searches: None,
         };
         expected.record(Some(&usage));
         tx.send(UiEvent::Usage {

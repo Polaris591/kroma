@@ -230,6 +230,7 @@ pub async fn run() -> Result<()> {
         max_output_tokens: original.max_output_tokens,
         thinking_levels: original.thinking_levels.clone(),
         catalog_model: original.catalog_model.clone(),
+        native_web_search: original.native_web_search,
     };
 
     let mut save = true;

@@ -59,17 +59,20 @@ struct Backend {
     checkpoints: AtomicUsize,
     poison: Option<PathBuf>,
     hang_after: Option<usize>,
+    native_search: bool,
     started: Notify,
     seen: Mutex<Vec<Message>>,
+    seen_tools: Mutex<Vec<Value>>,
 }
 impl ModelBackend for Backend {
     fn complete<'a>(
         &'a self,
         messages: &'a [Message],
-        _: &'a [Value],
+        tools: &'a [Value],
         _: &'a mut (dyn FnMut(&str) + Send),
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
+            *self.seen_tools.lock().unwrap() = tools.to_vec();
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             if self.hang_after == Some(n) {
                 self.started.notify_one();
@@ -105,6 +108,9 @@ impl ModelBackend for Backend {
             })
         })
     }
+    fn native_web_search(&self) -> bool {
+        self.native_search
+    }
     fn generate_text<'a>(
         &'a self,
         _: &'a str,
@@ -132,6 +138,34 @@ impl ModelBackend for Backend {
         })
     }
 }
+struct WebSearch;
+impl Tool for WebSearch {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+    fn definition(&self) -> Value {
+        json!({"type":"function","function":{"name":"web_search","parameters":{
+            "type":"object","properties":{"query":{"type":"string"}}}}})
+    }
+    fn execute<'a>(&'a self, _: &'a ToolCall, _: ToolContext<'a>) -> ToolFuture<'a> {
+        Box::pin(async { ToolResult::ok("results") })
+    }
+}
+
+struct WebFetch;
+impl Tool for WebFetch {
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
+    fn definition(&self) -> Value {
+        json!({"type":"function","function":{"name":"web_fetch","parameters":{
+            "type":"object","properties":{"url":{"type":"string"}}}}})
+    }
+    fn execute<'a>(&'a self, _: &'a ToolCall, _: ToolContext<'a>) -> ToolFuture<'a> {
+        Box::pin(async { ToolResult::ok("page") })
+    }
+}
+
 struct Evidence;
 impl Tool for Evidence {
     fn name(&self) -> &str {
@@ -371,6 +405,47 @@ async fn fork_and_rewind_migrate_summary_captures_before_source_clear() -> Resul
             .join("\n");
         assert!(projected.contains(copied.to_str().unwrap()));
         assert!(!projected.contains(original.to_str().unwrap()));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_server_search_suppresses_the_duplicate_local_tool() -> Result<()> {
+    for (native_search, offered) in [(true, false), (false, true)] {
+        let fixture = Fixture::new()?;
+        let model = Arc::new(Backend {
+            native_search,
+            ..Default::default()
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(WebSearch))?;
+        tools.register(Arc::new(WebFetch))?;
+        let mut agent = Agent::with_catalog_backends(
+            model.clone(),
+            tools,
+            Arc::new(BuiltinContextFactory),
+            PromptComposer::default(),
+            None,
+            fixture.0.clone(),
+            SessionCatalog::from_default(fixture.0.join("default.json"))?,
+            ContextConfig::with_output_reserve(128_000, 4096)?,
+            false,
+        )?;
+        agent.run("search the web", &mut |_| {}).await?;
+        let seen = model.seen_tools.lock().unwrap();
+        let names = seen
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names.contains(&"web_search"),
+            offered,
+            "native_search={native_search}: {names:?}"
+        );
+        assert!(
+            names.contains(&"web_fetch"),
+            "page reading must stay available: {names:?}"
+        );
     }
     Ok(())
 }

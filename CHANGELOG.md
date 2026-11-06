@@ -7,6 +7,7 @@ The source currently declares version `0.4.0` in `Cargo.toml`. No public npm pac
 ## Unreleased
 
 ### Added
+- Opt-in server-side `web_search` for Responses profiles (`native_web_search`): the endpoint runs the search, Kroma shows it through the existing tool activity view, keeps real source URLs with the turn and reports provider-supplied search counts.
 - Public Beta CLI/TUI documentation, configuration and first-run setup.
 - Shared Rust runtime for CLI, TUI and optional Desktop preview.
 - Opt-in process plugin host with tool hooks, model and context backends, streaming, event delivery and lifecycle contracts.

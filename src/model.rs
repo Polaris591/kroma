@@ -29,6 +29,21 @@ impl std::error::Error for ContextOverflow {}
 pub type StreamFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 pub type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
+/// One tool the provider executed on its own side, such as a Responses
+/// server-side web_search. Display-only: it never enters the transcript, the
+/// local ToolRegistry or a later request body.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NativeActivity {
+    pub name: String,
+    pub id: String,
+    /// Compact JSON arguments for the existing tool display.
+    pub arguments: String,
+    /// Reported result summary, present once the call is done.
+    pub result: Option<String>,
+    pub done: bool,
+    pub failed: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Usage {
@@ -38,6 +53,9 @@ pub struct Usage {
     pub cached: Option<u64>,
     /// Subset of output, when supplied by the provider.
     pub reasoning: Option<u64>,
+    /// Server-side tool requests the endpoint billed separately, when it
+    /// reports them (Responses tool_usage.web_search.num_requests).
+    pub web_searches: Option<u64>,
 }
 
 pub struct Completion {
@@ -111,6 +129,12 @@ pub trait ModelBackend: Send + Sync {
     fn accepts_images(&self) -> Option<bool> {
         None
     }
+
+    /// True only when the backend itself runs a server-side search, so the
+    /// host must not also expose a duplicate local search tool.
+    fn native_web_search(&self) -> bool {
+        false
+    }
     fn complete<'a>(
         &'a self,
         messages: &'a [Message],
@@ -160,6 +184,20 @@ pub trait ModelBackend: Send + Sync {
 
     fn set_reasoning_level(&self, _level: &str) -> Result<()> {
         anyhow::bail!("this model backend does not support live reasoning settings")
+    }
+
+    /// Optional server-side tool activity (for example an endpoint-executed
+    /// web search). Reported for display only; never a local tool call.
+    fn complete_with_activity<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        images: &'a TaskImageCache,
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+        _on_activity: &'a mut (dyn FnMut(NativeActivity) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        self.complete_with_task_images(messages, tools, images, on_text, on_reasoning)
     }
 
     /// Tool-free text generation, with an explicitly supplied system prompt.

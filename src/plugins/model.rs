@@ -949,6 +949,10 @@ impl ModelBackend for PluginModelHooks {
     fn accepts_images(&self) -> Option<bool> {
         self.inner.accepts_images()
     }
+    fn native_web_search(&self) -> bool {
+        // The decorator must not hide a capability the wrapped backend has.
+        self.inner.native_web_search()
+    }
     fn reasoning_level(&self) -> Option<String> {
         self.inner.reasoning_level()
     }
@@ -1007,6 +1011,30 @@ impl ModelBackend for PluginModelHooks {
                 .complete_with_task_images(&view, schemas.as_ref(), images, on_text, on_reasoning)
                 .await?;
             Ok(result)
+        })
+    }
+
+    fn complete_with_activity<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Value],
+        images: &'a TaskImageCache,
+        on_text: &'a mut (dyn FnMut(&str) + Send),
+        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+        on_activity: &'a mut (dyn FnMut(crate::model::NativeActivity) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        Box::pin(async move {
+            let (view, schemas) = self.projection(messages, tools).await?;
+            self.inner
+                .complete_with_activity(
+                    &view,
+                    schemas.as_ref(),
+                    images,
+                    on_text,
+                    on_reasoning,
+                    on_activity,
+                )
+                .await
         })
     }
 

@@ -371,6 +371,7 @@ async fn exercise(wire: Wire) -> Result<()> {
         thinking_levels_source: None,
         catalog_model: None,
         catalog_model_source: None,
+        native_web_search: false,
         selected_profile: None,
     };
     let mut agent = app::default_agent(config()).await?;
@@ -523,5 +524,92 @@ async fn responses_partial_stream_error_never_replays_the_request() -> Result<()
     assert!(failure.is_err());
     assert_eq!(visible, "partial");
     server.join().expect("mock server panicked")?;
+    Ok(())
+}
+
+/// Reply with a non-success status. CRLF is built from bytes so no test body
+/// has to spell out escape sequences.
+fn http_fail(stream: TcpStream, status: &str, body: &str) -> Result<()> {
+    let mut stream = stream;
+    let crlf = String::from_utf8(vec![13, 10])?;
+    write!(
+        stream,
+        "HTTP/1.1 {status}{crlf}Content-Type: application/json{crlf}Content-Length: {}{crlf}Connection: close{crlf}{crlf}{body}",
+        body.len()
+    )?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn offers_server_side_search(request: &Value) -> bool {
+    request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| tool["type"] == "web_search")
+}
+
+#[tokio::test]
+async fn responses_refused_server_side_search_is_retried_once_without_it() -> Result<()> {
+    use kroma::model::ModelBackend as _;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let server = thread::spawn(move || -> Result<Vec<Value>> {
+        let mut received = Vec::new();
+        for step in 0..2 {
+            let (stream, _) = listener.accept()?;
+            let (line, _, request) = read_http(&stream)?;
+            assert!(line.starts_with("POST /v1/responses "), "{line}");
+            assert_eq!(request["store"], false);
+            received.push(request);
+            if step == 0 {
+                http_fail(
+                    stream,
+                    "400 Bad Request",
+                    r#"{"detail":"Unsupported tool type: web_search"}"#,
+                )?;
+            } else {
+                let body = format!(
+                    "{}{}",
+                    sse_event(
+                        "response.output_text.delta",
+                        json!({"type":"response.output_text.delta","output_index":0,"delta":"searched"})
+                    ),
+                    sse_event(
+                        "response.completed",
+                        json!({"type":"response.completed","response":{
+                            "status":"completed",
+                            "tool_usage":{"web_search":{"num_requests":1}},
+                            "output":[{"type":"message","content":[
+                                {"type":"output_text","text":"searched"}]}],
+                            "usage":{"input_tokens":10,"output_tokens":2}}})
+                    )
+                );
+                http_reply(stream, &body, "text/event-stream")?;
+            }
+        }
+        Ok(received)
+    });
+    let client = ModelClient::new(&format!("http://{addr}/v1"), None, "mock".into())?
+        .with_protocol("responses")?
+        .with_native_web_search(true);
+    let messages = [kroma::protocol::Message::new("user", "search the web")];
+    let answer = client
+        .complete_with_tools(&messages, &[], &mut |_| {})
+        .await?;
+    assert_eq!(answer.message.content.as_deref(), Some("searched"));
+    assert_eq!(answer.usage.and_then(|usage| usage.web_searches), Some(1));
+    let requests = server.join().expect("mock server panicked")?;
+    assert_eq!(requests.len(), 2, "one refused attempt, one fallback");
+    assert!(offers_server_side_search(&requests[0]), "{}", requests[0]);
+    assert!(
+        !offers_server_side_search(&requests[1]),
+        "the fallback must not repeat the refused tool: {}",
+        requests[1]
+    );
+    assert!(
+        !client.native_web_search(),
+        "a refused capability stays off for this client"
+    );
     Ok(())
 }

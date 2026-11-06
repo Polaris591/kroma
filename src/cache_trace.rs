@@ -349,6 +349,7 @@ mod tests {
             cached: Some(64),
             reasoning: Some(5),
             total: Some(102),
+            web_searches: None,
         };
         trace.record(
             &session,

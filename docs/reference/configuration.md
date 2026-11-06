@@ -35,6 +35,7 @@ Fields:
 | `max_output_tokens` | Requested completion maximum |
 | `thinking_levels` | Optional allowed reasoning levels |
 | `catalog_model` | Explicit `provider/model` alias for a proxy or renamed model |
+| `native_web_search` | `true` sends the endpoint-run Responses `web_search` tool; off unless set |
 
 Key precedence: `KROMA_API_KEY` → stored `api_key` → `api_key_env` environment
 variable. Never put a key in a shell command or conversation.

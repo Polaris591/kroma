@@ -343,6 +343,7 @@ mod tests {
             thinking_levels_source: None,
             catalog_model: None,
             catalog_model_source: None,
+            native_web_search: false,
             selected_profile: None,
         }
     }
