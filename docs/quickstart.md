@@ -67,9 +67,48 @@ Useful slash commands:
 - `/help` — shortcuts and navigation
 - `/sessions`, `/resume`, `/new` — conversation management
 - `/history`, `/rewind`, `/undo` — conversation checkpoints (messages only)
+- `/compact [instructions]` — manually summarize old context; optional focus applies only to this checkpoint (e.g. `/compact preserve pending tests and exact file paths`)
 - `/checkpoints`, `/restore-files <n>` — file snapshots (Git worktrees only)
 - `/diff` — working-tree changes
-- `/exit` or Ctrl+Q — quit
+- `/exit`, Ctrl+Q or Ctrl+D on an empty draft — quit
+
+Kroma has **one classic TUI layout**: gray transcript, teal assistant rail,
+violet user rail, readable Markdown, collapsed reasoning, and tool calls with
+concise real output. Ctrl+T shows full reasoning, while Ctrl+O expands or
+collapses original tool output in the conversation. Previous `display` entries
+in `~/.kroma/ui.toml` are read for migration but no longer affect the layout.
+No extra model calls are used to summarize tool output.
+
+Common TUI shortcuts: Enter sends when idle; during a task Enter steers and
+Alt+Enter (or Ctrl+Q on Windows) queues a follow-up. Shift+Enter / Ctrl+J
+inserts a newline. Esc closes a popup or cancels a running task; Ctrl+C copies
+a selection, clears a draft or quits when idle and empty. Ctrl+P / Ctrl+L
+opens models; `/` searches commands. Ctrl+R searches sent prompts, Ctrl+T
+shows a short preview of recent reasoning (rather than flooding the chat),
+and Ctrl+O expands or collapses full command/output logs in the conversation.
+The detailed view keeps every tool call visible, with short live previews. Alt+T (or `/transcript`)
+opens the full searchable transcript. Shift+Tab cycles thinking levels, Alt+V
+imports clipboard media, and `/help` or `?` with an empty draft opens help.
+Ctrl+Q does not quit while a draft is unsent. Some Alt shortcuts may need
+terminal keybinding remapping.
+Some modified-key combinations depend on terminal support.
+
+### Chinese / CJK terminal font
+
+Kroma renders text in terminal cells; **the terminal chooses the font**, not
+Kroma. If Chinese falls back to a serif face beside monospace English, install
+an actual CJK terminal font such as **Sarasa Term SC (更纱终端黑体)** or
+**Maple Mono CN**, then in **Windows Terminal → Settings → Profiles → your
+Kroma/PowerShell profile → Appearance → Font face** select that font.
+Use a CJK-aware terminal variant so Chinese takes two cells and English takes
+one. This is an optional user terminal preference, not a required Kroma
+setting, and changing fonts does not alter agent behaviour or project files.
+
+The dark preset keeps the original neutral grayscale backgrounds and text,
+with a teal Kroma identity rail, a violet user rail, and separate
+success/warning/error colours. Model and context readings use the legible
+`muted` gray instead of the decorative `faint` token. Kroma already reduces true-colour output to ANSI
+256-colour terminals and supports `NO_COLOR` / `mono` for native terminal inks.
 
 ## 5. Safety and recovery
 

@@ -1,16 +1,16 @@
-                        ◆ Kroma / untitled session                                                                               project                        
                                                                                                                                                                 
-                            Review the change. 请 检 查 代 码 。                                                                                                      
-                            Preserve Unicode and indentation.                                                                                                   
                                                                                                                                                                 
-                         ◆  Updated the implementation.                                                                                                         
+      YOU                                                                                                                                                       
+      Review the change. 请 检 查 代 码 。                                                                                                                            
+      Preserve Unicode and indentation.                                                                                                                         
                                                                                                                                                                 
-                            • ╭ Review · ↑↓/PgUp/PgDn · Esc Close ───────────────────────────────────────────────────────────────╮                              
-                            • │A scrollable plugin panel.                                                                        │                              
-                              │The draft stays editable after closing.                                                           │                              
+                                                                                                                                                                
+                              ╭ Review · ↑↓/PgUp/PgDn · Esc Close ───────────────────────────────────────────────────────────────╮                              
+      KROMA                   │A scrollable plugin panel.                                                                        │                              
+      Updated the implementati│The draft stays editable after closing.                                                           │                              
                               │                                                                                                  │                              
-                              │                                                                                                  │                              
-                              │                                                                                                  │                              
+      • Preserved input and li│                                                                                                  │                              
+      • Verified Unicode selec│                                                                                                  │                              
                               │                                                                                                  │                              
                               │                                                                                                  │                              
                               │                                                                                                  │                              
@@ -33,8 +33,8 @@
                               ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯                              
                                                                                                                                                                 
                                                                                                                                                                 
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────  
                                                                                                                                                                 
-                        ────────────────────────────────────────────────────────────────────────────────────────────────────────────────                        
-                          › Describe a task, or / for commands…                                                                                                 
+    ›                                                                                                                                                           
                                                                                                                                                                 
-                          test-model · Think high · Context —                                                          Ctrl+P Commands                          
+    test-model · Think high                                                                                                         Context —/500k · Cache —    

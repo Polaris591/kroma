@@ -246,6 +246,9 @@ pub(super) fn summary(name: &str, command: &str, language: Language) -> String {
     )
 }
 
+/// Describe an *observed* tool action without dumping its script in the
+/// activity view. This is a display hint, never an execution plan or a
+/// synthesized outcome. Unknown commands are deliberately generic.
 pub(super) fn has_diagnostic(details: &str) -> bool {
     details.lines().any(|line| {
         let line = line

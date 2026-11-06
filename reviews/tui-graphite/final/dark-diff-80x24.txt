@@ -1,9 +1,13 @@
- ◆ Kroma / untitled session                                             project 
                                                                                 
+                                                                                
+     YOU                                                                        
      Review the change. 请 检 查 代 码 。                                             
      Preserve Unicode and indentation.                                          
                                                                                 
-  ◆                                                             diff · ⧉ Copy   
+                                                                                
+                                                                                
+     KROMA                                                                      
+                                                           diff · ⧉ Copy        
      │ diff --git a/main.rs b/main.rs                                           
      │ @@ -1 +1 @@                                                              
      │ -old_value                                                               
@@ -13,12 +17,8 @@
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
  ────────────────────────────────────────────────────────────────────────────── 
-   › Describe a task, or / for commands…                                        
                                                                                 
-   test-model · Think high · Context —                                          
+   ›                                                                            
+                                                                                
+   test-model · Think high                           Context —/500k · Cache —   

@@ -50,7 +50,7 @@ items = { type = "string" }
 description = "Review only: at least one short evidence reference. Stored as unverified text, never dereferenced."
 [tools.parameters.properties.supersedes]
 type = "string"
-description = "Optional id of the rule this replaces. Applied only after quote verification."
+description = "Optional single id returned by memory_search. Only provide when explicitly replacing that existing memory; otherwise omit entirely (never an empty string or array)."
 
 [[tools]]
 name = "memory_search"

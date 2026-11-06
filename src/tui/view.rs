@@ -337,9 +337,18 @@ enum Kind {
     Info,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AssistantPhase {
+    Pending,
+    Progress,
+    Answer,
+    Discarded,
+}
+
 #[derive(Clone)]
 struct Entry {
     kind: Kind,
+    assistant_phase: AssistantPhase,
     title: String,
     body: String,
     details: String,
@@ -407,6 +416,7 @@ struct HistoryCache {
     tools_expanded: bool,
     reasoning_expanded: bool,
     has_activity_tail: bool,
+    tool_timer_second: Option<u64>,
     theme: Theme,
     text: Text<'static>,
     source_lines: Vec<usize>,
@@ -425,6 +435,7 @@ impl Entry {
     fn new(kind: Kind, title: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             kind,
+            assistant_phase: AssistantPhase::Answer,
             title: title.into(),
             body: body.into(),
             details: String::new(),
@@ -557,6 +568,8 @@ pub struct UiState {
     removed_drafts: Vec<Attachment>,
     cleared_draft: Option<draft::ClearedDraft>,
     saved_draft_attachments: Option<Vec<Attachment>>,
+    /// Unsent drafts are kept per session (including the welcome page).
+    session_drafts: HashMap<Option<String>, draft::SessionDraft>,
     pub attach_mode: bool,
     pub attach_path: String,
     next_marker: u32,
@@ -717,6 +730,7 @@ impl UiState {
             removed_drafts: Vec::new(),
             cleared_draft: None,
             saved_draft_attachments: None,
+            session_drafts: HashMap::new(),
             attach_mode: false,
             attach_path: String::new(),
             next_marker: super::editor::ATTACHMENT_START,
@@ -1090,8 +1104,15 @@ impl UiState {
                     }
                     if let Some(text) = message.content.as_deref() {
                         if !text.trim().is_empty() {
-                            self.entries
-                                .push(Entry::new(Kind::Assistant, "KROMA", text));
+                            let mut entry = Entry::new(Kind::Assistant, "KROMA", text);
+                            if message
+                                .tool_calls
+                                .as_ref()
+                                .is_some_and(|calls| !calls.is_empty())
+                            {
+                                entry.assistant_phase = AssistantPhase::Progress;
+                            }
+                            self.entries.push(entry);
                         }
                     }
                     for call in message.tool_calls.as_deref().unwrap_or(&[]) {
@@ -1371,9 +1392,32 @@ impl UiState {
                 self.set_phase("compacting");
             }
             UiEvent::ModelStarted => {
+                if let Some(index) = self.active_assistant {
+                    self.entries[index].assistant_phase = AssistantPhase::Progress;
+                }
                 self.active_assistant = None;
                 self.active_reasoning = None;
                 self.set_phase("waiting");
+            }
+            UiEvent::ModelFinished { tools } => {
+                if let Some(index) = self.active_assistant {
+                    if tools > 0 {
+                        self.entries[index].assistant_phase = AssistantPhase::Progress;
+                    }
+                }
+            }
+            UiEvent::FinalAnswerReady => {
+                if let Some(index) = self.active_assistant {
+                    self.entries[index].assistant_phase = AssistantPhase::Answer;
+                }
+            }
+            UiEvent::ModelFailed => {
+                for index in [self.active_assistant.take(), self.active_reasoning.take()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.entries[index].assistant_phase = AssistantPhase::Discarded;
+                }
             }
             UiEvent::Text(delta) => {
                 self.received_model_output = true;
@@ -1382,8 +1426,9 @@ impl UiState {
                 if let Some(index) = self.active_assistant {
                     self.entries[index].body.push_str(&delta);
                 } else {
-                    self.entries
-                        .push(Entry::new(Kind::Assistant, "KROMA", delta));
+                    let mut entry = Entry::new(Kind::Assistant, "KROMA", delta);
+                    entry.assistant_phase = AssistantPhase::Pending;
+                    self.entries.push(entry);
                     self.active_assistant = Some(self.entries.len() - 1);
                 }
             }
@@ -1420,6 +1465,9 @@ impl UiState {
                 }
             }
             UiEvent::ToolStarted { name, id, args } => {
+                if let Some(index) = self.active_assistant {
+                    self.entries[index].assistant_phase = AssistantPhase::Progress;
+                }
                 self.received_model_output = true;
                 self.last_output = Instant::now();
                 self.set_phase("tool");
@@ -1509,7 +1557,7 @@ impl UiState {
             self.scroll_anchor = Some(self.history_max_scroll - self.scroll_from_bottom);
         }
         if amount > 0
-            && self.history_visible < self.entries.len()
+            && self.entries.len() > self.history_visible
             && self.scroll_from_bottom >= self.history_max_scroll.saturating_sub(35)
         {
             self.prepend_rows_before = self
@@ -1594,9 +1642,15 @@ impl UiState {
                 .iter()
                 .any(|(line, item)| *line == wrapped_row && matches!(item, Decor::Group(_)))
         });
+        // Match the clickable gutter to the chevron drawn by each renderer.
+        // The default classic TUI indents the tool card more than the legacy
+        // renderer; both must keep mouse hit targets aligned with the glyph.
+        let chevron_x = self
+            .selection_area
+            .x
+            .saturating_add(if self.plain_style { 6 } else { 2 });
         if !is_group
-            && !(self.selection_area.x.saturating_add(1)..=self.selection_area.x.saturating_add(5))
-                .contains(&column)
+            && !(chevron_x.saturating_sub(1)..=chevron_x.saturating_add(2)).contains(&column)
         {
             return false;
         }
@@ -2046,7 +2100,7 @@ impl UiState {
         let mut decor = Vec::new();
         let mut reading_rows = Vec::new();
         // One collapsed reasoning entry per user turn, even if the model
-        // alternates reasoning/tool calls several times. Ctrl+R still renders
+        // alternates reasoning/tool calls several times. Ctrl+T still renders
         // every reasoning segment in its original chronological position.
         let mut reasoning_notice_shown = false;
         if self.entries.is_empty() && !self.running {
@@ -2067,21 +2121,15 @@ impl UiState {
                 reading_rows,
             );
         }
-        // Large investigations may run dozens of short successful grep/sed
-        // calls. Keep failures, warnings, in-flight work and the last four
-        // completed calls visible. The rest is one quiet summary, and Ctrl+O
-        // immediately restores every call without changing the WAL.
-        let visible = self
-            .entries
-            .iter()
-            .rev()
-            .take(self.history_visible)
-            .collect::<Vec<_>>();
-        let visible = visible.into_iter().rev().collect::<Vec<_>>();
+        let visible_start = self.entries.len().saturating_sub(self.history_visible);
+        let visible = self.entries[visible_start..].iter().collect::<Vec<_>>();
         let mut hidden_until = 0;
         let mut previous_was_tool = false;
         let mut plain_assistant_start: Option<usize> = None;
         for (index, entry) in visible.iter().enumerate() {
+            if entry.assistant_phase == AssistantPhase::Discarded {
+                continue;
+            }
             if index < hidden_until {
                 continue;
             }
@@ -2097,12 +2145,7 @@ impl UiState {
                 Kind::User => {
                     reasoning_notice_shown = false;
                     let block_start = lines.len();
-                    decor.push((
-                        block_start,
-                        Decor::TurnStart(
-                            self.entries.len().saturating_sub(self.history_visible) + index,
-                        ),
-                    ));
+                    decor.push((block_start, Decor::TurnStart(visible_start + index)));
                     if self.plain_style {
                         lines.push(Line::default());
                         decor.push((
@@ -2185,14 +2228,13 @@ impl UiState {
                     let body_start = lines.len();
                     if !entry.body.is_empty() {
                         let prose = width.saturating_sub(if self.plain_style { 4 } else { 5 });
-                        // Plain keeps the UI grayscale, but prose structure
-                        // still needs semantic colour: headings use the link
-                        // tone and inline code the warning tone.
+                        // Headings retain the link tone, while ordinary inline
+                        // code is neutral rather than competing with warnings.
                         let prose_colors = if self.plain_style {
-                            let semantic = self.semantic_colors();
                             markdown::ProseColors {
-                                heading: semantic.link,
-                                code: semantic.warning,
+                                // Headings are hierarchy, not interactive links.
+                                heading: theme.text,
+                                code: theme.code,
                             }
                         } else {
                             markdown::ProseColors::from_theme(theme)
@@ -2273,7 +2315,13 @@ impl UiState {
                     }
                     let end = visible[index..]
                         .iter()
-                        .position(|next| !matches!(next.kind, Kind::Tool | Kind::Reasoning))
+                        .position(|next| {
+                            if self.plain_style {
+                                !matches!(next.kind, Kind::Tool)
+                            } else {
+                                !matches!(next.kind, Kind::Tool | Kind::Reasoning)
+                            }
+                        })
                         .map_or(visible.len(), |count| index + count);
                     // Interleaved reasoning belongs before the card, not between its steps.
                     for next in &visible[index..end] {
@@ -2368,6 +2416,45 @@ impl UiState {
                         continue;
                     }
                     let is_error = entry.title == "ERROR";
+                    // One-line command/status results are a quiet status row,
+                    // not a detached heading followed by a second row.
+                    if !is_error && entry.title != "DIFF" && entry.body.lines().count() == 1 {
+                        let content = entry.body.trim();
+                        if !content.is_empty() {
+                            let localized = if entry.title == "COMMAND" {
+                                content.strip_prefix("Resumed session: ").map(|id| {
+                                    let label = if chrome::is_generated_session_id(id) {
+                                        self.session_title
+                                            .as_deref()
+                                            .map(str::to_owned)
+                                            .unwrap_or_else(|| {
+                                                display_session_title(id, self.preferences.language)
+                                                    .to_owned()
+                                            })
+                                    } else {
+                                        id.to_owned()
+                                    };
+                                    format!(
+                                        "{}{label}",
+                                        self.preferences
+                                            .language
+                                            .text("Resumed session: ", "已恢复会话：")
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                            lines.push(Line::from(vec![
+                                Span::styled("  ·  ", Style::default().fg(theme.faint)),
+                                Span::styled(
+                                    localized.unwrap_or_else(|| content.to_owned()),
+                                    Style::default().fg(theme.muted),
+                                ),
+                            ]));
+                        }
+                        lines.push(Line::default());
+                        continue;
+                    }
                     lines.push(Line::from(Span::styled(
                         format!(
                             "  {}  {}",
@@ -2405,16 +2492,22 @@ impl UiState {
                         } else {
                             line
                         };
-                        let style = if is_error {
+                        let style = if entry.title == "DIFF" {
+                            if line.starts_with('+') && !line.starts_with("+++") {
+                                Style::default().fg(theme.success)
+                            } else if line.starts_with('-') && !line.starts_with("---") {
+                                Style::default().fg(theme.error)
+                            } else if line.starts_with("@@") {
+                                Style::default().fg(theme.accent)
+                            } else {
+                                Style::default().fg(theme.code)
+                            }
+                        } else if is_error
+                            && (line.starts_with("error:") || line.starts_with("fatal:"))
+                        {
                             Style::default().fg(theme.error)
-                        } else if line.starts_with('+') && !line.starts_with("+++") {
-                            Style::default().fg(theme.user)
-                        } else if line.starts_with('-') && !line.starts_with("---") {
-                            Style::default().fg(theme.error)
-                        } else if line.starts_with("@@") {
-                            Style::default().fg(theme.accent)
                         } else {
-                            Style::default().fg(theme.text)
+                            Style::default().fg(if is_error { theme.text } else { theme.muted })
                         };
                         if self.plain_style && entry.title == "DIFF" {
                             preformatted_rows.push(lines.len());
@@ -2513,7 +2606,7 @@ impl UiState {
         );
         let area = reading_area(full_area, self.plain_style || self.full_width_prose());
         let header_rows = if self.plain_style {
-            u16::from(area.height >= 20) * 2
+            u16::from(area.height >= 20)
         } else {
             self.plugin_layout
                 .as_ref()
@@ -2588,6 +2681,18 @@ impl UiState {
         }
         self.viewport_height = history_slot.height;
         let has_activity_tail = self.has_activity_tail();
+        let tool_timer_second = if self.plain_style {
+            self.entries
+                .iter()
+                .filter(|entry| {
+                    matches!(entry.kind, Kind::Tool) && entry.title.ends_with(" · running")
+                })
+                .filter_map(|entry| entry.started)
+                .min()
+                .map(|start| start.elapsed().as_secs())
+        } else {
+            None
+        };
         let cached = self.history_cache.as_ref().is_some_and(|cache| {
             cache.width == history_slot.width
                 && cache.visible == self.history_visible
@@ -2596,6 +2701,7 @@ impl UiState {
                 && cache.expanded_tool_groups == self.expanded_tool_groups
                 && cache.reasoning_expanded == self.reasoning_expanded
                 && cache.has_activity_tail == has_activity_tail
+                && cache.tool_timer_second == tool_timer_second
                 && cache.theme == colors
         });
         let reflow_anchor = self
@@ -2729,6 +2835,7 @@ impl UiState {
                 tools_expanded: self.tools_expanded,
                 reasoning_expanded: self.reasoning_expanded,
                 has_activity_tail,
+                tool_timer_second,
                 theme: colors,
                 text,
                 source_lines,
@@ -2842,7 +2949,7 @@ impl UiState {
                     .decor
                     .iter()
                     .filter(|(row, item)| {
-                        matches!(item, Decor::Surface(Surface::Message))
+                        matches!(item, Decor::Surface(Surface::Message) | Decor::Rail { .. })
                             && *row >= start_row
                             && *row < end_row
                     })
@@ -2950,7 +3057,9 @@ impl UiState {
                     );
                 }
                 Decor::Surface(Surface::ToolRecord) => {
-                    let inset = 2.min(history.width);
+                    // Classic B: inset the gray tool panel within the
+                    // assistant rail, leaving room for its chevron and text.
+                    let inset = if self.plain_style { 4 } else { 2 }.min(history.width);
                     let gutter = if self.plain_style {
                         PLAIN_RIGHT_GUTTER
                     } else {
@@ -2966,7 +3075,11 @@ impl UiState {
                             history.width.saturating_sub(inset + gutter + pad),
                             1,
                         ),
-                        Style::default().bg(colors.surface),
+                        Style::default().bg(if self.plain_style {
+                            message_colors.surface
+                        } else {
+                            colors.surface
+                        }),
                     );
                 }
                 _ => {}
@@ -3086,7 +3199,7 @@ impl UiState {
                             .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
                     } else if self.plain_style {
                         Style::default()
-                            .fg(colors.muted)
+                            .fg(self.semantic_colors().link)
                             .add_modifier(Modifier::UNDERLINED)
                     } else {
                         Style::default().add_modifier(Modifier::UNDERLINED)
@@ -3163,8 +3276,8 @@ impl UiState {
                 ),
             );
         }
-        // One quiet input surface: a divider, a colored prompt marker and a
-        // multiline editor. No nested rectangular conversation/editor boxes.
+        // One quiet input surface: a divider, neutral prompt marker and
+        // multiline editor. Role colours belong to message rails only.
         if layout[3].height > 0 {
             let mut status = self.activity_line(colors);
             if !self.queued.is_empty() {
@@ -3220,7 +3333,10 @@ impl UiState {
             let lines = self.editor.text().split('\n').count();
             let language = self.preferences.language;
             let action = if self.running {
-                language.text("Enter queue", "Enter 排队")
+                language.text(
+                    "Enter steer · Alt+Enter queue",
+                    "Enter 引导 · Alt+Enter 排队",
+                )
             } else {
                 language.text("Enter send", "Enter 发送")
             };
@@ -3262,8 +3378,8 @@ impl UiState {
         } else if self.editor.text().is_empty() {
             let hint = if self.running {
                 self.preferences.language.text(
-                    "Enter queues the next task; /steer redirects…",
-                    "回车排队下一任务；/steer 发送引导…",
+                    "Enter steers; Alt+Enter / Ctrl+Q queues…",
+                    "Enter 引导；Alt+Enter / Ctrl+Q 排队…",
                 )
             } else {
                 self.preferences.language.text(
@@ -3278,7 +3394,7 @@ impl UiState {
         frame.render_widget(
             Paragraph::new("›").style(
                 Style::default()
-                    .fg(colors.user)
+                    .fg(colors.text)
                     .add_modifier(Modifier::BOLD),
             ),
             Rect::new(
@@ -3393,6 +3509,9 @@ impl Drop for UiState {
             super::terminal_feedback::clear_progress(&mut std::io::stdout());
         }
         self.discard_draft();
+        for parked in self.session_drafts.values() {
+            parked.discard_copies();
+        }
     }
 }
 

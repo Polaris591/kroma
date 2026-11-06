@@ -86,18 +86,18 @@ impl UiState {
                     _ => None,
                 };
                 return Line::from(vec![
-                    Span::styled(left, Style::default().fg(colors.faint)),
+                    Span::styled(left, Style::default().fg(colors.muted)),
                     Span::raw(" ".repeat(width.saturating_sub(used))),
-                    Span::styled(prefix.clone(), Style::default().fg(colors.faint)),
+                    Span::styled(prefix.clone(), Style::default().fg(colors.muted)),
                     Span::styled(
                         context.clone(),
                         if let Some(color) = risk {
                             Style::default().fg(color).add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(colors.faint)
+                            Style::default().fg(colors.muted)
                         },
                     ),
-                    Span::styled(suffix.clone(), Style::default().fg(colors.faint)),
+                    Span::styled(suffix.clone(), Style::default().fg(colors.muted)),
                 ]);
             }
         }
@@ -108,7 +108,7 @@ impl UiState {
                 &format!("{} · {level} · {context} · {cache}", self.model),
                 width,
             ),
-            Style::default().fg(colors.faint),
+            Style::default().fg(colors.muted),
         )
     }
 
@@ -122,7 +122,7 @@ impl UiState {
         frame.render_widget(
             Paragraph::new("KROMA").style(
                 Style::default()
-                    .fg(colors.faint)
+                    .fg(colors.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Rect::new(x, y, width, 1),
@@ -141,7 +141,7 @@ impl UiState {
         if !self.recent_sessions.is_empty() {
             frame.render_widget(
                 Paragraph::new(language.text("Continue working", "继续工作"))
-                    .style(Style::default().fg(colors.faint)),
+                    .style(Style::default().fg(colors.muted)),
                 Rect::new(x, y, width, 1),
             );
             y += 2;
@@ -172,10 +172,10 @@ impl UiState {
         if y < area.bottom() {
             frame.render_widget(
                 Paragraph::new(language.text(
-                    "Start a task below · Ctrl+P commands",
-                    "在下方开始任务 · Ctrl+P 查看命令",
+                    "Start a task below · / commands · F2 theme",
+                    "在下方开始任务 · / 查看命令 · F2 切换主题",
                 ))
-                .style(Style::default().fg(colors.faint)),
+                .style(Style::default().fg(colors.muted)),
                 Rect::new(x, y, width, 1),
             );
         }

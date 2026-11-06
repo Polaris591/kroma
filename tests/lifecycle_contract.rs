@@ -250,6 +250,7 @@ impl EventSink for OrderEvents {
             RuntimeEvent::CompactionUsage { requests, .. } => {
                 format!("compaction-usage-{requests}")
             }
+            RuntimeEvent::FinalAnswerReady => "final-answer-ready".to_owned(),
             RuntimeEvent::TaskFinished { status } => format!("task-end-{status}"),
             RuntimeEvent::Warning { .. }
             | RuntimeEvent::CompactionStarted
@@ -291,6 +292,7 @@ async fn compaction_usage_is_settled_before_foreground_task_finished() -> Result
             "context",
             "model-start-1",
             "model-end-1",
+            "final-answer-ready",
             "compaction-usage-2",
             "task-end-completed",
         ]

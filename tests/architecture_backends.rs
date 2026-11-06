@@ -387,6 +387,7 @@ impl EventSink for RecordingEvents {
             RuntimeEvent::ModelFinished { request, .. } => format!("model-end-{request}"),
             RuntimeEvent::Warning { .. } => "warning".to_owned(),
             RuntimeEvent::ModelFailed => "model-failed".to_owned(),
+            RuntimeEvent::FinalAnswerReady => "final-answer-ready".to_owned(),
             RuntimeEvent::FailedRequestUsage { .. } => "failed-request-usage".to_owned(),
             RuntimeEvent::CompactionUsage { requests, .. } => format!("apec-usage:{requests}"),
             RuntimeEvent::ToolStarted { name, .. } => format!("tool-start:{name}"),
@@ -453,6 +454,7 @@ async fn prompt_contribution_is_projection_only_and_events_have_stable_order() -
             "model-start-2",
             "text:finished",
             "model-end-2",
+            "final-answer-ready",
             "task-end:completed",
         ]
     );

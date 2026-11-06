@@ -1,9 +1,18 @@
-//! One visible record per tool invocation. Only that invocation's long details
-//! are collapsible; adjacent calls never become a group or a hidden-step count.
+//! Each real tool call has one quiet, inset header and one focused output.
+//! Ctrl+O or the chevron exposes the original command and full captured log.
 //! Display sanitising removes terminal control sequences without changing the
 //! stored tool result or the model-facing transcript.
 use super::transcript::{interrupted, ToolCard};
 use super::*;
+
+/// Tool text sits inside its gray surface, one level deeper than prose.
+/// The base body_line adds four cells; these three extra cells keep output
+/// aligned beneath the header rather than next to the assistant's role rail.
+fn tool_body_line(line: Line<'static>) -> Line<'static> {
+    let mut spans = vec![Span::raw("   ")];
+    spans.extend(line.spans);
+    body_line(Line::from(spans))
+}
 
 /// Strip CSI/OSC and other escape sequences, then make remaining control bytes
 /// visible. The raw entry is never modified.
@@ -335,6 +344,55 @@ fn subagent_preview_spans(line: &str, theme: Theme) -> Vec<Span<'static>> {
     ]
 }
 
+/// A display-only excerpt of real output. No LLM calls, and no edits to
+/// model-facing tool results or the persisted transcript.
+fn focused_success_output(command: &str, output: &str, width: usize) -> Option<String> {
+    let mut count = 0usize;
+    let mut first = Vec::with_capacity(2);
+    let mut test_result = None;
+    let mut build_result = None;
+    for raw in output.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("exit: ") {
+            continue;
+        }
+        let line = line
+            .strip_prefix("stdout: ")
+            .or_else(|| line.strip_prefix("stderr: "))
+            .unwrap_or(line)
+            .trim();
+        if line.is_empty() || line == "stdout:" || line == "stderr:" {
+            continue;
+        }
+        count += 1;
+        if test_result.is_none() && line.starts_with("test result:") {
+            test_result = Some(line.to_owned());
+        }
+        if line.starts_with("Finished `") || line.starts_with("Finished release") {
+            build_result = Some(line.to_owned());
+        }
+        if first.len() < 2 {
+            first.push(line.to_owned());
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let command = command.to_ascii_lowercase();
+    let excerpt = if command.contains("cargo test") {
+        test_result.unwrap_or_else(|| first.join(" · "))
+    } else if command.contains("cargo build") || command.contains("cargo check") {
+        build_result.unwrap_or_else(|| first.join(" · "))
+    } else {
+        let mut output = first.join(" · ");
+        if count > 2 {
+            output.push_str(&format!(" · … (+{} lines)", count - 2));
+        }
+        output
+    };
+    Some(clip_line(&excerpt, width.saturating_sub(11)))
+}
+
 impl UiState {
     pub(super) fn plain_tool_records(
         &self,
@@ -345,21 +403,22 @@ impl UiState {
         let mut card = ToolCard::default();
         for entry in tools {
             let start = card.lines.len();
-            self.append_plain_record(entry, theme, width, &mut card);
-            // Successful calls stay on the shared message surface; only active,
-            // failed, unknown or diagnostic records get a panel tint.
-            let warning = !entry.failed
-                && !entry.title.ends_with(" · running")
-                && super::super::tool_display::has_diagnostic(&entry.details);
-            if entry.failed || entry.title.ends_with(" · running") || warning || interrupted(entry)
-            {
-                card.blocks.push((start, card.lines.len()));
-            }
+            self.append_plain_record(entry, theme, width, &mut card, false);
+            // One subtle, continuous gray tool surface for every recorded
+            // command, including successful ones. This is the sole layout.
+            card.blocks.push((start, card.lines.len()));
         }
         card
     }
 
-    fn append_plain_record(&self, entry: &Entry, theme: Theme, width: usize, card: &mut ToolCard) {
+    fn append_plain_record(
+        &self,
+        entry: &Entry,
+        theme: Theme,
+        width: usize,
+        card: &mut ToolCard,
+        force_expanded: bool,
+    ) {
         let language = self.preferences.language;
         let (name, state) = entry
             .title
@@ -381,7 +440,8 @@ impl UiState {
             "✓"
         };
         let (label, ink) = self.semantic_step_label(marker);
-        let expanded = self.tools_expanded
+        let expanded = force_expanded
+            || self.tools_expanded
             || entry
                 .call_id
                 .as_ref()
@@ -438,7 +498,7 @@ impl UiState {
         // Keep the tool text clear of the surface edge, but do not paint a
         // disclosure badge. The row remains expandable from its state marker
         // and through Ctrl+O.
-        let prefix_width = 4
+        let prefix_width = 8
             + 2
             + UnicodeWidthStr::width(state.as_str())
             + UnicodeWidthStr::width(elapsed.as_str());
@@ -452,22 +512,18 @@ impl UiState {
             card.rows.push((card.lines.len(), id.clone()));
         }
         card.lines.push(Line::from(vec![
-            Span::raw("    "),
+            Span::styled(
+                if expanded { "      ▾ " } else { "      ▸ " },
+                Style::default().fg(theme.faint),
+            ),
             Span::styled(format!("{marker} "), Style::default().fg(ink)),
             Span::styled(state, Style::default().fg(ink)),
-            Span::styled(
-                summary,
-                Style::default().fg(if marker == "✓" {
-                    theme.muted
-                } else {
-                    theme.text
-                }),
-            ),
+            Span::styled(summary, Style::default().fg(theme.text)),
             Span::styled(elapsed, Style::default().fg(theme.faint)),
         ]));
 
         if expanded {
-            card.lines.push(body_line(Line::styled(
+            card.lines.push(tool_body_line(Line::styled(
                 language.text("Command", "执行命令"),
                 Style::default().fg(theme.muted),
             )));
@@ -476,7 +532,7 @@ impl UiState {
             }
         }
         if unknown {
-            card.lines.push(body_line(Line::styled(
+            card.lines.push(tool_body_line(Line::styled(
                 language.text(
                     "Result unknown; will not rerun automatically",
                     "结果未知，不会自动重新执行",
@@ -486,12 +542,12 @@ impl UiState {
             return;
         }
         if expanded {
-            card.lines.push(body_line(Line::styled(
+            card.lines.push(tool_body_line(Line::styled(
                 language.text("Output", "执行输出"),
                 Style::default().fg(theme.muted),
             )));
             if entry.details.is_empty() {
-                card.lines.push(body_line(Line::styled(
+                card.lines.push(tool_body_line(Line::styled(
                     language.text("No output recorded", "暂无已记录输出"),
                     Style::default().fg(theme.faint),
                 )));
@@ -526,16 +582,22 @@ impl UiState {
                 } else {
                     vec![Span::styled(output, Style::default().fg(theme.code))]
                 };
-                card.lines.push(body_line(Line::from(spans)));
+                card.lines.push(tool_body_line(Line::from(spans)));
             }
             return;
         }
-        // Successful calls stay at two rows. Running, failed and diagnostic
-        // calls expose a bounded preview of their existing captured output.
+        // Every call is visible with *meaningful* output, not an unbounded
+        // stdout wall. Full original output is always available via Ctrl+O.
         if !running && !entry.failed && !warning && name != "subagent" {
+            if let Some(line) = focused_success_output(&entry.body, &entry.details, width) {
+                card.lines.push(tool_body_line(Line::from(vec![
+                    Span::styled("↳ ", Style::default().fg(theme.faint)),
+                    Span::styled(line, Style::default().fg(theme.muted)),
+                ])));
+            }
             return;
         }
-        let limit = if running { 8 } else { 2 };
+        let limit = if running { 1 } else { 2 };
         if name == "subagent" {
             let (mut preview, omitted) = if running {
                 (subagent_live_preview(&entry.details, limit), false)
@@ -558,12 +620,13 @@ impl UiState {
                 };
                 let mut column = 0;
                 let line = markdown::expand_tabs(&line, &mut column);
-                let max = width.saturating_sub(6 + UnicodeWidthStr::width(suffix));
+                let max = width.saturating_sub(11 + UnicodeWidthStr::width(suffix));
                 let clipped = format!("{}{suffix}", clip_line(&line, max));
                 card.preformatted.push(card.lines.len());
-                card.lines.push(body_line(Line::from(subagent_preview_spans(
-                    &clipped, theme,
-                ))));
+                card.lines
+                    .push(tool_body_line(Line::from(subagent_preview_spans(
+                        &clipped, theme,
+                    ))));
             }
             return;
         }
@@ -635,9 +698,9 @@ impl UiState {
             } else {
                 line
             };
-            let max = width.saturating_sub(6 + UnicodeWidthStr::width(suffix));
+            let max = width.saturating_sub(11 + UnicodeWidthStr::width(suffix));
             card.preformatted.push(card.lines.len());
-            card.lines.push(body_line(Line::from(vec![
+            card.lines.push(tool_body_line(Line::from(vec![
                 Span::styled("↳ ", Style::default().fg(theme.faint)),
                 Span::styled(
                     format!("{}{suffix}", clip_line(&line, max)),
@@ -667,7 +730,7 @@ impl UiState {
         let text = visible_line(&format!("{prefix}{command}"));
         let text = max.map_or_else(|| text.clone(), |max| clip_line(&text, max));
         card.preformatted.push(card.lines.len());
-        card.lines.push(body_line(Line::from(Span::styled(
+        card.lines.push(tool_body_line(Line::from(Span::styled(
             text,
             Style::default().fg(theme.code),
         ))));

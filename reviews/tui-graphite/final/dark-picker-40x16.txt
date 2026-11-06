@@ -1,5 +1,4 @@
- ◆ Kroma / untitled session             
-     Review the change. 请 检 查 代 码 。     
+     indentation.                     │ 
   Commands · ↑↓ select · Tab complete · 
    › /                                  
    › /checkpoints  — List file snaps…   
@@ -11,6 +10,7 @@
      /editor  — Edit draft in extern…   
      /exit  — Exit Kroma                
  ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

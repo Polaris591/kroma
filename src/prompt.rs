@@ -10,7 +10,7 @@ pub const EXECUTION_GUIDANCE: &str = "\nFor coding tasks, locate relevant symbol
 // execution guidance here: the final response should be concise without a
 // fixed sentence limit, so complex work can explain verification and risk.
 pub const V7_GUIDANCE: &str = concat!(
-    "\nAvoid nonessential narration between tool calls. When you finish, reply concisely and accurately about what changed and what was verified. Complex tasks may warrant a fuller explanation of the modifications, verification evidence, failure causes and remaining risks; report uncertainty rather than hiding it.",
+    "\nGive a brief user-facing progress update when starting substantial work, making an important confirmed discovery or changing direction, and starting validation. Describe actions or verified results, not internal reasoning. Skip routine tool-by-tool narration and progress updates for simple questions; do not add model requests or split batchable operations just to report progress. When you finish, reply concisely and accurately about what changed and what was verified. Complex tasks may warrant a fuller explanation of the modifications, verification evidence, failure causes and remaining risks; report uncertainty rather than hiding it.",
     "\nPrefer the simplest correct implementation consistent with the existing codebase. Avoid redundant comments, explanatory boilerplate, unnecessary helper layers, and unrelated refactoring. Preserve required APIs, edge cases, tests, and non-obvious invariants. Never sacrifice correctness just to reduce code length.",
     "\nInvestigate tooling internals only when the evidence points there."
 );

@@ -300,6 +300,58 @@ async fn checkpoint_input_cap_covers_the_appended_instruction() -> Result<()> {
 }
 
 #[tokio::test]
+async fn manual_compact_focus_is_budgeted_and_does_not_change_default_prompt() -> Result<()> {
+    let temp = Temp::new("manual-focus")?;
+    let history = turns();
+    let cap = 4_096;
+    let budget = ContextConfig::with_output_reserve(32_768, 4_096)?.with_input_limit(cap)?;
+    let focus = format!(
+        "重点保留失败的测试、源文件和错误码 E417：{}",
+        "项目计划 ".repeat(110)
+    );
+
+    let model = Arc::new(Capture::default());
+    let backend: Arc<dyn ModelBackend> = model.clone();
+    let mut context = compression(&history, budget, &temp.path().join("focused.json"));
+    context.set_request_context(&backend, &[]);
+    let report = context
+        .compact_with_instructions(&history, &backend, &Store::default(), 0, &focus)
+        .await?;
+    assert!(report.compacted);
+    {
+        let seen = model.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].instruction.contains(focus.trim()),
+            "manual focus missing from checkpoint request"
+        );
+        assert!(seen[0].instruction.contains("OBJECTIVE"));
+        let mut full = seen[0].source.clone();
+        full.push(Message::new("user", &seen[0].instruction));
+        assert!(
+            estimate(&full) <= cap,
+            "custom focus must count toward input limit"
+        );
+    }
+
+    let normal_model = Arc::new(Capture::default());
+    let normal_backend: Arc<dyn ModelBackend> = normal_model.clone();
+    let mut normal_context = compression(&history, budget, &temp.path().join("normal.json"));
+    normal_context.set_request_context(&normal_backend, &[]);
+    assert!(
+        normal_context
+            .compact(&history, &normal_backend, &Store::default(), 0)
+            .await?
+            .compacted
+    );
+    let normal = normal_model.seen.lock().unwrap();
+    assert_eq!(normal.len(), 1);
+    assert!(!normal[0].instruction.contains("E417"));
+    assert!(!normal[0].instruction.contains("Manual /compact focus"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_filtered_reasoning_does_not_block_a_fitting_checkpoint() -> Result<()> {
     let temp = Temp::new("reasoning")?;
     let history = vec![

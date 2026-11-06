@@ -1,16 +1,16 @@
- ◆ Kroma / untitled session ⊘ Cancelled 
-     Review the change. 请 检 查 代 码 。     
-     Preserve Unicode and indentation.  
+                                      │ 
+                                      │ 
+                                      │ 
+     KROMA                            │ 
+     Updated the implementation.      ┃ 
+                                      ┃ 
+     • Preserved input and links      ┃ 
+     • Verified Unicode selection     ┃ 
+                                      ┃ 
                                         
-  ◆  Updated the implementation.        
-                                        
-     • Preserved input and links        
-     • Verified Unicode selection       
-                                        
-                                        
-                                        
-   ⊘  Cancelled · side effects are no   
+     ⊘ Cancelled · 35.3s · side effe    
  ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

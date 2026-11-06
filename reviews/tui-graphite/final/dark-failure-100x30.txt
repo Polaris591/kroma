@@ -1,20 +1,18 @@
- ◆ Kroma / untitled session                                                       project  ✕ Failed 
                                                                                                     
-     Review the change. 请 检 查 代 码 。                                                                 
-     Preserve Unicode and indentation.                                                              
                                                                                                     
-   ▸ ✕ Executed 3 steps · 1 failed · 3.6s                                                           
-   ▸ ✕ Run Rust tests · 1.2s                                                               [view]   
-     ↳ exit 101 · error[E0599]: method not found                                                    
-     … Another 2 successful steps                                                                   
+      YOU                                                                                           
+      Review the change. 请 检 查 代 码 。                                                                
+      Preserve Unicode and indentation.                                                             
                                                                                                     
                                                                                                     
                                                                                                     
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
+      KROMA                                                                                         
+        ▸ ✓ $ echo step-0 · 1.2s                                                                    
+         ↳ verified                                                                                 
+        ▸ ✕ Failed $ cargo test · 1.2s                                               [view]         
+         ↳ exit 101 · error[E0599]: method not found                                                
+        ▸ ✓ $ echo step-2 · 1.2s                                                                    
+         ↳ verified                                                                                 
                                                                                                     
                                                                                                     
                                                                                                     
@@ -23,8 +21,10 @@
                                                                                                     
                                                                                                     
                                                                                                     
-   ✕  Task failed · see error above · 35.3s                                                         
- ────────────────────────────────────────────────────────────────────────────────────────────────── 
-   › Describe a task, or / for commands…                                                            
                                                                                                     
-   test-model · Think high · Context —                                                              
+      ✕ Failed · 35.3s · see error above                                                            
+  ────────────────────────────────────────────────────────────────────────────────────────────────  
+                                                                                                    
+    ›                                                                                               
+                                                                                                    
+    test-model · Think high                                             Context —/500k · Cache —    

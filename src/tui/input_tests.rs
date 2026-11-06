@@ -28,6 +28,56 @@ fn key(ui: &mut UiState, model: &ModelClient, code: KeyCode, modifiers: KeyModif
 }
 
 #[test]
+fn ctrl_o_restores_inline_tool_output_without_losing_the_draft() {
+    fn screen(ui: &mut UiState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+    let (_, model) = setup();
+    let mut ui = UiState::new_default(
+        "test".into(),
+        "test".into(),
+        ThemeStore::load_at(None).unwrap(),
+        &[],
+    );
+    ui.add_user("Run the checks");
+    ui.event(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "checks".into(),
+        args: "cargo test --lib".into(),
+    });
+    ui.event(UiEvent::ToolFinished {
+        id: "checks".into(),
+        result: "exit: 0\ntest result: ok. 1 passed; 0 failed\nother details\nALL_TESTS_PASSED"
+            .into(),
+        failed: false,
+    });
+    ui.editor.paste("draft to keep");
+    let closed = screen(&mut ui);
+    assert!(
+        closed.contains("cargo test --lib"),
+        "rendered screen: {closed}"
+    );
+    assert!(!closed.contains("ALL_TESTS_PASSED"));
+    key(&mut ui, &model, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert!(ui.tools_expanded);
+    assert!(!ui.has_plugin_panel());
+    assert!(screen(&mut ui).contains("ALL_TESTS_PASSED"));
+    assert_eq!(ui.editor.text(), "draft to keep");
+    key(&mut ui, &model, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert!(!ui.tools_expanded);
+    assert!(!screen(&mut ui).contains("ALL_TESTS_PASSED"));
+    assert_eq!(ui.editor.text(), "draft to keep");
+}
+
+#[test]
 fn multiline_paste_is_editable_and_waits_for_an_explicit_send() {
     let pasted = "任务\r\n\t中文 👩‍💻\r\n\r\n".repeat(20);
     let expected = pasted.replace("\r\n", "\n");
@@ -273,6 +323,271 @@ fn large_attachment_paste_replaces_selection_and_preserves_undo_file_ownership()
 }
 
 #[test]
+fn ctrl_q_preserves_unsent_drafts_and_running_messages_choose_the_right_lane() {
+    let (mut ui, model) = setup();
+    let dir = std::env::temp_dir();
+    let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let queue_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+
+    ui.editor.paste("unsent draft");
+    assert!(matches!(
+        input_event(&mut ui, Event::Key(q), false, &model, &dir),
+        InputAction::None
+    ));
+    assert_eq!(ui.editor.text(), "unsent draft");
+
+    assert!(matches!(
+        input_event(&mut ui, Event::Key(q), true, &model, &dir),
+        InputAction::Queue(text) if text == "unsent draft"
+    ));
+    assert!(ui.editor.text().is_empty());
+
+    ui.editor.paste("interrupt current task");
+    assert!(matches!(
+        input_event(&mut ui, Event::Key(enter), true, &model, &dir),
+        InputAction::Submit(text) if text == "interrupt current task"
+    ));
+    ui.editor.paste("run next after finishing");
+    assert!(matches!(
+        input_event(&mut ui, Event::Key(queue_enter), true, &model, &dir),
+        InputAction::Queue(text) if text == "run next after finishing"
+    ));
+
+    ui.editor.paste("keep");
+    assert!(matches!(
+        input_event(&mut ui, Event::Key(queue_enter), false, &model, &dir),
+        InputAction::None
+    ));
+    assert_eq!(ui.editor.text(), "keep\n");
+}
+
+#[test]
+fn input_history_recall_undo_restores_the_original_draft() {
+    let (mut ui, model) = setup();
+    ui.editor
+        .restore_history(vec![("saved prompt".into(), Default::default(), vec![])]);
+    ui.editor.paste("draft not sent");
+    key(&mut ui, &model, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    key(&mut ui, &model, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(ui.editor.text(), "saved prompt");
+    key(&mut ui, &model, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(ui.editor.text(), "draft not sent");
+    assert!(ui.editor.history_index().is_none());
+    key(&mut ui, &model, KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert_eq!(ui.editor.text(), "saved prompt");
+}
+
+#[test]
+fn session_draft_switches_preserve_text_and_attachment_ownership() {
+    let (mut ui, _model) = setup();
+    let dir = std::env::temp_dir().join(format!("kroma-draft-switch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    ui.editor.paste("session one");
+    let item = Attachment::from_log("preserved evidence", &dir).unwrap();
+    let path = item.path.clone();
+    ui.attach(item).unwrap();
+
+    ui.switch_session_draft("session-two", false);
+    ui.session = "session-two".into();
+    assert!(ui.editor.text().is_empty());
+    assert!(ui.attachments.is_empty());
+    assert!(
+        path.exists(),
+        "switching must not delete the draft attachment"
+    );
+
+    ui.editor.paste("session two");
+    ui.switch_session_draft("test", false);
+    ui.session = "test".into();
+    assert!(ui.editor.text().starts_with("session one"));
+    assert_eq!(ui.attachments.len(), 1);
+    assert_eq!(ui.attachments[0].path, path);
+
+    ui.switch_session_draft("test", true);
+    ui.enter_home();
+    assert!(ui.editor.text().is_empty());
+    ui.editor.paste("welcome draft");
+    ui.switch_session_draft("test", false);
+    ui.load_history(&[]);
+    assert!(ui.editor.text().starts_with("session one"));
+    ui.switch_session_draft("test", true);
+    ui.enter_home();
+    assert_eq!(ui.editor.text(), "welcome draft");
+
+    ui.switch_session_draft("test", false);
+    ui.load_history(&[]);
+    ui.discard_draft();
+    assert!(!path.exists(), "discard explicitly releases its draft copy");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn parked_draft_attachments_are_cleaned_when_tui_exits() {
+    let dir =
+        std::env::temp_dir().join(format!("kroma-parked-draft-cleanup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path;
+    {
+        let (mut ui, _) = setup();
+        let item = Attachment::from_log("draft-only evidence", &dir).unwrap();
+        path = item.path.clone();
+        ui.attach(item).unwrap();
+        ui.switch_session_draft("other-session", false);
+        assert!(path.exists());
+        ui.session = "other-session".into();
+    }
+    assert!(!path.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn help_and_thinking_alias_are_local_and_do_not_append_transcript_entries() {
+    let (mut ui, model) = setup();
+    ui.editor.paste("keep draft");
+    assert!(show_local_command(&mut ui, "/help", &model));
+    assert!(ui.has_plugin_panel());
+    assert_eq!(ui.editor.text(), "keep draft");
+    ui.close_plugin_panel();
+    assert!(show_local_command(&mut ui, "/hotkeys", &model));
+    assert!(ui.has_plugin_panel());
+    ui.close_plugin_panel();
+    assert!(show_local_command(&mut ui, "/thinking", &model));
+    assert!(show_local_command(&mut ui, "/thinking auto", &model));
+}
+
+#[test]
+fn familiar_shortcuts_select_model_recall_history_and_keep_draft() {
+    let (mut ui, model) = setup();
+    let dir = std::env::temp_dir();
+
+    for prompt in ["first prompt", "second prompt"] {
+        ui.editor.paste(prompt);
+        assert!(matches!(
+            input_event(
+                &mut ui,
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                false,
+                &model,
+                &dir
+            ),
+            InputAction::Submit(_)
+        ));
+    }
+    ui.editor.paste("unsent draft");
+    key(&mut ui, &model, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::History);
+    for ch in "first".chars() {
+        key(&mut ui, &model, KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+    key(&mut ui, &model, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(ui.picker.is_none());
+    assert_eq!(ui.editor.text(), "first prompt", "recall must not send");
+
+    key(&mut ui, &model, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(ui.editor.text(), "second prompt");
+    key(&mut ui, &model, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(ui.editor.text(), "unsent draft");
+
+    key(&mut ui, &model, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    key(&mut ui, &model, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(ui.picker.is_none());
+    assert_eq!(ui.editor.text(), "unsent draft", "Esc keeps the draft");
+
+    key(&mut ui, &model, KeyCode::Char('l'), KeyModifiers::CONTROL);
+    assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::Models);
+    key(&mut ui, &model, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(ui.editor.text(), "unsent draft");
+}
+
+#[test]
+fn history_search_renders_the_recalled_entries_own_attachment_labels() {
+    let (mut ui, model) = setup();
+    let marker = char::from_u32(editor::ATTACHMENT_START).unwrap();
+    let labels = std::collections::HashMap::from([(marker, "【source.txt】".into())]);
+    ui.editor
+        .restore_history(vec![(format!("inspect {marker}"), labels, vec![])]);
+    ui.editor.paste("unsent draft");
+    key(&mut ui, &model, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert!(ui.picker.as_ref().unwrap().items[0]
+        .label
+        .contains("【source.txt】"));
+    key(&mut ui, &model, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(ui.editor.text(), format!("inspect {marker}"));
+    key(&mut ui, &model, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(ui.editor.text(), "unsent draft");
+}
+
+#[test]
+fn escape_and_ctrl_t_respect_modals_and_running_state() {
+    let (mut ui, model) = setup();
+    let dir = std::env::temp_dir();
+    ui.editor.paste("draft survives");
+
+    key(&mut ui, &model, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert!(ui.reasoning_expanded);
+    key(&mut ui, &model, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert!(!ui.reasoning_expanded);
+
+    key(&mut ui, &model, KeyCode::Char('t'), KeyModifiers::ALT);
+    assert!(ui.has_plugin_panel(), "full transcript is still accessible");
+    assert!(matches!(
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            true,
+            &model,
+            &dir
+        ),
+        InputAction::None
+    ));
+    assert!(!ui.has_plugin_panel(), "first Esc closes a modal");
+    assert!(matches!(
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            true,
+            &model,
+            &dir
+        ),
+        InputAction::Cancel
+    ));
+    assert_eq!(ui.editor.text(), "draft survives");
+}
+
+#[test]
+fn ctrl_d_and_readline_word_motion_have_consistent_semantics() {
+    let (mut ui, model) = setup();
+    let dir = std::env::temp_dir();
+    assert!(matches!(
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            false,
+            &model,
+            &dir
+        ),
+        InputAction::Quit
+    ));
+    ui.editor.paste("alpha beta");
+    key(&mut ui, &model, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    key(&mut ui, &model, KeyCode::Char('d'), KeyModifiers::CONTROL);
+    assert_eq!(ui.editor.text(), "lpha beta");
+    key(&mut ui, &model, KeyCode::Char('f'), KeyModifiers::ALT);
+    assert_eq!(ui.editor.caret(), 5);
+    key(&mut ui, &model, KeyCode::Char('b'), KeyModifiers::ALT);
+    assert_eq!(ui.editor.caret(), 0);
+    key(&mut ui, &model, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert_eq!(ui.editor.text(), "lpha beta");
+    ui.editor.clear();
+    key(&mut ui, &model, KeyCode::Char('?'), KeyModifiers::NONE);
+    assert!(ui.has_plugin_panel(), "? on an empty draft opens help");
+    key(&mut ui, &model, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!ui.has_plugin_panel());
+    assert!(ui.editor.text().is_empty());
+}
+
+#[test]
 fn multiline_composer_explains_newline_and_send_or_queue_in_both_languages() {
     for language in [preferences::Language::En, preferences::Language::Zh] {
         let (mut ui, _) = setup();
@@ -294,9 +609,9 @@ fn multiline_composer_explains_newline_and_send_or_queue_in_both_languages() {
             assert!(compact.contains(language.text("3lines", "3行")));
             let action = match (language, running) {
                 (preferences::Language::En, false) => "Entersend",
-                (preferences::Language::En, true) => "Enterqueue",
+                (preferences::Language::En, true) => "Entersteer",
                 (preferences::Language::Zh, false) => "Enter发送",
-                (preferences::Language::Zh, true) => "Enter排队",
+                (preferences::Language::Zh, true) => "Enter引导",
             };
             assert!(compact.contains(action), "{compact}");
         }

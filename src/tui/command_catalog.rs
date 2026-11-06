@@ -34,6 +34,18 @@ commands![
         "搜索全部斜杠命令"
     ),
     (
+        "/hotkeys",
+        "",
+        "Show keyboard shortcuts (alias of /help)",
+        "查看快捷键（/help 别名）"
+    ),
+    (
+        "/transcript",
+        "",
+        "Open searchable full transcript",
+        "查看可搜索的全文记录"
+    ),
+    (
         "/language",
         "[en|zh]",
         "Switch interface language (saved)",
@@ -94,6 +106,7 @@ commands![
         "选择模型配置"
     ),
     ("/think", "[level]", "Set reasoning effort", "设置推理强度"),
+    ("/thinking", "[level]", "Alias for /think", "/think 的别名"),
     ("/reasoning", "[level]", "Alias for /think", "/think 的别名"),
     (
         "/theme",

@@ -1,16 +1,16 @@
- ◆ Kroma / untitled session    ✕ Failed 
-     Review the change. 请 检 查 代 码 。     
-     Preserve Unicode and indentation.  
+                                      │ 
+     KROMA                            │ 
+       ▸ ✓ $ echo step-0 · 1.2s       │ 
+        ↳ verified                    │ 
+       ▸ ✕ Failed $ cargo… · 1.2s     │ 
+        ↳ exit 101 · error[E0599…     ┃ 
+       ▸ ✓ $ echo step-2 · 1.2s       ┃ 
+        ↳ verified                    ┃ 
+                                      ┃ 
                                         
-   ▸ ✕ Executed 3 steps · 1 fa… · 3.6s  
-   ▸ ✕ Run Rust tests · 1.2s            
-     ↳ exit 101 · error[E0599]: method  
-     …                                  
-     … Another 2 successful steps       
-                                        
-                                        
-   ✕  Task failed · see error above ·   
+     ✕ Failed · 35.3s · see error ab    
  ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

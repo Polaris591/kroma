@@ -56,10 +56,14 @@ fn style(token: Token, theme: Theme) -> Style {
     let mono = theme.background == ratatui::style::Color::Reset;
     let mut style = Style::default().fg(match token {
         Token::Plain => theme.code,
-        Token::Comment => theme.faint,
-        Token::String | Token::Add => theme.success,
-        Token::Number => theme.warning,
-        Token::Keyword | Token::Hunk => theme.accent_text,
+        Token::Comment => theme.muted,
+        // Syntax is informational. Reserve state colours for actual
+        // diff additions/deletions and execution warnings/errors.
+        Token::String => theme.text,
+        Token::Keyword => theme.accent_text,
+        Token::Number => theme.muted,
+        Token::Add => theme.success,
+        Token::Hunk => theme.muted,
         Token::Type => theme.text,
         Token::Del => theme.error,
         Token::Meta => theme.muted,
@@ -380,9 +384,9 @@ mod tests {
             assert_eq!(
                 spans[0].style.fg,
                 Some(if language == "rust" {
-                    theme.faint
+                    theme.muted
                 } else {
-                    theme.success
+                    theme.text
                 })
             );
             assert!(lexer.quote.is_none() && lexer.block_depth == 0);
@@ -433,9 +437,7 @@ mod tests {
             theme,
         );
         assert!(lexer.quote.is_none());
-        assert!(spans
-            .iter()
-            .any(|span| span.style.fg == Some(theme.success)));
+        assert!(spans.iter().any(|span| span.style.fg == Some(theme.text)));
         assert_eq!(
             lexer.line("let n = 42;", "rust", theme)[0].style.fg,
             Some(theme.accent_text)

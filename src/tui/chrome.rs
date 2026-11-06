@@ -73,7 +73,7 @@ impl UiState {
                 .text("Working directory", "工作目录"),
             self.link_workdir.display()
         );
-        self.info("HELP", content);
+        self.open_plugin_panel(content);
     }
 
     pub(in crate::tui) fn refresh_git(&self) {

@@ -1,9 +1,13 @@
- ◆ Kroma / untitled session                                project  ⊘ Cancelled 
                                                                                 
+                                                                                
+     YOU                                                                        
      Review the change. 请 检 查 代 码 。                                             
      Preserve Unicode and indentation.                                          
                                                                                 
-  ◆  Updated the implementation.                                                
+                                                                                
+                                                                                
+     KROMA                                                                      
+     Updated the implementation.                                                
                                                                                 
      • Preserved input and links                                                
      • Verified Unicode selection                                               
@@ -12,13 +16,9 @@
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-   ⊘  Cancelled · side effects are not undone · 35.3s                           
+     ⊘ Cancelled · 35.3s · side effects are not undone                          
  ────────────────────────────────────────────────────────────────────────────── 
-   › Describe a task, or / for commands…                                        
                                                                                 
-   test-model · Think high · Context —                                          
+   ›                                                                            
+                                                                                
+   test-model · Think high                           Context —/500k · Cache —   

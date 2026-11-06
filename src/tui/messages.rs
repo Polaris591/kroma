@@ -23,7 +23,12 @@ impl UiState {
     ) {
         let p = self.message_colors();
         for row in start..end {
-            decor.push((row, Decor::Surface(Surface::Message)));
+            // Classic B: user messages are subtle gray cards, while the
+            // assistant reads directly on the terminal background. Nested
+            // tool calls provide their own gray panel inside that rail.
+            if matches!(role, MessageRole::User) {
+                decor.push((row, Decor::Surface(Surface::Message)));
+            }
             let color = match role {
                 MessageRole::User => p.user_rail,
                 MessageRole::Assistant => p.assistant_rail,
@@ -50,9 +55,6 @@ impl UiState {
         if start.is_some() {
             return;
         }
-        // Keep the same two terminal-background rows that close a turn, so a
-        // user message and the reply are separated by the same gap.
-        lines.push(Line::default());
         let block_start = lines.len();
         lines.push(Line::default());
         decor.push((
@@ -81,9 +83,7 @@ impl UiState {
             lines.push(Line::default());
         }
         self.decorate_message(block_start, lines.len(), MessageRole::Assistant, decor);
-        // Two terminal-background rows keep consecutive turns from merging
-        // into one long surface and give each block room to breathe.
-        lines.push(Line::default());
+        // A single terminal-background row separates consecutive turns.
         lines.push(Line::default());
     }
 

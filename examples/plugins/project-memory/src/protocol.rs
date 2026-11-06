@@ -309,6 +309,7 @@ fn store_message(error: &anyhow::Error) -> String {
 // ---------------------------------------------------------------------------
 // Tools
 
+#[derive(Debug)]
 struct ToolFailure {
     code: &'static str,
     message: String,
@@ -570,10 +571,14 @@ fn optional_quote(arguments: &Map<String, Value>) -> Result<Option<String>, Tool
 
 fn optional_supersedes(arguments: &Map<String, Value>) -> Result<Option<String>, ToolFailure> {
     match arguments.get("supersedes") {
+        // Some model endpoints materialize an omitted optional field as an
+        // empty string/array. An empty value never supersedes any memory.
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) if id.trim().is_empty() => Ok(None),
+        Some(Value::Array(ids)) if ids.is_empty() => Ok(None),
         Some(Value::String(id)) if valid_id(id) => Ok(Some(id.clone())),
         _ => Err(ToolFailure::invalid(
-            "supersedes must be a single opaque memory identifier",
+            "supersedes must be one memory id, or omitted when not replacing a memory",
         )),
     }
 }
@@ -1847,6 +1852,31 @@ mod tests {
         }));
         assert_eq!(reply["is_error"], true);
     }
+    #[test]
+    fn empty_supersedes_placeholders_are_omitted_without_accepting_bad_ids() {
+        for placeholder in [Value::Null, json!(""), json!("  "), json!([])] {
+            let args = json!({"supersedes":placeholder});
+            assert_eq!(
+                optional_supersedes(args.as_object().unwrap()).unwrap(),
+                None
+            );
+        }
+        let valid = json!({"supersedes":"memory-42"});
+        assert_eq!(
+            optional_supersedes(valid.as_object().unwrap()).unwrap(),
+            Some("memory-42".to_owned())
+        );
+        for invalid in [
+            json!(["memory-42"]),
+            json!(17),
+            json!({}),
+            json!("not valid"),
+        ] {
+            let args = json!({"supersedes":invalid});
+            assert!(optional_supersedes(args.as_object().unwrap()).is_err());
+        }
+    }
+
     fn storage_request(dir: &std::path::Path, kind: &str, name: &str, arguments: Value) -> Value {
         json!({
             "protocol_version": 2,
@@ -1864,6 +1894,34 @@ mod tests {
     fn reply_content(reply: &Value) -> Value {
         serde_json::from_str(reply["content"].as_str().expect("string content"))
             .expect("json content")
+    }
+
+    #[test]
+    fn model_supersedes_placeholders_do_not_block_verified_user_memory() {
+        for placeholder in [json!(""), json!([])] {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(tmp.path().join("project/src/tui")).unwrap();
+            let quote = "The TUI should use a concise activity display by default";
+            let mut request = storage_request(
+                tmp.path(),
+                "tool",
+                "memory_remember",
+                json!({
+                    "kind":"decision",
+                    "text":"Default to a concise TUI activity view",
+                    "topic":"TUI display",
+                    "quote":quote,
+                    "paths":["src/tui"],
+                    "evidence":[],
+                    "supersedes":placeholder,
+                }),
+            );
+            request["archive"] = json!("/tmp/verified-session");
+            request["trusted_user_context"] = json!({"message":quote,"turn":7});
+            let reply = handle(request);
+            assert_eq!(reply["is_error"], false, "{reply}");
+            assert_eq!(reply_content(&reply)["state"], "accepted");
+        }
     }
 
     #[test]

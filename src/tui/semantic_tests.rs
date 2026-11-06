@@ -18,7 +18,9 @@ fn draw(ui: &mut UiState, width: u16, height: u16) -> Buffer {
     terminal.backend().buffer().clone()
 }
 fn neutral(color: Color) -> bool {
-    matches!(color, Color::Reset) || matches!(color, Color::Rgb(r,g,b) if r==g && g==b)
+    // The dark preset uses blue-grey neutrals, not grayscale RGB triplets.
+    matches!(color, Color::Reset)
+        || matches!(color, Color::Rgb(r,g,b) if r <= g && g <= b && b - r <= 32)
 }
 fn assert_neutral_backgrounds_except_message_rails(ui: &UiState, buffer: &Buffer) {
     let messages = ui.message_colors();
@@ -73,10 +75,10 @@ fn semantic_palette_matches_design_and_keeps_neutral_theme_separate() {
         (
             "dark",
             [
-                Color::Rgb(122, 162, 247),
-                Color::Rgb(134, 217, 154),
-                Color::Rgb(229, 181, 103),
-                Color::Rgb(240, 120, 134),
+                Color::Rgb(77, 201, 192),
+                Color::Rgb(79, 157, 107),
+                Color::Rgb(229, 169, 61),
+                Color::Rgb(240, 98, 111),
             ],
         ),
         (
@@ -101,15 +103,19 @@ fn semantic_palette_matches_design_and_keeps_neutral_theme_separate() {
             base.text,
             base.muted,
             base.faint,
-            base.accent,
-            base.accent_text,
-            base.user,
+            // Accent and user are deliberately distinct brand/role inks,
+            // not neutral chrome colours.
             base.code,
             base.background,
             base.surface,
+            base.inset,
             base.overlay,
         ] {
             assert!(neutral(color));
+        }
+        if preset == "dark" {
+            assert_eq!(base.accent, ui.message_colors().assistant_rail);
+            assert_eq!(base.user, ui.message_colors().user_rail);
         }
         for foreground in [p.running, p.success, p.warning, p.error] {
             for background in [base.background, base.surface, base.overlay] {
@@ -125,26 +131,33 @@ fn semantic_palette_matches_design_and_keeps_neutral_theme_separate() {
 
 #[test]
 fn semantic_tool_prefix_colours_state_but_never_the_command() {
-    let unknown="Session interrupted. Tool result is unknown; do not assume the command succeeded or automatically repeat it.";
-    for (id, result, failed, kind, marker, label) in [
-        ("ok", "exit: 0\nverified", false, "success", "✓", ""),
+    let unknown = "Session interrupted. Tool result is unknown; do not assume the command succeeded or automatically repeat it.";
+    for (id, result, failed, marker, label) in [
+        (
+            "ok",
+            "exit: 0
+verified",
+            false,
+            "✓",
+            "",
+        ),
         (
             "warn",
-            "exit: 0\nstderr: warning: check configuration",
+            "exit: 0
+stderr: warning: check configuration",
             false,
-            "warning",
             "!",
             "Warning",
         ),
         (
             "bad",
-            "exit: 101\nstderr: assertion failed",
+            "exit: 101
+stderr: assertion failed",
             true,
-            "error",
             "✕",
             "Failed",
         ),
-        ("unknown", unknown, true, "warning", "⊘", "Unknown"),
+        ("unknown", unknown, true, "⊘", "Unknown"),
     ] {
         let mut ui = ui();
         finish_tool(&mut ui, id, "echo real-command", result, failed);
@@ -154,36 +167,50 @@ fn semantic_tool_prefix_colours_state_but_never_the_command() {
             .find(|e| e.call_id.as_deref() == Some(id))
             .unwrap();
         let card = ui.tool_card(&[entry], ui.active_colors(), 100);
-        let p = ui.semantic_colors();
-        let expected = match kind {
-            "success" => p.success,
-            "warning" => p.warning,
-            _ => p.error,
+        let header = &card.lines[0];
+        assert!(line_text(header).contains("$ echo real-command"));
+        let expected = match marker {
+            "✓" => ui.semantic_colors().success,
+            "!" | "⊘" => ui.semantic_colors().warning,
+            _ => ui.semantic_colors().error,
         };
-        let line = &card.lines[0];
-        let text = line_text(line);
-        assert!(text.contains("$ echo real-command"));
-        assert!(!text.contains("Done"));
-        let state = line
-            .spans
-            .iter()
-            .find(|span| span.content.trim_end() == marker)
-            .unwrap();
-        assert_eq!(state.style.fg, Some(expected));
-        if !label.is_empty() {
-            let word = line
+        assert_eq!(
+            header
                 .spans
                 .iter()
-                .find(|span| span.content.contains(label))
-                .unwrap();
-            assert_eq!(word.style.fg, Some(expected));
+                .find(|span| span.content.trim_end() == marker)
+                .unwrap()
+                .style
+                .fg,
+            Some(expected)
+        );
+        if !label.is_empty() {
+            assert_eq!(
+                header
+                    .spans
+                    .iter()
+                    .find(|span| span.content.contains(label))
+                    .unwrap()
+                    .style
+                    .fg,
+                Some(expected)
+            );
         }
-        assert!(line
+        assert!(header
             .spans
             .iter()
             .any(|span| span.content.contains("$ echo real-command")
                 && span.style.fg.is_some_and(neutral)));
-        for line in card.lines.iter().skip(1) {
+        assert!(!line_text(header).contains("Done"));
+        ui.toggle_all_tools();
+        let entry = ui
+            .entries
+            .iter()
+            .find(|e| e.call_id.as_deref() == Some(id))
+            .unwrap();
+        let expanded = ui.tool_card(&[entry], ui.active_colors(), 100);
+        assert!(line_text(&expanded.lines[0]).contains('▾'));
+        for line in expanded.lines.iter().skip(1) {
             for span in &line.spans {
                 assert!(span.style.fg.is_none_or(neutral));
             }
@@ -195,40 +222,60 @@ fn semantic_tool_prefix_colours_state_but_never_the_command() {
         id: "active".into(),
         args: "cargo test".into(),
     });
-    let entry = ui.entries.last().unwrap();
-    let card = ui.tool_card(&[entry], ui.active_colors(), 100);
-    let text = line_text(&card.lines[0]);
-    assert!(text.contains("$ cargo test") && text.contains("Running"));
-    let state = card.lines[0]
-        .spans
-        .iter()
-        .find(|span| span.content.contains("Running"))
-        .unwrap();
-    assert_eq!(state.style.fg, Some(ui.semantic_colors().running));
+    let card = ui.tool_card(&[ui.entries.last().unwrap()], ui.active_colors(), 100);
+    assert!(line_text(&card.lines[0]).contains("$ cargo test"));
+    assert_eq!(
+        card.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content == "◌ ")
+            .unwrap()
+            .style
+            .fg,
+        Some(ui.semantic_colors().running)
+    );
 }
 
 #[test]
-fn semantic_individual_records_and_chevrons_survive_compact_and_expanded_views() {
+fn semantic_tool_records_preserve_status_and_chevrons_on_expand() {
     let mut ui = ui();
-    finish_tool(&mut ui, "one", "echo one", "exit: 0\nok", false);
-    finish_tool(&mut ui, "two", "echo two", "exit: 0\nok", false);
-    let entries = ui
-        .entries
-        .iter()
-        .filter(|e| matches!(e.kind, Kind::Tool))
-        .collect::<Vec<_>>();
+    finish_tool(
+        &mut ui,
+        "one",
+        "echo one",
+        "exit: 0
+ok",
+        false,
+    );
+    finish_tool(
+        &mut ui,
+        "two",
+        "echo two",
+        "exit: 0
+ok",
+        false,
+    );
     for width in [40, 80, 120] {
+        let entries = ui
+            .entries
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::Tool))
+            .collect::<Vec<_>>();
         let card = ui.tool_card(&entries, ui.active_colors(), width);
         assert_eq!(card.rows.len(), 2);
-        assert!(card.blocks.is_empty());
-        assert!(card.groups.is_empty());
-        assert!(!line_text(&card.lines[0]).contains("2 steps"));
-        assert!(card.lines[0].width() <= width);
-        assert!(!line_text(&card.lines[0]).contains("Done"));
-        assert!(card.lines[0].spans.iter().any(
-            |span| span.content == "✓ " && span.style.fg == Some(ui.semantic_colors().success)
-        ));
-        assert!(!line_text(&card.lines[0]).contains('▸'));
+        assert!(card.groups.is_empty() && card.blocks.len() == 2);
+        for line in &card.lines {
+            assert!(line.width() <= width);
+        }
+        for (row, _) in &card.rows {
+            let line = &card.lines[*row];
+            assert!(line_text(line).contains('▸'));
+            assert!(line
+                .spans
+                .iter()
+                .any(|span| span.content == "✓ "
+                    && span.style.fg == Some(ui.semantic_colors().success)));
+        }
     }
     ui.toggle_all_tools();
     let entries = ui
@@ -237,9 +284,9 @@ fn semantic_individual_records_and_chevrons_survive_compact_and_expanded_views()
         .filter(|e| matches!(e.kind, Kind::Tool))
         .collect::<Vec<_>>();
     let card = ui.tool_card(&entries, ui.active_colors(), 100);
-    assert!(!line_text(&card.lines[0]).contains('▾'));
-    for (_, id) in &card.rows {
+    for (row, id) in &card.rows {
         assert!(id == "one" || id == "two");
+        assert!(line_text(&card.lines[*row]).contains('▾'));
     }
     assert!(card
         .lines
@@ -309,7 +356,7 @@ fn semantic_context_thresholds_do_not_colour_cache_model_or_unknowns() {
         let expected = match role {
             "warning" => ui.semantic_colors().warning,
             "error" => ui.semantic_colors().error,
-            _ => ui.active_colors().faint,
+            _ => ui.active_colors().muted,
         };
         assert_eq!(value.style.fg, Some(expected));
         for span in &line.spans {
@@ -337,7 +384,7 @@ fn semantic_link_colour_is_hover_only_and_does_not_spread_to_input() {
     let link = ui.visible_links[0].clone();
     assert_eq!(
         buffer.cell((link.x, link.y)).unwrap().fg,
-        ui.active_colors().muted
+        ui.semantic_colors().link
     );
     ui.hover_pointer = Some((link.x, link.y));
     let hovered = draw(&mut ui, 100, 30);
@@ -350,12 +397,15 @@ fn semantic_link_colour_is_hover_only_and_does_not_spread_to_input() {
         .unwrap()
         .modifier
         .contains(Modifier::UNDERLINED));
-    assert!(neutral(
-        hovered
-            .cell((ui.editor_area.x - 2, ui.editor_area.y))
-            .unwrap()
-            .fg
-    ));
+    let prompt_color = hovered
+        .cell((ui.editor_area.x - 2, ui.editor_area.y))
+        .unwrap()
+        .fg;
+    assert_eq!(
+        prompt_color,
+        ui.active_colors().text,
+        "editor prompt uses neutral white, not the user role purple"
+    );
     assert_eq!(
         ui.link_at(link.x, link.y),
         Some("https://example.org/plain")
@@ -391,9 +441,15 @@ fn semantic_diff_transform_is_lossless_and_colours_markers_not_code() {
     for line in &document.lines {
         for span in &line.spans {
             if span.style.fg.is_some_and(|c| !neutral(c)) {
-                assert!(span.content == "+" || span.content == "-");
-                assert!(span.style.bg.is_none());
-                markers += 1;
+                if span.content == "+" || span.content == "-" {
+                    assert!(span.style.bg.is_none());
+                    markers += 1;
+                } else {
+                    // Markdown syntax highlighting may also colour Rust
+                    // keywords, without colouring non-diff +/- text.
+                    assert_eq!(span.content.trim(), "let");
+                    assert_eq!(span.style.fg, Some(base.accent_text));
+                }
             }
         }
     }
@@ -510,7 +566,10 @@ fn semantic_error_info_colours_the_heading_not_diagnostic_body() {
     );
     for line in document.lines.iter().skip(1) {
         for span in &line.spans {
-            assert!(span.style.fg.is_none_or(neutral));
+            assert!(
+                span.style.fg.is_none_or(neutral)
+                    || (span.content == "│ " && span.style.fg == Some(ui.semantic_colors().error))
+            );
         }
     }
 }

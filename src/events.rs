@@ -26,6 +26,9 @@ pub enum RuntimeEvent<'a> {
         reasoning_tokens: Option<u64>,
         cached_tokens: Option<u64>,
     },
+    /// The final answer is durable and this turn will not accept more steering.
+    /// Emitted before optional post-answer context maintenance.
+    FinalAnswerReady,
     /// Usage from a failed model attempt, including attempts later recovered
     /// by context compression. Missing counters remain unknown, not zero.
     FailedRequestUsage {

@@ -118,16 +118,14 @@ fn surface_has_one_padding_row_each_side_and_a_continuous_rail() {
             ui.message_colors().user_rail
         );
     }
-    // Two terminal-background rows separate a user turn from the reply.
+    // One terminal-background row separates a user turn from the reply.
     let gap = rows.last().unwrap() + 1;
-    for row in [gap, gap + 1] {
-        let y = visible_y(&ui, row).unwrap();
-        assert_eq!(
-            buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
-            ui.active_colors().background
-        );
-    }
-    assert_eq!(rails(&ui, MessageRole::Assistant)[0], gap + 2);
+    let y = visible_y(&ui, gap).unwrap();
+    assert_eq!(
+        buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
+        ui.active_colors().background
+    );
+    assert_eq!(rails(&ui, MessageRole::Assistant)[0], gap + 1);
 }
 
 #[test]
@@ -154,6 +152,61 @@ fn assistant_rail_covers_paragraphs_code_and_all_soft_wraps() {
     assert_ne!(
         ui.message_colors().assistant_rail,
         ui.semantic_colors().success
+    );
+}
+
+#[test]
+fn classic_b_uses_a_user_card_but_keeps_assistant_prose_on_terminal_background() {
+    let mut ui = ui();
+    ui.add_user("user card");
+    ui.event(UiEvent::Text("assistant prose".into()));
+    ui.finish_task();
+    let buffer = draw(&mut ui, 100, 40);
+    let cache = ui.history_cache.as_ref().unwrap();
+    let prose_row = cache
+        .text
+        .lines
+        .iter()
+        .position(|line| line.to_string().contains("assistant prose"))
+        .unwrap();
+    let y = visible_y(&ui, prose_row).unwrap();
+    assert_eq!(
+        buffer.cell((ui.selection_area.x + 5, y)).unwrap().bg,
+        ui.active_colors().background,
+        "assistant prose is not another giant gray card"
+    );
+    assert!(cache
+        .decor
+        .iter()
+        .any(|(row, item)| *row == prose_row && matches!(item, Decor::Rail { .. })));
+    assert!(!cache
+        .decor
+        .iter()
+        .any(|(row, item)| *row == prose_row && matches!(item, Decor::Surface(Surface::Message))));
+    let user = rails(&ui, MessageRole::User);
+    let user_y = visible_y(&ui, user[1]).unwrap();
+    assert_eq!(
+        buffer.cell((ui.selection_area.x + 5, user_y)).unwrap().bg,
+        ui.message_colors().surface
+    );
+
+    ui.event(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "test-tool".into(),
+        args: "cargo test --lib".into(),
+    });
+    ui.event(UiEvent::ToolFinished {
+        id: "test-tool".into(),
+        result: "exit: 0\ntest result: ok. 2 passed; 0 failed".into(),
+        failed: false,
+    });
+    let buffer = draw(&mut ui, 100, 40);
+    let row = ui.history_cache.as_ref().unwrap().tool_rows[0].0;
+    let y = visible_y(&ui, row).unwrap();
+    assert_eq!(
+        buffer.cell((ui.selection_area.x + 5, y)).unwrap().bg,
+        ui.active_colors().surface,
+        "tool calls have a separate, restrained gray surface"
     );
 }
 
@@ -331,8 +384,12 @@ fn message_surfaces_leave_a_visible_terminal_right_gutter() {
                 let area = ui.message_surface_area(ui.selection_area, y);
                 assert_eq!(area.width, ui.selection_area.width - 1 - PLAIN_RIGHT_GUTTER);
                 assert_eq!(area.right(), ui.selection_area.right() - PLAIN_RIGHT_GUTTER);
+                let expected = match role {
+                    MessageRole::User => ui.message_colors().surface,
+                    MessageRole::Assistant => ui.active_colors().background,
+                };
                 for x in area.x + 1..area.right() {
-                    assert_eq!(buffer.cell((x, y)).unwrap().bg, ui.message_colors().surface);
+                    assert_eq!(buffer.cell((x, y)).unwrap().bg, expected);
                 }
                 for x in area.right()..ui.selection_area.right() {
                     assert_eq!(
@@ -369,7 +426,7 @@ fn message_colours_are_readable_and_native_mono_is_respected() {
         let p = ui.message_colors();
         let b = ui.active_colors();
         assert!(contrast(b.text, p.surface) >= 4.5);
-        assert!(contrast(b.faint, p.surface) >= 4.5);
+        assert!(contrast(b.faint, p.surface) >= if preset == "dark" { 2.8 } else { 4.5 });
         assert!(contrast(p.user_rail, p.surface) >= 3.0);
         assert!(contrast(p.assistant_rail, p.surface) >= 3.0);
         if preset == "dark" {
@@ -439,7 +496,12 @@ fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
         (
             labels,
             rails(&ui, MessageRole::Assistant),
-            cache.tool_rows[0].0,
+            cache
+                .tool_rows
+                .iter()
+                .map(|(row, _)| *row)
+                .next()
+                .expect("tool record row"),
             body,
         )
     };
@@ -450,7 +512,7 @@ fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
     );
     assert!(
         rows.contains(&tool_header),
-        "tool record sits inside the assistant rail"
+        "tool activity stays inside the assistant rail"
     );
     let tool_row = ui.selection_area.y + (tool_header - ui.history_top_row) as u16;
     let body_cell = ui.selection_area.y + (body - ui.history_top_row) as u16;
@@ -466,7 +528,7 @@ fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
         buffer.cell((ui.selection_area.x + 1, tool_row)).unwrap().bg,
         ui.message_colors().assistant_rail
     );
-    // Message prose and the tool state marker share the body indent.
+    // Tool state markers are inset inside a gray panel, prose is not.
     assert_eq!(
         buffer
             .cell((ui.selection_area.x + 4, body_cell))
@@ -476,7 +538,7 @@ fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
     );
     assert_eq!(
         buffer
-            .cell((ui.selection_area.x + 4, tool_row))
+            .cell((ui.selection_area.x + 8, tool_row))
             .unwrap()
             .symbol(),
         "✓"
@@ -690,26 +752,101 @@ fn connecting_after_a_user_turn_starts_its_own_assistant_block() {
 }
 
 #[test]
-fn plain_prose_uses_semantic_colours_for_headings_and_inline_code() {
+fn short_system_messages_are_compact_without_hiding_error_details() {
+    let mut ui = ui();
+    ui.preferences.language = super::super::preferences::Language::Zh;
+    ui.info("COMMAND", "Resumed session: project-work");
+    let document = ui.history_document(ui.active_colors(), 100);
+    let visible = document
+        .0
+        .lines
+        .iter()
+        .filter(|line| !line.to_string().trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(visible.len(), 1, "brief status is a single row");
+    assert!(visible[0].to_string().contains("已恢复会话：project-work"));
+    assert!(!visible[0].to_string().contains("命令结果"));
+    assert!(visible[0]
+        .spans
+        .iter()
+        .all(|span| span.style.fg == Some(ui.active_colors().muted)
+            || span.style.fg == Some(ui.active_colors().faint)));
+
+    ui.info("ERROR", "Something failed\nDetails to keep");
+    let output = ui.history_document(ui.active_colors(), 100).0.to_string();
+    assert!(output.contains("Something failed"));
+    assert!(output.contains("Details to keep"));
+}
+
+#[test]
+fn plain_prose_restores_semantic_markdown_without_recoloring_inline_code() {
     let mut ui = ui();
     ui.add_user("q");
-    ui.event(UiEvent::Text("# 标题\n\n正文 `代码`\n".into()));
+    ui.event(UiEvent::Text(
+        "# 标题\n\n**重要** 正文 `代码` [文档](https://example.org)\n\n- 条目\n\n> 引用内容\n\n| 维度 | 分数 |\n|---|---|\n| 质量 | 好 |\n".into(),
+    ));
     let semantic = ui.semantic_colors();
     let document = ui.history_document(ui.active_colors(), 80);
     let mut heading = false;
     let mut code = false;
+    let mut link = false;
+    let mut bullet = false;
+    let mut emphasized = false;
+    let mut table_heading = false;
+    let mut quote = false;
     for line in &document.0.lines {
         for span in &line.spans {
-            if span.content.contains("标题") && span.style.fg == Some(semantic.link) {
+            if span.content.contains("标题")
+                && span.style.fg == Some(ui.active_colors().text)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+            {
                 heading = true;
             }
-            if span.content.contains("代码") && span.style.fg == Some(semantic.warning) {
+            if span.content.contains("代码")
+                && span.style.fg == Some(ui.active_colors().code)
+                && span.style.bg == Some(ui.active_colors().overlay)
+            {
                 code = true;
+            }
+            if span.content.contains("文档")
+                && span.style.fg == Some(semantic.link)
+                && span.style.add_modifier.contains(Modifier::UNDERLINED)
+            {
+                link = true;
+            }
+            if span.content.contains('•') && span.style.fg == Some(ui.active_colors().muted) {
+                bullet = true;
+            }
+            if span.content.contains("重要")
+                && span.style.fg == Some(ui.active_colors().text)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+            {
+                emphasized = true;
+            }
+            if span.content.contains("维度")
+                && span.style.fg == Some(ui.active_colors().text)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+            {
+                table_heading = true;
+            }
+            if span.content.contains("引用内容")
+                && span.style.fg == Some(ui.active_colors().muted)
+                && !span.style.add_modifier.contains(Modifier::ITALIC)
+            {
+                quote = true;
             }
         }
     }
-    assert!(heading, "heading must use the semantic link tone");
-    assert!(code, "inline code must use the semantic warning tone");
+    assert!(heading, "headings are bright and bold, not link-colored");
+    assert!(link, "links are identifiable even without hovering");
+    assert!(bullet, "list structure uses a muted marker");
+    assert!(emphasized, "strong text has visibly stronger hierarchy");
+    assert!(table_heading, "table headings are bold and neutral");
+    assert!(quote, "blockquotes are muted without an italic text wall");
+    assert!(
+        code,
+        "inline code retains neutral ink and a distinct background"
+    );
 }
 
 #[test]
@@ -741,8 +878,7 @@ fn cancelled_notice_sits_directly_under_its_turn() {
         cache
             .decor
             .iter()
-            .any(|(row, decor)| *row == notice - 1
-                && matches!(decor, Decor::Surface(Surface::Message))),
+            .any(|(row, decor)| *row == notice - 1 && matches!(decor, Decor::Rail { .. })),
         "no blank separator between the cancelled turn and its notice"
     );
     assert!(

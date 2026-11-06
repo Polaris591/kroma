@@ -1,16 +1,16 @@
- ◆ Kroma / untitled session             
-     Review the change. 请 检 查 代 码 。     
-     Preserve Unicode and indentation.  
-                                        
-   ◇  Reasoning · Ctrl+R to collapse ·  
-   0.0s                                 
-                                        
-     │ Inspect the existing API, then   
-       verify the change.               
-     │                                  
-     │ Keep failures visible.           
+                                      │ 
+     KROMA                            │ 
+     ◇ Reasoning · Ctrl+T to          │ 
+     collapse · 0.0s                  │ 
+                                      │ 
+       Inspect the existing API,      ┃ 
+       then verify the change.        ┃ 
+                                      ┃ 
+       Keep failures visible.         ┃ 
+                                      ┃ 
                                         
  ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

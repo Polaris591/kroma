@@ -16,6 +16,11 @@ pub enum UiEvent {
     TaskStarted,
     CompactionStarted,
     ModelStarted,
+    ModelFinished {
+        tools: usize,
+    },
+    ModelFailed,
+    FinalAnswerReady,
     Usage {
         input: Option<u64>,
         output: Option<u64>,
@@ -83,6 +88,7 @@ impl crate::events::EventSink for UiSink {
             RuntimeEvent::TextDelta(delta) => Some(UiEvent::Text(delta.to_owned())),
             RuntimeEvent::ReasoningDelta(delta) => Some(UiEvent::ReasoningDelta(delta.to_owned())),
             RuntimeEvent::ModelFinished {
+                tools,
                 input_tokens,
                 output_tokens,
                 reasoning_tokens,
@@ -102,8 +108,10 @@ impl crate::events::EventSink for UiSink {
                 if let Some(text) = reasoning.filter(|s| !s.is_empty()) {
                     let _ = self.0.send(UiEvent::ReasoningFinal(text.to_owned()));
                 }
-                None
+                Some(UiEvent::ModelFinished { tools })
             }
+            RuntimeEvent::ModelFailed => Some(UiEvent::ModelFailed),
+            RuntimeEvent::FinalAnswerReady => Some(UiEvent::FinalAnswerReady),
             RuntimeEvent::FailedRequestUsage {
                 input_tokens,
                 output_tokens,
@@ -195,6 +203,10 @@ mod tests {
         assert!(
             matches!(receiver.try_recv().unwrap(), UiEvent::ReasoningFinal(text) if text == "visible reasoning")
         );
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            UiEvent::ModelFinished { tools: 0 }
+        ));
         assert!(receiver.try_recv().is_err());
     }
 

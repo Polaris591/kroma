@@ -1,16 +1,16 @@
- ◆ Kroma / new conversation             
                                         
-     Kroma                              
+     KROMA                              
                                         
      D:/fixture/project                 
                                         
-     Continue working                   
-     › Fix Unicode            1h ago    
-     › Review tool output     2h ago    
                                         
-     Start a task below · Ctrl+P to     
+     Continue working                   
+                                        
+     › Fix Unicode                      
+                                        
                                         
  ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

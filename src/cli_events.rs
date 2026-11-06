@@ -23,6 +23,7 @@ impl EventSink for JsonEvents {
             return;
         }
         let value = match event {
+            RuntimeEvent::FinalAnswerReady => return,
             RuntimeEvent::TaskStarted => json!({"type":"task_started"}),
             RuntimeEvent::CompactionStarted => json!({"type":"compaction_started"}),
             RuntimeEvent::ContextPrepared {

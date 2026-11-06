@@ -579,7 +579,7 @@ fn branded_activity_animates_without_reflow_or_disabling_steering() {
         .unwrap();
     let editor_row = rows
         .iter()
-        .position(|row| row.contains("Enter queues the next task"))
+        .position(|row| row.contains("Enter steers; Alt+Enter / Ctrl+Q queues"))
         .unwrap();
     assert!(
         (1..=2).contains(&editor_row.saturating_sub(status_row)),
@@ -666,7 +666,7 @@ fn short_chat_starts_below_header_and_live_status_follows_the_latest_message() {
         .unwrap();
     let editor = rows
         .iter()
-        .position(|row| row.contains("Enter queues the next task"))
+        .position(|row| row.contains("Enter steers; Alt+Enter / Ctrl+Q queues"))
         .unwrap();
     assert!(latest_user < status);
     assert!(
@@ -690,7 +690,7 @@ fn short_chat_starts_below_header_and_live_status_follows_the_latest_message() {
         .unwrap();
     let editor = rows
         .iter()
-        .position(|row| row.contains("Enter queues the next task"))
+        .position(|row| row.contains("Enter steers; Alt+Enter / Ctrl+Q queues"))
         .unwrap();
     assert!(latest_user < tool_status);
     assert!(
@@ -1228,14 +1228,21 @@ fn expanded_tool_and_reasoning_have_distinct_gutters_and_sections() {
     ui.tools_expanded = true;
     let doc = ui.history_text(ui.themes.colors, 130);
     let text = doc.to_string();
-    assert!(text.contains("Reasoning · Ctrl+R to collapse"));
+    assert!(text.contains("Reasoning · Ctrl+T to collapse"));
     assert!(text.contains("├─ Command"));
     assert!(text.contains("└─ Output"));
-    assert!(doc.lines.iter().any(|line| line
-        .spans
-        .first()
-        .is_some_and(|span| { span.content == "    " })
-        && line.spans.iter().any(|span| span.content == "│  ")));
+    assert!(text.contains("Inspect the build results"));
+    assert!(doc.lines.iter().any(
+        |line| line.to_string().contains("Inspect the build results")
+            && line
+                .spans
+                .iter()
+                .all(|span| !span.style.add_modifier.contains(Modifier::ITALIC))
+    ));
+    assert!(
+        !text.contains("│  Inspect the build results"),
+        "long reasoning must not be rendered as a guttered italic log"
+    );
     assert!(text.contains("$ cargo test"));
     assert!(text.contains("error: test failed"));
 }
@@ -3095,7 +3102,7 @@ fn reasoning_block_is_separated_from_the_answer_that_follows_it() {
     let rows = rendered_text(&mut ui, 80, 24);
     let reasoning = rows
         .iter()
-        .position(|row| row.contains("Reasoning collapsed · Ctrl+R"))
+        .position(|row| row.contains("Reasoning collapsed · Ctrl+T"))
         .expect("collapsed reasoning line");
     assert!(
         rows[reasoning + 1].trim().is_empty(),
@@ -3224,8 +3231,92 @@ fn expanded_git_diff_uses_semantic_add_remove_colors() {
     };
     assert_eq!(ink("+new"), Some(ui.themes.colors.success));
     assert_eq!(ink("-old"), Some(ui.themes.colors.error));
-    assert_eq!(ink("@@ -1 +1 @@"), Some(ui.themes.colors.accent_text));
+    assert_eq!(ink("@@ -1 +1 @@"), Some(ui.themes.colors.muted));
     assert_eq!(ink(" unchanged"), Some(ui.themes.colors.code));
+}
+
+#[test]
+fn detailed_tool_result_remains_visible_and_original_log_is_expandable() {
+    let mut ui = UiState::new_default(
+        "mock".into(),
+        "tool-log-panel".into(),
+        ThemeStore::load_at(None).unwrap(),
+        &[],
+    );
+    ui.add_user("Inspect files");
+    ui.event(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "older".into(),
+        args: "echo older-turn".into(),
+    });
+    ui.event(UiEvent::ToolFinished {
+        id: "older".into(),
+        result: "exit: 0\\nprevious".into(),
+        failed: false,
+    });
+    ui.add_user("Investigate failing test");
+    ui.event(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "current".into(),
+        args: "cargo test --lib".into(),
+    });
+    ui.event(UiEvent::ToolFinished {
+        id: "current".into(),
+        result: "exit: 101\\nstderr: assertion failed".into(),
+        failed: true,
+    });
+    ui.editor.paste("unfinished user draft");
+    let history = ui.history_text(ui.active_colors(), 100).to_string();
+    assert!(history.contains("cargo test") && history.contains("assertion failed"));
+    ui.toggle_all_tools();
+    let expanded = ui.history_text(ui.active_colors(), 100).to_string();
+    assert!(expanded.contains("cargo test --lib"));
+    assert!(expanded.contains("assertion failed"));
+    assert!(!ui.has_plugin_panel());
+    assert_eq!(ui.editor.text(), "unfinished user draft");
+}
+
+#[test]
+fn reasoning_is_collapsed_by_default_and_complete_when_expanded() {
+    let mut ui = UiState::new_default(
+        "mock".into(),
+        "reasoning-preview".into(),
+        ThemeStore::load_at(None).unwrap(),
+        &[],
+    );
+    ui.add_user("Investigate the failure");
+    let content = (0..18)
+        .map(|n| format!("reasoning line {n:02}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ui.event(UiEvent::ReasoningDelta(content.clone()));
+    ui.reasoning_expanded = true;
+    let document = ui.history_text(ui.active_colors(), 100);
+    let visible = document.to_string();
+    assert!(visible.contains("reasoning line 17"));
+    assert!(visible.contains("reasoning line 00"));
+    assert!(!visible.contains("earlier reasoning"));
+    for row in &document.lines {
+        if row.to_string().contains("reasoning line") {
+            assert!(row
+                .spans
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::ITALIC)));
+        }
+    }
+    ui.open_full_transcript();
+    assert!(ui
+        .plugin_panel
+        .as_ref()
+        .unwrap()
+        .body
+        .contains("reasoning line 00"));
+    assert!(ui
+        .plugin_panel
+        .as_ref()
+        .unwrap()
+        .body
+        .contains("reasoning line 17"));
 }
 
 #[test]
@@ -3268,7 +3359,7 @@ fn one_reasoning_notice_per_user_turn_preserves_every_expanded_segment() {
 
     let collapsed = ui.history_text(ui.themes.colors, 120).to_string();
     assert_eq!(
-        collapsed.matches("Reasoning collapsed · Ctrl+R").count(),
+        collapsed.matches("Reasoning collapsed · Ctrl+T").count(),
         1,
         "three thinking segments must not produce three repeated banners"
     );
@@ -3280,23 +3371,42 @@ fn one_reasoning_notice_per_user_turn_preserves_every_expanded_segment() {
         .history_text(ui.themes.colors, 120)
         .to_string()
         .contains("Check Node version"));
-    assert!(collapsed.contains("Write · cat.svg"));
+    assert!(collapsed.contains("2 steps completed"));
+    assert!(ui
+        .history_text(ui.themes.colors, 120)
+        .to_string()
+        .contains("Write · cat.svg"));
     assert!(!collapsed.contains("Run shell command"));
 
     ui.reasoning_expanded = true;
     let expanded = ui.history_text(ui.themes.colors, 120).to_string();
     assert_eq!(
-        expanded.matches("Reasoning · Ctrl+R to collapse").count(),
+        expanded.matches("Reasoning · Ctrl+T to collapse").count(),
         1
     );
-    assert!(expanded.contains("I should inspect"));
+    assert!(
+        expanded.contains("I should inspect"),
+        "expanded reasoning is complete"
+    );
     assert!(expanded.contains("Now create"));
     assert!(expanded.contains("Now check the SVG"));
+    assert!(!expanded.contains("earlier reasoning"));
+    ui.open_full_transcript();
+    assert!(ui.has_plugin_panel());
+    assert!(
+        ui.plugin_panel
+            .as_ref()
+            .unwrap()
+            .body
+            .contains("I should inspect"),
+        "searchable full transcript retains every original reasoning segment"
+    );
+    ui.close_plugin_panel();
     ui.add_user("make it bounce higher");
     ui.event(UiEvent::ReasoningDelta("Adjust the path".into()));
     ui.running = false;
     let next = ui.history_text(ui.themes.colors, 120).to_string();
-    assert_eq!(next.matches("Reasoning · Ctrl+R to collapse").count(), 2);
+    assert_eq!(next.matches("Reasoning · Ctrl+T to collapse").count(), 2);
 }
 
 #[test]

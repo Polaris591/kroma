@@ -1,16 +1,16 @@
- ◆ Kroma / new conversation             
                                         
-                                        
-                                        
-                                        
-                                        
-     Kroma                              
+     KROMA                              
                                         
      D:/fixture/project                 
                                         
-     Start a task below · Ctrl+P to     
+                                        
+     Start a task below · / commands    
+                                        
+                                        
+                                        
                                         
  ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

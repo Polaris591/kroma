@@ -489,6 +489,15 @@ impl Agent {
     /// Manually checkpoint completed history without adding a user turn or
     /// executing tools. The context policy owns validation and WAL commit.
     pub async fn compact(&mut self) -> Result<crate::context::CompactionReport> {
+        self.compact_with_instructions("").await
+    }
+
+    /// Optional instructions apply only to this explicit checkpoint; they
+    /// never become a user turn or affect automatic context compaction.
+    pub async fn compact_with_instructions(
+        &mut self,
+        instructions: &str,
+    ) -> Result<crate::context::CompactionReport> {
         let _active = self.task_input.start_exclusive()?;
         self.session.ensure_writable()?;
         self.prompt.refresh_for_task(&self.workdir, "")?;
@@ -514,11 +523,12 @@ impl Agent {
             )?));
         let result = self
             .compression
-            .compact(
+            .compact_with_instructions(
                 &self.messages,
                 &self.model,
                 &self.session.context_committer(&self.messages),
                 extra_tokens,
+                instructions,
             )
             .await;
         let usage = self.compression.take_usage();
@@ -1599,6 +1609,9 @@ impl Agent {
                 // turn, and finalization runs exactly once at the real boundary.
                 if !self.task_input.finish_if_no_steering() {
                     continue;
+                }
+                if let Some(events) = &self.events {
+                    events.on_event(RuntimeEvent::FinalAnswerReady);
                 }
                 let finish_started = Instant::now();
                 if let Err(error) = self

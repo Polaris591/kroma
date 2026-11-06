@@ -1,16 +1,16 @@
- ◆ Kroma / untitled session             
-     Review the change. 请 检 查 代 码 。     
-     Preserve Unicode and indentation.  
-                                        
-  ◆  Updated the implementation.        
-                                        
-     • Preserved input and links        
-     • Verified Unicode selection       
+     indentation.                     │ 
+                                      │ 
+                                      │ 
+                                      │ 
+     KROMA                            ┃ 
+     Updated the implementation.      ┃ 
+                                      ┃ 
   Files ─────────────────────────────── 
    ›                                    
    › src/tui/view.rs  — fixture         
                                         
  ────────────────────────────────────── 
+                                        
    › Unsent draft                       
                                         
-   test-model · high · Context —        
+   test-mod… · high  —/500k · Cache —   

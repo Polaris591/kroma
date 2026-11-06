@@ -1,4 +1,4 @@
- ◆ Kroma / untitled session             
+     indentation.                     │ 
  ╭ Review · Esc ──────────────────────╮ 
  │A scrollable plugin panel.          │ 
  │The draft stays editable after      │ 
@@ -13,4 +13,4 @@
  │                                    │ 
  │                                    │ 
  ╰────────────────────────────────────╯ 
-   test-model · high · Context —        
+   test-mod… · high  —/500k · Cache —   

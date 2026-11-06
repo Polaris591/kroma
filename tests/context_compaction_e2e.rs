@@ -55,6 +55,7 @@ struct ScriptedModel {
     checkpoint_delay: Duration,
     usage_divisor: Option<usize>,
     seen: Mutex<Vec<Vec<Message>>>,
+    checkpoint_prompts: Mutex<Vec<String>>,
 }
 
 impl ScriptedModel {
@@ -66,6 +67,7 @@ impl ScriptedModel {
             checkpoint_delay: Duration::ZERO,
             usage_divisor: None,
             seen: Mutex::new(Vec::new()),
+            checkpoint_prompts: Mutex::new(Vec::new()),
         }
     }
 
@@ -135,10 +137,14 @@ impl ModelBackend for ScriptedModel {
         &'a self,
         _: &'a [Message],
         _: &'a [Value],
-        _: &'a str,
+        instruction: &'a str,
         _: usize,
     ) -> ModelFuture<'a, TextResult> {
         Box::pin(async move {
+            self.checkpoint_prompts
+                .lock()
+                .unwrap()
+                .push(instruction.to_owned());
             self.checkpoints.fetch_add(1, Ordering::SeqCst);
             if !self.checkpoint_delay.is_zero() {
                 tokio::time::sleep(self.checkpoint_delay).await;
@@ -215,10 +221,11 @@ async fn compact_command_bypasses_threshold_preserves_history_and_survives_resta
         .await?
         .unwrap();
     assert!(no_op.output.contains("Nothing to compact"));
-    assert!(commands
-        .execute_async("/compact unexpected", &mut agent, &input)
-        .await
-        .is_err());
+    let focused_no_op = commands
+        .execute_async("/compact 重点保留当前项目结构", &mut agent, &input)
+        .await?
+        .unwrap();
+    assert!(focused_no_op.output.contains("Nothing to compact"));
     assert_eq!(model.checkpoints.load(Ordering::SeqCst), 0);
 
     completed_manual_history(&mut agent).await?;
@@ -228,10 +235,17 @@ async fn compact_command_bypasses_threshold_preserves_history_and_survives_resta
         0,
         "history is below automatic threshold"
     );
+    let focus = "重点保留 src/agent.rs 的设计决策和未完成测试";
     let reply = commands
-        .execute_async("/compact", &mut agent, &input)
+        .execute_async(&format!("/compact {focus}"), &mut agent, &input)
         .await?
         .unwrap();
+    {
+        let prompts = model.checkpoint_prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains(focus));
+        assert!(prompts[0].contains("OBJECTIVE"));
+    }
     assert!(reply.output.contains("Context compacted:"));
     assert!(reply.output.contains("estimated"));
     let counts = reply

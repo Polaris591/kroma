@@ -1,4 +1,4 @@
- ◆ Kroma / untitled session                                                                 project 
+                                                                                                    
                                                                                                     
  ╭ Review · ↑↓/PgUp/PgDn · Esc Close ─────────────────────────────────────────────────────────────╮ 
  │A scrollable plugin panel.                                                                      │ 
@@ -27,4 +27,4 @@
  │                                                                                                │ 
  ╰────────────────────────────────────────────────────────────────────────────────────────────────╯ 
                                                                                                     
-   test-model · Think high · Context —                                                              
+    test-model · Think high                                             Context —/500k · Cache —    

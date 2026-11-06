@@ -164,6 +164,24 @@ pub trait ContextPolicy: Send {
     ) -> StreamFuture<'a, CompactionReport> {
         Box::pin(async { bail!("the active context policy does not support /compact") })
     }
+    /// Optional manual focus is never applied to automatic checkpoints.
+    /// External policies retain the existing /compact behavior by default.
+    fn compact_with_instructions<'a>(
+        &'a mut self,
+        messages: &'a [Message],
+        model: &'a Arc<dyn ModelBackend>,
+        store: &'a dyn ContextCommit,
+        extra_tokens: usize,
+        instructions: &'a str,
+    ) -> StreamFuture<'a, CompactionReport> {
+        if instructions.trim().is_empty() {
+            self.compact(messages, model, store, extra_tokens)
+        } else {
+            Box::pin(async {
+                bail!("the active context policy does not support custom /compact instructions")
+            })
+        }
+    }
     fn prepare<'a>(
         &'a mut self,
         messages: &'a [Message],
@@ -698,10 +716,20 @@ impl Compression {
     /// instruction the provider appends, and the tool prefix. The source is
     /// projected exactly like the wire request, so provider-filtered history
     /// (for example unsupported reasoning) is not charged.
+    #[cfg(test)]
     fn checkpoint_request_tokens(
         &self,
         source: &[Message],
         model: &Arc<dyn ModelBackend>,
+    ) -> usize {
+        self.checkpoint_request_tokens_with_prompt(source, model, CHECKPOINT_PROMPT)
+    }
+
+    fn checkpoint_request_tokens_with_prompt(
+        &self,
+        source: &[Message],
+        model: &Arc<dyn ModelBackend>,
+        prompt: &str,
     ) -> usize {
         let mut budget_view = source.to_vec();
         model.project_for_budget(&mut budget_view);
@@ -709,7 +737,7 @@ impl Compression {
         let logs = crate::attachments::inline_log_extra_bytes(source)
             .map(bytes_to_tokens)
             .unwrap_or(0);
-        budget_view.push(Message::new("user", CHECKPOINT_PROMPT));
+        budget_view.push(Message::new("user", prompt));
         let bytes = serde_json::to_vec(&budget_view).unwrap_or_default().len();
         serialized_request_tokens(bytes)
             .saturating_add(bytes_to_tokens(self.request_tool_bytes))
@@ -1092,11 +1120,22 @@ impl Compression {
         largest_retained.or(last_safe)
     }
 
+    #[cfg(test)]
     fn summary_source(
         &self,
         messages: &[Message],
         model: &Arc<dyn ModelBackend>,
         boundary: usize,
+    ) -> Option<(usize, Vec<Message>, usize)> {
+        self.summary_source_with_prompt(messages, model, boundary, CHECKPOINT_PROMPT)
+    }
+
+    fn summary_source_with_prompt(
+        &self,
+        messages: &[Message],
+        model: &Arc<dyn ModelBackend>,
+        boundary: usize,
+        prompt: &str,
     ) -> Option<(usize, Vec<Message>, usize)> {
         let mut boundary = boundary;
         let mut view = self.summary_source_view(messages, &self.state);
@@ -1123,7 +1162,7 @@ impl Compression {
                 return None;
             }
             view.truncate(end);
-            let tokens = self.checkpoint_request_tokens(&view, model);
+            let tokens = self.checkpoint_request_tokens_with_prompt(&view, model, prompt);
             // Reserve the provider's first (cache-matching) attempt here.
             // Truncated retries are separately clamped to the remaining
             // window headroom by generate_checkpoint_with_ceiling.
@@ -1149,6 +1188,17 @@ impl Compression {
         model: &Arc<dyn ModelBackend>,
         store: &dyn ContextCommit,
     ) -> Result<bool> {
+        self.compact_once_with_prompt(messages, model, store, CHECKPOINT_PROMPT)
+            .await
+    }
+
+    async fn compact_once_with_prompt(
+        &mut self,
+        messages: &[Message],
+        model: &Arc<dyn ModelBackend>,
+        store: &dyn ContextCommit,
+        prompt: &str,
+    ) -> Result<bool> {
         let Some(boundary) = self.select_boundary(messages) else {
             crate::runtime_log!("[compact] no safe completed-turn boundary to checkpoint");
             return Ok(false);
@@ -1165,7 +1215,7 @@ impl Compression {
             return Ok(false);
         }
         let Some((boundary, source, source_tokens)) =
-            self.summary_source(messages, model, boundary)
+            self.summary_source_with_prompt(messages, model, boundary, prompt)
         else {
             crate::runtime_log!("[compact] checkpoint source does not fit the model window");
             return Ok(false);
@@ -1202,7 +1252,7 @@ impl Compression {
             model.generate_checkpoint_with_ceiling(
                 &source,
                 &self.request_tools,
-                CHECKPOINT_PROMPT,
+                prompt,
                 output_tokens,
                 self.budget.window().saturating_sub(source_tokens),
             ),
@@ -1424,7 +1474,28 @@ impl ContextPolicy for Compression {
         store: &'a dyn ContextCommit,
         extra_tokens: usize,
     ) -> StreamFuture<'a, CompactionReport> {
+        self.compact_with_instructions(messages, model, store, extra_tokens, "")
+    }
+
+    fn compact_with_instructions<'a>(
+        &'a mut self,
+        messages: &'a [Message],
+        model: &'a Arc<dyn ModelBackend>,
+        store: &'a dyn ContextCommit,
+        extra_tokens: usize,
+        instructions: &'a str,
+    ) -> StreamFuture<'a, CompactionReport> {
         Box::pin(async move {
+            // Preserve the exact default prompt when no instructions were
+            // supplied. User focus only shapes this manual summary request.
+            let focus = instructions.trim();
+            let prompt = if focus.is_empty() {
+                CHECKPOINT_PROMPT.to_owned()
+            } else {
+                format!(
+                    "{CHECKPOINT_PROMPT}\n\nManual /compact focus from the user:\n{focus}\n\nFollow this focus while preserving the required checkpoint sections, verified constraints, blockers, and next actions."
+                )
+            };
             self.request_extra_tokens = extra_tokens;
             self.current_raw_system = messages.first().cloned();
             // A deliberate /compact may retry a previously failed automatic
@@ -1435,7 +1506,9 @@ impl ContextPolicy for Compression {
             crate::attachments::project_history(&mut before, model.accepts_images());
             model.project_for_budget(&mut before);
             let before_tokens = self.tokens(&before);
-            let compacted = self.compact_once(messages, model, store).await?;
+            let compacted = self
+                .compact_once_with_prompt(messages, model, store, &prompt)
+                .await?;
             let mut after = self.request_view(messages);
             crate::attachments::project_history(&mut after, model.accepts_images());
             model.project_for_budget(&mut after);

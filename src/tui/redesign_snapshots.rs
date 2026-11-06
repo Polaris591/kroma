@@ -5,7 +5,9 @@ use ratatui::{backend::TestBackend, Terminal};
 fn fixture(scene: &str, preset: &str) -> UiState {
     let mut themes = ThemeStore::load_at(None).unwrap();
     themes.select(preset).unwrap();
-    let mut ui = UiState::new("test-model".into(), "snapshot".into(), themes, &[]);
+    // Golden snapshots must reflect the *actual* interactive default,
+    // not the historical low-level renderer used by old regression tests.
+    let mut ui = UiState::new_default("test-model".into(), "snapshot".into(), themes, &[]);
     ui.set_link_workdir(Path::new("D:/fixture/project"));
     ui.configure_status(500_000, Some("high".into()));
     if scene.starts_with("home") {

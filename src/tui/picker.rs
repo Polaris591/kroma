@@ -1,4 +1,4 @@
-//! One small searchable overlay for commands, model profiles, sessions and files.
+//! One small searchable overlay for commands, models, sessions, files and input history.
 //! No separate navigation runtime: it returns ordinary TUI actions.
 use super::{preferences::Language, theme::Theme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -18,6 +18,7 @@ pub enum Kind {
     Models,
     Sessions,
     Files,
+    History,
 }
 
 impl Kind {
@@ -27,6 +28,7 @@ impl Kind {
             Self::Models => "Models",
             Self::Sessions => "Sessions",
             Self::Files => "Files",
+            Self::History => "History",
         }
     }
     pub fn localized_title(self, language: Language) -> &'static str {
@@ -35,6 +37,7 @@ impl Kind {
             Self::Models => language.text("Models", "模型"),
             Self::Sessions => language.text("Sessions", "会话"),
             Self::Files => language.text("Files", "文件"),
+            Self::History => language.text("History", "输入历史"),
         }
     }
     pub fn next(self) -> Self {
@@ -43,6 +46,7 @@ impl Kind {
             Self::Models => Self::Sessions,
             Self::Sessions => Self::Files,
             Self::Files => Self::Commands,
+            Self::History => Self::History,
         }
     }
     pub fn prev(self) -> Self {
@@ -51,6 +55,7 @@ impl Kind {
             Self::Models => Self::Commands,
             Self::Sessions => Self::Models,
             Self::Files => Self::Sessions,
+            Self::History => Self::History,
         }
     }
 }
@@ -152,7 +157,7 @@ impl Picker {
             list_start: 0,
             completion: false,
             title: None,
-            preserve_order: kind == Kind::Sessions,
+            preserve_order: matches!(kind, Kind::Sessions | Kind::History),
         }
     }
 
@@ -201,11 +206,15 @@ impl Picker {
         }
         match key.code {
             KeyCode::Esc => Action::Close,
-            KeyCode::BackTab if !self.completion => Action::PrevKind,
-            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) && !self.completion => {
+            KeyCode::BackTab if !self.completion && self.kind != Kind::History => Action::PrevKind,
+            KeyCode::Tab
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && !self.completion
+                    && self.kind != Kind::History =>
+            {
                 Action::PrevKind
             }
-            KeyCode::Tab if !self.completion => Action::NextKind,
+            KeyCode::Tab if !self.completion && self.kind != Kind::History => Action::NextKind,
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 Action::None
@@ -285,6 +294,16 @@ impl Picker {
                     .text(
                         " Commands · ↑↓ select · Tab complete · Esc close ",
                         " 命令索引 · ↑↓选择 · Tab 补全 · Esc 关闭 ",
+                    )
+                    .to_owned(),
+                Style::default().fg(theme.accent_text),
+            )
+        } else if self.kind == Kind::History {
+            Line::styled(
+                language
+                    .text(
+                        " Input history · Enter recall · Esc keep draft ",
+                        " 输入历史 · Enter 恢复 · Esc 保留草稿 ",
                     )
                     .to_owned(),
                 Style::default().fg(theme.accent_text),
@@ -392,7 +411,7 @@ impl Picker {
                         max_label.saturating_sub(UnicodeWidthStr::width(name.as_str()) + 4),
                     );
                     let background = if active {
-                        Theme::blend(theme.accent, theme.overlay, 0.08)
+                        Theme::blend(theme.accent, theme.overlay, 0.04)
                     } else {
                         theme.overlay
                     };

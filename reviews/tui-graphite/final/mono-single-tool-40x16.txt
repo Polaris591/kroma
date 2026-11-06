@@ -1,16 +1,16 @@
- ◆ Kroma / untitled session             
-     Review the change. 请 检 查 代 码 。     
-     Preserve Unicode and indentation.  
+     Preserve Unicode and             │ 
+     indentation.                     │ 
+                                      │ 
+                                      │ 
+                                      ┃ 
+     KROMA                            ┃ 
+       ▸ ✓ $ echo step-0 · 1.2s       ┃ 
+        ↳ verified                    ┃ 
+                                      ┃ 
                                         
-   ▸ ✓ Run · echo step-0 · 1.2s         
-                                        
-                                        
-                                        
-                                        
-                                        
-                                        
-   ·  Execution finished · 35.3s        
+     ✓ Completed · 35.3s                
  ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

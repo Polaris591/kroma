@@ -2702,7 +2702,8 @@ fn plugin_event_name(event: &RuntimeEvent<'_>) -> Option<&'static str> {
         RuntimeEvent::SessionRewound { .. } => "session_rewound",
         RuntimeEvent::TextDelta(_)
         | RuntimeEvent::ReasoningDelta(_)
-        | RuntimeEvent::ToolOutput { .. } => return None,
+        | RuntimeEvent::ToolOutput { .. }
+        | RuntimeEvent::FinalAnswerReady => return None,
     })
 }
 
@@ -2779,7 +2780,8 @@ fn plugin_event_fields(event: &RuntimeEvent<'_>) -> Value {
         }),
         RuntimeEvent::TextDelta(_)
         | RuntimeEvent::ReasoningDelta(_)
-        | RuntimeEvent::ToolOutput { .. } => json!({}),
+        | RuntimeEvent::ToolOutput { .. }
+        | RuntimeEvent::FinalAnswerReady => json!({}),
     }
 }
 

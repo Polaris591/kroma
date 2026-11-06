@@ -1,6 +1,53 @@
 use super::*;
 
+#[derive(Default)]
+pub(crate) struct SessionDraft {
+    editor: Editor,
+    attachments: Vec<Attachment>,
+    removed: Vec<Attachment>,
+    cleared: Option<ClearedDraft>,
+    saved: Option<Vec<Attachment>>,
+    next_marker: u32,
+    attach_mode: bool,
+    attach_path: String,
+}
+
 impl UiState {
+    /// Park an unsent draft before moving between sessions. The draft files
+    /// remain owned by that session until the user returns or sends them.
+    pub fn switch_session_draft(&mut self, next: &str, home: bool) {
+        let from = (!self.is_home()).then(|| self.session.clone());
+        let to = (!home).then(|| next.to_owned());
+        if from == to {
+            return;
+        }
+        let current = SessionDraft {
+            editor: std::mem::take(&mut self.editor),
+            attachments: std::mem::take(&mut self.attachments),
+            removed: std::mem::take(&mut self.removed_drafts),
+            cleared: self.cleared_draft.take(),
+            saved: self.saved_draft_attachments.take(),
+            next_marker: self.next_marker,
+            attach_mode: self.attach_mode,
+            attach_path: std::mem::take(&mut self.attach_path),
+        };
+        self.session_drafts.insert(from, current);
+        let restored = self.session_drafts.remove(&to).unwrap_or_default();
+        self.editor = restored.editor;
+        self.attachments = restored.attachments;
+        self.removed_drafts = restored.removed;
+        self.cleared_draft = restored.cleared;
+        self.saved_draft_attachments = restored.saved;
+        self.next_marker = if restored.next_marker == 0 {
+            crate::tui::editor::ATTACHMENT_START
+        } else {
+            restored.next_marker
+        };
+        self.attach_mode = restored.attach_mode;
+        self.attach_path = restored.attach_path;
+        self.clear_editor_selection();
+    }
+
     pub fn attach(&mut self, mut item: Attachment) -> Result<(), String> {
         if self.attachments.len() >= MAX_ATTACHMENTS {
             Self::discard_copy(&item);
@@ -180,6 +227,24 @@ impl UiState {
         if let Some(draft) = self.cleared_draft.take() {
             for item in draft.attachments.into_iter().chain(draft.removed) {
                 Self::discard_copy(&item);
+            }
+        }
+    }
+}
+
+impl SessionDraft {
+    pub(crate) fn discard_copies(&self) {
+        for item in self.attachments.iter().chain(&self.removed) {
+            UiState::discard_copy(item);
+        }
+        if let Some(saved) = &self.saved {
+            for item in saved {
+                UiState::discard_copy(item);
+            }
+        }
+        if let Some(cleared) = &self.cleared {
+            for item in cleared.attachments.iter().chain(&cleared.removed) {
+                UiState::discard_copy(item);
             }
         }
     }

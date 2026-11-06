@@ -1,20 +1,18 @@
- ◆ Kroma / untitled session                                                                 project 
                                                                                                     
-     Review the change. 请 检 查 代 码 。                                                                 
-     Preserve Unicode and indentation.                                                              
                                                                                                     
-   ▸ ✓ Run · echo step-2 · 3 steps · 3.6s                                                           
-                                                                                                    
+      YOU                                                                                           
+      Review the change. 请 检 查 代 码 。                                                                
+      Preserve Unicode and indentation.                                                             
                                                                                                     
                                                                                                     
                                                                                                     
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
+      KROMA                                                                                         
+        ▸ ✓ $ echo step-0 · 1.2s                                                                    
+         ↳ verified                                                                                 
+        ▸ ✓ $ cargo test · 1.2s                                                                     
+         ↳ verified                                                                                 
+        ▸ ✓ $ echo step-2 · 1.2s                                                                    
+         ↳ verified                                                                                 
                                                                                                     
                                                                                                     
                                                                                                     
@@ -23,8 +21,10 @@
                                                                                                     
                                                                                                     
                                                                                                     
-   ·  Execution finished · 35.3s                                                                    
- ────────────────────────────────────────────────────────────────────────────────────────────────── 
-   › Describe a task, or / for commands…                                                            
                                                                                                     
-   test-model · Think high · Context —                                                              
+      ✓ Completed · 35.3s                                                                           
+  ────────────────────────────────────────────────────────────────────────────────────────────────  
+                                                                                                    
+    ›                                                                                               
+                                                                                                    
+    test-model · Think high                                             Context —/500k · Cache —    

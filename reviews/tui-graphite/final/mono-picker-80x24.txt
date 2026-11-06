@@ -1,13 +1,12 @@
- ◆ Kroma / untitled session                                             project 
                                                                                 
+                                                                                
+     YOU                                                                        
      Review the change. 请 检 查 代 码 。                                             
      Preserve Unicode and indentation.                                          
                                                                                 
-  ◆  Updated the implementation.                                                
                                                                                 
-     • Preserved input and links                                                
-     • Verified Unicode selection                                               
                                                                                 
+     KROMA                                                                      
   Commands · ↑↓ select · Tab complete · Esc close ───────────────────────────── 
    › /                                                                          
    › /checkpoints  — List file snapshots (Git worktrees)                        
@@ -19,6 +18,7 @@
      /editor  — Edit draft in external editor                                   
      /exit  — Exit Kroma                                                        
  ────────────────────────────────────────────────────────────────────────────── 
-   › Describe a task, or / for commands…                                        
                                                                                 
-   test-model · Think high · Context —                                          
+   ›                                                                            
+                                                                                
+   test-model · Think high                           Context —/500k · Cache —   

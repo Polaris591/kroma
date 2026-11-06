@@ -1,16 +1,16 @@
- ◆ Kroma / untitled session             
-     Review the change. 请 检 查 代 码 。     
-     Preserve Unicode and indentation.  
-                                        
-  ◆                     diff · ⧉ Copy   
-     │ diff --git a/main.rs b/main.rs   
-     │ @@ -1 +1 @@                      
-     │ -old_value                       
-     │ +new_value                       
-                                        
-                                        
+                                      │ 
+                                      │ 
+     KROMA                            │ 
+                   diff · ⧉ Copy      │ 
+     │ diff --git a/main.rs           │ 
+       b/main.rs                      ┃ 
+     │ @@ -1 +1 @@                    ┃ 
+     │ -old_value                     ┃ 
+     │ +new_value                     ┃ 
+                                      ┃ 
                                         
  ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

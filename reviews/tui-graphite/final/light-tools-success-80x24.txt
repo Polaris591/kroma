@@ -1,24 +1,24 @@
- ◆ Kroma / untitled session                                             project 
                                                                                 
+                                                                                
+     YOU                                                                        
      Review the change. 请 检 查 代 码 。                                             
      Preserve Unicode and indentation.                                          
                                                                                 
-   ▸ ✓ Run · echo step-2 · 3 steps · 3.6s                                       
+                                                                                
+                                                                                
+     KROMA                                                                      
+       ▸ ✓ $ echo step-0 · 1.2s                                                 
+        ↳ verified                                                              
+       ▸ ✓ $ cargo test · 1.2s                                                  
+        ↳ verified                                                              
+       ▸ ✓ $ echo step-2 · 1.2s                                                 
+        ↳ verified                                                              
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-   ·  Execution finished · 35.3s                                                
+     ✓ Completed · 35.3s                                                        
  ────────────────────────────────────────────────────────────────────────────── 
-   › Describe a task, or / for commands…                                        
                                                                                 
-   test-model · Think high · Context —                                          
+   ›                                                                            
+                                                                                
+   test-model · Think high                           Context —/500k · Cache —   

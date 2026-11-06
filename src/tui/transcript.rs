@@ -214,14 +214,14 @@ impl UiState {
                     self.preferences.language.text("Reasoning", "思考内容"),
                     self.preferences
                         .language
-                        .text(" · Ctrl+R to collapse", " · Ctrl+R 折叠"),
+                        .text(" · Ctrl+T to collapse", " · Ctrl+T 折叠"),
                 )
             } else {
                 (
                     self.preferences
                         .language
                         .text("Reasoning collapsed", "思考已折叠"),
-                    " · Ctrl+R",
+                    " · Ctrl+T",
                 )
             };
             let elapsed = entry
@@ -232,7 +232,7 @@ impl UiState {
             let notice = Line::from(vec![
                 Span::styled("◇ ", Style::default().fg(theme.faint)),
                 Span::styled(heading, Style::default().fg(theme.muted)),
-                Span::styled(format!("{hint}{elapsed}"), Style::default().fg(theme.faint)),
+                Span::styled(format!("{hint}{elapsed}"), Style::default().fg(theme.muted)),
             ]);
             lines.push(if self.plain_style {
                 body_line(notice)
@@ -240,7 +240,7 @@ impl UiState {
                 Line::from(vec![
                     Span::styled("  ◇  ", Style::default().fg(theme.faint)),
                     Span::styled(heading, Style::default().fg(theme.muted)),
-                    Span::styled(format!("{hint}{elapsed}"), Style::default().fg(theme.faint)),
+                    Span::styled(format!("{hint}{elapsed}"), Style::default().fg(theme.muted)),
                 ])
             });
             *reasoning_notice_shown = true;
@@ -263,22 +263,32 @@ impl UiState {
                     markdown_targets.push((span.content.to_string(), tag.target));
                 }
             }
-            let base = lines.len();
-            reading_rows.extend(
-                (0..rendered.len())
-                    .filter(|row| code_rows.binary_search(row).is_err())
-                    .map(|row| base + row),
-            );
-            preformatted_rows.extend(code_rows.into_iter().map(|row| base + row));
-            for line in rendered {
-                let mut spans = line.spans;
-                for span in &mut spans {
-                    span.style = span.style.fg(theme.muted).add_modifier(Modifier::ITALIC);
+            for (row, line) in rendered.into_iter().enumerate() {
+                let dest = lines.len();
+                if code_rows.binary_search(&row).is_ok() {
+                    preformatted_rows.push(dest);
+                } else {
+                    reading_rows.push(dest);
                 }
-                spans.insert(0, Span::styled("│  ", Style::default().fg(theme.faint)));
-                lines.push(body_line(Line::from(spans)));
+                let mut spans = line.spans;
+                // Do not render an entire long chain of thought in italic
+                // with a vertical bar on every wrapped row. Keep Markdown
+                // hierarchy and give reasoning quieter ink than the answer.
+                for span in &mut spans {
+                    span.style = span.style.fg(theme.muted);
+                }
+                if spans.is_empty() {
+                    if lines.last().is_some_and(|line| !line.spans.is_empty()) {
+                        lines.push(Line::default());
+                    }
+                } else {
+                    spans.insert(0, Span::raw("  "));
+                    lines.push(body_line(Line::from(spans)));
+                }
             }
-            lines.push(Line::default());
+            if lines.last().is_some_and(|line| !line.spans.is_empty()) {
+                lines.push(Line::default());
+            }
         }
     }
 }
@@ -415,13 +425,18 @@ impl UiState {
                 );
                 (summary, elapsed)
             } else {
-                let caption = tools[tools.len() - 1];
-                let suffix = format!(" · {} {step_word}{elapsed}", tools.len());
-                let summary = compact_line(
-                    &self.tool_summary(caption),
-                    group_width.saturating_sub(6 + UnicodeWidthStr::width(suffix.as_str())),
+                // A finished, successful group is a status summary, not
+                // an abbreviated version of the last shell command.
+                let title = format!(
+                    "{} {step_word} {} · Ctrl+O",
+                    tools.len(),
+                    language.text("completed", "已完成")
                 );
-                (summary, suffix)
+                let summary = compact_line(
+                    &title,
+                    group_width.saturating_sub(6 + UnicodeWidthStr::width(elapsed.as_str())),
+                );
+                (summary, elapsed)
             };
             card.groups.push((0, key.to_owned()));
             card.lines.push(Line::from(vec![

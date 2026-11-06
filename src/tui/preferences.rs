@@ -48,7 +48,16 @@ impl Preferences {
     pub fn load_at(path: Option<&Path>) -> Result<Self> {
         match path {
             Some(path) => match fs::read_to_string(path) {
-                Ok(text) => toml::from_str(&text).context("invalid ui.toml"),
+                Ok(text) => {
+                    // Migrate older ui.toml files without keeping a second
+                    // TUI display mode (or failing to start on old settings).
+                    let mut value: toml::Value =
+                        toml::from_str(&text).context("invalid ui.toml")?;
+                    if let Some(table) = value.as_table_mut() {
+                        table.remove("display");
+                    }
+                    value.try_into().context("invalid ui.toml")
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
                 Err(error) => Err(error).context("reading ui.toml"),
             },
@@ -99,6 +108,19 @@ mod tests {
         assert!(Preferences::load_at(Some(&path)).is_err());
         assert!(toml::from_str::<Preferences>("typo = true").is_err());
         assert!(Language::parse("fr").is_err());
+        let old: Preferences = toml::from_str(
+            "language = 'zh'
+full_width = true",
+        )
+        .unwrap();
+        assert!(old.full_width);
+        fs::write(
+            &path,
+            "language = 'zh'\ndisplay = 'simple'\nfull_width = true",
+        )?;
+        assert_eq!(Preferences::load_at(Some(&path))?, prefs);
+        Preferences::load_at(Some(&path))?.save_at(Some(&path))?;
+        assert!(!fs::read_to_string(&path)?.contains("display"));
         fs::remove_dir_all(root)?;
         Ok(())
     }

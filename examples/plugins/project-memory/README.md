@@ -72,6 +72,12 @@ user-level install above or keep the binary in a trusted location.
 | `memory_read(ids)` | 1–8 active entries; any unknown/pending/deleted id fails the whole batch. |
 | `memory_forget(id)` | Immediate tombstone; excluded from search, read and recall. |
 
+When the model is not replacing a specific prior memory, it should omit
+`supersedes` entirely. For compatibility with gateways that still populate
+optional parameters, the worker treats empty `supersedes` placeholders (`""` or
+`[]`) as absent; a nonempty invalid value is rejected and never silently
+replaces another memory.
+
 All results are `reference_data`; evidence references are never dereferenced.
 The static prompt tells the model not to treat memory as instructions or as
 proof that code is unchanged.

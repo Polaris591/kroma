@@ -1,9 +1,13 @@
- ◆ Kroma / untitled session                                             project 
                                                                                 
+                                                                                
+     YOU                                                                        
      Review the change. 请 检 查 代 码 。                                             
      Preserve Unicode and indentation.                                          
                                                                                 
-  ◆  Updated the implementation.                                                
+                                                                                
+                                                                                
+     KROMA                                                                      
+     Updated the implementation.                                                
                                                                                 
      • Preserved input and links                                                
      • Verified Unicode selection                                               
@@ -12,13 +16,9 @@
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-   ▲▲▲  Waiting for model · 0s                                                  
+     ●·· Waiting · 0s                                                           
  ────────────────────────────────────────────────────────────────────────────── 
-   › Enter queues the next task; /steer redirects…                              
                                                                                 
-   test-model · Think high · Context —                                          
+   ›                                                                            
+                                                                                
+   test-model · Think high                           Context —/500k · Cache —   

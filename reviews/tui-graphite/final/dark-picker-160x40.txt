@@ -1,18 +1,16 @@
-                        ◆ Kroma / untitled session                                                                               project                        
                                                                                                                                                                 
-                            Review the change. 请 检 查 代 码 。                                                                                                      
-                            Preserve Unicode and indentation.                                                                                                   
                                                                                                                                                                 
-                         ◆  Updated the implementation.                                                                                                         
-                                                                                                                                                                
-                            • Preserved input and links                                                                                                         
-                            • Verified Unicode selection                                                                                                        
+      YOU                                                                                                                                                       
+      Review the change. 请 检 查 代 码 。                                                                                                                            
+      Preserve Unicode and indentation.                                                                                                                         
                                                                                                                                                                 
                                                                                                                                                                 
                                                                                                                                                                 
+      KROMA                                                                                                                                                     
+      Updated the implementation.                                                                                                                               
                                                                                                                                                                 
-                                                                                                                                                                
-                                                                                                                                                                
+      • Preserved input and links                                                                                                                               
+      • Verified Unicode selection                                                                                                                              
                                                                                                                                                                 
                                                                                                                                                                 
                                                                                                                                                                 
@@ -24,17 +22,19 @@
                                                                                                                                                                 
                                                                                                                                                                 
                                                                                                                                                                 
-                         Commands · ↑↓ select · Tab complete · Esc close ───────────────────────────────────────────────────────────────                        
-                          › /                                                                                                                                   
-                          › /checkpoints  — List file snapshots (Git worktrees)                                                                                 
-                            /clear  — Clear the current conversation                                                                                            
-                            /commands  — Search all slash commands                                                                                              
-                            /compact  — Compact context now; preserve original history                                                                          
-                            /continue  — Resume the latest conversation                                                                                         
-                            /diff  — Show workspace changes                                                                                                     
-                            /editor  — Edit draft in external editor                                                                                            
-                            /exit  — Exit Kroma                                                                                                                 
-                        ────────────────────────────────────────────────────────────────────────────────────────────────────────────────                        
-                          › Describe a task, or / for commands…                                                                                                 
                                                                                                                                                                 
-                          test-model · Think high · Context —                                                          Ctrl+P Commands                          
+   Commands · ↑↓ select · Tab complete · Esc close ───────────────────────────────────────────────────────────────────────────────────────────────────────────  
+    › /                                                                                                                                                         
+    › /checkpoints  — List file snapshots (Git worktrees)                                                                                                       
+      /clear  — Clear the current conversation                                                                                                                  
+      /commands  — Search all slash commands                                                                                                                    
+      /compact  — Compact context now; preserve original history                                                                                                
+      /continue  — Resume the latest conversation                                                                                                               
+      /diff  — Show workspace changes                                                                                                                           
+      /editor  — Edit draft in external editor                                                                                                                  
+      /exit  — Exit Kroma                                                                                                                                       
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────  
+                                                                                                                                                                
+    ›                                                                                                                                                           
+                                                                                                                                                                
+    test-model · Think high                                                                                                         Context —/500k · Cache —    

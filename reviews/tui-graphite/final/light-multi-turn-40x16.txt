@@ -1,16 +1,16 @@
- ◆ Kroma / untitled session             
                                       │ 
-     Follow-up 1 · 保 留 上 下 文          │ 
+     YOU                              │ 
+     Follow-up 2 · 保 留 上 下 文          │ 
                                       │ 
-  ◆  Response 1 with a focused        │ 
-     explanation.                     │ 
-                                      ┃ 
-     Follow-up 2 · 保 留 上 下 文          ┃ 
-                                      ┃ 
-  ◆  Response 2 with a focused        ┃ 
+                                      │ 
+                                      │ 
+     KROMA                            │ 
+     Response 2 with a focused        │ 
      explanation.                     ┃ 
                                       ┃ 
- ────────────────────────────────────── 
-   › Describe a task, or / for comman   
                                         
-   test-model · high · Context —        
+ ────────────────────────────────────── 
+                                        
+   ›                                    
+                                        
+   test-mod… · high  —/500k · Cache —   

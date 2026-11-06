@@ -290,6 +290,52 @@ impl Editor {
         self.history_index
     }
 
+    /// Most recent submitted prompts first. Keep full content searchable,
+    /// but render attachment markers and newlines as ordinary text.
+    pub fn history_previews(&self) -> Vec<(usize, String)> {
+        self.history
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(index, entry)| {
+                let mut preview = String::new();
+                for ch in entry.text.chars() {
+                    if let Some(label) = entry.labels.get(&ch) {
+                        preview.push_str(label);
+                    } else if ch == '\n' {
+                        preview.push_str(" ↵ ");
+                    } else if ch == '\t' {
+                        preview.push_str("    ");
+                    } else if !ch.is_control() {
+                        preview.push(ch);
+                    }
+                }
+                (index, preview)
+            })
+            .collect()
+    }
+
+    /// Recall through the same path as Up/Down, including attachment labels
+    /// and the unsent draft so Down can restore it afterwards.
+    pub fn recall_history(&mut self, index: usize) -> bool {
+        let Some(entry) = self.history.get(index).cloned() else {
+            return false;
+        };
+        if self.history_index.is_none() {
+            self.history_draft = HistoryEntry {
+                text: self.text.clone(),
+                labels: self.attachment_labels.clone(),
+                attachments: Vec::new(),
+            };
+        }
+        self.checkpoint();
+        self.text = entry.text.clone();
+        self.attachment_labels = entry.labels.clone();
+        self.caret = self.text.chars().count();
+        self.history_index = Some(index);
+        true
+    }
+
     pub fn history_attachments(&self) -> &[Value] {
         self.history_index
             .and_then(|index| self.history.get(index))
@@ -423,10 +469,12 @@ impl Editor {
                     attachments: Vec::new(),
                 };
             }
+            self.checkpoint();
             self.history_index = Some(next);
             self.text = self.history[next].text.clone();
             self.attachment_labels = self.history[next].labels.clone();
         } else if let Some(index) = self.history_index {
+            self.checkpoint();
             if index + 1 == self.history.len() {
                 self.history_index = None;
                 self.text = self.history_draft.text.clone();
@@ -454,6 +502,19 @@ impl Editor {
             }
             KeyCode::Enter => return self.take().map_or(EditAction::None, EditAction::Submit),
             KeyCode::Char('j') if ctrl => self.insert("\n"),
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) && !ctrl => {
+                self.caret = self.word_boundary(true)
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) && !ctrl => {
+                self.caret = self.word_boundary(false)
+            }
+            KeyCode::Char('d') if ctrl && self.caret < self.text.chars().count() => {
+                self.checkpoint();
+                self.text.replace_range(
+                    self.byte_index(self.caret)..self.byte_index(self.next_grapheme()),
+                    "",
+                );
+            }
             KeyCode::Char('w') if ctrl => {
                 let start = self.word_boundary(true);
                 if start != self.caret {

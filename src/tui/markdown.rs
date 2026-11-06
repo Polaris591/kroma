@@ -103,9 +103,7 @@ fn render_table(lines: &mut Vec<Line<'static>>, table: TableContent, theme: Them
                 }
                 let cell = row.get(column).map(String::as_str).unwrap_or("");
                 let style = if index == 0 {
-                    Style::default()
-                        .fg(theme.accent_text)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.text)
                 };
@@ -123,7 +121,7 @@ fn render_table(lines: &mut Vec<Line<'static>>, table: TableContent, theme: Them
         for row in table.rows {
             let title = row.first().map(String::as_str).unwrap_or("");
             lines.push(Line::from(vec![
-                Span::styled("  • ", Style::default().fg(theme.accent)),
+                Span::styled("  • ", Style::default().fg(theme.muted)),
                 Span::styled(
                     title.to_owned(),
                     Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
@@ -196,7 +194,7 @@ impl ProseColors {
     pub(super) fn from_theme(theme: Theme) -> Self {
         Self {
             heading: theme.accent,
-            code: theme.warning,
+            code: theme.code,
         }
     }
 }
@@ -221,7 +219,7 @@ pub(super) fn render_document_with(
     let body_fg = if theme.background == ratatui::style::Color::Reset {
         theme.text
     } else {
-        Theme::blend(theme.text, theme.muted, 0.35)
+        Theme::blend(theme.text, theme.muted, 0.12)
     };
     let mut styles = vec![Style::default().fg(body_fg)];
     let mut lists: Vec<ListState> = Vec::new();
@@ -291,7 +289,7 @@ pub(super) fn render_document_with(
                         pulldown_cmark::HeadingLevel::H2 => "▸ ",
                         _ => "▍ ",
                     };
-                    spans.push(Span::styled(marker, Style::default().fg(prose.heading)));
+                    spans.push(Span::styled(marker, Style::default().fg(theme.muted)));
                     styles.push(
                         Style::default()
                             .fg(prose.heading)
@@ -386,7 +384,7 @@ pub(super) fn render_document_with(
                     };
                     let marker_style = if ordered {
                         Style::default()
-                            .fg(theme.accent_text)
+                            .fg(theme.muted)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(theme.muted)
@@ -398,12 +396,8 @@ pub(super) fn render_document_with(
                         emit_line(&mut lines, &mut spans, &mut last_blank);
                     }
                     blank_after(&mut lines);
-                    spans.push(Span::styled("│ ", Style::default().fg(theme.muted)));
-                    styles.push(
-                        Style::default()
-                            .fg(theme.muted)
-                            .add_modifier(Modifier::ITALIC),
-                    );
+                    spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
+                    styles.push(Style::default().fg(theme.muted));
                 }
                 Tag::TableCell if !spans.is_empty() => {
                     spans.push(Span::styled(" │ ", Style::default().fg(theme.border)));
@@ -526,9 +520,9 @@ pub(super) fn render_document_with(
                 } else if theme.background == ratatui::style::Color::Reset {
                     Style::default().fg(theme.code).add_modifier(Modifier::BOLD)
                 } else {
-                    // Amber reads as "verbatim" against prose without adding a
-                    // palette field that every theme would have to carry.
-                    Style::default().fg(prose.code).bg(theme.surface)
+                    // Low-contrast code separates literal text from prose
+                    // without competing with warnings and errors.
+                    Style::default().fg(prose.code).bg(theme.overlay)
                 };
                 spans.push(Span::styled(value.into_string(), style));
             }
@@ -550,7 +544,7 @@ pub(super) fn render_document_with(
             }
             Event::TaskListMarker(checked) => spans.push(Span::styled(
                 if checked { "[x] " } else { "[ ] " },
-                Style::default().fg(theme.accent),
+                Style::default().fg(theme.muted),
             )),
             _ => {}
         }

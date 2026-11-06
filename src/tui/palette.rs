@@ -38,6 +38,7 @@ impl UiState {
                 theme: Theme {
                     background: native,
                     surface: native,
+                    inset: native,
                     overlay: native,
                     text: native,
                     muted: native,
@@ -65,6 +66,29 @@ impl UiState {
                     link: native,
                     add: native,
                     remove: native,
+                },
+            };
+        }
+
+        if self.themes.preset() == "dark" {
+            // The default Plain renderer uses the same semantic palette as
+            // the theme settings, including user theme.toml overrides.
+            let base = self.themes.colors;
+            return PlainPalette {
+                theme: base,
+                message: MessageColors {
+                    surface: base.surface,
+                    user_rail: base.user,
+                    assistant_rail: base.accent,
+                },
+                semantic: SemanticColors {
+                    running: base.accent,
+                    success: base.success,
+                    warning: base.warning,
+                    error: base.error,
+                    link: base.accent,
+                    add: base.success,
+                    remove: base.error,
                 },
             };
         }
@@ -99,6 +123,7 @@ impl UiState {
             theme: Theme {
                 background: gray(13, 239),
                 surface: gray(23, 226),
+                inset: gray(17, 239),
                 overlay: gray(30, 219),
                 text: gray(229, 41),
                 muted: gray(176, 83),

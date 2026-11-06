@@ -1,17 +1,16 @@
- ◆ Kroma / untitled session                                             project 
                                                                                 
+                                                                                
+     YOU                                                                        
      Review the change. 请 检 查 代 码 。                                             
      Preserve Unicode and indentation.                                          
                                                                                 
-  ◆  Updated the implementation.                                                
+                                                                                
+                                                                                
+     KROMA                                                                      
+     Updated the implementation.                                                
                                                                                 
      • Preserved input and links                                                
      • Verified Unicode selection                                               
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
                                                                                 
                                                                                 
   Commands · Models · Sessions · Files  Tab · Esc ───────────────────────────── 
@@ -19,6 +18,7 @@
    › src/tui/view.rs  — fixture                                                 
                                                                                 
  ────────────────────────────────────────────────────────────────────────────── 
+                                                                                
    › Unsent draft                                                               
                                                                                 
-   test-model · Think high · Context —                                          
+   test-model · Think high                           Context —/500k · Cache —   

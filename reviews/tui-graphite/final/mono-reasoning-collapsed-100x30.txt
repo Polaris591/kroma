@@ -1,15 +1,13 @@
- ◆ Kroma / untitled session                                                                 project 
                                                                                                     
-     Review the change. 请 检 查 代 码 。                                                                 
-     Preserve Unicode and indentation.                                                              
                                                                                                     
-   ◇  Reasoning collapsed · Ctrl+R · 0.0s                                                           
-                                                                                                    
+      YOU                                                                                           
+      Review the change. 请 检 查 代 码 。                                                                
+      Preserve Unicode and indentation.                                                             
                                                                                                     
                                                                                                     
                                                                                                     
-                                                                                                    
-                                                                                                    
+      KROMA                                                                                         
+      ◇ Reasoning collapsed · Ctrl+T · 0.0s                                                         
                                                                                                     
                                                                                                     
                                                                                                     
@@ -24,7 +22,9 @@
                                                                                                     
                                                                                                     
                                                                                                     
- ────────────────────────────────────────────────────────────────────────────────────────────────── 
-   › Describe a task, or / for commands…                                                            
                                                                                                     
-   test-model · Think high · Context —                                                              
+  ────────────────────────────────────────────────────────────────────────────────────────────────  
+                                                                                                    
+    ›                                                                                               
+                                                                                                    
+    test-model · Think high                                             Context —/500k · Cache —    

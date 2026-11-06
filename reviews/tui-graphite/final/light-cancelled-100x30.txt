@@ -1,18 +1,16 @@
- ◆ Kroma / untitled session                                                    project  ⊘ Cancelled 
                                                                                                     
-     Review the change. 请 检 查 代 码 。                                                                 
-     Preserve Unicode and indentation.                                                              
                                                                                                     
-  ◆  Updated the implementation.                                                                    
-                                                                                                    
-     • Preserved input and links                                                                    
-     • Verified Unicode selection                                                                   
+      YOU                                                                                           
+      Review the change. 请 检 查 代 码 。                                                                
+      Preserve Unicode and indentation.                                                             
                                                                                                     
                                                                                                     
                                                                                                     
+      KROMA                                                                                         
+      Updated the implementation.                                                                   
                                                                                                     
-                                                                                                    
-                                                                                                    
+      • Preserved input and links                                                                   
+      • Verified Unicode selection                                                                  
                                                                                                     
                                                                                                     
                                                                                                     
@@ -23,8 +21,10 @@
                                                                                                     
                                                                                                     
                                                                                                     
-   ⊘  Cancelled · side effects are not undone · 35.3s                                               
- ────────────────────────────────────────────────────────────────────────────────────────────────── 
-   › Describe a task, or / for commands…                                                            
                                                                                                     
-   test-model · Think high · Context —                                                              
+      ⊘ Cancelled · 35.3s · side effects are not undone                                             
+  ────────────────────────────────────────────────────────────────────────────────────────────────  
+                                                                                                    
+    ›                                                                                               
+                                                                                                    
+    test-model · Think high                                             Context —/500k · Cache —    

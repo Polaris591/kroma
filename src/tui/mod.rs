@@ -191,6 +191,7 @@ enum InputAction {
     None,
     Quit,
     Submit(String),
+    Queue(String),
     Cancel,
     Edit,
 }
@@ -287,17 +288,10 @@ fn cycle_levels(model: &dyn ModelBackend) -> Vec<String> {
 fn change_thinking(state: &mut UiState, model: &dyn ModelBackend, level: &str) {
     match model.set_reasoning_level(level) {
         Ok(()) => {
+            // The footer already displays the active thinking level. Avoid
+            // a redundant transient notification for a successful change.
             state.thinking = model.reasoning_level();
             save_model_choice(state, model);
-            state.note(format!(
-                "{} {} · {}",
-                state.preferences.language.text("Thinking:", "推理："),
-                state.thinking.as_deref().unwrap_or(level),
-                state
-                    .preferences
-                    .language
-                    .text("applies to the next model request", "下次模型请求生效")
-            ));
         }
         Err(error) => state.note_with_level(
             view::NoticeLevel::Error,
@@ -381,6 +375,12 @@ fn picker_items(
                 PickerItem::new(&path, &path, "file")
             })
             .collect(),
+        PickerKind::History => state
+            .editor
+            .history_previews()
+            .into_iter()
+            .map(|(index, preview)| PickerItem::new(preview, index.to_string(), ""))
+            .collect(),
     })
 }
 
@@ -461,6 +461,16 @@ fn picker_event(state: &mut UiState, event: Event, workdir: &std::path::Path) ->
                 state.editor.replace_all(&format!("{value} "));
                 return InputAction::None;
             }
+            if kind == PickerKind::History {
+                if let Ok(index) = value.parse::<usize>() {
+                    let previous = state.editor.history_index();
+                    if state.editor.recall_history(index) {
+                        state.clear_editor_selection();
+                        state.history_navigated(previous);
+                    }
+                }
+                return InputAction::None;
+            }
             if kind == PickerKind::Files {
                 if value.ends_with('/') {
                     open_picker(state, kind, value.trim_start_matches('@'), workdir);
@@ -514,30 +524,47 @@ fn key_action(
         KeyCode::Char('c') if ctrl => {
             if state.editor.text().is_empty() && state.attachments.is_empty() && !state.attach_mode
             {
-                let language = state.preferences.language;
-                state.note(
-                    language
-                        .text(
-                            "Nothing to cancel · Ctrl+Q quits",
-                            "没有可取消的任务 · Ctrl+Q 退出",
-                        )
-                        .to_owned(),
-                );
-                return InputAction::None;
+                return InputAction::Quit;
             }
             state.clear_draft_undoable();
             return InputAction::None;
         }
-        KeyCode::Char('q') if ctrl && !running => return InputAction::Quit,
+        KeyCode::Char('d')
+            if ctrl
+                && !running
+                && state.editor.text().is_empty()
+                && state.attachments.is_empty()
+                && !state.attach_mode =>
+        {
+            return InputAction::Quit;
+        }
+        KeyCode::Char('q') if ctrl && running => {
+            return state.editor.take().map_or(InputAction::None, |text| {
+                state.remember_submitted_attachments();
+                InputAction::Queue(text)
+            });
+        }
+        KeyCode::Char('q') if ctrl && !running => {
+            if state.editor.text().is_empty() && state.attachments.is_empty() && !state.attach_mode
+            {
+                return InputAction::Quit;
+            }
+            state.note(state.preferences.language.text(
+                "Draft preserved · clear it before quitting",
+                "草稿已保留 · 清空后再退出",
+            ));
+            return InputAction::None;
+        }
+        KeyCode::Enter if running && key.modifiers.contains(KeyModifiers::ALT) => {
+            return state.editor.take().map_or(InputAction::None, |text| {
+                state.remember_submitted_attachments();
+                InputAction::Queue(text)
+            });
+        }
         KeyCode::Char('g') if ctrl && !running => return InputAction::Edit,
         KeyCode::F(2) => {
             match state.themes.cycle() {
-                Ok(()) => state.note(format!(
-                    "{} {} · {} ~/.kroma/theme.toml",
-                    state.preferences.language.text("Theme:", "主题："),
-                    state.themes.preset(),
-                    state.preferences.language.text("saved to", "已保存到")
-                )),
+                Ok(()) => {}
                 Err(error) => state.note_with_level(
                     view::NoticeLevel::Error,
                     format!(
@@ -551,17 +578,23 @@ fn key_action(
             }
             return InputAction::None;
         }
-        KeyCode::Char('t') if ctrl => {
+        KeyCode::Char('t' | 'T') if key.modifiers == KeyModifiers::ALT => {
             state.open_full_transcript();
+            return InputAction::None;
+        }
+        KeyCode::Char('t' | 'T') if ctrl => {
+            state.reasoning_expanded = !state.reasoning_expanded;
+            state.invalidate_history_cache();
             return InputAction::None;
         }
         KeyCode::Char('o') if ctrl => {
             state.toggle_all_tools();
             return InputAction::None;
         }
-        KeyCode::Char('r') if ctrl => {
-            state.reasoning_expanded = !state.reasoning_expanded;
-            state.invalidate_history_cache();
+        KeyCode::Char('?')
+            if !running && state.editor.text().is_empty() && state.attachments.is_empty() =>
+        {
+            state.open_plugin_panel(help::text(state.preferences.language).to_owned());
             return InputAction::None;
         }
         KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -598,11 +631,13 @@ fn key_action(
             return InputAction::None;
         }
         KeyCode::Esc => {
-            // Esc dismisses a modal/path input, never the ordinary draft.
-            // Ctrl+C remains the explicit clear/cancel/quit action.
+            // Overlay/path input takes priority in input_event. Outside a
+            // modal, Esc cancels a running task but never discards the draft.
             if state.attach_mode {
                 state.attach_mode = false;
                 state.attach_path.clear();
+            } else if running {
+                return InputAction::Cancel;
             }
             return InputAction::None;
         }
@@ -626,7 +661,11 @@ fn key_action(
             })
         }
         EditAction::None => {
-            if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            if matches!(key.code, KeyCode::Up | KeyCode::Down)
+                || (ctrl
+                    && matches!(key.code, KeyCode::Char('z' | 'y'))
+                    && previous_history != state.editor.history_index())
+            {
                 state.history_navigated(previous_history);
             } else {
                 state.prune_attachments();
@@ -806,10 +845,16 @@ fn input_event(
         Event::Key(key)
             if !running
                 && !state.attach_mode
-                && key.code == KeyCode::Char('p')
-                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                && key.kind != KeyEventKind::Release
+                && key.modifiers == KeyModifiers::CONTROL
+                && matches!(key.code, KeyCode::Char('p' | 'l' | 'r')) =>
         {
-            open_picker(state, PickerKind::Commands, "", workdir);
+            let kind = match key.code {
+                KeyCode::Char('p' | 'l') => PickerKind::Models,
+                KeyCode::Char('r') => PickerKind::History,
+                _ => PickerKind::Commands,
+            };
+            open_picker(state, kind, "", workdir);
         }
         Event::Key(key)
             if key.kind != KeyEventKind::Release
@@ -1124,10 +1169,7 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
             }
         };
         match outcome.and_then(|()| next.save_at(state.preferences_path.as_deref())) {
-            Ok(()) => {
-                state.apply_preferences(next);
-                state.note(next.language.text("UI preferences saved", "界面设置已保存"));
-            }
+            Ok(()) => state.apply_preferences(next),
             Err(error) => state.note_with_level(
                 view::NoticeLevel::Error,
                 format!(
@@ -1141,8 +1183,12 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
         }
         return true;
     }
-    if input == "/help" {
+    if input == "/help" || input == "/hotkeys" {
         state.show_help();
+        return true;
+    }
+    if input == "/transcript" {
+        state.open_full_transcript();
         return true;
     }
     if input == "/inspect" {
@@ -1159,6 +1205,8 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
     }
     if input == "/think"
         || input.starts_with("/think ")
+        || input == "/thinking"
+        || input.starts_with("/thinking ")
         || input == "/reasoning"
         || input.starts_with("/reasoning ")
     {
@@ -1197,11 +1245,7 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
             name => state.themes.select(name),
         };
         match outcome {
-            Ok(()) => state.note(format!(
-                "{} {}",
-                state.preferences.language.text("Theme:", "主题："),
-                state.themes.preset()
-            )),
+            Ok(()) => {}
             Err(error) => state.note_with_level(
                 view::NoticeLevel::Error,
                 format!(
@@ -1215,7 +1259,13 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
     false
 }
 
-fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &dyn ModelBackend) {
+fn running_input(
+    state: &mut UiState,
+    task: &TaskInput,
+    input: String,
+    model: &dyn ModelBackend,
+    follow_up: bool,
+) {
     if show_local_command(state, &input, model) {
         return;
     }
@@ -1263,12 +1313,27 @@ fn running_input(state: &mut UiState, task: &TaskInput, input: String, model: &d
         }
     } else if input.starts_with('/') {
         state.note(state.preferences.language.text(
-            "During a task: Enter queues, /steer text redirects, /pending lists; Ctrl+C cancels",
-            "任务执行中：回车排队，/steer 引导，/pending 查看，Ctrl+C 取消",
+            "During a task: Enter steers, Alt+Enter/Ctrl+Q queues; Esc cancels",
+            "任务执行中：Enter 引导，Alt+Enter/Ctrl+Q 排队；Esc 取消",
         ));
+    } else if !follow_up {
+        match task.steer(&input) {
+            Ok(()) => state.note(state.preferences.language.text(
+                "Steering accepted; applies at next model boundary",
+                "已接受引导指令，将在下次模型请求时生效",
+            )),
+            Err(error) => state.note_with_level(
+                view::NoticeLevel::Error,
+                format!(
+                    "{}: {error:#}",
+                    state
+                        .preferences
+                        .language
+                        .text("Steering error", "引导指令错误"),
+                ),
+            ),
+        }
     } else {
-        // Safe default: a message typed while running becomes the next task.
-        // Redirecting the running task is explicit via /steer.
         match task.queue_followup(&input) {
             Ok(position) => {
                 state.queued = task.queued();
@@ -1373,7 +1438,8 @@ async fn execute_task(
                             }
                             match input_event(state,event,true,model,workdir) {
                                 InputAction::Cancel => break None,
-                                InputAction::Submit(text) => running_input(state,&task_input,text,model),
+                                InputAction::Submit(text) => running_input(state,&task_input,text,model,false),
+                                InputAction::Queue(text) => running_input(state,&task_input,text,model,true),
                                 _ => {},
                             }
                         }
@@ -1500,8 +1566,8 @@ async fn execute_local_shell(
     archive: &std::path::Path,
 ) -> Result<()> {
     state.note(state.preferences.language.text(
-        "Shell running · Ctrl+C cancels",
-        "正在执行 Shell · Ctrl+C 取消",
+        "Shell running · Esc / Ctrl+C cancels",
+        "正在执行 Shell · Esc / Ctrl+C 取消",
     ));
     screen.draw(state)?;
     let result = {
@@ -1511,7 +1577,7 @@ async fn execute_local_shell(
                 result = &mut future => break Some(result),
                 event = input.next() => match event {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release &&
-                        (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) => break None,
+                        (key.code == KeyCode::Esc || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))) => break None,
                     Some(Ok(Event::Resize(_, _))) => screen.draw(state)?,
                     Some(Err(error)) => return Err(error.into()),
                     None => break None,
@@ -1546,6 +1612,11 @@ fn plugin_shortcut_command(key: &KeyEvent, bindings: &[(char, String)]) -> Optio
     let KeyCode::Char(letter) = key.code else {
         return None;
     };
+    // Built-in clipboard paste and Readline word motion take priority over
+    // optional plugin shortcuts, even if a plugin requests the same chord.
+    if matches!(letter.to_ascii_lowercase(), 'v' | 'b' | 'f' | 't') {
+        return None;
+    }
     bindings
         .iter()
         .find(|(bound, _)| *bound == letter.to_ascii_lowercase())
@@ -1798,6 +1869,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         };
         match action {
             InputAction::Quit => break,
+            InputAction::Queue(_) => {}
             InputAction::Edit => {
                 if let Err(error) = screen.edit_prompt(&mut state) {
                     state.note(format!(
@@ -1915,7 +1987,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                         ));
                         continue;
                     }
-                    state.discard_draft();
+                    state.switch_session_draft(&state.session.clone(), true);
                     state.enter_home();
                     continue;
                 }
@@ -1947,9 +2019,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                         agent.context_window_tokens(),
                                         model.reasoning_level(),
                                     );
+                                    // The footer already reflects the selected model.
+                                    // Keep success silent; errors still produce notices.
                                     state.reset_context();
-                                    state
-                                        .note(format!("Model: {} · profile {name}", profile.model));
                                 }
                                 Err(error) => state.note_with_level(
                                     view::NoticeLevel::Error,
@@ -2114,7 +2186,11 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                 match command_result {
                     Ok(Some(reply)) => {
                         let before = state.session.clone();
-                        state.session = agent.session_id().to_owned();
+                        let next_session = agent.session_id().to_owned();
+                        if state.is_home() || next_session != before {
+                            state.switch_session_draft(&next_session, false);
+                        }
+                        state.session = next_session;
                         if state.session != before {
                             let saved = if runtime.plugins.has_model_override() {
                                 // Session profiles must never override the active provider plugin.
@@ -2206,7 +2282,6 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             || text.starts_with("/rewind ")
                         {
                             state.reset_context();
-                            state.discard_draft();
                             state.restore_input_history(agent.messages());
                         }
                         if state.session != before {
@@ -2405,6 +2480,17 @@ mod tests {
         let mut repeat = alt_e;
         repeat.kind = KeyEventKind::Repeat;
         assert_eq!(super::plugin_shortcut_command(&repeat, &bindings), None);
+        for letter in ['b', 'f', 'v'] {
+            let reserved = [(letter, "/must-not-intercept".to_owned())];
+            assert_eq!(
+                super::plugin_shortcut_command(
+                    &KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT),
+                    &reserved
+                ),
+                None,
+                "Alt+{letter} is reserved for the editor or clipboard"
+            );
+        }
     }
     use super::*;
     use crate::provider::ModelClient;
@@ -2825,13 +2911,46 @@ mod tests {
     }
 
     #[test]
+    fn running_plain_enter_steers_and_follow_up_lane_is_separate() {
+        let (mut ui, model) = setup();
+        let input = TaskInput::default();
+        let active = input.start().unwrap();
+        running_input(&mut ui, &input, "inspect this error".into(), &model, false);
+        assert_eq!(input.pending_steering(), 1);
+        assert!(input.queued().is_empty());
+        running_input(&mut ui, &input, "add tests later".into(), &model, true);
+        assert_eq!(input.pending_steering(), 1);
+        assert_eq!(input.queued(), ["add tests later"]);
+        running_input(
+            &mut ui,
+            &input,
+            "/queue another follow-up".into(),
+            &model,
+            false,
+        );
+        assert_eq!(input.queued(), ["add tests later", "another follow-up"]);
+        drop(active);
+        assert_eq!(input.pending_steering(), 0);
+        assert_eq!(input.queued().len(), 2);
+    }
+
+    #[test]
     fn common_picker_filters_commands_without_overwriting_unsent_draft() {
         let (mut ui, model) = setup();
         let dir = std::env::temp_dir();
         ui.editor.paste("keep this unsent note");
         let trigger = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
         input_event(&mut ui, Event::Key(trigger), false, &model, &dir);
-        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::Commands);
+        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::Models);
+        input_event(
+            &mut ui,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            false,
+            &model,
+            &dir,
+        );
+        assert_eq!(ui.editor.text(), "keep this unsent note");
+        open_picker(&mut ui, PickerKind::Commands, "", &dir);
         for ch in "usage".chars() {
             input_event(
                 &mut ui,
@@ -2851,7 +2970,7 @@ mod tests {
         assert!(matches!(result, InputAction::Submit(text) if text == "/usage"));
         assert!(ui.picker.is_none());
         assert_eq!(ui.editor.text(), "keep this unsent note");
-        input_event(&mut ui, Event::Key(trigger), false, &model, &dir);
+        open_picker(&mut ui, PickerKind::Commands, "", &dir);
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         input_event(&mut ui, Event::Key(tab), false, &model, &dir);
         assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::Models);
@@ -2952,8 +3071,15 @@ mod tests {
         assert_eq!(old.reasoning_level().as_deref(), Some("low"));
         key_action(&mut ui, key, false, &new);
         assert_eq!(new.reasoning_level().as_deref(), Some("xhigh"));
+        assert_eq!(ui.thinking.as_deref(), Some("xhigh"));
+        assert!(
+            ui.notification.is_empty(),
+            "the footer is sufficient feedback"
+        );
         key_action(&mut ui, key, false, &new);
         assert_eq!(new.reasoning_level().as_deref(), Some("high"));
+        assert_eq!(ui.thinking.as_deref(), Some("high"));
+        assert!(ui.notification.is_empty());
     }
 
     #[test]
@@ -3016,14 +3142,13 @@ mod tests {
     }
 
     #[test]
-    fn control_c_never_quits_and_clears_a_draft_with_undo() {
+    fn control_c_quits_only_when_idle_and_draft_is_empty() {
         let (mut ui, model) = setup();
         let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(
             key_action(&mut ui, c, false, &model),
-            InputAction::None
+            InputAction::Quit
         ));
-        assert!(ui.notification.contains("Ctrl+Q"));
         ui.editor.paste("unsubmitted");
         assert!(matches!(
             key_action(&mut ui, c, false, &model),
@@ -3032,7 +3157,7 @@ mod tests {
         assert!(ui.editor.text().is_empty());
         assert!(matches!(
             key_action(&mut ui, c, false, &model),
-            InputAction::None
+            InputAction::Quit
         ));
         ui.editor.paste("steer");
         assert!(matches!(
@@ -3457,7 +3582,10 @@ mod tests {
         ui.preferences_path = Some(path.clone());
         assert!(show_local_command(&mut ui, "/language zh", &model));
         assert_eq!(ui.preferences.language, preferences::Language::Zh);
-        assert!(ui.notification.contains("已保存"));
+        assert!(
+            ui.notification.is_empty(),
+            "successful changes update in place"
+        );
         assert!(show_local_command(&mut ui, "/layout wide", &model));
         let saved = preferences::Preferences::load_at(Some(&path))?;
         assert_eq!(saved, ui.preferences);

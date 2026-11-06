@@ -1,20 +1,18 @@
- ◆ Kroma / untitled session                                                                 project 
                                                                                                     
-     Review the change. 请 检 查 代 码 。                                                                 
-     Preserve Unicode and indentation.                                                              
                                                                                                     
-   ▸ ◌ Running 3 steps · 2.4s                                                                       
-   ▸ ✓ Run · echo step-0 · 1.2s                                                            [view]   
-   ▸ ✓ Run Rust tests · 1.2s                                                               [view]   
-   ▸ ◌ Run · echo step-2                                                                   [view]   
-     ↳ test unicode_copy ... ok                                                                     
+      YOU                                                                                           
+      Review the change. 请 检 查 代 码 。                                                                
+      Preserve Unicode and indentation.                                                             
                                                                                                     
                                                                                                     
                                                                                                     
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
+      KROMA                                                                                         
+        ▸ ✓ $ echo step-0 · 1.2s                                                                    
+         ↳ verified                                                                                 
+        ▸ ✓ $ cargo test · 1.2s                                                                     
+         ↳ verified                                                                                 
+        ▸ ◌ Running $ echo step-2                                                                   
+         ↳ test unicode_copy ... ok                                                                 
                                                                                                     
                                                                                                     
                                                                                                     
@@ -23,8 +21,10 @@
                                                                                                     
                                                                                                     
                                                                                                     
-   ▲▲▲  Running Run · echo step-2 · 0s                                                              
- ────────────────────────────────────────────────────────────────────────────────────────────────── 
-   › Enter queues the next task; /steer redirects…                                                  
                                                                                                     
-   test-model · Think high · Context —                                                              
+      ●·· Running · 0s                                                                              
+  ────────────────────────────────────────────────────────────────────────────────────────────────  
+                                                                                                    
+    ›                                                                                               
+                                                                                                    
+    test-model · Think high                                             Context —/500k · Cache —    

@@ -202,8 +202,7 @@ impl CommandRegistry {
         })?;
         registry.register_agent_async("/compact", |agent, _, args| {
             Box::pin(async move {
-                require_no_args(args, "/compact")?;
-                let report = agent.compact().await?;
+                let report = agent.compact_with_instructions(args).await?;
                 Ok(CommandReply::text(if report.compacted {
                     format!(
                         "Context compacted: ~{} -> ~{} tokens (estimated). Original conversation history is preserved.",

@@ -177,7 +177,7 @@ impl UiState {
         let hint_width = UnicodeWidthStr::width(hint);
         if width >= 100 && used + hint_width + 3 <= width && self.notification.is_empty() {
             spans.push(Span::raw(" ".repeat(width - used - hint_width)));
-            spans.push(Span::styled(hint, Style::default().fg(colors.faint)));
+            spans.push(Span::styled(hint, Style::default().fg(colors.muted)));
         }
         Line::from(spans)
     }

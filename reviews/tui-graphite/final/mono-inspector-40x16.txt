@@ -1,4 +1,3 @@
- ◆ Kroma / untitled session             
   Snapshot · Run Rust tests · Esc ───── 
      Command                            
      cargo test                         
@@ -9,8 +8,9 @@
                                         
                                         
                                         
-   ·  Execution finished · 35.3s        
+     ✓ Completed · 35.3s                
  ────────────────────────────────────── 
+                                        
    › Unsent draft 中 文                   
                                         
-   test-model · high · Context —        
+   test-mod… · high  —/500k · Cache —   
