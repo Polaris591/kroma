@@ -175,6 +175,9 @@ a permitted test process can execute arbitrary code from the repository.
 Completed run evidence is cleaned after 30 days or 150 completed runs, without
 deleting in-progress directories or a run explicitly being resumed. Results
 and resume tokens remain ordered by the original tasks.
+Every result is marked `trust: "untrusted_child_report"`. Obvious instructions
+to override the parent's rules set `suspicious_instructions: true` for the
+parent to inspect. The heuristic never silently deletes or edits child output.
 
 Sessions are isolated; **the filesystem is not**. A task instruction such as
 "do not edit files" is not a permission boundary.

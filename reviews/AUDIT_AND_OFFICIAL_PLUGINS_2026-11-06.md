@@ -32,6 +32,7 @@ Preserves local project identity, SQLite WAL, low-trust request_context, task_su
 ### Subagents 1.0 (implementation increments)
 
 Bundles `general`, `explore`, `planner`, `reviewer`, and `verifier` Markdown profiles with strict validation. Supports user and project overrides, labels, complexity tiers, per-profile tool allow/deny and shell policy, model-turn/token admission, ordered batch results, resume and evidence retention. Child processes receive the current host connection metadata and use local profiles for credentials; no hard-coded DeepSeek default. Nested subagents and memory writes are disabled in child tool lists. Completed run archives are pruned by age/count while active and resumed runs are preserved. This is a tool-filter contract, **not** an OS sandbox.
+Each child result is explicitly marked `untrusted_child_report` and instruction-shaped outputs are flagged for inspection without hiding the original answer.
 
 ## Recorded validation
 
@@ -39,7 +40,7 @@ Environment: Devspace Linux, Rust 1.85.1, `NO_COLOR` removed and terminal `TERM=
 
 - Core `cargo test --locked --lib`: **646 passed, 9 pre-existing ignored, 0 failed**.
 - Project-memory `cargo test --locked --manifest-path examples/plugins/project-memory/Cargo.toml`: **44 passed**.
-- Node official-plugin suites (`web`, `subagents`, `memory`): **154 passed**.
+- Node official-plugin suites (`web`, `subagents`, `memory`): **155 passed** after adding the result-trust regression.
 - CLI checkpoints: **3 passed**.
 - Core `cargo clippy --locked --all-targets -- -D warnings`: **passed**.
 - `mcp_skills_e2e`: **8 passed**; `plugins_e2e`: **52 passed**;
