@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::model::*;
 
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 pub(crate) const MAX_ROWS: i64 = 10_000;
 pub(crate) const MAX_CANDIDATES: i64 = 200;
 pub(crate) const MAX_ACTIVE: i64 = 200;
@@ -27,13 +27,12 @@ pub(crate) const STATE_FORGOTTEN: &str = "forgotten";
 pub(crate) const STATE_PURGED: &str = "purged";
 pub(crate) const STATE_DROPPED: &str = "dropped";
 pub(crate) const STATE_EXPIRED: &str = "expired";
-pub(crate) const STATE_STALE: &str = "stale";
 pub(crate) const STATE_ARCHIVED: &str = "archived";
-pub(crate) const STATE_DISPUTED: &str = "disputed";
 
+/// A rule quote verified against the current user turn. The turn only enforces
+/// "one durable rule per user message"; it is not evidence for a conflict.
 pub struct VerifiedClaim<'a> {
     pub turn: Option<&'a str>,
-    pub topic: Option<&'a str>,
 }
 
 /// A remembered rule stays pending for one week waiting for the user to
@@ -81,17 +80,17 @@ CREATE TABLE IF NOT EXISTS tombstones (
     fingerprint TEXT PRIMARY KEY
 );
 CREATE TABLE IF NOT EXISTS memory_files (
-    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    memory_id     TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    root          TEXT NOT NULL,
     relative_path TEXT NOT NULL,
-    digest TEXT NOT NULL,
-    PRIMARY KEY(memory_id, relative_path)
+    digest        TEXT NOT NULL,
+    PRIMARY KEY (memory_id, root, relative_path)
 );
-CREATE TABLE IF NOT EXISTS memory_topics (
-    memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
-    topic TEXT NOT NULL,
-    notified INTEGER NOT NULL DEFAULT 0
+CREATE TABLE IF NOT EXISTS memory_stale (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    root      TEXT NOT NULL,
+    PRIMARY KEY (memory_id, root)
 );
-CREATE INDEX IF NOT EXISTS memory_topics_topic ON memory_topics(topic);
 "#;
 
 const INDEXES: &str = r#"
@@ -108,11 +107,14 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
 
 pub struct Store {
     pub(crate) conn: Connection,
+    /// Canonical worktree whose file fingerprints this connection evaluates.
+    pub(crate) root: String,
 }
 
 impl Store {
-    /// Open (or create) the workspace database and bind it to `scope_identity`.
-    pub fn open(path: &Path, scope_identity: &str) -> Result<Store> {
+    /// Open (or create) the workspace database and bind it to `scope_identity`
+    /// and one worktree `root`.
+    pub fn open(path: &Path, scope_identity: &str, root: &str) -> Result<Store> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
@@ -124,7 +126,10 @@ impl Store {
         conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
         let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-        let store = Store { conn };
+        let store = Store {
+            conn,
+            root: worktree_key(Path::new(root)),
+        };
         store.init(scope_identity)?;
         Ok(store)
     }
@@ -141,7 +146,7 @@ impl Store {
         self.conn
             .execute_batch(SCHEMA)
             .context("Failed to create memory schema")?;
-        migrate(&self.conn)?;
+        migrate(&self.conn, version)?;
         self.conn
             .execute_batch(&format!("PRAGMA user_version={SCHEMA_VERSION};"))?;
 
@@ -418,7 +423,6 @@ impl Store {
         verified: VerifiedClaim<'_>,
     ) -> Result<Memory> {
         let verified_turn = verified.turn;
-        let topic = verified.topic;
         validate_input(input)?;
         if state != STATE_PENDING && state != STATE_ACCEPTED {
             bail!("Unsupported memory state");
@@ -455,8 +459,8 @@ impl Store {
             expires_at,
             supersedes,
         };
-        let mut memory = if let Some(existing) = load_by_fingerprint(&tx, &fingerprint)? {
-            let memory = match existing.state.as_str() {
+        let memory = if let Some(existing) = load_by_fingerprint(&tx, &fingerprint)? {
+            match existing.state.as_str() {
                 STATE_PURGED => bail!("Memory was purged"),
                 STATE_FORGOTTEN => {
                     bail!("Identical content was forgotten and cannot be re-created")
@@ -465,70 +469,18 @@ impl Store {
                 STATE_PENDING if state == STATE_ACCEPTED => promote_row(&tx, &existing)?,
                 STATE_PENDING => existing,
                 _ => revive_row(&tx, &existing, &row)?,
-            };
-            memory
+            }
         } else {
             insert_row(&tx, input, &text, fingerprint, &row)?
         };
         if state == STATE_ACCEPTED {
             if let Some(old_id) = supersedes.filter(|old| *old != memory.id) {
                 let old = load_memory(&tx, old_id)?.context("Superseded memory not found")?;
-                if old.state != STATE_ACCEPTED && old.state != STATE_DISPUTED {
+                if old.state != STATE_ACCEPTED {
                     bail!("Superseded memory is not an active rule");
                 }
                 record_version_tombstones(&tx, &old)?;
                 set_state(&tx, &old, STATE_FORGOTTEN)?;
-            }
-        }
-        if state == STATE_ACCEPTED && matches!(memory.kind.as_str(), "preference" | "decision") {
-            if let Some(topic) = topic {
-                tx.execute(
-                    "INSERT INTO memory_topics(memory_id,topic,notified) VALUES (?1,?2,0)
-                    ON CONFLICT(memory_id) DO UPDATE SET topic=excluded.topic, notified=0",
-                    params![memory.id, topic],
-                )?;
-                let mut stmt = tx.prepare(
-                    "SELECT m.id FROM memory_topics t
-                    JOIN memories m ON m.id=t.memory_id WHERE t.topic=?1 AND m.id != ?2
-                    AND m.state IN (?3,?4) AND m.text != ?5",
-                )?;
-                let conflicts = stmt
-                    .query_map(
-                        params![
-                            topic,
-                            memory.id,
-                            STATE_ACCEPTED,
-                            STATE_DISPUTED,
-                            memory.text
-                        ],
-                        |row| row.get::<_, String>(0),
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                drop(stmt);
-                if !conflicts.is_empty() {
-                    for id in conflicts {
-                        if let Some(other) = load_memory(&tx, &id)? {
-                            if supersedes.is_some() {
-                                // A verified user correction explicitly selects the
-                                // replacement rule for this topic. Resolve the whole
-                                // paused topic in one action, not one id at a time.
-                                record_version_tombstones(&tx, &other)?;
-                                set_state(&tx, &other, STATE_FORGOTTEN)?;
-                            } else if other.state != STATE_DISPUTED {
-                                set_state(&tx, &other, STATE_DISPUTED)?;
-                            }
-                        }
-                        if supersedes.is_none() {
-                            tx.execute(
-                                "UPDATE memory_topics SET notified=0 WHERE memory_id=?1",
-                                params![id],
-                            )?;
-                        }
-                    }
-                    if supersedes.is_none() {
-                        memory = set_state(&tx, &memory, STATE_DISPUTED)?;
-                    }
-                }
             }
         }
         if let Some(turn) = verified_turn {
@@ -597,74 +549,55 @@ impl Store {
         Ok(report)
     }
 
-    /// Snapshot only path fingerprints, never source code. A memory anchored
-    /// to a missing/out-of-scope/very large file cannot become an active code
-    /// fact. This maintenance is local and runs at write/recall boundaries.
+    /// Record a per-worktree fingerprint baseline for review evidence. Only a
+    /// regular file can anchor evidence: a directory hint is navigation, and a
+    /// rule keeps its path hints as navigation too, so a later edit can never
+    /// turn a durable user rule inert.
     pub fn stamp_paths(&mut self, id: &str, root: &Path) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let memory = require_memory(&tx, id)?;
-        if memory.state != STATE_ACCEPTED {
+        if memory.state != STATE_ACCEPTED || memory.kind != "review" {
             return Ok(());
         }
-        let mut missing = false;
+        let root_key = worktree_key(root);
         for path in &memory.paths {
-            if let Some(digest) = digest_project_file(root, path) {
+            if let PathState::File(digest) = fingerprint_path(root, path) {
                 tx.execute(
-                    "INSERT INTO memory_files(memory_id,relative_path,digest)
-                    VALUES (?1,?2,?3) ON CONFLICT(memory_id,relative_path)
+                    "INSERT INTO memory_files(memory_id,root,relative_path,digest)
+                    VALUES (?1,?2,?3,?4) ON CONFLICT(memory_id,root,relative_path)
                     DO UPDATE SET digest=excluded.digest",
-                    params![id, path, digest],
+                    params![id, root_key, path, digest],
                 )?;
-            } else {
-                missing = true;
             }
         }
-        if missing {
-            set_state(&tx, &memory, STATE_STALE)?;
-        }
+        let stale = review_is_stale(&tx, root, id)?;
+        set_stale(&tx, id, &root_key, stale)?;
         tx.commit()?;
         Ok(())
     }
 
+    /// Re-evaluate review evidence for one worktree. The verdict is stored per
+    /// worktree and never rewrites a memory that another checkout still
+    /// verifies, so ordinary work in a sibling cannot hide shared evidence.
     pub fn refresh_file_states(&mut self, root: &Path) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut statement = tx.prepare(
-            "SELECT m.id, f.relative_path, f.digest
-              FROM memory_files f JOIN memories m ON m.id=f.memory_id
-              WHERE m.state='accepted'",
-        )?;
-        let entries = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(statement);
-        let mut invalid = std::collections::HashSet::new();
-        for (id, path, digest) in entries {
-            if digest_project_file(root, &path).as_deref() != Some(&digest) {
-                invalid.insert(id);
-            }
-        }
-        // Old records with paths but no baseline fingerprint are uncertain.
-        // Keep them in the database but exclude them from automatic recall.
-        let mut statement = tx.prepare("SELECT id FROM memories WHERE state='accepted'
-            AND paths != '[]' AND NOT EXISTS (SELECT 1 FROM memory_files WHERE memory_id=memories.id)")?;
-        for id in statement.query_map([], |row| row.get::<_, String>(0))? {
-            invalid.insert(id?);
-        }
-        drop(statement);
-        for id in invalid {
-            if let Some(memory) = load_memory(&tx, &id)? {
-                set_state(&tx, &memory, STATE_STALE)?;
-            }
+        let root_key = worktree_key(root);
+        let anchored = {
+            let mut statement = tx.prepare(
+                "SELECT DISTINCT m.id FROM memory_files f JOIN memories m ON m.id=f.memory_id
+                  WHERE m.state=?1 AND m.kind='review'",
+            )?;
+            let rows =
+                statement.query_map(params![STATE_ACCEPTED], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for id in &anchored {
+            let stale = review_is_stale(&tx, root, id)?;
+            set_stale(&tx, id, &root_key, stale)?;
         }
         tx.commit()?;
         Ok(())
@@ -719,55 +652,6 @@ impl Store {
         Ok(Some(format!(
             "Previous task status: {status}; most recent user request: {request}"
         )))
-    }
-
-    /// Once-per-topic conflict hint. Conflicting claims are never injected as
-    /// trusted facts; only a relevant user task can surface a bounded notice.
-    pub fn take_conflict_notice(&mut self, intent: &str) -> Result<Option<String>> {
-        let intent = intent.to_lowercase();
-        if intent.trim().is_empty() {
-            return Ok(None);
-        }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut stmt = tx.prepare(
-            "SELECT DISTINCT t.topic FROM memory_topics t
-            JOIN memories m ON m.id=t.memory_id WHERE m.state=?1 AND t.notified=0
-            ORDER BY t.topic ASC LIMIT 100",
-        )?;
-        let topics = stmt
-            .query_map(params![STATE_DISPUTED], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(stmt);
-        for topic in topics {
-            if !intent.contains(&topic) {
-                continue;
-            }
-            let mut stmt = tx.prepare(
-                "SELECT m.text FROM memory_topics t JOIN memories m ON m.id=t.memory_id
-                WHERE t.topic=?1 AND m.state=?2 LIMIT 3",
-            )?;
-            let texts = stmt
-                .query_map(params![topic, STATE_DISPUTED], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            tx.execute(
-                "UPDATE memory_topics SET notified=1 WHERE topic=?1",
-                params![topic],
-            )?;
-            tx.commit()?;
-            let summary = texts
-                .iter()
-                .map(|s| s.chars().take(100).collect::<String>())
-                .collect::<Vec<_>>()
-                .join(" / ");
-            return Ok(Some(format!("Conflicting project memories about '{topic}' were paused; ask the user which rule applies: {summary}")));
-        }
-        tx.commit()?;
-        Ok(None)
     }
 
     pub fn set_mode(
@@ -896,22 +780,95 @@ fn enforce_active_limit(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn digest_project_file(root: &Path, relative: &str) -> Option<String> {
-    let root = std::fs::canonicalize(root).ok()?;
-    let target = std::fs::canonicalize(root.join(relative)).ok()?;
-    if !target.starts_with(&root) || !target.is_file() {
-        return None;
+/// What one path hint can contribute: an evidence digest, plain navigation, or
+/// no usable anchor at all.
+#[derive(Debug, PartialEq, Eq)]
+enum PathState {
+    File(String),
+    Directory,
+    Unavailable,
+}
+
+/// Stable per-worktree key stored with a fingerprint.
+fn worktree_key(root: &Path) -> String {
+    std::fs::canonicalize(root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.to_string_lossy().into_owned())
+}
+
+/// Evidence is stale here when no recorded baseline matches the current file
+/// content in this worktree. A memory with nothing to compare keeps its normal
+/// 30-day expiry instead: a hint that is only a directory, or a record written
+/// before per-worktree baselines existed, has no content to re-verify.
+fn review_is_stale(conn: &Connection, root: &Path, id: &str) -> Result<bool> {
+    let mut statement =
+        conn.prepare("SELECT relative_path, digest FROM memory_files WHERE memory_id=?1")?;
+    let rows = statement.query_map(params![id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut anchored = false;
+    for row in rows {
+        let (path, digest) = row?;
+        anchored = true;
+        if fingerprint_path(root, &path) == PathState::File(digest) {
+            return Ok(false);
+        }
     }
-    let file = std::fs::File::open(target).ok()?;
-    if file.metadata().ok()?.len() > 16 * 1024 * 1024 {
-        return None;
+    Ok(anchored)
+}
+
+/// Hide review evidence from this worktree only; other checkouts keep their own
+/// verdict for the same shared memory.
+fn set_stale(conn: &Connection, id: &str, root: &str, stale: bool) -> Result<()> {
+    if stale {
+        conn.execute(
+            "INSERT INTO memory_stale(memory_id,root) VALUES (?1,?2)
+            ON CONFLICT(memory_id,root) DO NOTHING",
+            params![id, root],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM memory_stale WHERE memory_id=?1 AND root=?2",
+            params![id, root],
+        )?;
+    }
+    Ok(())
+}
+
+fn fingerprint_path(root: &Path, relative: &str) -> PathState {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return PathState::Unavailable;
+    };
+    let Ok(target) = std::fs::canonicalize(root.join(relative)) else {
+        return PathState::Unavailable;
+    };
+    if !target.starts_with(&root) {
+        return PathState::Unavailable;
+    }
+    if target.is_dir() {
+        return PathState::Directory;
+    }
+    if !target.is_file() {
+        return PathState::Unavailable;
+    }
+    let Ok(file) = std::fs::File::open(target) else {
+        return PathState::Unavailable;
+    };
+    if file
+        .metadata()
+        .ok()
+        .is_none_or(|data| data.len() > 16 * 1024 * 1024)
+    {
+        return PathState::Unavailable;
     }
     let mut bytes = Vec::new();
-    file.take(16 * 1024 * 1024 + 1)
+    if file
+        .take(16 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > 16 * 1024 * 1024 {
-        return None;
+        .is_err()
+        || bytes.len() > 16 * 1024 * 1024
+    {
+        return PathState::Unavailable;
     }
     let digest = Sha256::digest(&bytes);
     let mut out = String::with_capacity(64);
@@ -919,7 +876,7 @@ fn digest_project_file(root: &Path, relative: &str) -> Option<String> {
     for byte in digest {
         let _ = write!(&mut out, "{byte:02x}");
     }
-    Some(out)
+    PathState::File(out)
 }
 
 /// Reuse an existing row's identity when the same content is remembered again
@@ -1079,12 +1036,27 @@ fn from_json<T: serde::de::DeserializeOwned>(row: &Row<'_>, index: usize) -> rus
 /// Forward-compatible, additive schema migration. A database written by an
 /// older build gains the new columns; a database from a newer build is rejected
 /// by the version check in `Store::init`.
-fn migrate(conn: &Connection) -> Result<()> {
+fn migrate(conn: &Connection, from: i64) -> Result<()> {
     for (name, kind) in ADDED_COLUMNS {
         if !column_exists(conn, name)? {
             conn.execute_batch(&format!("ALTER TABLE memories ADD COLUMN {name} {kind};"))
                 .context("Failed to migrate the memory schema")?;
         }
+    }
+    if from < 3 {
+        // Version 3 keeps fingerprints per worktree and stops inferring topic
+        // conflicts. An old baseline cannot be attributed to a checkout, and a
+        // paused rule has no author left to ask, so both are reset: reviews then
+        // rely on their 30-day expiry until new evidence is recorded.
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS memory_topics; DROP TABLE IF EXISTS memory_files;",
+        )?;
+        conn.execute_batch(SCHEMA)
+            .context("Failed to create the version 3 tables")?;
+        conn.execute(
+            "UPDATE memories SET state=?1, updated_at=?2 WHERE state IN ('stale','disputed')",
+            params![STATE_ACCEPTED, now_ts()],
+        )?;
     }
     conn.execute_batch(INDEXES)
         .context("Failed to create memory schema indexes")?;
@@ -1218,6 +1190,7 @@ mod tests {
         Store::open(
             &dir.join("workspaces").join("abc").join("memory.sqlite3"),
             "scope-1",
+            &dir.to_string_lossy(),
         )
         .expect("open store")
     }
@@ -1356,16 +1329,22 @@ mod tests {
         let settings = reopened.set_mode(None, None).unwrap();
         assert!(!settings.use_enabled && settings.capture_enabled);
 
-        assert!(Store::open(&dir.path().join("w2").join("m.sqlite3"), "other-scope").is_ok());
+        assert!(Store::open(
+            &dir.path().join("w2").join("m.sqlite3"),
+            "other-scope",
+            &dir.path().to_string_lossy()
+        )
+        .is_ok());
     }
 
     #[test]
     fn identity_mismatch_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("m.sqlite3");
-        drop(Store::open(&path, "scope-a").unwrap());
-        assert!(Store::open(&path, "scope-b").is_err());
-        assert!(Store::open(&path, "scope-a").is_ok());
+        let root = dir.path().to_string_lossy().into_owned();
+        drop(Store::open(&path, "scope-a", &root).unwrap());
+        assert!(Store::open(&path, "scope-b", &root).is_err());
+        assert!(Store::open(&path, "scope-a", &root).is_ok());
     }
     fn note(text: &str) -> NewMemory {
         NewMemory {
@@ -1436,12 +1415,14 @@ mod tests {
             .join("workspaces")
             .join("abc")
             .join("memory.sqlite3");
-        drop(Store::open(&path, "scope-1").unwrap());
+        let root = dir.path().to_string_lossy().into_owned();
+        drop(Store::open(&path, "scope-1", &root).unwrap());
         let mut handles = Vec::new();
         for worker in 0..2 {
             let path = path.clone();
+            let root = root.clone();
             handles.push(std::thread::spawn(move || {
-                let mut store = Store::open(&path, "scope-1").unwrap();
+                let mut store = Store::open(&path, "scope-1", &root).unwrap();
                 for index in 0..10 {
                     let text = format!("worker {worker} note {index}");
                     store.insert(&input(&text, "manual"), true).unwrap();
@@ -1451,11 +1432,71 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        let store = Store::open(&path, "scope-1").unwrap();
+        let store = Store::open(&path, "scope-1", &root).unwrap();
         let count: i64 = store
             .conn
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 20);
+    }
+
+    fn review(text: &str, paths: &[&str]) -> NewMemory {
+        NewMemory {
+            kind: "review".to_string(),
+            text: text.to_string(),
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+            evidence_refs: vec!["src/lib.rs:1".to_string()],
+            source: Source {
+                origin: "model_proposal".to_string(),
+                session_id: None,
+                call_id: None,
+            },
+        }
+    }
+
+    #[test]
+    fn review_evidence_is_only_hidden_in_the_worktree_that_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let side = dir.path().join("side");
+        for root in [&main, &side] {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+        }
+        std::fs::write(
+            main.join("src/lib.rs"),
+            "fn main() {}
+",
+        )
+        .unwrap();
+        std::fs::write(
+            side.join("src/lib.rs"),
+            "fn main() { work(); }
+",
+        )
+        .unwrap();
+        let path = dir.path().join("memory.sqlite3");
+
+        let mut from_main = Store::open(&path, "scope-1", &main.to_string_lossy()).unwrap();
+        let memory = from_main
+            .insert(&review("parser lacks EOF handling", &["src/lib.rs"]), true)
+            .unwrap();
+        from_main.stamp_paths(&memory.id, &main).unwrap();
+        assert!(!from_main.is_stale(&memory.id).unwrap());
+        assert_eq!(from_main.search("parser EOF", &[], 5).unwrap().len(), 1);
+
+        let mut from_side = Store::open(&path, "scope-1", &side.to_string_lossy()).unwrap();
+        from_side.refresh_file_states(&side).unwrap();
+        assert!(from_side.is_stale(&memory.id).unwrap());
+        assert!(from_side.search("parser EOF", &[], 5).unwrap().is_empty());
+        assert!(
+            !from_main.is_stale(&memory.id).unwrap(),
+            "a sibling checkout cannot change this verdict"
+        );
+        assert_eq!(from_main.search("parser EOF", &[], 5).unwrap().len(), 1);
+
+        from_side.stamp_paths(&memory.id, &side).unwrap();
+        assert!(!from_side.is_stale(&memory.id).unwrap());
+        assert_eq!(from_side.search("parser EOF", &[], 5).unwrap().len(), 1);
+        assert!(!from_main.is_stale(&memory.id).unwrap());
     }
 }

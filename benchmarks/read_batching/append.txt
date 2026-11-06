@@ -1,0 +1,1 @@
+When reads of relevant implementation and tests are independent, gather them in a single model turn when practical, without expanding the reading scope merely to batch.

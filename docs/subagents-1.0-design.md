@@ -40,7 +40,8 @@ No host-side multi-agent coordinator is introduced.
 
 1. Let the main agent choose a **profile**, not hand-write a new role prompt for
    every delegation.
-2. Make read-only and test-running profiles **actually enforced** by the host.
+2. Give profiles a tool allowlist and declare intent in their prompt; do not
+   parse shell commands in the host, because a command grammar is not a sandbox.
 3. Route profiles to different model tiers without exposing raw model IDs to the
    model.
 4. Bound each child with turn and token budgets; a limit produces a resumable
@@ -133,7 +134,7 @@ child.
 
 Project profiles cannot add hooks, MCP servers, environment variables or
 permissions the parent does not already have. They only select a prompt, a tool
-filter, a shell policy, a model tier and numeric limits.
+filter, a shell switch, a model tier and numeric limits.
 
 ### 4.2 File format
 
@@ -147,7 +148,7 @@ name: reviewer
 description: Read-only review of a diff. Use after code changes.
 model: heavy
 thinking: high
-shell: read-only
+shell: allow
 tools: [shell]
 maxTurns: 20
 maxTokens: 60000
@@ -164,7 +165,7 @@ severity, and what you could not verify. Do not edit files.
 | `description` | required | At most 240 characters. Written for the main model; say when to use it. |
 | `model` | `inherit` | `auto`, `light`, `medium`, `heavy` or `inherit`. No raw model IDs in profiles. |
 | `thinking` | inherit | Uses the host's existing thinking-tier environment; empty means inherit. Provider-specific extensions are out of scope. |
-| `shell` | `inherit` | `read-only`, `test`, `inherit` or `deny`. See section 5. |
+| `shell` | `allow` | `allow` or `deny` (removes the shell tool). "Read only" is prompt guidance, not enforcement. |
 | `tools` | inherit all | Inline list of host tool names. `[]` means no tools. Omitted means inherit all. |
 | `disallowedTools` | none | Inline list removed after `tools`. Deny wins. |
 | `maxTurns` | plugin default | Integer 1..100. One turn is one model request. |
@@ -180,15 +181,17 @@ tools fails the child with a clear `NO_TOOLS` startup error. Unknown names in
 
 | Profile | Model | Shell | Tools | Default turns | Purpose |
 | --- | --- | --- | --- | --- | --- |
-| `explore` | `light` | `read-only` | `[shell]` | 30 | Find files, trace code, answer codebase questions. |
-| `planner` | `medium` | `read-only` | `[shell]` | 30 | Produce an implementation plan without edits. |
-| `reviewer` | `heavy` | `read-only` | `[shell]` | 20 | Review a diff for correctness, security and missing tests. |
-| `verifier` | `heavy` | `test` | `[shell]` | 30 | Run tests and verify behavior against acceptance criteria. |
-| `general` | `auto` | `inherit` | inherit all | 40 | Implementation and other full-tool work. |
+| `explore` | `light` | `allow` | `[shell]` | 30 | Find files, trace code, answer codebase questions. |
+| `planner` | `medium` | `allow` | `[shell]` | 30 | Produce an implementation plan without edits. |
+| `reviewer` | `heavy` | `allow` | `[shell]` | 20 | Review a diff for correctness, security and missing tests. |
+| `verifier` | `heavy` | `allow` | `[shell]` | 30 | Run tests and verify behavior against acceptance criteria. |
+| `general` | `auto` | `allow` | inherit all | 40 | Implementation and other full-tool work. |
 
 `general` is the default when `profile` is omitted, so old task shapes keep
 working. Its prompt must stay short and must not duplicate the plugin's base
 delegation guidance.
 
-Kroma's core only exposes `shell` plus plugin/MCP tools. Therefore `[shell]` is
-the normal read-only tool set; enforcement comes from the sh
+Kroma's core only exposes `shell` plus plugin/MCP tools, so `[shell]` is the normal
+read-only tool set: no file-editing tool is advertised. Preventing a write the
+model decides to run through the shell is the profile prompt's job, not the
+host's; only `shell: deny` removes the shell tool itself.

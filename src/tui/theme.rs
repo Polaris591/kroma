@@ -77,21 +77,21 @@ impl Theme {
                 // surfaces. Brand identity and execution states keep their
                 // distinct accent colours without tinting ordinary content.
                 background: Color::Rgb(13, 13, 13), // original terminal gray
-                text: Color::Rgb(229, 229, 229),    // original prose gray
-                muted: Color::Rgb(176, 176, 176),   // original secondary gray
-                accent: Color::Rgb(77, 201, 192),   // Kroma identity
+                text: Color::Rgb(244, 244, 245),    // crisp primary ink on unchanged gray
+                muted: Color::Rgb(189, 191, 197),   // readable secondary ink
+                accent: Color::Rgb(94, 218, 214),   // vivid but controlled cyan
                 border: Color::Rgb(86, 86, 86),     // original separators
-                user: Color::Rgb(180, 156, 255),    // user identity
-                tool: Color::Rgb(176, 176, 176),    // neutral command text
-                code: Color::Rgb(229, 229, 229),    // neutral inline code
-                error: Color::Rgb(240, 98, 111),    // error state
+                user: Color::Rgb(190, 155, 255),    // distinct luminous violet
+                tool: Color::Rgb(189, 191, 197),    // subdued command metadata
+                code: Color::Rgb(244, 244, 245),    // syntax tokens styled separately
+                error: Color::Rgb(255, 139, 151),   // legible coral error ink
                 surface: Color::Rgb(27, 27, 27),    // original message gray
                 inset: Color::Rgb(17, 17, 17),      // recessed tool area
                 overlay: Color::Rgb(30, 30, 30),    // code and overlays
-                faint: Color::Rgb(145, 145, 145),   // original dim gray
-                accent_text: Color::Rgb(77, 201, 192),
-                success: Color::Rgb(79, 157, 107),
-                warning: Color::Rgb(229, 169, 61),
+                faint: Color::Rgb(161, 161, 166),   // brighter quiet metadata
+                accent_text: Color::Rgb(94, 218, 214),
+                success: Color::Rgb(142, 223, 173),
+                warning: Color::Rgb(255, 193, 120),
             },
             "light" => Self {
                 background: Color::Rgb(246, 245, 242),
@@ -303,12 +303,12 @@ mod tests {
         assert_eq!(theme.surface, Color::Rgb(27, 27, 27));
         assert_eq!(theme.inset, Color::Rgb(17, 17, 17));
         assert_eq!(theme.overlay, Color::Rgb(30, 30, 30));
-        assert_eq!(theme.text, Color::Rgb(229, 229, 229));
-        assert_eq!(theme.muted, Color::Rgb(176, 176, 176));
-        assert_eq!(theme.faint, Color::Rgb(145, 145, 145));
+        assert_eq!(theme.text, Color::Rgb(244, 244, 245));
+        assert_eq!(theme.muted, Color::Rgb(189, 191, 197));
+        assert_eq!(theme.faint, Color::Rgb(161, 161, 166));
         assert_eq!(theme.code, theme.text);
-        assert_eq!(theme.accent, Color::Rgb(77, 201, 192));
-        assert_eq!(theme.user, Color::Rgb(180, 156, 255));
+        assert_eq!(theme.accent, Color::Rgb(94, 218, 214));
+        assert_eq!(theme.user, Color::Rgb(190, 155, 255));
     }
 
     #[test]

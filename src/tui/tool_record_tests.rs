@@ -327,10 +327,19 @@ fn all_tool_records_share_one_subtle_gray_surface() {
     success_ui.finish_task();
     let b = draw(&mut success_ui, 100, 60);
     let cache = success_ui.history_cache.as_ref().unwrap();
-    assert!(cache
+    assert!(!cache
         .decor
         .iter()
         .any(|(_, d)| matches!(d, Decor::Surface(Surface::ToolRecord))));
+    assert_eq!(
+        cache
+            .decor
+            .iter()
+            .filter(|(_, d)| matches!(d, Decor::Role { label, .. } if *label == "TOOLS" || *label == "工具"))
+            .count(),
+        1,
+        "adjacent tool calls share a single phase card"
+    );
     for (row, _) in &cache.tool_rows {
         let y = success_ui.selection_area.y + (*row - success_ui.history_top_row) as u16;
         assert_eq!(
@@ -339,8 +348,8 @@ fn all_tool_records_share_one_subtle_gray_surface() {
         );
         assert_eq!(
             b.cell((success_ui.selection_area.x + 3, y)).unwrap().bg,
-            success_ui.active_colors().background,
-            "the gray panel stays inset from the assistant rail"
+            success_ui.message_colors().surface,
+            "tool content fills the same card surface as the reply"
         );
         assert_eq!(
             b.cell((success_ui.selection_area.x + 6, y))
@@ -362,7 +371,7 @@ fn all_tool_records_share_one_subtle_gray_surface() {
     );
     failed_ui.finish_task();
     draw(&mut failed_ui, 100, 60);
-    assert!(failed_ui
+    assert!(!failed_ui
         .history_cache
         .as_ref()
         .unwrap()
@@ -372,16 +381,281 @@ fn all_tool_records_share_one_subtle_gray_surface() {
     failed_ui.toggle_all_tools();
     let b = draw(&mut failed_ui, 100, 60);
     let cache = failed_ui.history_cache.as_ref().unwrap();
-    let panel = cache
-        .decor
-        .iter()
-        .find_map(|(row, d)| matches!(d, Decor::Surface(Surface::ToolRecord)).then_some(*row))
-        .expect("full mode keeps failure diagnostics in a tinted panel");
-    let y = failed_ui.selection_area.y + (panel - failed_ui.history_top_row) as u16;
+    let row = cache.tool_rows[0].0;
+    let y = failed_ui.selection_area.y + (row - failed_ui.history_top_row) as u16;
     assert_eq!(
         b.cell((failed_ui.selection_area.x + 4, y)).unwrap().bg,
         failed_ui.message_colors().surface
     );
+}
+
+#[test]
+fn model_replies_and_consecutive_tools_are_separate_uniform_cards() {
+    let mut ui = ui();
+    ui.add_user("Investigate");
+    ui.event(UiEvent::Text("First I will inspect the code.".into()));
+    finish(
+        &mut ui,
+        "read",
+        "rg -n TODO src",
+        "exit: 0\nsrc/main.rs:1",
+        false,
+    );
+    finish(&mut ui, "check", "cargo check", "exit: 0\nFinished", false);
+    ui.event(UiEvent::Text("Now I can fix it.".into()));
+    finish(&mut ui, "test", "cargo test", "exit: 0\n1 passed", false);
+    ui.event(UiEvent::Text("The change is verified.".into()));
+    ui.finish_task();
+
+    let buffer = draw(&mut ui, 120, 75);
+    let cache = ui.history_cache.as_ref().unwrap();
+    let roles: Vec<_> = cache
+        .decor
+        .iter()
+        .filter_map(|(row, decor)| match decor {
+            Decor::Role { label, .. } => Some((*row, *label)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        roles.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
+        vec!["YOU", "KROMA", "TOOLS", "KROMA", "TOOLS", "KROMA"]
+    );
+    assert!(!cache
+        .decor
+        .iter()
+        .any(|(_, decor)| matches!(decor, Decor::Surface(Surface::ToolRecord))));
+    let rail_rows = cache
+        .decor
+        .iter()
+        .filter_map(|(row, decor)| {
+            matches!(
+                decor,
+                Decor::Rail {
+                    column: 1,
+                    first_only: false,
+                    ..
+                }
+            )
+            .then_some(*row)
+        })
+        .collect::<Vec<_>>();
+    let gaps = rail_rows
+        .windows(2)
+        .filter_map(|pair| (pair[1] > pair[0] + 1).then_some(pair[1] - pair[0] - 1))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        gaps,
+        vec![1; roles.len() - 1],
+        "each user, model, and tool card has exactly one black separator row"
+    );
+    let colors = ui.message_colors();
+    for (row, role) in roles {
+        let y = ui.selection_area.y + (row - ui.history_top_row) as u16;
+        assert_eq!(
+            buffer.cell((ui.selection_area.x + 3, y)).unwrap().bg,
+            colors.surface,
+            "every {role} card uses the same background"
+        );
+        assert_eq!(
+            buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
+            if role == "YOU" {
+                colors.user_rail
+            } else {
+                colors.assistant_rail
+            }
+        );
+    }
+}
+
+#[test]
+fn thinking_only_waits_for_real_output_then_joins_the_reply_card() {
+    let mut ui = ui();
+    ui.add_user("Explain this");
+    ui.event(UiEvent::TaskStarted);
+    ui.event(UiEvent::ModelStarted);
+    ui.event(UiEvent::ReasoningDelta("Check what matters first".into()));
+    let roles = |ui: &UiState| {
+        ui.history_cache
+            .as_ref()
+            .unwrap()
+            .decor
+            .iter()
+            .filter_map(|(_, item)| match item {
+                Decor::Role { label, .. } => Some(*label),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    draw(&mut ui, 100, 40);
+    assert_eq!(roles(&ui), vec!["YOU"]);
+    assert_eq!(ui.phase, "thinking");
+    assert!(!ui
+        .history_cache
+        .as_ref()
+        .unwrap()
+        .text
+        .to_string()
+        .contains("Reasoning collapsed"));
+
+    ui.reasoning_expanded = true;
+    draw(&mut ui, 100, 40);
+    assert_eq!(
+        roles(&ui),
+        vec!["YOU"],
+        "expanded pending thinking still has no card"
+    );
+
+    ui.event(UiEvent::Text("The conclusion is clear".into()));
+    draw(&mut ui, 100, 40);
+    assert_eq!(roles(&ui), vec!["YOU", "KROMA"]);
+    let expanded = ui.history_cache.as_ref().unwrap().text.to_string();
+    assert!(expanded.contains("Check what matters first"));
+    assert!(expanded.contains("The conclusion is clear"));
+    assert!(
+        expanded.find("Check what matters first") < expanded.find("The conclusion is clear"),
+        "thinking appears within its answer, before the text"
+    );
+
+    ui.reasoning_expanded = false;
+    draw(&mut ui, 100, 40);
+    assert_eq!(roles(&ui), vec!["YOU", "KROMA"]);
+    let collapsed = ui.history_cache.as_ref().unwrap().text.to_string();
+    assert_eq!(collapsed.matches("Reasoning collapsed").count(), 1);
+    assert!(!collapsed.contains("Check what matters first"));
+    assert!(collapsed.contains("The conclusion is clear"));
+}
+
+#[test]
+fn collapsed_reasoning_between_tool_calls_never_creates_blank_kroma_cards() {
+    let mut ui = ui();
+    ui.add_user("Research recent rankings");
+    ui.event(UiEvent::TaskStarted);
+    ui.event(UiEvent::ModelStarted);
+    ui.event(UiEvent::ReasoningDelta("Plan the search".into()));
+    finish(
+        &mut ui,
+        "search",
+        "web search",
+        "exit: 0\nFound results",
+        false,
+    );
+    ui.event(UiEvent::ModelStarted);
+    ui.event(UiEvent::ReasoningDelta("Choose an official source".into()));
+
+    // A model step that emitted only hidden reasoning does not add a
+    // KROMA card while waiting for the next tool.
+    draw(&mut ui, 120, 65);
+    let labels = |ui: &UiState| -> Vec<&'static str> {
+        ui.history_cache
+            .as_ref()
+            .unwrap()
+            .decor
+            .iter()
+            .filter_map(|(_, decor)| match decor {
+                Decor::Role { label, .. } => Some(*label),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(labels(&ui), vec!["YOU", "TOOLS"]);
+
+    finish(&mut ui, "fetch", "web fetch", "exit: 0\nData loaded", false);
+    ui.event(UiEvent::ModelStarted);
+    ui.event(UiEvent::ReasoningDelta("Check another source".into()));
+    finish(&mut ui, "check", "web search", "exit: 0\nVerified", false);
+    ui.event(UiEvent::ModelStarted);
+    ui.event(UiEvent::ReasoningDelta("Form the answer".into()));
+    draw(&mut ui, 120, 65);
+    assert_eq!(labels(&ui), vec!["YOU", "TOOLS"]);
+
+    // Only one reasoning notice is rendered in the tool card, and all calls form one
+    // continuous group even though the model thought between calls.
+    let cache = ui.history_cache.as_ref().unwrap();
+    assert_eq!(cache.tool_rows.len(), 3);
+    assert_eq!(
+        cache
+            .text
+            .lines
+            .iter()
+            .filter(|line| line.to_string().contains("Reasoning collapsed"))
+            .count(),
+        1
+    );
+
+    ui.event(UiEvent::Text("The verified rankings are ready.".into()));
+    ui.finish_task();
+    draw(&mut ui, 120, 65);
+    assert_eq!(labels(&ui), vec!["YOU", "TOOLS", "KROMA"]);
+
+    // Expanding restores all thoughts in chronological order without
+    // splitting the tool group or adding standalone KROMA cards.
+    ui.reasoning_expanded = true;
+    draw(&mut ui, 120, 65);
+    assert_eq!(labels(&ui), vec!["YOU", "TOOLS", "KROMA"]);
+    let expanded = ui.history_cache.as_ref().unwrap().text.to_string();
+    let positions = [
+        "Plan the search",
+        "web search",
+        "Choose an official source",
+        "web fetch",
+        "Check another source",
+        "Form the answer",
+        "The verified rankings are ready.",
+    ]
+    .iter()
+    .map(|item| {
+        expanded
+            .find(item)
+            .unwrap_or_else(|| panic!("missing expanded item {item}: {expanded}"))
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "expanded thoughts must stay in chronological order: {expanded}"
+    );
+    assert_eq!(
+        expanded.matches("Reasoning · Ctrl+T to collapse").count(),
+        2,
+        "tools and final reply each own a reasoning notice"
+    );
+    ui.reasoning_expanded = false;
+    draw(&mut ui, 120, 65);
+    assert_eq!(labels(&ui), vec!["YOU", "TOOLS", "KROMA"]);
+    assert_eq!(
+        ui.history_cache
+            .as_ref()
+            .unwrap()
+            .text
+            .to_string()
+            .matches("Reasoning collapsed")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn empty_assistant_stream_does_not_create_a_header_only_card() {
+    let mut ui = ui();
+    ui.add_user("Run checks");
+    ui.event(UiEvent::Text(" \n".into()));
+    finish(&mut ui, "check", "cargo check", "exit: 0", false);
+    draw(&mut ui, 100, 35);
+    let roles = ui
+        .history_cache
+        .as_ref()
+        .unwrap()
+        .decor
+        .iter()
+        .filter_map(|(_, item)| {
+            if let Decor::Role { label, .. } = item {
+                Some(*label)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(roles, vec!["YOU", "TOOLS"]);
 }
 
 #[test]

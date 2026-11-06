@@ -596,6 +596,7 @@ pub struct UiState {
     scrollbar_drag: Option<usize>,
     scrollbar_pointer_y: Option<u16>,
     scrollbar_area: Rect,
+    return_latest_area: Rect,
     selection_dragging: bool,
     selection_edge: i8,
     visible_links: Vec<VisibleLink>,
@@ -753,6 +754,7 @@ impl UiState {
             scrollbar_drag: None,
             scrollbar_pointer_y: None,
             scrollbar_area: Rect::default(),
+            return_latest_area: Rect::default(),
             selection_dragging: false,
             selection_edge: 0,
             visible_links: Vec::new(),
@@ -881,10 +883,7 @@ impl UiState {
 
     fn navigation_status(&self) -> String {
         let language = self.preferences.language;
-        let latest = language.text(
-            "Browsing history · Ctrl+End: latest",
-            "正在浏览历史 · Ctrl+End 返回最新",
-        );
+        let latest = language.text("Browsing history", "正在浏览历史");
         let latest = if let Some(index) = self.navigation_turn {
             let end = index.saturating_add(1).min(self.entries.len());
             let number = self.entries[..end]
@@ -912,6 +911,11 @@ impl UiState {
         } else {
             latest
         }
+    }
+
+    /// Mouse hit testing matches the link shown while browsing history.
+    pub(in crate::tui) fn return_latest_at(&self, column: u16, row: u16) -> bool {
+        self.return_latest_area.width > 0 && self.return_latest_area.contains((column, row).into())
     }
 
     /// Record the turn's wall-clock duration.
@@ -2099,9 +2103,9 @@ impl UiState {
         let mut preformatted_rows = Vec::new();
         let mut decor = Vec::new();
         let mut reading_rows = Vec::new();
-        // One collapsed reasoning entry per user turn, even if the model
-        // alternates reasoning/tool calls several times. Ctrl+T still renders
-        // every reasoning segment in its original chronological position.
+        // Legacy shows one reasoning notice per turn. Plain defers thoughts
+        // into their next real tool/reply card, where Ctrl+T restores each
+        // segment without creating a separate reasoning-only card.
         let mut reasoning_notice_shown = false;
         if self.entries.is_empty() && !self.running {
             lines.push(Line::default());
@@ -2125,18 +2129,46 @@ impl UiState {
         let visible = self.entries[visible_start..].iter().collect::<Vec<_>>();
         let mut hidden_until = 0;
         let mut previous_was_tool = false;
-        let mut plain_assistant_start: Option<usize> = None;
+        let mut plain_block: Option<(usize, messages::MessageRole)> = None;
+        let mut plain_assistant_has_text = false;
+        // In Plain, thinking belongs to the *next* visible model or tool
+        // phase. Until one exists, only the pinned activity line displays it.
+        let mut pending_reasoning: Vec<&Entry> = Vec::new();
         for (index, entry) in visible.iter().enumerate() {
-            if entry.assistant_phase == AssistantPhase::Discarded {
+            if entry.assistant_phase == AssistantPhase::Discarded || index < hidden_until {
                 continue;
             }
-            if index < hidden_until {
+            if matches!(entry.kind, Kind::Reasoning) && entry.body.trim().is_empty() {
                 continue;
             }
-            if self.plain_style && matches!(entry.kind, Kind::User | Kind::Info) {
-                self.close_plain_assistant(&mut lines, &mut decor, &mut plain_assistant_start);
+            // Never create a standalone KROMA card for thinking, even
+            // when Ctrl+T is expanded. Attach it when real output arrives.
+            if self.plain_style && matches!(entry.kind, Kind::Reasoning) {
+                pending_reasoning.push(*entry);
+                continue;
             }
-            if previous_was_tool && !matches!(entry.kind, Kind::Tool) {
+            if self.plain_style
+                && matches!(entry.kind, Kind::Assistant)
+                && entry.body.trim().is_empty()
+            {
+                continue;
+            }
+            if self.plain_style {
+                let role = match entry.kind {
+                    Kind::Assistant => Some(messages::MessageRole::Assistant),
+                    Kind::Tool => Some(messages::MessageRole::Tools),
+                    Kind::Reasoning | Kind::User | Kind::Info => None,
+                };
+                // Real model text and tool batches get distinct cards.
+                // Pending thinking is attached only after this boundary.
+                if plain_block.is_some_and(|(_, current)| Some(current) != role)
+                    || (plain_assistant_has_text && matches!(entry.kind, Kind::Assistant))
+                {
+                    self.close_plain_block(&mut lines, &mut decor, &mut plain_block);
+                    plain_assistant_has_text = false;
+                }
+            }
+            if !self.plain_style && previous_was_tool && !matches!(entry.kind, Kind::Tool) {
                 lines.push(Line::default());
             }
             previous_was_tool = matches!(entry.kind, Kind::Tool);
@@ -2144,6 +2176,7 @@ impl UiState {
             match entry.kind {
                 Kind::User => {
                     reasoning_notice_shown = false;
+                    pending_reasoning.clear();
                     let block_start = lines.len();
                     decor.push((block_start, Decor::TurnStart(visible_start + index)));
                     if self.plain_style {
@@ -2206,11 +2239,25 @@ impl UiState {
                         continue;
                     }
                     if self.plain_style {
-                        self.begin_plain_assistant(
+                        self.begin_plain_block(
                             &mut lines,
                             &mut decor,
-                            &mut plain_assistant_start,
+                            &mut plain_block,
+                            messages::MessageRole::Assistant,
                         );
+                        let mut reasoning_in_card = false;
+                        for thought in pending_reasoning.drain(..) {
+                            self.append_reasoning(
+                                thought,
+                                theme,
+                                width,
+                                &mut lines,
+                                &mut preformatted_rows,
+                                &mut markdown_targets,
+                                &mut reasoning_in_card,
+                                &mut reading_rows,
+                            );
+                        }
                         if lines.last().is_some_and(|line| !line.spans.is_empty()) {
                             lines.push(Line::default());
                         }
@@ -2228,13 +2275,23 @@ impl UiState {
                     let body_start = lines.len();
                     if !entry.body.is_empty() {
                         let prose = width.saturating_sub(if self.plain_style { 4 } else { 5 });
-                        // Headings retain the link tone, while ordinary inline
-                        // code is neutral rather than competing with warnings.
+                        // Distinct restrained inks: almost-white headings,
+                        // mist-blue links and warm inline literals. Keep the
+                        // existing prose/code/background surfaces unchanged.
                         let prose_colors = if self.plain_style {
+                            let dark = self.themes.preset() == "dark";
                             markdown::ProseColors {
-                                // Headings are hierarchy, not interactive links.
-                                heading: theme.text,
-                                code: theme.code,
+                                heading: if dark {
+                                    Color::Rgb(255, 255, 255)
+                                } else {
+                                    theme.text
+                                },
+                                code: if dark && theme.code == theme.text {
+                                    Color::Rgb(255, 208, 138)
+                                } else {
+                                    theme.code
+                                },
+                                link: self.semantic_colors().link,
                             }
                         } else {
                             markdown::ProseColors::from_theme(theme)
@@ -2301,105 +2358,161 @@ impl UiState {
                     {
                         lines.push(Line::default());
                     }
+                    if self.plain_style {
+                        plain_assistant_has_text = true;
+                    }
                 }
                 Kind::Tool => {
+                    // A tool batch may contain interleaved thinking. It ends
+                    // at its last tool: trailing thinking belongs to the next
+                    // actual model response, not to this tool card.
+                    let boundary = visible[index..]
+                        .iter()
+                        .position(|next| !matches!(next.kind, Kind::Tool | Kind::Reasoning))
+                        .map_or(visible.len(), |count| index + count);
+                    let end = if self.plain_style {
+                        index
+                            + visible[index..boundary]
+                                .iter()
+                                .rposition(|next| matches!(next.kind, Kind::Tool))
+                                .expect("a tool batch always begins with a tool")
+                            + 1
+                    } else {
+                        boundary
+                    };
                     if self.plain_style {
-                        self.begin_plain_assistant(
+                        self.begin_plain_block(
                             &mut lines,
                             &mut decor,
-                            &mut plain_assistant_start,
+                            &mut plain_block,
+                            messages::MessageRole::Tools,
                         );
-                        if lines.last().is_some_and(|line| !line.spans.is_empty()) {
-                            lines.push(Line::default());
-                        }
-                    }
-                    let end = visible[index..]
-                        .iter()
-                        .position(|next| {
-                            if self.plain_style {
-                                !matches!(next.kind, Kind::Tool)
-                            } else {
-                                !matches!(next.kind, Kind::Tool | Kind::Reasoning)
+                        let mut reasoning_in_card = false;
+                        if self.reasoning_expanded {
+                            // Preserve the chronological order of thoughts
+                            // and tools while retaining a single outer card.
+                            for thought in pending_reasoning.drain(..) {
+                                self.append_reasoning(
+                                    thought,
+                                    theme,
+                                    width,
+                                    &mut lines,
+                                    &mut preformatted_rows,
+                                    &mut markdown_targets,
+                                    &mut reasoning_in_card,
+                                    &mut reading_rows,
+                                );
                             }
-                        })
-                        .map_or(visible.len(), |count| index + count);
-                    // Interleaved reasoning belongs before the card, not between its steps.
-                    for next in &visible[index..end] {
-                        if matches!(next.kind, Kind::Reasoning) {
-                            self.append_reasoning(
-                                next,
+                            let mut tools = Vec::new();
+                            for next in &visible[index..end] {
+                                if matches!(next.kind, Kind::Tool) {
+                                    tools.push(*next);
+                                } else if matches!(next.kind, Kind::Reasoning) {
+                                    self.append_tool_group(
+                                        &tools,
+                                        theme,
+                                        width,
+                                        &mut lines,
+                                        &mut tool_rows,
+                                        &mut decor,
+                                        &mut preformatted_rows,
+                                    );
+                                    tools.clear();
+                                    self.append_reasoning(
+                                        next,
+                                        theme,
+                                        width,
+                                        &mut lines,
+                                        &mut preformatted_rows,
+                                        &mut markdown_targets,
+                                        &mut reasoning_in_card,
+                                        &mut reading_rows,
+                                    );
+                                }
+                            }
+                            self.append_tool_group(
+                                &tools,
                                 theme,
                                 width,
                                 &mut lines,
+                                &mut tool_rows,
+                                &mut decor,
                                 &mut preformatted_rows,
-                                &mut markdown_targets,
-                                &mut reasoning_notice_shown,
-                                &mut reading_rows,
+                            );
+                        } else {
+                            // Only one collapsed notice per visible tool card.
+                            // Keep all consecutive tools together regardless
+                            // of how many hidden reasoning steps separate them.
+                            for thought in pending_reasoning.drain(..).chain(
+                                visible[index..end]
+                                    .iter()
+                                    .copied()
+                                    .filter(|next| matches!(next.kind, Kind::Reasoning)),
+                            ) {
+                                self.append_reasoning(
+                                    thought,
+                                    theme,
+                                    width,
+                                    &mut lines,
+                                    &mut preformatted_rows,
+                                    &mut markdown_targets,
+                                    &mut reasoning_in_card,
+                                    &mut reading_rows,
+                                );
+                            }
+                            let tools = visible[index..end]
+                                .iter()
+                                .copied()
+                                .filter(|next| matches!(next.kind, Kind::Tool))
+                                .collect::<Vec<_>>();
+                            self.append_tool_group(
+                                &tools,
+                                theme,
+                                width,
+                                &mut lines,
+                                &mut tool_rows,
+                                &mut decor,
+                                &mut preformatted_rows,
                             );
                         }
-                    }
-                    let tools = visible[index..end]
-                        .iter()
-                        .copied()
-                        .filter(|item| matches!(item.kind, Kind::Tool))
-                        .collect::<Vec<_>>();
-                    let card = self.tool_card(
-                        &tools,
-                        theme,
-                        width.saturating_sub(if width >= inspector::MIN_ACTION_WIDTH {
-                            UnicodeWidthStr::width(self.inspection_label()) + 2
-                        } else {
-                            0
-                        }),
-                    );
-                    let base = lines.len();
-                    if width >= inspector::MIN_ACTION_WIDTH {
-                        let inspect = if self.plain_style {
-                            &card.inspect
-                        } else {
-                            &card.rows
-                        };
-                        decor.extend(
-                            inspect
-                                .iter()
-                                .map(|(row, id)| (base + row, Decor::Inspect(id.clone()))),
+                    } else {
+                        // Legacy transcript semantics remain unchanged.
+                        for next in &visible[index..end] {
+                            if matches!(next.kind, Kind::Reasoning) {
+                                self.append_reasoning(
+                                    next,
+                                    theme,
+                                    width,
+                                    &mut lines,
+                                    &mut preformatted_rows,
+                                    &mut markdown_targets,
+                                    &mut reasoning_notice_shown,
+                                    &mut reading_rows,
+                                );
+                            }
+                        }
+                        let tools = visible[index..end]
+                            .iter()
+                            .copied()
+                            .filter(|next| matches!(next.kind, Kind::Tool))
+                            .collect::<Vec<_>>();
+                        self.append_tool_group(
+                            &tools,
+                            theme,
+                            width,
+                            &mut lines,
+                            &mut tool_rows,
+                            &mut decor,
+                            &mut preformatted_rows,
                         );
                     }
-                    tool_rows.extend(card.rows.into_iter().map(|(row, id)| (base + row, id)));
-                    decor.extend(
-                        card.groups
-                            .into_iter()
-                            .map(|(row, id)| (base + row, Decor::Group(id))),
-                    );
-                    for (start, end) in card.blocks {
-                        decor.extend(
-                            (start..end)
-                                .map(|row| (base + row, Decor::Surface(Surface::ToolRecord))),
-                        );
-                    }
-                    preformatted_rows.extend(card.preformatted.into_iter().map(|row| base + row));
-                    if !self.plain_style {
-                        decor.extend(
-                            (0..card.lines.len())
-                                .map(|row| (base + row, Decor::Surface(Surface::Raised))),
-                        );
-                    }
-                    lines.extend(card.lines);
                     lines.push(Line::default());
                     hidden_until = end;
                     previous_was_tool = false;
                 }
                 Kind::Reasoning => {
-                    if self.plain_style {
-                        self.begin_plain_assistant(
-                            &mut lines,
-                            &mut decor,
-                            &mut plain_assistant_start,
-                        );
-                        if lines.last().is_some_and(|line| !line.spans.is_empty()) {
-                            lines.push(Line::default());
-                        }
-                    }
+                    // In Plain this entry was deferred above, until a real
+                    // output exists. Only the legacy renderer gets here.
                     self.append_reasoning(
                         entry,
                         theme,
@@ -2526,7 +2639,7 @@ impl UiState {
             }
         }
         if self.plain_style {
-            self.close_plain_assistant(&mut lines, &mut decor, &mut plain_assistant_start);
+            self.close_plain_block(&mut lines, &mut decor, &mut plain_block);
         }
         for (row, line) in lines.iter().enumerate() {
             if let Some(span) = line.spans.get(1) {
@@ -2568,6 +2681,7 @@ impl UiState {
         // A prior frame's IME anchor must not survive an overlay or resize.
         self.ime_cursor_position = None;
         self.recent_session_rows.clear();
+        self.return_latest_area = Rect::default();
         self.editor
             .localize_attachment_labels(self.preferences.language);
         let colors = self.active_colors();
@@ -3259,21 +3373,51 @@ impl UiState {
         }
 
         if show_navigation {
+            let area = Rect::new(
+                layout[2]
+                    .x
+                    .saturating_add(if self.plain_style { 4 } else { 2 }),
+                layout[2].y,
+                layout[2].width.saturating_sub(4),
+                1,
+            );
+            let action = self
+                .preferences
+                .language
+                .text("Return to latest", "返回最新");
+            let action_width = UnicodeWidthStr::width(action);
+            let mut prefix = format!("{} · ", self.navigation_status());
+            if UnicodeWidthStr::width(prefix.as_str()) + action_width > area.width as usize {
+                prefix = format!("{} · ", self.preferences.language.text("History", "历史"));
+            }
+            if UnicodeWidthStr::width(prefix.as_str()) + action_width > area.width as usize {
+                prefix.clear();
+            }
+            let offset = UnicodeWidthStr::width(prefix.as_str()) as u16;
+            self.return_latest_area = Rect::new(
+                area.x + offset,
+                area.y,
+                (action_width as u16).min(area.width.saturating_sub(offset)),
+                1,
+            );
+            let hovered = self
+                .hover_pointer
+                .is_some_and(|(x, y)| self.return_latest_at(x, y));
             frame.render_widget(
-                Paragraph::new(Line::styled(
-                    self.navigation_status(),
-                    Style::default().fg(colors.accent),
-                )),
-                Rect::new(
-                    // Same left edge as the pinned status line and the
-                    // transcript body, so the two stacked rows line up.
-                    layout[2]
-                        .x
-                        .saturating_add(if self.plain_style { 4 } else { 2 }),
-                    layout[2].y,
-                    layout[2].width.saturating_sub(4),
-                    1,
-                ),
+                Paragraph::new(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(colors.muted)),
+                    Span::styled(
+                        action,
+                        Style::default()
+                            .fg(if hovered {
+                                colors.accent_text
+                            } else {
+                                colors.accent
+                            })
+                            .add_modifier(Modifier::UNDERLINED | Modifier::BOLD),
+                    ),
+                ])),
+                area,
             );
         }
         // One quiet input surface: a divider, neutral prompt marker and

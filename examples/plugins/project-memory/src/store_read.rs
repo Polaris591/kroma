@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 
 use anyhow::{bail, Result};
-use rusqlite::{params, Row};
+use rusqlite::{params, OptionalExtension, Row};
 
 use crate::model::{validate_paths, Memory, SearchHit, Settings, Stats};
 use crate::store::{
@@ -40,10 +40,16 @@ const MAX_SUMMARY_CHARS: usize = 160;
 /// `model::validate_paths` allows at most eight path hints.
 const MAX_PATH_FILTERS: usize = 8;
 
-/// ?1 query, ?2 state, ?3 path-filter flag, ?4..?11 padded hints, ?12 limit.
+/// ?1 query, ?2 state, ?3 path-filter flag, ?4..?11 padded hints, ?12 limit,
+/// ?13 now, ?14 this worktree.
 /// Padding uses the empty string, which `validate_paths` never produces, so
 /// unused slots cannot match a stored hint.
 const ACTIVE_ROW: &str = "(m.expires_at IS NULL OR m.expires_at > ?13)";
+
+/// Review evidence this worktree can no longer verify stays out of recall, but
+/// a sibling worktree keeps its own verdict for the same shared memory.
+const STALE_FILTER: &str = "AND NOT EXISTS (SELECT 1 FROM memory_stale s \
+     WHERE s.memory_id = m.id AND s.root = ?14)";
 
 const PATH_FILTER: &str = "AND (?3 = 0 OR EXISTS (SELECT 1 FROM json_each(m.paths) hp \
      WHERE hp.value IN (?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)))";
@@ -97,12 +103,16 @@ impl Store {
             }
         }
         let now = now_ts();
+        let stale = self.stale_ids()?;
         let mut memories = Vec::with_capacity(unique.len());
         for id in unique {
             let memory =
                 load_memory(&self.conn, id)?.ok_or_else(|| anyhow::anyhow!("Memory not found"))?;
             if !is_active(&memory, now) {
                 bail!("Only active memories can be read");
+            }
+            if stale.contains(&memory.id) {
+                bail!("Memory evidence changed in this worktree; it is no longer active");
             }
             memories.push(memory);
         }
@@ -333,6 +343,7 @@ impl Store {
                 AND m.state = ?2
                 AND {ACTIVE_ROW}
                 {PATH_FILTER}
+                {STALE_FILTER}
               ORDER BY bm25(memories_fts) ASC, m.updated_at DESC
               LIMIT ?12"
         );
@@ -347,6 +358,7 @@ impl Store {
                 AND {ACTIVE_ROW}
                 AND instr(lower(m.text), lower(?1)) > 0
                 {PATH_FILTER}
+                {STALE_FILTER}
               ORDER BY m.updated_at DESC
               LIMIT ?12"
         );
@@ -378,10 +390,32 @@ impl Store {
                 padded[7],
                 limit as i64,
                 now_ts(),
+                self.root,
             ],
             hit_from_row,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Review evidence that this worktree can no longer verify.
+    pub fn is_stale(&self, id: &str) -> Result<bool> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM memory_stale WHERE memory_id=?1 AND root=?2",
+                params![id, self.root],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    fn stale_ids(&self) -> Result<HashSet<String>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT memory_id FROM memory_stale WHERE root=?1")?;
+        let rows = statement.query_map(params![self.root], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
     }
 }
 
@@ -478,7 +512,7 @@ mod tests {
 
     fn open(dir: &Path, name: &str) -> Store {
         let path = dir.join("workspaces").join(name).join("memory.sqlite3");
-        Store::open(&path, name).expect("open store")
+        Store::open(&path, name, &path.to_string_lossy()).expect("open store")
     }
 
     fn add(store: &mut Store, kind: &str, text: &str, paths: &[&str], accepted: bool) -> Memory {

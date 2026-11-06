@@ -42,9 +42,16 @@ const RUN_RETENTION_COUNT = 150;
 // In-process jobs are intentionally tied to the plugin host lifetime. WAL and
 // evidence live on disk; no detached daemon, second agent loop or task center.
 const jobs = new Map();
+// Runs this worker is executing right now. A `running` state on disk that is
+// not in here belongs to a host that already exited, so it is resumable.
+const activeRuns = new Set();
 const MAX_ACTIVE_JOBS = 32;
 const GLOBAL_CHILD_LIMIT = 3;
 const globalSlots = {active:0,waiting:[]};
+
+function isActiveRun(runId) {
+  return activeRuns.has(runId);
+}
 
 function childSlotRelease() {
   let released=false;
@@ -204,9 +211,11 @@ function directory(value, workdir) {
 }
 
 // A resume token is `<run_id>/<index>` and resolves only inside this plugin's
-// own runs directory. It continues a child that already finished; a running or
-// interrupted task is refused because its session may still be in use.
-function resumeSource(value, dataDir, workdir) {
+// own runs directory. It continues a child that already finished. A task this
+// worker is still executing is refused because its session may still be in use;
+// a `running` record this worker does not own is an interrupted run, and
+// resuming it is the only way to recover the work.
+function resumeSource(value, dataDir, workdir, isActive) {
   if (value === undefined || value === null) return null;
   if (typeof value !== "string" || !value.trim()) {
     throw new SubagentError("INVALID_ARGUMENT", "resume must be a nonempty string");
@@ -243,10 +252,11 @@ function resumeSource(value, dataDir, workdir) {
     throw new SubagentError("RESUME_MISSING", `resumed task '${token}' has an invalid state record`);
   }
   if (state.status === "running") {
-    throw new SubagentError("RESUME_ACTIVE",
-      `task '${token}' is still marked running; inspect its evidence instead of resuming it`);
-  }
-  if (!["completed", "failed", "paused"].includes(state.status)) {
+    if (isActive(match[1])) {
+      throw new SubagentError("RESUME_ACTIVE",
+        `task '${token}' is still running in this host; inspect its evidence instead of resuming it`);
+    }
+  } else if (!["completed", "failed", "paused"].includes(state.status)) {
     throw new SubagentError("RESUME_MISSING", `resumed task '${token}' never finished`);
   }
   let cwd;
@@ -271,7 +281,7 @@ function resumeSource(value, dataDir, workdir) {
 
 // Validate the whole batch before spawning anything: a bad task later in the
 // list must not leave earlier child agents running.
-function tasks(request, workdir, dataDir, profiles) {
+function tasks(request, workdir, dataDir, profiles, isActive) {
   const value = request?.arguments?.tasks;
   if (!Array.isArray(value) || value.length === 0) {
     throw new SubagentError("INVALID_ARGUMENT", "tasks must be a nonempty array");
@@ -299,7 +309,7 @@ function tasks(request, workdir, dataDir, profiles) {
       throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].cwd must be a nonempty string`);
     }
     const cwd = entry.cwd === undefined ? null : directory(entry.cwd, workdir);
-    const resume = resumeSource(entry.resume, dataDir, workdir);
+    const resume = resumeSource(entry.resume, dataDir, workdir, isActive);
     const name = entry.profile ?? resume?.profile ?? "general";
     if (typeof name !== "string" || !profiles.has(name)) {
       throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].profile is unknown`);
@@ -1040,7 +1050,7 @@ async function runBatch(request, options = {}) {
   } catch (error) {
     throw new SubagentError("PROFILE_INVALID", error.message);
   }
-  const entries = tasks(request, workdir, dataDir, profiles);
+  const entries = tasks(request, workdir, dataDir, profiles, options.isActive ?? isActiveRun);
 
   pruneRuns(dataDir, new Set(entries
     .filter(entry => entry.resume)
@@ -1086,6 +1096,7 @@ async function runBatch(request, options = {}) {
   const context = {runId: id, runDir, executable, model, thinking, config, connection, maxOutput,
     count: entries.length, depth: depth + 1, deadlineSecs, taskTimeoutMs, killGraceMs, run,
     onProgress: options.onProgress};
+  activeRuns.add(id);
   options.onStart?.({id, run, status: () => [...run.status], dir: runDir});
 
   const results = new Array(entries.length);
@@ -1142,6 +1153,7 @@ async function runBatch(request, options = {}) {
   } finally {
     clearInterval(heartbeat);
     clearTimeout(batchTimer);
+    activeRuns.delete(id);
   }
 
   // Unstarted tasks occur when a fatal fault or batch deadline stops the queue.

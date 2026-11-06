@@ -1,7 +1,7 @@
 //! Bounded, lossless line lexer for transcript code, not a language parser.
 use super::theme::Theme;
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Span,
 };
 
@@ -13,6 +13,7 @@ enum Token {
     Number,
     Keyword,
     Type,
+    Function,
     Add,
     Del,
     Hunk,
@@ -53,15 +54,24 @@ fn supported(language: &str) -> bool {
 }
 
 fn style(token: Token, theme: Theme) -> Style {
-    let mono = theme.background == ratatui::style::Color::Reset;
+    let mono = theme.background == Color::Reset;
+    let dark = matches!(
+        theme.background,
+        Color::Rgb(r, g, b) if u16::from(r) + u16::from(g) + u16::from(b) < 384
+    );
+    // Markdown syntax is quieter than execution status and independent of
+    // the role rail. Mono and light themes retain their own contrast rules.
     let mut style = Style::default().fg(match token {
         Token::Plain => theme.code,
+        Token::Comment if dark => Color::Rgb(165, 170, 181),
         Token::Comment => theme.muted,
-        // Syntax is informational. Reserve state colours for actual
-        // diff additions/deletions and execution warnings/errors.
+        Token::String if dark => Color::Rgb(143, 220, 182),
         Token::String => theme.text,
+        Token::Keyword if dark => Color::Rgb(167, 190, 255),
         Token::Keyword => theme.accent_text,
         Token::Number => theme.muted,
+        Token::Function if dark => Color::Rgb(255, 208, 138),
+        Token::Function => theme.code,
         Token::Add => theme.success,
         Token::Hunk => theme.muted,
         Token::Type => theme.text,
@@ -311,6 +321,8 @@ impl Lexer {
                     )
                 {
                     Token::Type
+                } else if line[end..].trim_start().starts_with('(') {
+                    Token::Function
                 } else {
                     Token::Plain
                 };
@@ -384,16 +396,16 @@ mod tests {
             assert_eq!(
                 spans[0].style.fg,
                 Some(if language == "rust" {
-                    theme.muted
+                    Color::Rgb(165, 170, 181)
                 } else {
-                    theme.text
+                    Color::Rgb(143, 220, 182)
                 })
             );
             assert!(lexer.quote.is_none() && lexer.block_depth == 0);
         }
         assert_eq!(
             Lexer::default().line("fn", "rust", theme)[0].style.fg,
-            Some(theme.accent_text)
+            Some(Color::Rgb(167, 190, 255))
         );
     }
     #[test]
@@ -440,7 +452,7 @@ mod tests {
         assert!(spans.iter().any(|span| span.style.fg == Some(theme.text)));
         assert_eq!(
             lexer.line("let n = 42;", "rust", theme)[0].style.fg,
-            Some(theme.accent_text)
+            Some(Color::Rgb(167, 190, 255))
         );
     }
 }

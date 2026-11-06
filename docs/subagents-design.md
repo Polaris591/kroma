@@ -139,7 +139,8 @@ without a result, or more than one result, is a failure. The tool response is
 | Non-zero exit, signal | That task fails; others continue; exit 3/4/5/6 becomes `MODEL_NOT_CONFIGURED` / `AUTH_FAILED` / `MODEL_REQUEST_FAILED` / `CONTEXT_LIMIT` |
 | Exit 0 without a result | Protocol failure for that task |
 | Timeout or batch cut-off with streamed text | Task fails with `partial: true` and keeps a bounded `output` |
-| Resume of a running task or missing session | Reject before spawning (`RESUME_ACTIVE` / `RESUME_MISSING`) |
+| Resume of a task this worker is still running, or a missing session | Reject before spawning (`RESUME_ACTIVE` / `RESUME_MISSING`) |
+| Resume of an interrupted task (`running` record no live child owns) | Allowed: fork the saved session into a new run |
 | Non-JSON stdout, duplicate/textless result, oversized frame | Fatal: abort the batch, reject with the evidence path, discard the worker |
 | Evidence write failure | Fatal: the result would be untrustworthy |
 | Host deadline or Ctrl+C | Host teardown; final results are not guaranteed |

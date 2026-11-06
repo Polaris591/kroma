@@ -3081,9 +3081,9 @@ fn screenshot_regressions_compact_tools_localized_labels_and_single_history_hint
     ui.scroll(10);
     let output = rendered_rows(&mut ui, 100, 26).join("\n");
     assert_eq!(
-        output.matches("Ctrl+End").count(),
+        output.matches("返回最新").count(),
         1,
-        "history navigation should appear once: {output}"
+        "the clickable return-to-latest action should appear once: {output}"
     );
 }
 
@@ -3289,8 +3289,16 @@ fn reasoning_is_collapsed_by_default_and_complete_when_expanded() {
         .map(|n| format!("reasoning line {n:02}"))
         .collect::<Vec<_>>()
         .join("\n\n");
+    ui.event(UiEvent::TaskStarted);
     ui.event(UiEvent::ReasoningDelta(content.clone()));
     ui.reasoning_expanded = true;
+    let pending = ui.history_text(ui.active_colors(), 100).to_string();
+    assert!(
+        !pending.contains("reasoning line") && !pending.contains("KROMA"),
+        "thinking-only output must not create a response card"
+    );
+    assert!(ui.activity_status().starts_with("Thinking"));
+    ui.event(UiEvent::Text("The investigation is complete.".into()));
     let document = ui.history_text(ui.active_colors(), 100);
     let visible = document.to_string();
     assert!(visible.contains("reasoning line 17"));

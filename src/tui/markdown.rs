@@ -188,6 +188,7 @@ pub(super) struct Document {
 pub(super) struct ProseColors {
     pub heading: ratatui::style::Color,
     pub code: ratatui::style::Color,
+    pub link: ratatui::style::Color,
 }
 
 impl ProseColors {
@@ -195,6 +196,7 @@ impl ProseColors {
         Self {
             heading: theme.accent,
             code: theme.code,
+            link: theme.accent,
         }
     }
 }
@@ -219,7 +221,9 @@ pub(super) fn render_document_with(
     let body_fg = if theme.background == ratatui::style::Color::Reset {
         theme.text
     } else {
-        Theme::blend(theme.text, theme.muted, 0.12)
+        // Body copy stays close to primary ink. Secondary ink is reserved
+        // for metadata; long prose should not look disabled.
+        Theme::blend(theme.text, theme.muted, 0.84)
     };
     let mut styles = vec![Style::default().fg(body_fg)];
     let mut lists: Vec<ListState> = Vec::new();
@@ -316,7 +320,7 @@ pub(super) fn render_document_with(
                     current_link = Some(dest_url.into_string());
                     styles.push(
                         Style::default()
-                            .fg(theme.accent)
+                            .fg(prose.link)
                             .add_modifier(Modifier::UNDERLINED),
                     );
                 }
@@ -515,7 +519,7 @@ pub(super) fn render_document_with(
                 }
                 let style = if current_link.is_some() {
                     Style::default()
-                        .fg(theme.accent)
+                        .fg(prose.link)
                         .add_modifier(Modifier::UNDERLINED)
                 } else if theme.background == ratatui::style::Color::Reset {
                     Style::default().fg(theme.code).add_modifier(Modifier::BOLD)

@@ -1,15 +1,12 @@
 //! Child-only tool and prompt policy. The normal Kroma runtime does not load
-//! this file or pay for its checks. These are tool-level restrictions, not OS
-//! filesystem isolation: a test process may still execute repository code.
+//! this file or pay for its checks. The policy can remove tools and cap turns
+//! and tokens; it deliberately does not parse shell commands, because a command
+//! grammar is not an OS sandbox and blocks ordinary read-only work.
 
-use crate::{
-    prompt::PromptComposer,
-    protocol::ToolCall,
-    tools::{BuiltinShell, Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult},
-};
+use crate::{prompt::PromptComposer, tools::ToolRegistry};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use std::{collections::HashSet, fs, path::Path, sync::Arc};
+use std::{collections::HashSet, fs, path::Path};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ExecutionLimits {
@@ -52,10 +49,7 @@ impl ChildPolicy {
             || policy.prompt.len() > 32 * 1024
             || !(1..=100).contains(&policy.max_turns)
             || policy.max_tokens > 1_000_000
-            || !matches!(
-                policy.shell.as_str(),
-                "inherit" | "deny" | "read-only" | "test"
-            )
+            || !matches!(policy.shell.as_str(), "allow" | "deny")
         {
             bail!("invalid subagent profile, prompt or budget");
         }
@@ -98,21 +92,6 @@ impl ChildPolicy {
         if self.tools.as_ref().is_some_and(|items| !items.is_empty()) && enabled == 0 {
             bail!("NO_TOOLS: subagent profile tool allowlist matched no available tools");
         }
-        if names.iter().any(|name| name == "shell")
-            && enabled > 0
-            && matches!(self.shell.as_str(), "read-only" | "test")
-            && tools
-                .definitions()
-                .iter()
-                .any(|value| value["function"]["name"] == "shell")
-        {
-            tools.replace(
-                "shell",
-                Arc::new(GuardedShell {
-                    mode: self.shell.clone(),
-                }),
-            )?;
-        }
         prompt.push_trailing(format!(
             "\nSubagent profile [{}]:\n{}",
             self.profile, self.prompt
@@ -121,128 +100,14 @@ impl ChildPolicy {
     }
 }
 
-struct GuardedShell {
-    mode: String,
-}
-
-impl Tool for GuardedShell {
-    fn name(&self) -> &str {
-        "shell"
-    }
-
-    fn definition(&self) -> serde_json::Value {
-        let mut definition = BuiltinShell.definition();
-        definition["function"]["description"] = serde_json::json!(format!(
-            "Restricted subagent shell ({}). Use simple commands only; pipelines, redirections and substitutions are not allowed.",
-            self.mode
-        ));
-        definition
-    }
-
-    fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a> {
-        Box::pin(async move {
-            let command = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
-                .ok()
-                .and_then(|value| value["command"].as_str().map(str::to_owned));
-            match command.as_deref() {
-                Some(command) if allowed_command(command, &self.mode) => {
-                    BuiltinShell.execute(call, ctx).await
-                }
-                _ => ToolResult::error(
-                    "subagent shell policy refused this command; use an allowed simple command",
-                ),
-            }
-        })
-    }
-}
-
-fn allowed_command(command: &str, mode: &str) -> bool {
-    if command.is_empty() || command.len() > 8192 {
-        return false;
-    }
-    // A single, purely literal command. In particular, reject shell control,
-    // expansion, redirection and quoting rather than trying to blacklist
-    // dangerous writes after Bash has interpreted them.
-    if !command.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || c.is_ascii_whitespace() && c != '\n' && c != '\r'
-            || matches!(c, '_' | '-' | '/' | '.' | ':' | '=' | ',' | '%')
-    }) {
-        return false;
-    }
-    let parts: Vec<&str> = command.split_ascii_whitespace().collect();
-    if parts.len() > 64 {
-        return false;
-    }
-    let Some(first) = parts.first() else {
-        return false;
-    };
-    if matches!(
-        *first,
-        "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "stat"
-    ) {
-        return parts[1..]
-            .iter()
-            .all(|arg| !arg.starts_with("--output") && *arg != "--files0-from");
-    }
-    if matches!(*first, "rg" | "grep") {
-        return parts[1..].iter().all(|arg| {
-            !arg.starts_with('-')
-                || matches!(
-                    *arg,
-                    "-n" | "-i" | "-F" | "-l" | "--files" | "--hidden" | "--no-heading" | "--"
-                )
-        });
-    }
-    if *first == "git" {
-        let rest = &parts[1..];
-        let (verb, args) = if rest.first() == Some(&"--no-pager") {
-            (rest.get(1), &rest[2..])
-        } else {
-            (rest.first(), rest.get(1..).unwrap_or(&[]))
-        };
-        return verb.is_some_and(|v| {
-            matches!(
-                *v,
-                "status" | "diff" | "log" | "show" | "grep" | "ls-files" | "rev-parse"
-            )
-        }) && args.iter().all(|arg| {
-            !arg.starts_with('-')
-                || matches!(
-                    *arg,
-                    "--short"
-                        | "--stat"
-                        | "--oneline"
-                        | "--name-only"
-                        | "--name-status"
-                        | "--no-ext-diff"
-                        | "--"
-                        | "-n"
-                )
-        });
-    }
-    if mode == "test" {
-        return match *first {
-            "cargo" => parts.get(1).is_some_and(|verb| {
-                matches!(*verb, "test" | "check" | "clippy")
-                    || (*verb == "fmt" && parts.contains(&"--check"))
-            }),
-            "npm" => parts.get(1).is_some_and(|verb| {
-                *verb == "test" || (*verb == "run" && parts.get(2) == Some(&"test"))
-            }),
-            "node" => parts.get(1) == Some(&"--test"),
-            "pytest" => true,
-            "go" => parts.get(1) == Some(&"test"),
-            "python" | "python3" => parts.get(1..3) == Some(&["-m", "pytest"][..]),
-            _ => false,
-        };
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        protocol::ToolCall,
+        tools::{Tool, ToolContext, ToolFuture, ToolResult},
+    };
+    use std::sync::Arc;
 
     struct NamedTool(&'static str);
 
@@ -260,38 +125,6 @@ mod tests {
     }
 
     #[test]
-    fn read_only_rejects_shell_control_and_mutation() {
-        for allowed in [
-            "pwd",
-            "ls -la",
-            "cat src/lib.rs",
-            "rg -n error src",
-            "git status --short",
-            "git diff --stat",
-        ] {
-            assert!(allowed_command(allowed, "read-only"), "{allowed}");
-        }
-        for forbidden in [
-            "rm -rf src",
-            "echo hello > file",
-            "git reset --hard",
-            "git diff --output=file",
-            "rg --pre sh src",
-            "cat file; rm file",
-            "cat $(touch file)",
-            "cat file | tee new.txt",
-            "curl example.com",
-        ] {
-            assert!(!allowed_command(forbidden, "read-only"), "{forbidden}");
-        }
-        assert!(allowed_command("cargo test --locked", "test"));
-        assert!(!allowed_command("cargo fmt", "test"));
-        assert!(allowed_command("cargo fmt --check", "test"));
-        assert!(!allowed_command("npm run arbitrary-script", "test"));
-        assert!(!allowed_command("cargo test --locked", "read-only"));
-    }
-
-    #[test]
     fn policy_filters_advertised_tools_and_adds_profile_prompt() {
         let policy = ChildPolicy {
             profile: "explore".into(),
@@ -299,7 +132,7 @@ mod tests {
             tools: Some(vec!["shell".into()]),
             disallowed_tools: vec![],
             host_denied_tools: vec![],
-            shell: "read-only".into(),
+            shell: "allow".into(),
             max_turns: 20,
             max_tokens: 10000,
         };
@@ -307,10 +140,7 @@ mod tests {
         let mut prompt = PromptComposer::default();
         policy.apply(&mut tools, &mut prompt).unwrap();
         assert_eq!(tools.definitions().len(), 1);
-        assert!(tools.definitions()[0]["function"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("Restricted subagent"));
+        assert_eq!(tools.definitions()[0]["function"]["name"], "shell");
         assert_eq!(policy.limits().max_turns, 20);
     }
 
@@ -335,7 +165,7 @@ mod tests {
                 "memory_remember".into(),
                 "memory_forget".into(),
             ],
-            shell: "inherit".into(),
+            shell: "allow".into(),
             max_turns: 40,
             max_tokens: 0,
         };

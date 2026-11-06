@@ -181,7 +181,7 @@ def verify(root, task_id, answer):
             "cross_file_fix": "from app import tag_key; from core import normalize_tag; assert tag_key(' Foo ') == 'foo'; assert tag_key(' Straße ') == 'strasse'; assert normalize_tag(' BAR ') == 'bar'",
         }
         test = subprocess.run(
-            [sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); " + checks[task_id], str(root)],
+            [sys.executable, "-I", "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1]); " + checks[task_id], str(root)],
             cwd=root, capture_output=True, text=True, timeout=15,
         )
         return test.returncode == 0

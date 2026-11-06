@@ -3714,6 +3714,20 @@ createInterface({input:process.stdin}).on("line",line=>{
         context_calls + 1,
         "memory mutation must invalidate even an unchanged user-turn digest"
     );
+    // The same wording in a later task is a new boundary, not a cached pack.
+    let repeated = vec![
+        Message::new("system", "system"),
+        Message::new("user", "please use pnpm for this repo"),
+        Message::new("assistant", "done"),
+        Message::new("user", "please use pnpm for this repo"),
+    ];
+    model.complete(&repeated, &[], &mut |_| {}).await?;
+    let log = fs::read_to_string(directory.join("requests.log"))?;
+    assert_eq!(
+        log.matches("\"type\":\"request_context\"").count(),
+        context_calls + 2,
+        "an identical user message in a later turn is a different task"
+    );
     let failed = vec![
         Message::new("system", "system"),
         Message::new("user", "FAIL please use pnpm"),

@@ -86,7 +86,8 @@ impl UiState {
                     success: base.success,
                     warning: base.warning,
                     error: base.error,
-                    link: base.accent,
+                    // Links are separate from the cyan role rail.
+                    link: Color::Rgb(141, 189, 255),
                     add: base.success,
                     remove: base.error,
                 },

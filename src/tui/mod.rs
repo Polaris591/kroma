@@ -1014,7 +1014,9 @@ fn input_event(
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => state.mouse_release(),
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 state.hover_link(mouse.column, mouse.row);
-                if state.scrollbar_press(mouse.column, mouse.row) {
+                if state.return_latest_at(mouse.column, mouse.row) {
+                    state.scroll_to_bottom();
+                } else if state.scrollbar_press(mouse.column, mouse.row) {
                     // Scrollbar owns this drag, not transcript selection.
                 } else if mouse.modifiers.contains(KeyModifiers::CONTROL) {
                     if let Some(target) = state.link_at(mouse.column, mouse.row) {
@@ -2796,6 +2798,50 @@ mod tests {
             std::path::Path::new("."),
         );
         assert!(matches!(action, InputAction::None));
+    }
+
+    #[test]
+    fn clicking_return_to_latest_leaves_history_without_touching_draft() {
+        use crossterm::event::{MouseButton, MouseEvent};
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut ui, model) = setup();
+        ui.editor.paste("unsent text stays here");
+        for index in 0..60 {
+            ui.add_user(&format!("Request {index}"));
+            ui.event(UiEvent::Text(format!("Response {index}")));
+            ui.event(UiEvent::ModelStarted);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(45, 25)).unwrap();
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        ui.scroll(12);
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(ui.reading_position().is_some());
+        let (action_x, action_y) = (0..25)
+            .flat_map(|y| (0..45).map(move |x| (x, y)))
+            .find(|&(x, y)| ui.return_latest_at(x, y))
+            .expect("back-to-latest action is clickable");
+
+        let result = input_event(
+            &mut ui,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: action_x,
+                row: action_y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            false,
+            &model,
+            std::path::Path::new("."),
+        );
+        assert!(matches!(result, InputAction::None));
+        assert!(ui.reading_position().is_none());
+        assert_eq!(ui.scroll_from_bottom, 0);
+        assert_eq!(ui.editor.text(), "unsent text stays here");
+        terminal.draw(|frame| ui.draw(frame)).unwrap();
+        assert!(
+            !(0..25).any(|y| (0..45).any(|x| ui.return_latest_at(x, y))),
+            "the link vanishes at latest"
+        );
     }
 
     #[test]

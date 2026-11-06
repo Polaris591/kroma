@@ -20,7 +20,7 @@ fn rails(ui: &UiState, role: MessageRole) -> Vec<usize> {
     let p = ui.message_colors();
     let expected = match role {
         MessageRole::User => p.user_rail,
-        MessageRole::Assistant => p.assistant_rail,
+        MessageRole::Assistant | MessageRole::Tools => p.assistant_rail,
     };
     let mut rows = ui
         .history_cache
@@ -102,7 +102,7 @@ fn surface_has_one_padding_row_each_side_and_a_continuous_rail() {
     ui.finish_task();
     let buffer = draw(&mut ui, 120, 40);
     let rows = rails(&ui, MessageRole::User);
-    assert_eq!(rows.len(), 4);
+    assert!(rows.len() >= 4);
     assert!(rows.windows(2).all(|p| p[1] == p[0] + 1));
     let cache = ui.history_cache.as_ref().unwrap();
     assert!(cache.text.lines[rows[0]].spans.is_empty());
@@ -118,14 +118,117 @@ fn surface_has_one_padding_row_each_side_and_a_continuous_rail() {
             ui.message_colors().user_rail
         );
     }
-    // One terminal-background row separates a user turn from the reply.
+    // Keep exactly one original terminal-background row between cards.
     let gap = rows.last().unwrap() + 1;
     let y = visible_y(&ui, gap).unwrap();
-    assert_eq!(
-        buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
-        ui.active_colors().background
-    );
+    for x in [ui.selection_area.x + 1, ui.selection_area.x + 4] {
+        assert_eq!(
+            buffer.cell((x, y)).unwrap().bg,
+            ui.active_colors().background
+        );
+    }
     assert_eq!(rails(&ui, MessageRole::Assistant)[0], gap + 1);
+}
+
+#[test]
+fn separate_messages_and_tool_phases_keep_black_gaps_and_original_background() {
+    let mut ui = ui();
+    ui.add_user("Inspect this project");
+    ui.event(UiEvent::Text("# Heading\n\nSome `inline` text".into()));
+    ui.info("COMMAND", "Status during the same task");
+    ui.event(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "band-tool".into(),
+        args: "cargo check".into(),
+    });
+    ui.event(UiEvent::ToolFinished {
+        id: "band-tool".into(),
+        result: "exit: 0\nFinished".into(),
+        failed: false,
+    });
+    ui.event(UiEvent::ToolStarted {
+        name: "shell".into(),
+        id: "second-tool".into(),
+        args: "cargo test".into(),
+    });
+    ui.event(UiEvent::ToolFinished {
+        id: "second-tool".into(),
+        result: "exit: 0\nPassed".into(),
+        failed: false,
+    });
+    ui.event(UiEvent::Text("Checked successfully.".into()));
+    ui.finish_task();
+    ui.add_user("Run the next task");
+    let buffer = draw(&mut ui, 110, 70);
+    let cache = ui.history_cache.as_ref().unwrap();
+    let rails = cache
+        .decor
+        .iter()
+        .filter_map(|(row, decor)| match decor {
+            Decor::Rail {
+                column: 1,
+                color,
+                first_only: false,
+            } => Some((*row, *color)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let first = rails.iter().map(|(row, _)| *row).min().unwrap();
+    let last = rails.iter().map(|(row, _)| *row).max().unwrap();
+    assert!(rails.len() < last - first + 1, "cards must have black gaps");
+    let tool_groups = cache
+        .decor
+        .iter()
+        .filter(|(_, item)| {
+            matches!(
+                item,
+                Decor::Role {
+                    label: "TOOLS" | "工具",
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(tool_groups, 1, "consecutive tool calls share one card");
+    assert_eq!(cache.tool_rows.len(), 2);
+    let mut blank_gap_rows = 0;
+    for row in first..=last {
+        let y = visible_y(&ui, row).expect("the fixture fits on screen");
+        if let Some((_, color)) = rails.iter().find(|(at, _)| *at == row) {
+            assert_eq!(
+                buffer.cell((ui.selection_area.x + 5, y)).unwrap().bg,
+                ui.message_colors().surface,
+                "each card keeps the original gray message background"
+            );
+            assert_eq!(
+                buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
+                *color,
+                "each card has the right role rail"
+            );
+        } else {
+            blank_gap_rows += 1;
+            for x in [ui.selection_area.x + 1, ui.selection_area.x + 5] {
+                assert_eq!(
+                    buffer.cell((x, y)).unwrap().bg,
+                    ui.active_colors().background,
+                    "card separators use the original terminal background"
+                );
+            }
+            assert!(!cache
+                .decor
+                .iter()
+                .any(|(at, item)| *at == row && matches!(item, Decor::Surface(Surface::Message))));
+        }
+        assert_eq!(
+            buffer.cell((ui.selection_area.right() - 1, y)).unwrap().bg,
+            ui.active_colors().background,
+            "the original terminal right gutter remains untouched"
+        );
+    }
+    assert!(
+        blank_gap_rows >= 3,
+        "user, tools and answer are distinct cards"
+    );
 }
 
 #[test]
@@ -156,7 +259,7 @@ fn assistant_rail_covers_paragraphs_code_and_all_soft_wraps() {
 }
 
 #[test]
-fn classic_b_uses_a_user_card_but_keeps_assistant_prose_on_terminal_background() {
+fn assistant_prose_uses_the_same_gray_card_as_the_user() {
     let mut ui = ui();
     ui.add_user("user card");
     ui.event(UiEvent::Text("assistant prose".into()));
@@ -172,14 +275,14 @@ fn classic_b_uses_a_user_card_but_keeps_assistant_prose_on_terminal_background()
     let y = visible_y(&ui, prose_row).unwrap();
     assert_eq!(
         buffer.cell((ui.selection_area.x + 5, y)).unwrap().bg,
-        ui.active_colors().background,
-        "assistant prose is not another giant gray card"
+        ui.message_colors().surface,
+        "assistant prose uses the shared message surface"
     );
     assert!(cache
         .decor
         .iter()
         .any(|(row, item)| *row == prose_row && matches!(item, Decor::Rail { .. })));
-    assert!(!cache
+    assert!(cache
         .decor
         .iter()
         .any(|(row, item)| *row == prose_row && matches!(item, Decor::Surface(Surface::Message))));
@@ -385,8 +488,9 @@ fn message_surfaces_leave_a_visible_terminal_right_gutter() {
                 assert_eq!(area.width, ui.selection_area.width - 1 - PLAIN_RIGHT_GUTTER);
                 assert_eq!(area.right(), ui.selection_area.right() - PLAIN_RIGHT_GUTTER);
                 let expected = match role {
-                    MessageRole::User => ui.message_colors().surface,
-                    MessageRole::Assistant => ui.active_colors().background,
+                    MessageRole::User | MessageRole::Assistant | MessageRole::Tools => {
+                        ui.message_colors().surface
+                    }
                 };
                 for x in area.x + 1..area.right() {
                     assert_eq!(buffer.cell((x, y)).unwrap().bg, expected);
@@ -463,7 +567,7 @@ fn small_windows_and_editor_geometry_remain_safe() {
 }
 
 #[test]
-fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
+fn one_assistant_turn_separates_model_text_tools_and_followup_text() {
     let mut ui = ui();
     ui.add_user("Inspect the project");
     ui.event(UiEvent::Text("I will inspect the files.".into()));
@@ -505,14 +609,31 @@ fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
             body,
         )
     };
-    assert_eq!(labels, 1, "one assistant turn has one KROMA label");
+    assert_eq!(labels, 2, "each model response has its own KROMA label");
     assert!(
-        rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
-        "rail is continuous"
+        rows.windows(2).any(|pair| pair[1] > pair[0] + 1),
+        "Kroma and tool phases must be visually separated"
     );
     assert!(
         rows.contains(&tool_header),
-        "tool activity stays inside the assistant rail"
+        "tools also have a continuous rail"
+    );
+    assert_eq!(
+        ui.history_cache
+            .as_ref()
+            .unwrap()
+            .decor
+            .iter()
+            .filter(|(_, item)| matches!(
+                item,
+                Decor::Role {
+                    label: "TOOLS" | "工具",
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "all adjacent calls belong to one tool card"
     );
     let tool_row = ui.selection_area.y + (tool_header - ui.history_top_row) as u16;
     let body_cell = ui.selection_area.y + (body - ui.history_top_row) as u16;
@@ -528,7 +649,7 @@ fn one_assistant_turn_keeps_one_label_and_one_rail_through_tools_and_text() {
         buffer.cell((ui.selection_area.x + 1, tool_row)).unwrap().bg,
         ui.message_colors().assistant_rail
     );
-    // Tool state markers are inset inside a gray panel, prose is not.
+    // Tool markers and model prose now share one neutral card background.
     assert_eq!(
         buffer
             .cell((ui.selection_area.x + 4, body_cell))
@@ -598,7 +719,7 @@ fn completion_status_is_pinned_plain_text_above_the_composer() {
 }
 
 #[test]
-fn consecutive_turns_are_separated_by_a_terminal_background_row() {
+fn consecutive_turns_keep_one_black_row_between_distinct_cards() {
     let mut ui = ui();
     ui.add_user("First question");
     ui.event(UiEvent::Text("First answer".into()));
@@ -620,13 +741,15 @@ fn consecutive_turns_are_separated_by_a_terminal_background_row() {
         .max()
         .unwrap();
     let boundary = last_assistant + 1;
-    assert!(boundary < second_user);
+    assert_eq!(boundary + 1, second_user, "only one black separator row");
     let buffer = draw(&mut ui, 100, 50);
     let y = ui.selection_area.y + (boundary - ui.history_top_row) as u16;
-    assert_eq!(
-        buffer.cell((ui.selection_area.x + 1, y)).unwrap().bg,
-        ui.active_colors().background
-    );
+    for x in [ui.selection_area.x + 1, ui.selection_area.x + 5] {
+        assert_eq!(
+            buffer.cell((x, y)).unwrap().bg,
+            ui.active_colors().background
+        );
+    }
     assert_eq!(
         buffer.cell((ui.selection_area.x + 1, y)).unwrap().symbol(),
         " "
@@ -779,7 +902,7 @@ fn short_system_messages_are_compact_without_hiding_error_details() {
 }
 
 #[test]
-fn plain_prose_restores_semantic_markdown_without_recoloring_inline_code() {
+fn plain_prose_uses_near_white_headings_blue_links_and_warm_inline_code() {
     let mut ui = ui();
     ui.add_user("q");
     ui.event(UiEvent::Text(
@@ -797,13 +920,13 @@ fn plain_prose_restores_semantic_markdown_without_recoloring_inline_code() {
     for line in &document.0.lines {
         for span in &line.spans {
             if span.content.contains("标题")
-                && span.style.fg == Some(ui.active_colors().text)
+                && span.style.fg == Some(Color::Rgb(255, 255, 255))
                 && span.style.add_modifier.contains(Modifier::BOLD)
             {
                 heading = true;
             }
             if span.content.contains("代码")
-                && span.style.fg == Some(ui.active_colors().code)
+                && span.style.fg == Some(Color::Rgb(255, 208, 138))
                 && span.style.bg == Some(ui.active_colors().overlay)
             {
                 code = true;
@@ -845,7 +968,7 @@ fn plain_prose_restores_semantic_markdown_without_recoloring_inline_code() {
     assert!(quote, "blockquotes are muted without an italic text wall");
     assert!(
         code,
-        "inline code retains neutral ink and a distinct background"
+        "inline code uses warm literal ink and the existing code background"
     );
 }
 

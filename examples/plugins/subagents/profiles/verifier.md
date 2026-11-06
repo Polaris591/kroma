@@ -2,7 +2,6 @@
 name: verifier
 description: Check changes against acceptance criteria, run focused tests and report failures.
 model: heavy
-shell: test
 tools: [shell]
 maxTurns: 30
 ---

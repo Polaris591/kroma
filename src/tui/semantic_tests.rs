@@ -75,10 +75,10 @@ fn semantic_palette_matches_design_and_keeps_neutral_theme_separate() {
         (
             "dark",
             [
-                Color::Rgb(77, 201, 192),
-                Color::Rgb(79, 157, 107),
-                Color::Rgb(229, 169, 61),
-                Color::Rgb(240, 98, 111),
+                Color::Rgb(94, 218, 214),
+                Color::Rgb(142, 223, 173),
+                Color::Rgb(255, 193, 120),
+                Color::Rgb(255, 139, 151),
             ],
         ),
         (
@@ -96,7 +96,12 @@ fn semantic_palette_matches_design_and_keeps_neutral_theme_separate() {
         let p = ui.semantic_colors();
         let base = ui.active_colors();
         assert_eq!([p.running, p.success, p.warning, p.error], expected);
-        assert_eq!(p.link, p.running);
+        if preset == "dark" {
+            assert_eq!(p.link, Color::Rgb(141, 189, 255));
+            assert_ne!(p.link, p.running, "links must not look like role rails");
+        } else {
+            assert_eq!(p.link, p.running);
+        }
         assert_eq!(p.add, p.success);
         assert_eq!(p.remove, p.error);
         for color in [
@@ -445,10 +450,16 @@ fn semantic_diff_transform_is_lossless_and_colours_markers_not_code() {
                     assert!(span.style.bg.is_none());
                     markers += 1;
                 } else {
-                    // Markdown syntax highlighting may also colour Rust
-                    // keywords, without colouring non-diff +/- text.
-                    assert_eq!(span.content.trim(), "let");
-                    assert_eq!(span.style.fg, Some(base.accent_text));
+                    // Rust syntax remains styled but cannot turn a string
+                    // containing "+not a diff" into a diff addition.
+                    match span.content.trim() {
+                        "let" => assert_eq!(span.style.fg, Some(Color::Rgb(167, 190, 255))),
+                        "\"+not a diff\"" => {
+                            assert_eq!(span.style.fg, Some(Color::Rgb(143, 220, 182)))
+                        }
+                        other => panic!("unexpected colored syntax: {other}"),
+                    }
+                    assert!(span.style.bg.is_none());
                 }
             }
         }

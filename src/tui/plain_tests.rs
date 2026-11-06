@@ -108,9 +108,17 @@ fn plain_keeps_code_and_overlays_neutral_except_semantic_diff_markers() {
                         || (cell.symbol() == "-" && cell.fg == palette.remove);
                     let role_label =
                         cell.fg == messages.user_rail || cell.fg == messages.assistant_rail;
+                    let syntax = preset == "dark"
+                        && matches!(
+                            cell.fg,
+                            Color::Rgb(167, 190, 255)
+                                | Color::Rgb(143, 220, 182)
+                                | Color::Rgb(165, 170, 181)
+                                | Color::Rgb(255, 208, 138)
+                        );
                     assert!(
-                        diff || role_rail || role_label,
-                        "non-semantic text got colour: {}",
+                        diff || role_rail || role_label || syntax,
+                        "only semantic state and restrained code syntax may use color: {}",
                         cell.symbol()
                     );
                 }

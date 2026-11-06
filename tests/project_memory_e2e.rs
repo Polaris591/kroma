@@ -307,7 +307,7 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         &tools,
         "memory_remember",
         json!({"kind":"decision","text":"Run clippy before commits",
-            "quote":current,"topic":"commit checks"}),
+            "quote":current}),
         &workspace_a,
         &archive,
         Some(current),

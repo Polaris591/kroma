@@ -559,18 +559,19 @@ pub(super) struct CapabilityWorker {
     pub source: String,
 }
 
-/// Last user request and its digest: the boundary that identifies one task.
-fn last_user_task(messages: &[Message]) -> Option<(String, String)> {
-    let last = messages
+/// Last user request, its position and its digest: the boundary that identifies
+/// one task. The position keeps two turns with identical wording apart, and it
+/// stays fixed while tool rounds append messages to the same task.
+fn last_user_task(messages: &[Message]) -> Option<(String, usize, String)> {
+    let index = messages
         .iter()
-        .rev()
-        .find(|message| message.role == "user")?;
-    let content = last.content.as_deref().unwrap_or("").trim();
+        .rposition(|message| message.role == "user")?;
+    let content = messages[index].content.as_deref().unwrap_or("").trim();
     if content.is_empty() {
         return None;
     }
     let intent: String = content.chars().take(INTENT_MAX_CHARS).collect();
-    Some((intent, pack_digest(&["user", content])))
+    Some((intent, index, pack_digest(&["user", content])))
 }
 
 /// Append host packs to the last user message of the projection only.
@@ -727,10 +728,10 @@ impl PluginModelHooks {
         let Some(archive) = archive else {
             return Vec::new();
         };
-        let Some((intent, digest)) = last_user_task(messages) else {
+        let Some((intent, index, digest)) = last_user_task(messages) else {
             return Vec::new();
         };
-        let key = (archive.clone(), digest);
+        let key = (archive.clone(), format!("{index}:{digest}"));
         if let Some(cached) = self.packs.lock().ok().and_then(|cache| cache.get(&key)) {
             return cached;
         }

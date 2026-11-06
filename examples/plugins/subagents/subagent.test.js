@@ -309,7 +309,7 @@ test("child inherits the active session endpoint, protocol, profile and reasonin
     assert.equal(env.KROMA_API_KEY, undefined);
     const policy = JSON.parse(fs.readFileSync(env.KROMA_CHILD_POLICY_FILE, "utf8"));
     assert.equal(policy.profile, "reviewer");
-    assert.equal(policy.shell, "read-only");
+    assert.equal(policy.shell, "allow");
     h.calls[0].finish({frames: [{type: "result", text: "reviewed"}]});
     assert.equal((await run).results[0].status, "completed");
     const snapshot = fs.readFileSync(path.join(dir, "runs", fs.readdirSync(path.join(dir, "runs"))[0], "request.json"), "utf8");
@@ -1400,12 +1400,8 @@ test("resume tokens are validated before any child starts", async () => {
     await assert.rejects(run("../escape/0"), {code: "INVALID_ARGUMENT"});
     await assert.rejects(run("missing-run/0"), {code: "RESUME_MISSING"});
 
-    const active = path.join(dir, "runs", "run-active", "0");
-    fs.mkdirSync(active, {recursive: true});
-    fs.writeFileSync(path.join(active, "state.json"),
-      JSON.stringify({status: "running", cwd: dir}));
-    fs.writeFileSync(path.join(active, "session.json"), "{}");
-    await assert.rejects(run("run-active/0"), {code: "RESUME_ACTIVE"});
+    // A task is refused only while this worker still owns it. See
+    // "an interrupted run resumes after its host exited" for the orphan case.
 
     const mismatch = path.join(dir, "runs", "run-mismatch", "0");
     fs.mkdirSync(mismatch, {recursive: true});
@@ -1420,6 +1416,52 @@ test("resume tokens are validated before any child starts", async () => {
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
     fs.rmSync(other, {recursive: true, force: true});
+  }
+});
+
+test("an interrupted run resumes after its host exited", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const interrupted = path.join(dir, "runs", "run-interrupted", "0");
+    fs.mkdirSync(interrupted, {recursive: true});
+    // The host exited before the child reported, so the record still says
+    // running while nothing owns the session any more.
+    fs.writeFileSync(path.join(interrupted, "state.json"),
+      JSON.stringify({status: "running", cwd: dir, profile: "general"}));
+    fs.writeFileSync(path.join(interrupted, "session.json"), '{"messages":[]}');
+    const run = runBatch(batch([{task: "carry on", resume: "run-interrupted/0"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    assert.equal(h.calls.length, 1, "the interrupted task is resumable");
+    assert.equal(fs.readFileSync(h.calls[0].options.env.KROMA_SESSION_FILE, "utf8"),
+      '{"messages":[]}', "the recovered session is forked into a new run");
+    h.calls[0].finish({frames: [{type: "result", text: "carried on"}]});
+    const response = await run;
+    assert.equal(response.status, "completed");
+    assert.equal(response.results[0].output, "carried on");
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test("a task this worker is still running refuses a resume", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    let runId = null;
+    const first = runBatch(batch([{task: "long task"}], {workdir: dir}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir,
+        onStart: state => { runId = state.id; }});
+    assert.ok(runId);
+    await assert.rejects(
+      runBatch(batch([{task: "again", resume: `${runId}/0`}], {workdir: dir}),
+        {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir}),
+      {code: "RESUME_ACTIVE"});
+    assert.equal(h.calls.length, 1, "a refused resume starts nothing");
+    h.calls[0].finish({frames: [{type: "result", text: "done"}]});
+    assert.equal((await first).results[0].output, "done");
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
   }
 });
 

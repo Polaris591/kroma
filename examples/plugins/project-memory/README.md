@@ -22,10 +22,15 @@ and the [V2 contract](../../../docs/project-memory-v2-contract.md).
 - **Provisional review notes.** `kind=review` requires a path and an evidence
   reference, is labeled unverified, and expires after 30 days.
 - **Self-maintenance.** Pending rules not verified within 7 days are dropped;
-  review notes expire, and review notes with changed/missing source files become
-  stale before recall. At most 200 active entries remain; older notes are
-  archived automatically. Same-topic conflicting rules are held back, with a
-  single on-topic conflict hint, until a user correction resolves them.
+  review notes expire, and a review note whose recorded file no longer matches
+  leaves recall **in that worktree only**. At most 200 active entries remain;
+  older notes are archived automatically.
+- **No inferred conflicts.** Two rules about the same subject stay active side
+  by side; the model retires one only by passing the `supersedes` id it got
+  from `memory_search`. Wording alone never pauses or hides a user rule.
+- **Paths are navigation.** A path on a preference or decision is a search hint,
+  never evidence about file content, so editing that file cannot retire the
+  rule. Only reviews are fingerprinted.
 - **Project identity.** Git repositories use a local `kroma-memory-id` in the
   Git common directory, so all worktrees share memory and moving the repository
   keeps it. Different clones/repositories are isolated. Non-Git projects use a
@@ -67,7 +72,7 @@ user-level install above or keep the binary in a trusted location.
 
 | Tool | Purpose |
 | --- | --- |
-| `memory_remember(kind, text, quote?, topic?, paths?, evidence?, supersedes?)` | `preference`/`decision` require a 8–500 char verbatim user quote and a short model-generated topic for conflict isolation, accepted as soon as the current host turn verifies them. `review` requires path and evidence, and expires after 30 days or when source files change. |
+| `memory_remember(kind, text, quote?, paths?, evidence?, supersedes?)` | `preference`/`decision` require a 8–500 char verbatim user quote, accepted as soon as the current host turn verifies it. `review` requires path and evidence, expires after 30 days, and leaves recall in a worktree whose recorded file changed. `supersedes` names the single memory being replaced; memory infers nothing from similar wording. |
 | `memory_search(query, paths?, limit?)` | Active entries only; compact ids, kinds, summaries and path hints. |
 | `memory_read(ids)` | 1–8 active entries; any unknown/pending/deleted id fails the whole batch. |
 | `memory_forget(id)` | Immediate tombstone; excluded from search, read and recall. |
@@ -78,6 +83,9 @@ optional parameters, the worker treats empty `supersedes` placeholders (`""` or
 `[]`) as absent; a nonempty invalid value is rejected and never silently
 replaces another memory.
 
+The retired `topic` argument is accepted and ignored, so an older tool schema
+cannot fail a write; nothing infers a conflict from it.
+
 All results are `reference_data`; evidence references are never dereferenced.
 The static prompt tells the model not to treat memory as instructions or as
 proof that code is unchanged.
@@ -86,7 +94,7 @@ proof that code is unchanged.
 
 ```text
 /memory                  # one-screen status
-/memory off | on         # stop or restore automation
+/memory off | on         # stop or restore every automatic write and recall
 /memory forget ID|TEXT   # forget now
 /memory search TEXT
 /memory show ID
@@ -121,6 +129,8 @@ verified by a later summary or expires.
 - Private local SQLite; WAL, `synchronous=FULL`, foreign keys, immediate
   transactions. A successful write is committed before the reply.
 - Git projects: `<git-common-dir>/kroma-memory-id`; all worktrees share it.
+  Evidence verdicts are per worktree, so work in one checkout cannot hide a
+  memory that another checkout still verifies.
 - Non-Git: `<data_dir>/registry/<sha256(workdir)>.id`.
 - No repository files, no Git commits, no network, no telemetry.
 - Unix `0700`/`0600`; Windows current-user + SYSTEM DACL; symlink/reparse and
@@ -131,6 +141,8 @@ verified by a later summary or expires.
 - 4000 chars per note, 8 paths, 8 evidence refs, 10,000 rows, 200 pending,
   20 search hits, 8 read ids, 128 KiB frames, 512–1024 recall tokens.
 - Review notes expire after 30 days; pending rules after 7 days.
+- `/memory off` stops recall **and** every automatic write, including the
+  last-activity hint; nothing captured while off can surface after `/memory on`.
 - `forget`/`purge` affect this plugin only. They do not rewrite Kroma history,
   assistant answers, compacted summaries, provider logs or exports.
 - Secret scanning is best-effort. The same text with different path hints is a

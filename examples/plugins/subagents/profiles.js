@@ -9,7 +9,10 @@ const path = require("node:path");
 const FIELDS = new Set(["name", "description", "model", "thinking", "shell", "tools",
   "disallowedTools", "maxTurns", "maxTokens"]);
 const MODEL = new Set(["auto", "inherit", "light", "medium", "heavy"]);
-const SHELL = new Set(["inherit", "read-only", "test", "deny"]);
+// `deny` removes the shell tool; anything else is the normal tool set. The
+// profile prompt states intent such as "read only" because enforcing it by
+// parsing shell commands is neither sound nor worth the kernel complexity.
+const SHELL = new Set(["allow", "deny"]);
 const NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 function error(message) {
@@ -50,7 +53,7 @@ function parseProfile(source, file) {
     throw error(`${file}: description must contain 1..240 characters`);
   }
   const model = fields.model ?? "inherit";
-  const shell = fields.shell ?? "inherit";
+  const shell = fields.shell ?? "allow";
   if (!MODEL.has(model) || !SHELL.has(shell)) throw error(`${file}: invalid model or shell policy`);
   if (fields.thinking !== undefined && !["off", "enabled", "high", "max"].includes(fields.thinking)) {
     throw error(`${file}: unsupported thinking tier`);

@@ -3,10 +3,11 @@
 use super::palette::MessageColors;
 use super::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MessageRole {
     User,
     Assistant,
+    Tools,
 }
 
 impl UiState {
@@ -23,15 +24,12 @@ impl UiState {
     ) {
         let p = self.message_colors();
         for row in start..end {
-            // Classic B: user messages are subtle gray cards, while the
-            // assistant reads directly on the terminal background. Nested
-            // tool calls provide their own gray panel inside that rail.
-            if matches!(role, MessageRole::User) {
-                decor.push((row, Decor::Surface(Surface::Message)));
-            }
+            // User, assistant and tool groups share one neutral surface.
+            // Identity lives in the rail, not in competing shades of gray.
+            decor.push((row, Decor::Surface(Surface::Message)));
             let color = match role {
                 MessageRole::User => p.user_rail,
-                MessageRole::Assistant => p.assistant_rail,
+                MessageRole::Assistant | MessageRole::Tools => p.assistant_rail,
             };
             decor.push((
                 row,
@@ -44,13 +42,14 @@ impl UiState {
         }
     }
 
-    /// Start one assistant turn: one blank padding row, one role label, one
-    /// blank row. Later text, reasoning and tool records join this rail.
-    pub(super) fn begin_plain_assistant(
+    /// Start a single visible phase, not the entire assistant turn. The next
+    /// model response or batch of tool calls gets a separate card and rail.
+    pub(super) fn begin_plain_block(
         &self,
         lines: &mut Vec<Line<'static>>,
         decor: &mut Vec<(usize, Decor)>,
-        start: &mut Option<usize>,
+        start: &mut Option<(usize, MessageRole)>,
+        role: MessageRole,
     ) {
         if start.is_some() {
             return;
@@ -60,30 +59,38 @@ impl UiState {
         decor.push((
             lines.len(),
             Decor::Role {
-                label: "KROMA",
-                color: self.message_colors().assistant_rail,
+                label: match role {
+                    MessageRole::Tools => self.preferences.language.text("TOOLS", "工具"),
+                    MessageRole::User => self.preferences.language.text("YOU", "你"),
+                    MessageRole::Assistant => "KROMA",
+                },
+                color: match role {
+                    MessageRole::User => self.message_colors().user_rail,
+                    MessageRole::Assistant | MessageRole::Tools => {
+                        self.message_colors().assistant_rail
+                    }
+                },
             },
         ));
         lines.push(Line::default());
-        *start = Some(block_start);
+        *start = Some((block_start, role));
     }
 
-    /// End the turn at its last content row, paint one continuous rail over
-    /// every nested row, and retain no leading separator outside the block.
-    pub(super) fn close_plain_assistant(
+    /// Close a phase with one continuous surface and rail, then leave a single
+    /// terminal-background row between this card and whatever comes next.
+    pub(super) fn close_plain_block(
         &self,
         lines: &mut Vec<Line<'static>>,
         decor: &mut Vec<(usize, Decor)>,
-        start: &mut Option<usize>,
+        start: &mut Option<(usize, MessageRole)>,
     ) {
-        let Some(block_start) = start.take() else {
+        let Some((block_start, role)) = start.take() else {
             return;
         };
         if lines.last().is_some_and(|line| !line.spans.is_empty()) {
             lines.push(Line::default());
         }
-        self.decorate_message(block_start, lines.len(), MessageRole::Assistant, decor);
-        // A single terminal-background row separates consecutive turns.
+        self.decorate_message(block_start, lines.len(), role, decor);
         lines.push(Line::default());
     }
 

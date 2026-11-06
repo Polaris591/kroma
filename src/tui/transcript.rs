@@ -194,6 +194,66 @@ impl UiState {
 
 impl UiState {
     #[allow(clippy::too_many_arguments)]
+    /// Append a contiguous run of tools inside an existing transcript card.
+    /// Keeping row offsets here preserves expansion, inspection and code copy.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn append_tool_group(
+        &self,
+        tools: &[&Entry],
+        theme: Theme,
+        width: usize,
+        lines: &mut Vec<Line<'static>>,
+        tool_rows: &mut Vec<(usize, String)>,
+        decor: &mut Vec<(usize, Decor)>,
+        preformatted_rows: &mut Vec<usize>,
+    ) {
+        if tools.is_empty() {
+            return;
+        }
+        let card = self.tool_card(
+            tools,
+            theme,
+            width.saturating_sub(if width >= inspector::MIN_ACTION_WIDTH {
+                UnicodeWidthStr::width(self.inspection_label()) + 2
+            } else {
+                0
+            }),
+        );
+        let base = lines.len();
+        if width >= inspector::MIN_ACTION_WIDTH {
+            let inspect = if self.plain_style {
+                &card.inspect
+            } else {
+                &card.rows
+            };
+            decor.extend(
+                inspect
+                    .iter()
+                    .map(|(row, id)| (base + row, Decor::Inspect(id.clone()))),
+            );
+        }
+        tool_rows.extend(card.rows.into_iter().map(|(row, id)| (base + row, id)));
+        decor.extend(
+            card.groups
+                .into_iter()
+                .map(|(row, id)| (base + row, Decor::Group(id))),
+        );
+        if !self.plain_style {
+            for (start, end) in card.blocks {
+                decor.extend(
+                    (start..end).map(|row| (base + row, Decor::Surface(Surface::ToolRecord))),
+                );
+            }
+        }
+        preformatted_rows.extend(card.preformatted.into_iter().map(|row| base + row));
+        if !self.plain_style {
+            decor.extend(
+                (0..card.lines.len()).map(|row| (base + row, Decor::Surface(Surface::Raised))),
+            );
+        }
+        lines.extend(card.lines);
+    }
+
     pub(super) fn append_reasoning(
         &self,
         entry: &Entry,

@@ -152,9 +152,11 @@ its saved conversation:
   evidence is untouched, and both runs stay on disk.
 - The child runs in the recorded working directory. A `cwd` that resolves
   elsewhere is refused; omit `cwd` and the recorded directory is used.
-- Only a task with a final `completed` or `failed` state can be resumed. A
-  `running` record may still own its session lock and is refused with
-  `RESUME_ACTIVE`; a missing snapshot is `RESUME_MISSING`.
+- A finished task (`completed`, `failed`, `paused`) resumes from its saved
+  session. So does an **interrupted** task: a `running` record that no live
+  child in this worker owns is what a host shutdown leaves behind, and resuming
+  is the only way to recover that work. A task this worker is still executing is
+  refused with `RESUME_ACTIVE`; a missing snapshot is `RESUME_MISSING`.
 - A resume is a fork, not a retry: two resumes start from the same snapshot,
   and the child is billed again for the context it loads. Use a fresh task for
   independent work, and inspect a failure before resuming it.
@@ -172,7 +174,9 @@ its saved conversation:
 ## Profiles and models (1.0)
 
 The bundled profiles are `general` (unrestricted task), `explore` and `planner`
-(read-only), `reviewer` (read-only) and `verifier` (read/test). Custom Markdown
+(read-only by instruction), `reviewer` (same) and `verifier` (run focused
+tests). `explore`, `planner`, `reviewer` and `verifier` advertise only the
+`shell` tool, so no file-editing tool exists for them. Custom Markdown
 profiles are read from `~/.kroma/agents/*.md`, then
 `<project>/.kroma/agents/*.md`, with the project definition taking precedence.
 Frontmatter accepts only `name`, `description`, `model`, `thinking`, `shell`,
@@ -186,11 +190,15 @@ the named tiers. Missing mappings reuse the model from the normal child
 configuration; no upstream ID is guessed. Advanced setups may set
 `model` and `thinking` in plugin settings to override this fallback.
 
-The child Kroma host enforces an allowlist/denylist of tools, a literal-command
-read-only/test Shell policy and model-turn/token admission limits. The child
-never exposes nested `subagent`, `memory_remember` or `memory_forget` tools, and
-its automatic memory task-summary hook is disabled. This is not an OS sandbox;
-a permitted test process can execute arbitrary code from the repository.
+`shell` accepts `allow` (default) or `deny`; `deny` removes the shell tool. The
+child Kroma host enforces that tool allowlist/denylist plus model-turn and token
+admission limits. It deliberately does **not** parse shell commands: a command
+grammar is not an OS sandbox, and it rejects ordinary work such as
+`sed -n '1,80p' file` or `rg -n 'a|b' src`. "Read only" in a profile is an
+instruction to the model, not an enforced permission. The child never exposes
+nested `subagent`, `memory_remember` or `memory_forget` tools, and its automatic
+memory task-summary hook is disabled. A child can still execute arbitrary code
+from the repository through a shell command it was told not to run.
 
 Completed run evidence is cleaned after 30 days or 150 completed runs, without
 deleting in-progress directories or a run explicitly being resumed. Results
@@ -278,7 +286,7 @@ check the evidence directory before deciding what to run again.
 | `BATCH_ABORTED` | A sibling fault stopped this task |
 | `CHILD_PROTOCOL` | Invalid child output; fatal, the worker is discarded |
 | `RESUME_MISSING` | The token has no state record or no saved session |
-| `RESUME_ACTIVE` | The source task is still marked running |
+| `RESUME_ACTIVE` | The source task is still running in this worker |
 | `RESUME_STALE` | The saved session cannot be copied or its cwd is gone |
 
 Fatal codes reject the whole call with one error instead of returning per-task
