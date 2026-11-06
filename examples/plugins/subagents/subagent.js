@@ -40,6 +40,13 @@ const PREVIEW_MS = 30_000;
 const RUN_RETENTION_DAYS = 30;
 const RUN_RETENTION_COUNT = 150;
 
+// Delegation results are lower-trust reports, not a new user instruction.
+// Flag only obvious attempts to redirect the parent's instruction hierarchy;
+// do not hide, rewrite or reject an otherwise useful answer.
+function instructionShaped(text) {
+  return /(?:ignore|disregard|override|forget)\s+(?:all\s+)?(?:previous|prior|system|developer)(?:\s+(?:system|developer))?\s+(?:instructions?|prompts?|messages?|rules?)|(?:<\/?(?:system|developer)>|\[\s*im_start\s*\]\s*(?:system|developer))|(?:you\s+are\s+now\s+(?:the\s+)?(?:system|developer))/i.test(text);
+}
+
 function pruneRuns(dataDir, protectedIds = new Set(), now = Date.now()) {
   const root = path.join(dataDir, "runs");
   let names;
@@ -846,6 +853,7 @@ async function runTask(entry, context) {
       }
       const result = {index: entry.index, profile: entry.profile.name, label: entry.label,
         status: outcome.status,
+        trust: "untrusted_child_report",
         exit_code: outcome.exit_code ?? null};
       if (outcome.status === "completed") {
         result.output = clipped.text;
@@ -864,6 +872,7 @@ async function runTask(entry, context) {
         result.error = {code: outcome.code ?? "FAILED", message: detail};
       }
       result.duration_ms = Date.now() - started;
+      result.suspicious_instructions = instructionShaped(result.output ?? "");
       result.usage = usageReport(trace.usage);
       result.tool_calls = trace.toolCalls;
       result.resume = `${context.runId}/${entry.index}`;
