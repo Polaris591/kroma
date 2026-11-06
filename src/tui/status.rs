@@ -310,12 +310,11 @@ impl UiState {
         }
     }
 
-    /// The task loop already wakes every 40ms; paint about five frames per
+    /// The task loop already wakes every 40ms; paint about two frames per
     /// second while active, without reflowing history or polling the provider.
     pub fn tick_activity(&mut self) -> bool {
-        // Every frame re-shows and re-anchors the hardware cursor, which
-        // restarts the terminal caret blink. Keep the pulse calm so the
-        // composer caret is not strobed while the model runs.
+        // Keep the pulse calm; the composer draws a software caret and the
+        // terminal's hardware cursor remains hidden during these redraws.
         if !self.running || self.last_activity_frame.elapsed() < Duration::from_millis(500) {
             return false;
         }
