@@ -398,6 +398,11 @@ fn capture_provider() -> Result<(String, std::sync::mpsc::Receiver<Value>)> {
                 }
                 Err(_) => return,
             };
+            // Accepted sockets can inherit nonblocking mode on Windows. The
+            // synchronous BufReader below must wait for the complete body.
+            if stream.set_nonblocking(false).is_err() {
+                continue;
+            }
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let parsed = (|| -> Result<Value> {
                 let mut reader = BufReader::new(&stream);
