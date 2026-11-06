@@ -515,10 +515,12 @@ pub(super) enum TaskOutcome {
 }
 
 pub struct UiState {
+    #[cfg(any(windows, test))]
+    pub(super) native_paste_keys: super::paste::NativePasteKeys,
     plain_style: bool,
-    /// True while the composer paints its own caret: the hardware cursor is
-    /// positioned for the IME but hidden so its blink cannot fight the block.
-    pub(super) hide_hardware_cursor: bool,
+    /// Anchor for IME composition while the composer paints a software caret.
+    /// The terminal moves here *without showing* its blinking hardware cursor.
+    pub(super) ime_cursor_position: Option<(u16, u16)>,
     pub(super) taskbar_enabled: bool,
     pub(super) ui_sender: Option<EventSender>,
     navigation_turn: Option<usize>,
@@ -677,8 +679,10 @@ impl UiState {
         messages: &[Message],
     ) -> Self {
         let mut result = Self {
+            #[cfg(any(windows, test))]
+            native_paste_keys: Default::default(),
             plain_style: false,
-            hide_hardware_cursor: false,
+            ime_cursor_position: None,
             taskbar_enabled: false,
             ui_sender: None,
             navigation_turn: None,
@@ -1714,6 +1718,15 @@ impl UiState {
         self.editor_selecting = false;
         self.scrollbar_drag = None;
         self.scrollbar_pointer_y = None;
+        // A click is not a selection. In particular, a click on empty
+        // transcript space must not leave a reversed one-cell "caret".
+        if self.selection_end.is_none()
+            || self.selection_start == self.selection_end
+            || self.selected_text().is_none()
+        {
+            self.selection_start = None;
+            self.selection_end = None;
+        }
         self.selection_dragging = false;
         self.selection_edge = 0;
     }
@@ -1843,7 +1856,10 @@ impl UiState {
     }
 
     pub fn paste_text(&mut self, text: &str) {
-        self.editor.paste_over(text, self.editor_selection.take());
+        // The Windows clipboard commonly uses CRLF. Keep pasted text as
+        // logical editor lines rather than embedding stray carriage returns.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.editor.paste_over(&text, self.editor_selection.take());
         self.clear_editor_selection();
         self.prune_attachments();
     }
@@ -1922,6 +1938,12 @@ impl UiState {
     }
 
     pub fn select_start(&mut self, column: u16, row: u16) {
+        // Any new click clears the previous range. Only a subsequent drag
+        // creates a nonempty selection; Down itself never highlights a cell.
+        self.selection_start = None;
+        self.selection_end = None;
+        self.selection_dragging = false;
+        self.selection_edge = 0;
         if self.selection_area.contains((column, row).into()) {
             self.clear_editor_selection();
             let point = (
@@ -1929,9 +1951,7 @@ impl UiState {
                 (column - self.selection_area.x) as usize,
             );
             self.selection_start = Some(point);
-            self.selection_end = Some(point);
             self.selection_dragging = true;
-            self.selection_edge = 0;
         }
     }
 
@@ -1961,6 +1981,9 @@ impl UiState {
 
     pub fn selected_text(&self) -> Option<String> {
         let (start, end) = (self.selection_start?, self.selection_end?);
+        if start == end {
+            return None;
+        }
         let (start, end) = if start <= end {
             (start, end)
         } else {
@@ -2449,6 +2472,8 @@ impl UiState {
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
+        // A prior frame's IME anchor must not survive an overlay or resize.
+        self.ime_cursor_position = None;
         self.recent_session_rows.clear();
         self.editor
             .localize_attachment_labels(self.preferences.language);
@@ -3070,7 +3095,11 @@ impl UiState {
                 }
             }
         }
-        if let (Some(mut start), Some(mut end)) = (self.selection_start, self.selection_end) {
+        if let Some((mut start, mut end)) = self
+            .selection_start
+            .zip(self.selection_end)
+            .filter(|(start, end)| start != end)
+        {
             if start > end {
                 std::mem::swap(&mut start, &mut end);
             }
@@ -3295,10 +3324,9 @@ impl UiState {
             } else {
                 (cx, cy)
             };
-            // Software caret: the hardware cursor is still positioned here so
-            // IME composition windows land on the text, but it is hidden after
-            // the frame so its blink cannot fight the block.
-            self.hide_hardware_cursor = true;
+            // Paint a software caret and retain its position for the IME.
+            // Do NOT call frame.set_cursor_position here: ratatui would show
+            // the hardware cursor on every animation / elapsed-time redraw.
             let caret = (
                 editor_inner
                     .x
@@ -3310,7 +3338,7 @@ impl UiState {
             if let Some(cell) = frame.buffer_mut().cell_mut(caret) {
                 cell.set_style(Style::default().bg(colors.text).fg(colors.background));
             }
-            frame.set_cursor_position(caret);
+            self.ime_cursor_position = Some(caret);
         }
         let status_area = Rect::new(
             layout[5].x.saturating_add(2),

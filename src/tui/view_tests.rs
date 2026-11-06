@@ -366,6 +366,65 @@ fn connecting_steering_stays_in_composer_not_activity_row() {
 }
 
 #[test]
+fn blank_history_click_does_not_reverse_a_cell_and_drag_still_selects_text() {
+    let mut ui = UiState::new(
+        "mock".into(),
+        "session".into(),
+        ThemeStore::load_at(None).unwrap(),
+        &[Message::new("assistant", "SELECTABLE_TEXT")],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(90, 28)).unwrap();
+    terminal.draw(|frame| ui.draw(frame)).unwrap();
+
+    let area = ui.selection_area;
+    let blank = (area.x + area.width / 2, area.y + area.height / 2);
+    assert_eq!(
+        terminal.backend().buffer().cell(blank).unwrap().symbol(),
+        " "
+    );
+    ui.select_start(blank.0, blank.1);
+    assert!(ui.selected_text().is_none(), "Down is not a selection");
+    terminal.draw(|frame| ui.draw(frame)).unwrap();
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .cell(blank)
+            .unwrap()
+            .modifier
+            .contains(Modifier::REVERSED),
+        "clicking empty history must not draw a fake cursor"
+    );
+    ui.mouse_release();
+    assert!(ui.selection_start.is_none());
+    assert!(ui.selection_end.is_none());
+
+    // A genuine drag still selects transcript text and survives mouse release.
+    let (x, y) = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(90)
+        .enumerate()
+        .find_map(|(row, cells)| {
+            cells
+                .windows("SELECTABLE_TEXT".len())
+                .position(|cells| {
+                    cells.iter().map(|cell| cell.symbol()).collect::<String>() == "SELECTABLE_TEXT"
+                })
+                .map(|col| (col as u16, row as u16))
+        })
+        .expect("rendered assistant text");
+    assert!(area.contains((x, y).into()));
+    ui.select_start(x, y);
+    ui.select_drag(x + 5, y);
+    ui.mouse_release();
+    assert!(ui
+        .selected_text()
+        .is_some_and(|text| text.contains("SELECT")));
+}
+
+#[test]
 fn command_output_survives_same_session_reload_without_entering_wal() {
     let history = vec![
         Message::new("user", "first question"),
