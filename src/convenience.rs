@@ -17,9 +17,41 @@ pub fn save_pipe_input(bytes: &[u8]) -> Result<PathBuf> {
 
 pub fn file_reference(text: &str, workdir: &Path) -> Result<String> {
     let mut output = String::new();
-    for span in text.split_inclusive(char::is_whitespace) {
-        let word = span.trim_end_matches(char::is_whitespace);
-        let suffix = &span[word.len()..];
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        let space = remaining
+            .find(|ch: char| !ch.is_whitespace())
+            .unwrap_or(remaining.len());
+        output.push_str(&remaining[..space]);
+        remaining = &remaining[space..];
+        if remaining.is_empty() {
+            break;
+        }
+        // Quoted @ references make paths with spaces usable in both CLI and
+        // TUI without changing the normal word-completion contract.
+        if let Some(quote) = remaining
+            .strip_prefix('@')
+            .and_then(|rest| rest.chars().next())
+            .filter(|ch| *ch == '"' || *ch == '\'')
+        {
+            let prefix_len = 1 + quote.len_utf8();
+            if let Some(close) = remaining[prefix_len..].find(quote) {
+                let end = prefix_len + close + quote.len_utf8();
+                let path = &remaining[prefix_len..prefix_len + close];
+                if let Some(reference) = resolved_file_reference(path, workdir)? {
+                    output.push_str(&reference);
+                } else {
+                    output.push_str(&remaining[..end]);
+                }
+                remaining = &remaining[end..];
+                continue;
+            }
+        }
+        let end = remaining
+            .find(char::is_whitespace)
+            .unwrap_or(remaining.len());
+        let word = &remaining[..end];
+        remaining = &remaining[end..];
         let (core, trailing) = word.split_at(
             word.trim_end_matches(|ch: char| {
                 matches!(ch, ',' | ';' | ':' | ')' | ']' | '}' | '。' | '，' | '；')
@@ -27,24 +59,30 @@ pub fn file_reference(text: &str, workdir: &Path) -> Result<String> {
             .len(),
         );
         if let Some(path) = core.strip_prefix('@') {
-            if !path.is_empty() {
-                let candidate = workdir.join(path);
-                if candidate.is_file() {
-                    let full = candidate.canonicalize()?;
-                    output.push_str(&format!(
-                        "File {} (read with Shell as needed)",
-                        crate::path_display::for_shell(&full)
-                    ));
-                    output.push_str(trailing);
-                    output.push_str(suffix);
-                    continue;
-                }
+            if let Some(reference) = resolved_file_reference(path, workdir)? {
+                output.push_str(&reference);
+                output.push_str(trailing);
+                continue;
             }
         }
         output.push_str(word);
-        output.push_str(suffix);
     }
     Ok(output)
+}
+
+fn resolved_file_reference(path: &str, workdir: &Path) -> Result<Option<String>> {
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let candidate = workdir.join(path);
+    if !candidate.is_file() {
+        return Ok(None);
+    }
+    let full = candidate.canonicalize()?;
+    Ok(Some(format!(
+        "File {} (read with Shell as needed)",
+        crate::path_display::for_shell(&full)
+    )))
 }
 
 pub fn suggestions(workdir: &Path, prefix: &str) -> Result<Vec<String>> {
@@ -287,6 +325,25 @@ mod tests {
             suggestions(&root, "@src/age")?,
             vec![format!("@src{}agent.rs", std::path::MAIN_SEPARATOR)]
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn quoted_file_references_support_spaces_without_rewriting_missing_paths() -> Result<()> {
+        let root = scratch("quoted-file-ref");
+        fs::write(root.join("hello world.txt"), "hello")?;
+        let input =
+            "Read @\"hello world.txt\", then @'hello world.txt'; keep @\"missing file.txt\".";
+        let projected = file_reference(input, &root)?;
+        let canonical = root.join("hello world.txt").canonicalize()?;
+        let expected = format!(
+            "File {} (read with Shell as needed)",
+            crate::path_display::for_shell(&canonical)
+        );
+        assert_eq!(projected.matches(&expected).count(), 2);
+        assert!(projected.contains("@\"missing file.txt\"."));
+        assert!(projected.contains(&format!("{expected},")));
+        assert!(projected.contains(&format!("{expected};")));
         fs::remove_dir_all(root)?;
         Ok(())
     }
