@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        For security vulnerabilities, follow [SECURITY.md](../../SECURITY.md) and **do not** open a public issue. Never paste API keys, credentials, private conversations or proprietary source.
+        For security vulnerabilities, follow [SECURITY.md](https://github.com/Polaris591/kroma/blob/main/SECURITY.md) and **do not** open a public issue. Never paste API keys, credentials, private conversations or proprietary source.
   - type: textarea
     id: summary
     attributes:

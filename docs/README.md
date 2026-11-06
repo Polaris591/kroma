@@ -18,6 +18,7 @@ Start at the [English README](../README.md) or [中文说明](../README.zh-CN.md
 | Guide | Contents |
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Development checks, pull requests and architecture principles |
+| [Maintainer operations](maintainer-operations.md) | GitHub settings, issue triage, CI ownership and release gates |
 | [Architecture](architecture.md) | Runtime ownership and module boundaries |
 | [Lifecycle](lifecycle.md) | Task transitions, event ordering and cancellation |
 | [Performance](performance.md) | Opt-in local measurements and interpretation |
@@ -35,6 +36,6 @@ These documents are retained for context, and some record proposals, experiments
 - [Project Memory design](project-memory-design.md), [V2 contract](project-memory-v2-contract.md), and [zero-maintenance notes](project-memory-zero-maintenance.md)
 - [Subagent design](subagents-design.md) and [1.0 design](subagents-1.0-design.md)
 - [Historical deployment notes](promotion-linux-do.md)
-- [Plugin roadmap](../PLUGIN_ROADMAP.md), [benchmarks](../benchmarks/) and [reviews](../reviews/)
+- [Plugin roadmap](../PLUGIN_ROADMAP.md), [benchmark archive](../benchmarks/README.md) and [review archive](../reviews/README.md)
 
 Use the repository's `main` source and tests as the final authority when historical documents disagree.

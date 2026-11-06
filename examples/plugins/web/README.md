@@ -46,7 +46,7 @@ changes need a restart or `/plugins reload` while the TUI is idle.
   skipping those without credentials. Only **one paid request** is attempted
   by default. Enable `paid_fallback` explicitly to allow multiple paid calls
   on transient errors.
-  Default order: **Parallel Fast → Brave → Exa**. An empty configured chain
+  Official manifest default order: **Parallel → You.com → Exa → Tavily**. An empty configured chain
   returns `CONFIG_ERROR` before any request. Brave, Firecrawl and SearXNG can be
   used explicitly or added to the priority list; they are not silently appended.
 - `mwmbl`, `bing`, `duckduckgo` and `duckduckgo_lite`: keyless engines. They can be
@@ -115,7 +115,7 @@ restarts itself once before reading requests to apply the proxy at startup.
 An unreachable configured proxy fails; there is no silent direct fallback.
 Set `proxy_enabled: false` to explicitly choose direct networking.
 
-### Priority configuration / upgrade to 1.7
+### Priority configuration
 
 To enable prioritized automatic search:
 

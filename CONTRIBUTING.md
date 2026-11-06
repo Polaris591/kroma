@@ -23,6 +23,7 @@ cargo clippy --locked --all-targets -- -D warnings
 node --test examples/plugins/web/web.test.js examples/plugins/web/http.test.js examples/plugins/web/main.test.js
 node --test examples/plugins/subagents/subagent.test.js examples/plugins/subagents/main.test.js
 npm --prefix npm test
+python3 scripts/check_doc_links.py
 ```
 
 The full CI matrix runs Rust tests and Clippy on Linux, macOS and Windows. Project Memory and Desktop have **separate** checks; consult their documentation and workflows instead of assuming the root Cargo command covers them. In environments that set `NO_COLOR`, the TUI color-assertion tests can fail; unset it for tests explicitly expecting colored rendering.

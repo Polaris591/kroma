@@ -11,6 +11,19 @@ Kroma 有意保持自主：它不会逐条命令请求批准。它以可见性�
 权限审批。请在运行前阅读[安全模型](docs/security.md)。英文主文档见
 [README.md](README.md)。
 
+## 项目状态
+
+| 组件 | 当前状态 | 资料 |
+| --- | --- | --- |
+| Rust CLI、JSONL、TUI | 公开测试版；当前支持源码构建 | [快速开始](docs/quickstart.md) |
+| MCP、Skills、进程插件 | 已实现；插件默认不启用 | [插件指南](examples/plugins/README.md) |
+| 官方 Web、子代理、项目记忆插件 | 源码已提供；按需启用 | [插件说明](examples/plugins/README.md) |
+| Desktop | 独立预览版，不包含在 CLI 的 npm 包内 | [Desktop 说明](desktop/README.md) |
+| npm 分发 | 已准备五个平台的构建流程；尚未发布 | [分发说明](docs/npm-distribution.md) |
+
+项目文档见[文档索引](docs/README.md)，尚未发布的开发变更见
+[CHANGELOG](CHANGELOG.md)。
+
 ## 前置条件
 
 - 源码构建需要 Rust 1.85+；使用预编译 npm 包时最终用户不需要 Rust。
@@ -109,6 +122,7 @@ npm 包（`kroma` 与五个 `kroma-<platform>`）目前均未发布，名称在�
 - [贡献指南](CONTRIBUTING.md)：开发检查、PR 规范与简约架构原则。
 - [变更记录](CHANGELOG.md)：尚未发布版本的整理记录，不代表已经发布安装包。
 - [Issues](https://github.com/Polaris591/kroma/issues)：报告问题和提出功能建议。
+- [项目维护指南](docs/maintainer-operations.md)：GitHub 设置、CI 与发布验收。
 
 ## 反馈
 
