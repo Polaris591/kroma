@@ -516,9 +516,9 @@ pub(super) enum TaskOutcome {
 
 pub struct UiState {
     plain_style: bool,
-    /// True while the composer paints its own caret: the hardware cursor is
-    /// positioned for the IME but hidden so its blink cannot fight the block.
-    pub(super) hide_hardware_cursor: bool,
+    /// Anchor for IME composition while the composer paints a software caret.
+    /// The terminal moves here *without showing* its blinking hardware cursor.
+    pub(super) ime_cursor_position: Option<(u16, u16)>,
     pub(super) taskbar_enabled: bool,
     pub(super) ui_sender: Option<EventSender>,
     navigation_turn: Option<usize>,
@@ -678,7 +678,7 @@ impl UiState {
     ) -> Self {
         let mut result = Self {
             plain_style: false,
-            hide_hardware_cursor: false,
+            ime_cursor_position: None,
             taskbar_enabled: false,
             ui_sender: None,
             navigation_turn: None,
@@ -2445,6 +2445,8 @@ impl UiState {
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
+        // A prior frame's IME anchor must not survive an overlay or resize.
+        self.ime_cursor_position = None;
         self.recent_session_rows.clear();
         self.editor
             .localize_attachment_labels(self.preferences.language);
@@ -3291,10 +3293,9 @@ impl UiState {
             } else {
                 (cx, cy)
             };
-            // Software caret: the hardware cursor is still positioned here so
-            // IME composition windows land on the text, but it is hidden after
-            // the frame so its blink cannot fight the block.
-            self.hide_hardware_cursor = true;
+            // Paint a software caret and retain its position for the IME.
+            // Do NOT call frame.set_cursor_position here: ratatui would show
+            // the hardware cursor on every animation / elapsed-time redraw.
             let caret = (
                 editor_inner
                     .x
@@ -3306,7 +3307,7 @@ impl UiState {
             if let Some(cell) = frame.buffer_mut().cell_mut(caret) {
                 cell.set_style(Style::default().bg(colors.text).fg(colors.background));
             }
-            frame.set_cursor_position(caret);
+            self.ime_cursor_position = Some(caret);
         }
         let status_area = Rect::new(
             layout[5].x.saturating_add(2),

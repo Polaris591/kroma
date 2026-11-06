@@ -46,7 +46,11 @@ use editor::EditAction;
 use event_queue::EventReceiver;
 use futures_util::StreamExt;
 use picker::{Action as PickerAction, Item as PickerItem, Kind as PickerKind, Picker};
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{
+    backend::{Backend, CrosstermBackend},
+    buffer::Buffer,
+    Terminal,
+};
 use runtime_events::{UiEvent, UiSink};
 use std::{io, process::Command, sync::Arc};
 use theme::ThemeStore;
@@ -55,6 +59,25 @@ use view::UiState;
 struct TerminalScreen {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     feedback: terminal_feedback::Feedback,
+}
+
+/// Ratatui shows its hardware cursor whenever a frame sets a cursor position.
+/// The editor draws a software caret instead, so anchor the terminal cursor for
+/// IME input *after* ratatui has hidden it. This avoids a visible blink on every
+/// spinner or elapsed-time redraw while leaving the picker cursor functional.
+fn draw_tui_frame<B: Backend>(
+    terminal: &mut Terminal<B>,
+    state: &mut UiState,
+    decorate: impl FnOnce(&mut Buffer),
+) -> io::Result<()> {
+    terminal.draw(|frame| {
+        state.draw(frame);
+        decorate(frame.buffer_mut());
+    })?;
+    if let Some(position) = state.ime_cursor_position {
+        terminal.set_cursor_position(position)?;
+    }
+    Ok(())
 }
 
 impl TerminalScreen {
@@ -92,20 +115,9 @@ impl TerminalScreen {
         state.taskbar_enabled = self.feedback.windows_terminal;
         self.feedback
             .update(&mut io::stdout(), &state.terminal_title(), state.running)?;
-        let cursor_was_hidden = state.hide_hardware_cursor;
-        state.hide_hardware_cursor = false;
-        self.terminal.draw(|frame| {
-            state.draw(frame);
-            self.feedback.reduce_palette(frame.buffer_mut());
+        draw_tui_frame(&mut self.terminal, state, |buffer| {
+            self.feedback.reduce_palette(buffer)
         })?;
-        if state.hide_hardware_cursor {
-            // Keep the position for IME composition, drop the blinking caret:
-            // the composer paints its own block.
-            let _ = execute!(io::stdout(), crossterm::cursor::Hide);
-        } else if cursor_was_hidden {
-            // The composer stopped drawing; return the caret the terminal owns.
-            let _ = execute!(io::stdout(), crossterm::cursor::Show);
-        }
         Ok(())
     }
 
@@ -2342,6 +2354,114 @@ mod tests {
     use super::*;
     use crate::provider::ModelClient;
     use crossterm::event::KeyModifiers;
+    use ratatui::{
+        backend::{TestBackend, WindowSize},
+        buffer::Cell,
+        layout::{Position, Size},
+    };
+
+    // TestBackend alone does not expose whether ratatui briefly called Show.
+    // Record cursor operations so a transient caret flash fails the test.
+    struct CursorProbe {
+        inner: TestBackend,
+        shows: usize,
+        hides: usize,
+    }
+
+    impl Backend for CursorProbe {
+        fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            self.inner.draw(content)
+        }
+
+        fn hide_cursor(&mut self) -> io::Result<()> {
+            self.hides += 1;
+            self.inner.hide_cursor()
+        }
+
+        fn show_cursor(&mut self) -> io::Result<()> {
+            self.shows += 1;
+            self.inner.show_cursor()
+        }
+
+        fn get_cursor_position(&mut self) -> io::Result<Position> {
+            self.inner.get_cursor_position()
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+            self.inner.set_cursor_position(position)
+        }
+
+        fn clear(&mut self) -> io::Result<()> {
+            self.inner.clear()
+        }
+
+        fn size(&self) -> io::Result<Size> {
+            self.inner.size()
+        }
+
+        fn window_size(&mut self) -> io::Result<WindowSize> {
+            self.inner.window_size()
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    #[test]
+    fn spinner_redraws_never_show_hardware_cursor_but_preserve_ime_and_picker() {
+        let (mut state, _) = setup();
+        state.event(UiEvent::TaskStarted);
+        state.event(UiEvent::ModelStarted);
+        state.editor.paste("输入法测试");
+        let mut terminal = Terminal::new(CursorProbe {
+            inner: TestBackend::new(90, 28),
+            shows: 0,
+            hides: 0,
+        })
+        .unwrap();
+
+        for tick in 0..4 {
+            draw_tui_frame(&mut terminal, &mut state, |_| {}).unwrap();
+            let anchor = state.ime_cursor_position.expect("composer IME anchor");
+            assert_eq!(terminal.get_cursor_position().unwrap(), anchor.into());
+            assert_eq!(terminal.backend().shows, 0, "no caret flash during redraw");
+            if tick < 3 {
+                std::thread::sleep(std::time::Duration::from_millis(510));
+                assert!(state.tick_activity());
+            }
+        }
+        assert!(terminal.backend().hides >= 4);
+
+        // The picker is an actual text input; it must retain its visible cursor.
+        state.picker = Some(Picker::new(
+            PickerKind::Commands,
+            vec![PickerItem::new("Help", "/help", "help")],
+            "he",
+        ));
+        draw_tui_frame(&mut terminal, &mut state, |_| {}).unwrap();
+        assert_eq!(state.ime_cursor_position, None);
+        assert_eq!(terminal.backend().shows, 1, "picker needs a visible caret");
+
+        state.picker = None;
+        draw_tui_frame(&mut terminal, &mut state, |_| {}).unwrap();
+        assert_eq!(
+            terminal.backend().shows,
+            1,
+            "composer must not re-show caret"
+        );
+        assert!(state.ime_cursor_position.is_some());
+
+        // A tiny terminal cannot display the editor, so its IME anchor must
+        // be cleared rather than retaining coordinates from a prior frame.
+        terminal.backend_mut().inner.resize(10, 5);
+        draw_tui_frame(&mut terminal, &mut state, |_| {}).unwrap();
+        assert!(state.ime_cursor_position.is_none());
+        assert_eq!(terminal.backend().shows, 1);
+    }
 
     fn setup() -> (UiState, ModelClient) {
         let model = ModelClient::new("http://localhost/v1", None, "test".into()).unwrap();
