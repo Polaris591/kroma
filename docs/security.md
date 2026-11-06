@@ -61,19 +61,17 @@ are left alone. Because this can delete new work, run `/checkpoints` first and u
 `/restore-files` deliberately. Conversation history is not changed; use `/rewind`
 for messages.
 
-## Project plugin approval
+## Project plugins: explicit enablement, no reapproval queue
 
-Project plugin approval is bound to the manifest and a bounded scan of authored
-local files, including Python helpers, extensionless files and files larger than
-1 MiB. The scan covers at most 20,000 entries / 64 MiB total, with an 8 MiB local
-file limit and a 16 MiB explicit entry-point limit. Incomplete or unreadable scans
-cannot be approved. Dependency/cache directories (`node_modules`, `.git`,
-`target`, `__pycache__`, `.pytest_cache`) are deliberately outside this boundary;
-this is change detection, **not a sandbox**. Enabled plugins retain user privileges.
-
-Older project approvals must be renewed with `kroma plugins enable <id>` because
-the fingerprint format changed. Disabled discovery does not scan plugin code;
-disabling a broken or unverifiable plugin does not require approving it.
+User-installed and project plugins are disabled until explicitly enabled once.
+After that, source edits do **not** require renewed approval or silently turn
+off the plugin. Kroma scans a bounded set of authored source files to decide
+whether a worker can be reused across idle reload; dependency/cache trees are
+excluded. Incomplete scans produce diagnostics, not an approval dialog.
+Plugins execute with the current user's privileges; this scan is **not** a
+sandbox. Disable any plugin you no longer want to run. An invalid optional
+plugin does not block other plugins; an explicitly selected broken model or
+context plugin must not silently fall back to another backend.
 
 If an after-tool hook fails, the completed tool's result/status is preserved and
 the failed hook's partial patch is discarded. A separate warning is persisted

@@ -340,6 +340,11 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         Message::new("user", quote),
     ];
     model.complete(&first_task, &[], &mut |_| {}).await?;
+    // Legacy pending proposals are promoted only after the host's durable
+    // task boundary, not by an intermediate assistant model response.
+    model
+        .task_finished("session-a", &archive, &first_task, "completed")
+        .await?;
     let (content, _) = call_tool(
         &tools,
         "memory_search",
@@ -361,7 +366,7 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         .last()
         .and_then(|message| message.content.as_deref())
         .unwrap_or("");
-    assert!(injected.contains("<project-memory trust=\"unverified-reference\">"));
+    assert!(injected.contains("<plugin-context trust=\"unverified-reference\">"));
     assert!(injected.contains("Use pnpm, not npm"));
 
     drop(model);

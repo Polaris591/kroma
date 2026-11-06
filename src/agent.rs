@@ -1033,6 +1033,9 @@ impl Agent {
         ));
         self.session
             .append(&self.messages, &self.compression.state())?;
+        // Cancellation has already committed its durable boundary. Notify
+        // optional plugins only after the WAL append, without blocking Ctrl+C.
+        self.notify_task_plugins("cancelled");
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::TaskFinished {
                 status: "cancelled",
@@ -1098,10 +1101,48 @@ impl Agent {
             "failed"
         };
         stats.finish(status);
+        // Final, post-WAL, non-blocking notification. No hook runs for an
+        // intermediate assistant response or in an unextended model backend.
+        self.notify_task_plugins(status);
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::TaskFinished { status });
         }
         result
+    }
+
+    fn notify_task_plugins(&self, status: &str) {
+        if !self.model.has_task_finished_hook() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let model = self.model.clone();
+        let session_id = self.session_id().to_owned();
+        let archive = self.session.archive_path().to_path_buf();
+        // Send only bounded user task signals, not the entire transcript or
+        // arbitrary tool outputs through an optional lifecycle extension.
+        let mut users: Vec<Message> = self
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == "user")
+            .take(8)
+            .map(|message| {
+                let text = message.content.as_deref().unwrap_or("");
+                Message::new("user", text.chars().take(2000).collect::<String>())
+            })
+            .collect();
+        users.reverse();
+        let status = status.to_owned();
+        handle.spawn(async move {
+            if let Err(error) = model
+                .task_finished(&session_id, &archive, &users, &status)
+                .await
+            {
+                crate::runtime_log!("[plugin] task lifecycle notification skipped: {error:#}");
+            }
+        });
     }
 
     async fn snapshot_before_first_tool(&mut self, stats: &mut TaskStats) {

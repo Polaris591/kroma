@@ -46,20 +46,22 @@ or cause commands to be replayed. See [lifecycle](lifecycle.md) for limits and
 ordering. Moving notifications out of the renderer is an ownership separation,
 not a new event bus, scheduler or public plugin ABI.
 
-## Plugins: content approval versus worker lifetime
+## Plugins: opt-in runtime versus worker lifetime
 
 - `plugins.rs`: manifest/state/catalog, activation and reload composition, adapters
   for tools/hooks/events and worker process ownership.
-- `plugins/approval.rs`: bounded filesystem scan, content snapshot and the v3
-  approval fingerprint. It does not own a process, a model or Host state.
+- `plugins/approval.rs`: bounded filesystem source scans for idle worker reuse.
+  It does not implement an approval workflow or own Host/Agent state.
 - `plugins/model.rs`, `plugins/context.rs`, `plugins/stream.rs`: process-backed
   model/context adapters and streamed protocol assembly/validation.
 
-A worker owns a content-scan value, not the scanning algorithm. Catalog activation
-uses that value to compare approval; reload compares content, not mtime. This
-keeps trust decisions independently testable from IPC/cancellation. The v3 field
-layout is regression-tested so moving code does not revoke existing v3 approvals.
-Disabled discovery stays metadata-only; enabling rescans. Dependency/cache trees
+A worker owns a content-scan value, not the scanning algorithm. Explicit plugin
+enablement is one persistent switch; project source edits do not require
+reapproval. Idle reload compares authored content, not just mtime, to decide
+which workers can be reused. Plugin registration stages tool and Prompt changes
+atomically. Broken optional plugins are isolated, while an explicitly selected
+model/context backend cannot silently fall back to another provider. Event
+subscribers have bounded queues and drop diagnostics. Dependency/cache trees
 and runtime downloads are not a complete dependency graph or sandbox. See
 [security](security.md) and [the plugin guide](../examples/plugins/README.md).
 
