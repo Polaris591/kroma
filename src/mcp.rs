@@ -223,10 +223,12 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 
 /// Stable content digest used wherever an approval is bound to code bytes.
 pub(crate) fn content_digest(bytes: &[u8]) -> String {
-    sha256(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    use std::fmt::Write;
+    let mut digest = String::with_capacity(64);
+    for byte in sha256(bytes) {
+        let _ = write!(&mut digest, "{byte:02x}");
+    }
+    digest
 }
 
 fn is_js_module(path: &Path) -> bool {
@@ -2192,6 +2194,7 @@ mod tests {
         let mut active = Box::pin(tool.execute(
             &call_a,
             ToolContext {
+                model_connection: None,
                 workdir: &dir,
                 archive: &archive_a,
                 on_output: None,
@@ -2227,6 +2230,7 @@ mod tests {
                 .execute(
                     &call,
                     ToolContext {
+                        model_connection: None,
                         workdir: &waiting_dir,
                         archive: &archive,
                         on_output: None,
@@ -2293,6 +2297,7 @@ mod tests {
                 .execute(
                     &call,
                     ToolContext {
+                        model_connection: None,
                         workdir: &dir,
                         archive: &dir.join("session.json"),
                         on_output: None,
@@ -2334,6 +2339,7 @@ mod tests {
         let mut future = Box::pin(tool.execute(
             &call,
             ToolContext {
+                model_connection: None,
                 workdir: &dir,
                 archive: &archive,
                 on_output: None,
@@ -2753,6 +2759,31 @@ struct McpSearch {
     server_names: String,
 }
 
+// Discovery must return callable input schemas. Previously the agent saw only
+// names/descriptions and had to guess required arguments for mcp_call. Bound
+// the expansion so a single tool with a pathological schema cannot drown the
+// context or make tool discovery unusable.
+const MCP_DISCOVERY_MAX_BYTES: usize = 128 * 1024;
+const MCP_DISCOVERY_SCHEMA_MAX_BYTES: usize = 16 * 1024;
+
+fn discovered_mcp_tool(server: &str, metadata: &Value) -> Option<Value> {
+    let remote = metadata["name"].as_str()?;
+    let description = metadata["description"].as_str().unwrap_or("MCP tool");
+    let mut entry = json!({"server":server,"tool":remote,"description":description});
+    if let Some(schema) = metadata.get("inputSchema") {
+        if serde_json::to_vec(schema)
+            .is_ok_and(|bytes| bytes.len() <= MCP_DISCOVERY_SCHEMA_MAX_BYTES)
+        {
+            entry["input_schema"] = schema.clone();
+        } else {
+            entry["schema_omitted"] = json!("Tool input schema exceeds discovery limit (16 KiB)");
+        }
+    } else {
+        entry["schema_omitted"] = json!("Server did not advertise inputSchema");
+    }
+    Some(entry)
+}
+
 impl Tool for McpSearch {
     fn name(&self) -> &str {
         "mcp_search"
@@ -2791,6 +2822,7 @@ impl Tool for McpSearch {
             }
             let mut found = Vec::new();
             let mut truncated = false;
+            let mut result_bytes = 0usize;
             let deadline = tokio::time::Instant::now() + MCP_SEARCH_BUDGET;
             for name in self.manager.servers.keys() {
                 if only.is_some_and(|only| only != name) {
@@ -2866,11 +2898,16 @@ impl Tool for McpSearch {
                                 truncated = true;
                                 continue;
                             }
-                            found.push(json!({
-                                "server":name,
-                                "tool":remote,
-                                "description":description
-                            }));
+                            if let Some(entry) = discovered_mcp_tool(name, &metadata) {
+                                let size =
+                                    serde_json::to_vec(&entry).map_or(usize::MAX, |b| b.len());
+                                if result_bytes.saturating_add(size) > MCP_DISCOVERY_MAX_BYTES {
+                                    truncated = true;
+                                    continue;
+                                }
+                                result_bytes += size;
+                                found.push(entry);
+                            }
                         }
                     }
                     Err(error) => {

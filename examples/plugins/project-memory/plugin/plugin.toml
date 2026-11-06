@@ -80,6 +80,7 @@ items = { type = "string" }
 
 [[tools]]
 name = "memory_forget"
+invalidates_context = true
 description = "Forget one project memory by id. Use only when the user explicitly asks to forget it. The entry is tombstoned immediately and excluded from search, read and recall."
 [tools.parameters]
 type = "object"

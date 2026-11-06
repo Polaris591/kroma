@@ -89,6 +89,7 @@ for line in sys.stdin:
         .execute(
             &invoke("mcp__local__echo", r#"{"text":"hello"}"#),
             ToolContext {
+                model_connection: None,
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
@@ -224,6 +225,7 @@ async fn http_integration(version: &str, sse: bool) -> Result<()> {
         .execute(
             &invoke("mcp__remote__echo", r#"{"text":"hello"}"#),
             ToolContext {
+                model_connection: None,
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
@@ -340,6 +342,7 @@ async fn skills_expose_metadata_and_load_on_demand() -> Result<()> {
         .execute(
             &invoke("load_skill", r#"{"name":"code-review"}"#),
             ToolContext {
+                model_connection: None,
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
@@ -517,6 +520,7 @@ async fn lazy_mcp_search_and_call_share_one_connection() -> Result<()> {
     let report = register_configured_lazy_allow_project(&mut tools, &dir).await?;
     assert_eq!(report.tools, 2);
     let context = || ToolContext {
+        model_connection: None,
         workdir: &dir,
         archive: Path::new("/tmp/test.json"),
         on_output: None,
@@ -525,6 +529,11 @@ async fn lazy_mcp_search_and_call_share_one_connection() -> Result<()> {
     let found: Value = serde_json::from_str(&found.content)?;
     assert_eq!(found["tools"][0]["server"], "remote");
     assert_eq!(found["tools"][0]["tool"], "echo");
+    assert_eq!(found["tools"][0]["input_schema"]["type"], "object");
+    assert_eq!(
+        found["tools"][0]["input_schema"]["properties"]["text"]["type"], "string",
+        "lazy search must reveal the actual tool argument contract, not just its name"
+    );
     let called = tools
         .execute(
             &invoke(

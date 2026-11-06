@@ -116,6 +116,8 @@ pub(super) fn payload_with_cache_at(
 pub(super) struct Stream {
     items: BTreeMap<usize, Value>,
     text: String,
+    indexed_text: BTreeMap<usize, String>,
+    unindexed_text: String,
     reasoning_summary: String,
     usage: Option<Usage>,
     status: Option<String>,
@@ -167,6 +169,30 @@ impl Stream {
                 if !s.is_empty() {
                     self.received_delta = true;
                     self.text.push_str(s);
+                    if let Some(index) = v["output_index"].as_u64() {
+                        self.indexed_text
+                            .entry(index as usize)
+                            .or_default()
+                            .push_str(s);
+                    } else {
+                        self.unindexed_text.push_str(s);
+                    }
+                    on_text(s);
+                }
+            }
+            "response.refusal.delta" => {
+                let s = v["delta"].as_str().unwrap_or("");
+                if !s.is_empty() {
+                    self.received_delta = true;
+                    self.text.push_str(s);
+                    if let Some(index) = v["output_index"].as_u64() {
+                        self.indexed_text
+                            .entry(index as usize)
+                            .or_default()
+                            .push_str(s);
+                    } else {
+                        self.unindexed_text.push_str(s);
+                    }
                     on_text(s);
                 }
             }
@@ -183,6 +209,15 @@ impl Stream {
             "response.completed" | "response.incomplete" | "response.failed" => {
                 self.status = v["response"]["status"].as_str().map(str::to_owned);
                 self.usage = Usage::from_value(&v["response"]["usage"]);
+                // The final Responses output, when supplied, is authoritative.
+                // A stream may carry only deltas for one message and a full
+                // output item for a second; do not silently drop that second
+                // message just because the first already emitted text.
+                if let Some(output) = v["response"]["output"].as_array() {
+                    for (index, item) in output.iter().enumerate() {
+                        self.items.insert(index, item.clone());
+                    }
+                }
                 self.done = true;
             }
             "error" => bail!("Responses stream error: {v}"),
@@ -200,9 +235,18 @@ impl Stream {
         }
         let mut calls = Vec::new();
         let mut opaque = Vec::new();
-        let mut content = self.text;
+        let mut content = String::new();
         let mut seen = HashSet::new();
-        for item in self.items.into_values() {
+        let mut indexes = std::collections::BTreeSet::new();
+        indexes.extend(self.items.keys().copied());
+        indexes.extend(self.indexed_text.keys().copied());
+        for index in indexes {
+            let Some(item) = self.items.get(&index) else {
+                if let Some(partial) = self.indexed_text.get(&index) {
+                    content.push_str(partial);
+                }
+                continue;
+            };
             match item["type"].as_str().unwrap_or("") {
                 "function_call" => {
                     let id = item["call_id"]
@@ -227,16 +271,35 @@ impl Stream {
                         function: FunctionCall { name, arguments },
                     });
                 }
-                "reasoning" => opaque.push(item),
-                "message" if content.is_empty() => {
+                "reasoning" => opaque.push(item.clone()),
+                "message" => {
+                    let before = content.len();
                     for part in item["content"].as_array().into_iter().flatten() {
                         if part["type"] == "output_text" {
                             content.push_str(part["text"].as_str().unwrap_or(""));
+                        } else if part["type"] == "refusal" {
+                            // Refusal is a terminal assistant answer, not an
+                            // empty response that the Agent should retry.
+                            content.push_str(part["refusal"].as_str().unwrap_or(""));
+                        }
+                    }
+                    if before == content.len() {
+                        if let Some(partial) = self.indexed_text.get(&index) {
+                            content.push_str(partial);
                         }
                     }
                 }
                 _ => {}
             }
+        }
+        // Older gateway streams omit output_index even when the completed
+        // item contains the same text. Prefer the authoritative final item
+        // and avoid returning duplicated answer text.
+        if !self.unindexed_text.is_empty() && !content.contains(&self.unindexed_text) {
+            content.push_str(&self.unindexed_text);
+        }
+        if content.is_empty() {
+            content = self.text;
         }
         if calls.is_empty() && content.trim().is_empty() {
             bail!("Responses returned neither text nor tools");
@@ -284,6 +347,89 @@ pub(super) fn parse_text(body: &str) -> Result<ApecTextAttempt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiple_message_items_keep_text_even_when_only_first_streamed() {
+        let mut stream = Stream::default();
+        let mut streamed = String::new();
+        stream
+            .apply(
+                &json!({"type":"response.output_text.delta","output_index":0,
+            "delta":"First "})
+                .to_string(),
+                &mut |s| streamed.push_str(s),
+            )
+            .unwrap();
+        stream
+            .apply(
+                &json!({"type":"response.completed","response":{
+                    "status":"completed", "output":[
+                        {"type":"message","content":[{"type":"output_text","text":"First "}]},
+                        {"type":"reasoning","id":"opaque","encrypted_content":"hidden"},
+                        {"type":"message","content":[{"type":"output_text","text":"second"}]}
+                    ],"usage":{"input_tokens":23,"output_tokens":4}
+                }})
+                .to_string(),
+                &mut |s| streamed.push_str(s),
+            )
+            .unwrap();
+        let (message, usage) = stream.finish().unwrap();
+        assert_eq!(streamed, "First ");
+        assert_eq!(message.content.as_deref(), Some("First second"));
+        assert_eq!(usage.unwrap().input, Some(23));
+        assert_eq!(message.provider_items.as_ref().unwrap()[0]["id"], "opaque");
+    }
+
+    #[test]
+    fn mixed_refusal_and_text_are_not_dropped_or_retried() {
+        let mut stream = Stream::default();
+        stream
+            .apply(
+                &json!({"type":"response.output_item.done","output_index":0,
+                "item":{"type":"message","content":[
+                    {"type":"output_text","text":"Unable to proceed: "},
+                    {"type":"refusal","refusal":"request declined"}
+                ]}})
+                .to_string(),
+                &mut |_| {},
+            )
+            .unwrap();
+        stream
+            .apply(
+                &json!({"type":"response.completed","response":{
+            "status":"completed"}})
+                .to_string(),
+                &mut |_| {},
+            )
+            .unwrap();
+        let (message, _) = stream.finish().unwrap();
+        assert_eq!(
+            message.content.as_deref(),
+            Some("Unable to proceed: request declined")
+        );
+    }
+
+    #[test]
+    fn unindexed_deltas_and_final_message_never_duplicate_answer() {
+        let mut stream = Stream::default();
+        stream
+            .apply(
+                &json!({"type":"response.output_text.delta","delta":"Hello"}).to_string(),
+                &mut |_| {},
+            )
+            .unwrap();
+        stream
+            .apply(
+                &json!({"type":"response.completed","response":{
+                    "status":"completed","output":[{"type":"message","content":[
+                        {"type":"output_text","text":"Hello"}]}]
+                }})
+                .to_string(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(stream.finish().unwrap().0.content.as_deref(), Some("Hello"));
+    }
 
     #[test]
     fn responses_reject_non_object_tool_arguments() {

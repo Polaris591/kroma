@@ -386,7 +386,8 @@ fn plain_history_remains_pinned_while_streaming_and_survives_resize() {
     ui.event(UiEvent::Text(
         (0..150)
             .map(|i| format!("line-{i:03} stable content\n"))
-            .collect(),
+            .collect::<Vec<_>>()
+            .concat(),
     ));
     draw(&mut ui, 80, 24);
     ui.scroll_anchor = Some(3);

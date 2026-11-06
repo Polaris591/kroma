@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const {StringDecoder} = require("node:string_decoder");
+const {loadProfiles} = require("./profiles");
 
 // One executor, one deadline. The host owns time (tool timeout_secs), this
 // module owns state: validation, bounded queues, child processes and evidence.
@@ -34,6 +35,40 @@ const DEFAULT_KILL_GRACE_MS = 2000;
 const QUIET_MS = 90_000;
 // Show streamed text in a live row only while it is fresh.
 const PREVIEW_MS = 30_000;
+// Run archives are useful for resume and troubleshooting, but must not grow
+// forever as unattended subprocesses create sessions. No user knobs needed.
+const RUN_RETENTION_DAYS = 30;
+const RUN_RETENTION_COUNT = 150;
+
+function pruneRuns(dataDir, protectedIds = new Set(), now = Date.now()) {
+  const root = path.join(dataDir, "runs");
+  let names;
+  try { names = fs.readdirSync(root); } catch { return; }
+  const completed = [];
+  for (const name of names) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name) || protectedIds.has(name)) continue;
+    const folder = path.join(root, name);
+    try {
+      const stat = fs.lstatSync(folder);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+      const summary = JSON.parse(fs.readFileSync(path.join(folder, "batch.json"), "utf8"));
+      if (!summary || !["completed", "partial", "failed"].includes(summary.status)) continue;
+      completed.push({folder, mtime: stat.mtimeMs});
+    } catch {
+      // In-flight or interrupted runs preserve evidence until repaired;
+      // never assume an incomplete archive can be removed safely.
+    }
+  }
+  completed.sort((a, b) => a.mtime - b.mtime);
+  const overflow = Math.max(0, completed.length - RUN_RETENTION_COUNT);
+  const maxAge = RUN_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  for (const [index, entry] of completed.entries()) {
+    if (index >= overflow && now - entry.mtime < maxAge) continue;
+    try { fs.rmSync(entry.folder, {recursive: true, force: true}); } catch {
+      // Pruning is a convenience, never a reason to fail delegation.
+    }
+  }
+}
 
 class SubagentError extends Error {
   // fatal errors abort the whole batch and are reported as a stream error, so
@@ -178,12 +213,12 @@ function resumeSource(value, dataDir, workdir) {
   if (!info.isFile()) {
     throw new SubagentError("RESUME_MISSING", `resumed task '${token}' has no saved session`);
   }
-  return {token, source: real, session, cwd};
+  return {token, source: real, session, cwd, profile: state.profile ?? "general"};
 }
 
 // Validate the whole batch before spawning anything: a bad task later in the
 // list must not leave earlier child agents running.
-function tasks(request, workdir, dataDir) {
+function tasks(request, workdir, dataDir, profiles) {
   const value = request?.arguments?.tasks;
   if (!Array.isArray(value) || value.length === 0) {
     throw new SubagentError("INVALID_ARGUMENT", "tasks must be a nonempty array");
@@ -192,6 +227,14 @@ function tasks(request, workdir, dataDir) {
     throw new SubagentError("INVALID_ARGUMENT", `at most ${LIMITS.tasks} tasks per call`);
   }
   return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}] must be an object`);
+    }
+    for (const key of Object.keys(entry)) {
+      if (!new Set(["task", "cwd", "resume", "profile", "label", "complexity"]).has(key)) {
+        throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].${key} is not supported`);
+      }
+    }
     const task = entry?.task;
     if (typeof task !== "string" || !task.trim()) {
       throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].task must be a nonempty string`);
@@ -204,12 +247,36 @@ function tasks(request, workdir, dataDir) {
     }
     const cwd = entry.cwd === undefined ? null : directory(entry.cwd, workdir);
     const resume = resumeSource(entry.resume, dataDir, workdir);
+    const name = entry.profile ?? resume?.profile ?? "general";
+    if (typeof name !== "string" || !profiles.has(name)) {
+      throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].profile is unknown`);
+    }
+    if (resume && entry.profile !== undefined && name !== resume.profile) {
+      throw new SubagentError("RESUME_PROFILE", `tasks[${index}].profile differs from resumed task`);
+    }
+    const complexity = entry.complexity ?? "medium";
+    if (!["light", "medium", "heavy"].includes(complexity)) {
+      throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].complexity must be light, medium or heavy`);
+    }
+    const label = entry.label ?? task.split(/\r?\n/)[0].trim().slice(0, 60);
+    if (typeof label !== "string" || !label.trim() || Array.from(label).length > 60
+      || /[\x00-\x1f\x7f]/.test(label)) {
+      throw new SubagentError("INVALID_ARGUMENT", `tasks[${index}].label must have 1..60 printable characters`);
+    }
     if (resume && cwd && cwd !== resume.cwd) {
       throw new SubagentError("INVALID_ARGUMENT",
         `tasks[${index}].cwd must match the resumed task directory: ${resume.cwd}`);
     }
-    return {index, task, cwd: resume ? resume.cwd : (cwd ?? directory(undefined, workdir)), resume};
+    return {index, task, label, complexity, profile: profiles.get(name),
+      cwd: resume ? resume.cwd : (cwd ?? directory(undefined, workdir)), resume};
   });
+}
+
+function profileModel(entry, config, legacyModel) {
+  const selected = entry.profile.model === "auto" ? entry.complexity : entry.profile.model;
+  if (selected === "inherit") return legacyModel;
+  // Never invent a model ID: an absent tier mapping uses the configured model.
+  return optionalModel(config[`model_${selected}`]) ?? legacyModel;
 }
 
 function writeFile(file, text) {
@@ -501,7 +568,7 @@ async function runTask(entry, context) {
   const started = Date.now();
   const trace = createTrace(eventsPath);
   trace.startedAt = started;
-  trace.label = entry.task;
+  trace.label = entry.label;
   // Bounded tail of stderr, mirrored to stderr.log as it arrives.
   let stderr = Buffer.alloc(0);
   let finished = false;
@@ -512,6 +579,7 @@ async function runTask(entry, context) {
     // Locatable before it starts: a host kill cannot skip this record.
     writeFile(path.join(dir, "state.json"), JSON.stringify({
       index: entry.index, status: "running", session, cwd: entry.cwd,
+      profile: entry.profile.name, label: entry.label,
       resumed_from: entry.resume?.token ?? null,
       started_at: new Date().toISOString(),
     }));
@@ -525,7 +593,7 @@ async function runTask(entry, context) {
   }
   context.run.status[entry.index] = "running";
   context.run.live[entry.index] = trace;
-  progress(context, `▷ [${entry.index + 1}/${context.count}] ${oneLine(entry.task, 48)}`);
+  progress(context, `▷ [${entry.index + 1}/${context.count}] ${oneLine(entry.label, 48)}`);
 
   function appendStderr(chunk) {
     stderr = Buffer.concat([stderr, chunk]);
@@ -632,6 +700,20 @@ async function runTask(entry, context) {
       }
     }
 
+    const policyPath = path.join(dir, "policy.json");
+    try {
+      writeFile(policyPath, JSON.stringify({
+        profile: entry.profile.name, prompt: entry.profile.prompt,
+        tools: entry.profile.tools, disallowedTools: entry.profile.disallowedTools,
+        shell: entry.profile.shell, maxTurns: entry.profile.maxTurns,
+        maxTokens: entry.profile.maxTokens,
+      }));
+    } catch (error) {
+      finish({status: "failed", code: "ARCHIVE_ERROR",
+        message: `cannot write subagent policy: ${error.message}`});
+      return;
+    }
+
     try {
       child = context.run.spawn(context.executable, ["--json"], {
         cwd: entry.cwd,
@@ -640,8 +722,19 @@ async function runTask(entry, context) {
           KROMA_WORKDIR: entry.cwd,
           KROMA_SESSION_FILE: session,
           KROMA_SUBAGENT_DEPTH: String(context.depth),
-          ...(context.model ? {KROMA_MODEL: context.model} : {}),
-          ...(context.thinking ? {KROMA_DEEPSEEK_THINKING: context.thinking} : {}),
+          KROMA_SUBAGENT_POLICY_FILE: policyPath,
+          ...(context.connection?.base_url ?
+            {KROMA_BASE_URL: context.connection.base_url} : {}),
+          ...(context.connection?.api_protocol ?
+            {KROMA_API_PROTOCOL: context.connection.api_protocol} : {}),
+          ...(context.connection?.provider_profile ?
+            {KROMA_PROVIDER_PROFILE: context.connection.provider_profile} : {}),
+          ...(context.connection?.reasoning_effort ?
+            {KROMA_REASONING_EFFORT: context.connection.reasoning_effort} : {}),
+          ...(profileModel(entry, context.config, context.model) ?
+            {KROMA_MODEL: profileModel(entry, context.config, context.model)} : {}),
+          ...((entry.profile.thinking || context.thinking) ?
+            {KROMA_DEEPSEEK_THINKING: entry.profile.thinking || context.thinking} : {}),
         },
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
@@ -737,6 +830,7 @@ async function runTask(entry, context) {
         }
         writeFile(path.join(dir, "state.json"), JSON.stringify({
           index: entry.index, status: outcome.status, code: outcome.code,
+          profile: entry.profile.name, label: entry.label,
           session, cwd: entry.cwd, task_status: trace.taskStatus,
           resumed_from: entry.resume?.token ?? null,
           tool_calls: trace.toolCalls, text_chars: trace.textChars,
@@ -750,7 +844,8 @@ async function runTask(entry, context) {
         context.run.abort(failure);
         outcome = {status: "failed", code: "ARCHIVE_ERROR", exit_code: null, message: failure.message};
       }
-      const result = {index: entry.index, status: outcome.status,
+      const result = {index: entry.index, profile: entry.profile.name, label: entry.label,
+        status: outcome.status,
         exit_code: outcome.exit_code ?? null};
       if (outcome.status === "completed") {
         result.output = clipped.text;
@@ -840,6 +935,12 @@ function fit(response) {
 async function runBatch(request, options = {}) {
   const workdir = options.workdir ?? request?.workdir ?? process.cwd();
   const config = {...(request?.config ?? {}), ...(options.config ?? {})};
+  // Host-supplied identity is an out-of-band, non-secret snapshot of the
+  // current parent session. It is NOT an agent-authored task argument and
+  // never contains API credentials; the child resolves its key from the
+  // selected local provider profile or inherited environment.
+  const connection = request?.model_connection && typeof request.model_connection === "object"
+    && !Array.isArray(request.model_connection) ? request.model_connection : null;
   // A malformed depth is refused rather than read as zero: reading it as
   // "top level" is what would allow unbounded nesting.
   const depth = integer(process.env.KROMA_SUBAGENT_DEPTH, "KROMA_SUBAGENT_DEPTH", 0, 8, 0);
@@ -862,12 +963,24 @@ async function runBatch(request, options = {}) {
   const batchTimeoutMs = integer(options.batchTimeoutMs, "batchTimeoutMs", 1,
     deadlineMs, Math.max(1, deadlineMs - reserveMs));
   const executable = String(config.kroma_bin || process.env.KROMA_BIN || "kroma");
-  const model = optionalModel(config.model);
-  const thinking = optionalThinking(config.thinking);
+  const model = optionalModel(config.model) ?? optionalModel(connection?.model);
+  const thinking = optionalThinking(config.thinking) ?? optionalThinking(connection?.deepseek_thinking);
   const rawDataDir = options.dataDir ?? request?.data_dir;
   const dataDir = rawDataDir ? localPath(rawDataDir) : null;
   if (!dataDir) throw new SubagentError("ARCHIVE_ERROR", "plugin data directory is unavailable", true);
-  const entries = tasks(request, workdir, dataDir);
+  // Resolve profiles and validate every task before creating run evidence or
+  // starting children. Invalid definitions must not start half a batch.
+  let profiles;
+  try {
+    profiles = loadProfiles(workdir, options.profileDirs);
+  } catch (error) {
+    throw new SubagentError("PROFILE_INVALID", error.message);
+  }
+  const entries = tasks(request, workdir, dataDir, profiles);
+
+  pruneRuns(dataDir, new Set(entries
+    .filter(entry => entry.resume)
+    .map(entry => entry.resume.token.split("/")[0])));
 
   const id = newRunId();
   const runDir = path.join(dataDir, "runs", id);
@@ -878,6 +991,7 @@ async function runBatch(request, options = {}) {
       max_parallel: maxParallel, max_output_chars: maxOutput,
       task_timeout_secs: taskTimeoutSecs, model, thinking,
       tasks: entries.map(entry => ({index: entry.index, task: entry.task, cwd: entry.cwd,
+        profile: entry.profile.name, label: entry.label, complexity: entry.complexity,
         resume: entry.resume?.token ?? null})),
     }, null, 2));
   } catch (error) {
@@ -902,7 +1016,7 @@ async function runBatch(request, options = {}) {
     run.reason = new SubagentError("CHILD_TIMEOUT", message, false);
     for (const stop of [...run.timeouts]) stop(message);
   };
-  const context = {runId: id, runDir, executable, model, thinking, maxOutput,
+  const context = {runId: id, runDir, executable, model, thinking, config, connection, maxOutput,
     count: entries.length, depth: depth + 1, deadlineSecs, taskTimeoutMs, killGraceMs, run,
     onProgress: options.onProgress};
 
@@ -1007,4 +1121,4 @@ async function dispatch(request, options = {}) {
   throw new SubagentError("UNKNOWN_TOOL", `unknown tool '${request.name}'`);
 }
 
-module.exports = {dispatch, runBatch, SubagentError, LIMITS};
+module.exports = {dispatch, runBatch, SubagentError, LIMITS, pruneRuns};

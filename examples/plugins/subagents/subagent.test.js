@@ -5,7 +5,33 @@ const {EventEmitter} = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const {dispatch, runBatch, LIMITS} = require("./subagent");
+const {dispatch, runBatch, LIMITS, pruneRuns} = require("./subagent");
+
+test("evidence retention prunes completed old runs but preserves active and resumed work", () => {
+  const root = workspace();
+  const runs = path.join(root, "runs");
+  fs.mkdirSync(runs);
+  const old = Date.now() - 40 * 24 * 60 * 60 * 1000;
+  const createRun = (id, status, stale) => {
+    const dir = path.join(runs, id);
+    fs.mkdirSync(dir);
+    if (status) fs.writeFileSync(path.join(dir, "batch.json"), JSON.stringify({status}));
+    fs.writeFileSync(path.join(dir, "evidence.txt"), "keep until retention period");
+    if (stale) fs.utimesSync(dir, old / 1000, old / 1000);
+    return dir;
+  };
+  try {
+    const aged = createRun("aged", "completed", true);
+    const protectedRun = createRun("protected", "failed", true);
+    const incomplete = createRun("incomplete", null, true);
+    const recent = createRun("recent", "partial", false);
+    pruneRuns(root, new Set(["protected"]));
+    assert.equal(fs.existsSync(aged), false);
+    assert.equal(fs.existsSync(protectedRun), true);
+    assert.equal(fs.existsSync(incomplete), true);
+    assert.equal(fs.existsSync(recent), true);
+  } finally { fs.rmSync(root, {recursive: true, force: true}); }
+});
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -132,6 +158,35 @@ test("a task gets its own session, working directory and parsed result", async (
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
+});
+
+test("child inherits the active session endpoint, protocol, profile and reasoning without exposing a key", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const request = batch([{task: "review module", profile: "reviewer"}], {workdir: dir});
+    request.model_connection = {
+      model: "sol-test", base_url: "https://gateway.example/v1", api_protocol: "responses",
+      reasoning_effort: "xhigh", deepseek_thinking: null, provider_profile: "current-session",
+    };
+    const run = runBatch(request, {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    assert.equal(h.calls.length, 1);
+    const env = h.calls[0].options.env;
+    assert.equal(env.KROMA_MODEL, "sol-test");
+    assert.equal(env.KROMA_BASE_URL, "https://gateway.example/v1");
+    assert.equal(env.KROMA_API_PROTOCOL, "responses");
+    assert.equal(env.KROMA_REASONING_EFFORT, "xhigh");
+    assert.equal(env.KROMA_PROVIDER_PROFILE, "current-session");
+    assert.equal(env.KROMA_API_KEY, undefined);
+    const policy = JSON.parse(fs.readFileSync(env.KROMA_SUBAGENT_POLICY_FILE, "utf8"));
+    assert.equal(policy.profile, "reviewer");
+    assert.equal(policy.shell, "read-only");
+    h.calls[0].finish({frames: [{type: "result", text: "reviewed"}]});
+    assert.equal((await run).results[0].status, "completed");
+    const snapshot = fs.readFileSync(path.join(dir, "runs", fs.readdirSync(path.join(dir, "runs"))[0], "request.json"), "utf8");
+    assert.doesNotMatch(snapshot, /api_key|token|Authorization|gateway.example/i,
+      "only non-secret model selection is in process env, not persisted run evidence");
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
 test("the queue caps concurrency and returns results in input order", async () => {
@@ -800,7 +855,8 @@ test("live progress shows a roster row, one row per running task and the answers
     h.calls[0].finish({frames: [{type: "result", text: "done\nand dusted"}]});
     const response = await run;
     assert.equal(response.status, "completed");
-    assert.ok(seen.includes("▷ [1/1] count files"), JSON.stringify(seen));
+    // Default profile labels use the first task line, not the whole brief.
+    assert.ok(seen.includes("▷ [1/1] count"), JSON.stringify(seen));
     assert.ok(seen.some(line => line.startsWith("1▶ · ")), JSON.stringify(seen));
     const live = seen.find(line => line.startsWith("[1/1] ") && line.includes("▶ shell "));
     assert.ok(live, JSON.stringify(seen));

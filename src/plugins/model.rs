@@ -605,6 +605,11 @@ impl PackCache {
             }
         }
     }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
 }
 
 pub(super) struct PluginModelHooks {
@@ -885,6 +890,15 @@ impl PluginModelHooks {
 }
 
 impl ModelBackend for PluginModelHooks {
+    fn connection_info(&self) -> Option<crate::model::ModelConnection> {
+        self.inner.connection_info()
+    }
+    fn invalidate_ephemeral_context(&self) {
+        if let Ok(mut cache) = self.packs.lock() {
+            cache.clear();
+        }
+        self.inner.invalidate_ephemeral_context();
+    }
     fn set_session_context(&self, id: &str, archive: &Path) {
         self.inner.set_session_context(id, archive);
         if let Ok(mut session) = self.session.write() {

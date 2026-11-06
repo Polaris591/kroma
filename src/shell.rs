@@ -118,12 +118,13 @@ fn referenced_mcp_images(messages: &[crate::protocol::Message]) -> HashSet<PathB
 /// A forked conversation must own its large Shell captures. Otherwise
 /// clearing the original conversation can invalidate the fork's file links.
 /// Captures are immutable, so hard-link them when possible and copy otherwise.
+type ClonedCaptures = (Vec<crate::protocol::Message>, Vec<(String, String)>);
 pub(crate) fn clone_session_captures(
     workdir: &Path,
     source_session: &Path,
     destination_session: &Path,
     messages: &[crate::protocol::Message],
-) -> Result<(Vec<crate::protocol::Message>, Vec<(String, String)>)> {
+) -> Result<ClonedCaptures> {
     let dir = capture_dir(workdir)?;
     let source_prefix = capture_prefix(source_session);
     let destination_prefix = capture_prefix(destination_session);

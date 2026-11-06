@@ -1,7 +1,7 @@
 "use strict";
 const {WebError, httpUrl, download, assertPublicTarget} = require("./http");
 const {extractPage, plainText, entities} = require("./page");
-const DEFAULTS = Object.freeze({provider: "auto", max_results: 6, max_chars: 12000, timeout_ms: 15000,
+const DEFAULTS = Object.freeze({provider: "auto", paid_fallback: false, max_results: 6, max_chars: 12000, timeout_ms: 15000,
   search_priority: Object.freeze(["parallel", "you", "exa", "tavily"]), search_attempt_timeout_ms: 8000});
 
 // Keyless engines cannot honour every ranking signal, so say what each one is
@@ -129,8 +129,8 @@ function normalizeResults(results, sites, count) {
     }
     if (seen.has(url.href)) continue;
     seen.add(url.href);
-    clean.push({title: plainText(item.title).slice(0, 500), url: url.href,
-      snippet: plainText(item.snippet).slice(0, 1800)});
+    clean.push({title: plainText(item.title).slice(0, 180), url: url.href,
+      snippet: plainText(item.snippet).slice(0, 480)});
     if (clean.length >= count) break;
   }
   return clean;
@@ -268,7 +268,11 @@ async function search(query, config = {}, wanted) {
   // Keyless order: a configured SearXNG, then a real free API, then public HTML
   // endpoints, then Bing's RSS. Ranking quality differs sharply between them.
   if (free) providers = [...(settings.searxng_url ? ["searxng"] : []), "mwmbl", "duckduckgo", "duckduckgo_lite", "bing"];
-  const chained = provider === "auto" || free;
+  // A model-triggered search must not silently fan out into several paid API
+  // calls. The owner can explicitly opt into paid failover in plugin settings.
+  const paidFallback = settings.paid_fallback === true || settings.paid_fallback === "true";
+  if (provider === "auto" && !free && !paidFallback) providers = providers.slice(0, 1);
+  const chained = free || provider === "auto" && paidFallback;
   let skipDuckDuckGoLite = false;
   const deadline = Date.now() + timeout;
   const attemptTimeout = bounded(settings.search_attempt_timeout_ms, 8000, 500, 60000);
@@ -406,8 +410,14 @@ async function fetchFirecrawl(url, settings, timeout) {
 
 async function dispatch(req) {
   if (!req || req.type !== "tool") throw new WebError("INVALID_REQUEST", "Only tool requests are supported");
-  if (req.name === "web_search") return search(req.arguments?.query, {...req.config, ...(req.arguments?.provider ? {provider: req.arguments.provider} : {})}, req.arguments?.count);
-  if (req.name === "web_fetch") return fetchPage(req.arguments?.url, {...req.config, ...(req.arguments?.provider ? {fetch_provider: req.arguments.provider} : {})}, req.arguments?.max_chars, req.arguments?.start_char);
+  // Which provider is billed belongs exclusively to user configuration, not
+  // the model/tool arguments. Reject old overrides rather than silently
+  // ignoring an attempt to switch vendor or turn on a billed extraction.
+  if (req.arguments && Object.hasOwn(req.arguments, "provider")) {
+    throw new WebError("INVALID_ARGUMENT", "Select a web provider in the plugin settings, not in tool arguments");
+  }
+  if (req.name === "web_search") return search(req.arguments?.query, req.config, req.arguments?.count);
+  if (req.name === "web_fetch") return fetchPage(req.arguments?.url, req.config, req.arguments?.max_chars, req.arguments?.start_char);
   throw new WebError("UNKNOWN_TOOL", "Unknown tool " + req.name);
 }
 

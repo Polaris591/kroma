@@ -346,7 +346,8 @@ fn long_details_are_still_available_and_tiny_windows_do_not_panic() {
     let mut ui = ui();
     let output = (0..40)
         .map(|i| format!("line-{i:02}\n"))
-        .collect::<String>();
+        .collect::<Vec<_>>()
+        .concat();
     finish(
         &mut ui,
         "many",

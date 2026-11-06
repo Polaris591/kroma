@@ -1,4 +1,4 @@
-# Web Search & Fetch 1.6
+# Web Search & Fetch 1.7
 
 Dependency-free process plugin for Node.js 20+. Two tools: `web_search` finds
 sources; `web_fetch` reads them. The agent decides which queries/pages to use.
@@ -39,20 +39,25 @@ queries are sent to the selected provider and may incur API charges.
 Restart Kroma after changing its environment. Other configuration/code
 changes need a restart or `/plugins reload` while the TUI is idle.
 
-- Explicit provider: use only that backend. An optional tool argument `provider`
-  overrides the configured backend for one call.
-- Default `auto`: follow `search_priority`, skipping providers without credentials.
+- Explicit provider: use only that backend. Only the user-controlled plugin
+  settings select providers; the model cannot override the paid provider or
+  enable a paid extraction call through tool arguments.
+- Default `auto`: select the first eligible backend in `search_priority`,
+  skipping those without credentials. Only **one paid request** is attempted
+  by default. Enable `paid_fallback` explicitly to allow multiple paid calls
+  on transient errors.
   Default order: **Parallel → You.com → Exa → Tavily**. An empty configured chain
   returns `CONFIG_ERROR` before any request. Brave, Firecrawl and SearXNG can be
   used explicitly or added to the priority list; they are not silently appended.
 - `mwmbl`, `bing`, `duckduckgo` and `duckduckgo_lite`: keyless engines. They can be
   selected explicitly, and keyless mode walks them in the order documented below.
   Their endpoints have no availability or relevance guarantee.
-- In auto mode only, switch on `NETWORK_ERROR`, `TIMEOUT`, HTTP 429 or 5xx.
+- Only when `paid_fallback = true`, switch on `NETWORK_ERROR`, `TIMEOUT`, HTTP 429 or 5xx.
   Authentication, configuration, bad requests, empty/filtered results, malformed
   responses and redirects stop the chain. Each provider is called at most once,
   sequentially; there is no fan-out or retry of the same provider.
-- Auto shares one `timeout_ms` budget (default 15 seconds). Each attempt is capped
+- Auto shares one `timeout_ms` budget (default 15 seconds). If multiple attempts
+  are explicitly enabled, each attempt is capped
   by `search_attempt_timeout_ms` (default 8000 ms) and the remaining total budget.
   Later providers may not be reached if the budget expires. Explicit backends
   use the full total budget and never switch. Switching may incur multiple charges.
@@ -110,7 +115,7 @@ restarts itself once before reading requests to apply the proxy at startup.
 An unreachable configured proxy fails; there is no silent direct fallback.
 Set `proxy_enabled: false` to explicitly choose direct networking.
 
-### Priority configuration / upgrade from 1.3
+### Priority configuration / upgrade to 1.7
 
 To enable prioritized automatic search:
 
@@ -118,13 +123,16 @@ To enable prioritized automatic search:
 kroma plugins set web provider auto
 kroma plugins set web search_priority parallel,you,exa,tavily
 kroma plugins set web search_attempt_timeout_ms 8000
+# Optional: explicit permission for repeated paid provider calls
+kroma plugins set web paid_fallback true
 ```
 
 The priority setting accepts an array in TOML/JSON or comma-separated names via
 CLI. Names must be unique and drawn from the supported nonexperimental providers.
 Existing explicit provider settings remain explicit after upgrading; change to
-`auto` to enable the chain. `auto` no longer rejects multiple configured keys.
-Tool names and reading/continuation behavior are unchanged.
+`auto` to enable prioritized selection. The default does **not** retry by
+calling a second paid provider. A per-call `provider` tool argument is rejected
+with `INVALID_ARGUMENT`; migration requires choosing the provider in settings.
 
 ## Search
 
@@ -192,8 +200,9 @@ Downloads stop at 1.5 MB and warn if the source tail is unavailable;
 ### Optional Firecrawl reading
 
 HTTP is the default and does not send page URLs to a third-party extraction API.
-Use `web_fetch({"url":"https://example.com/","provider":"firecrawl"})` for
-remote Markdown extraction, or set `fetch_provider = firecrawl`. This may incur
+Set `kroma plugins set web fetch_provider firecrawl` to enable
+remote Markdown extraction. A model cannot switch to it on a single tool call.
+This may incur
 charges and may render pages remotely; no local browser is started. No actions,
 login sessions or browser-control tools are exposed. Firecrawl source-page status
 is checked in addition to API status, and its snapshots are separate from HTTP.
@@ -203,7 +212,7 @@ Fresh scraping is opt-in via `firecrawl_fresh_scrape: true`.
 ## Failures and security
 
 Errors return `is_error: true`, an actionable message and a machine-readable code:
-`CONFIG_ERROR`, `INVALID_QUERY`, `NO_RESULTS`, `INVALID_RESPONSE`, `TIMEOUT`,
+`CONFIG_ERROR`, `INVALID_ARGUMENT`, `INVALID_QUERY`, `NO_RESULTS`, `INVALID_RESPONSE`, `TIMEOUT`,
 `HTTP_ERROR`, `NETWORK_ERROR`, `REDIRECT_ERROR`, `INVALID_URL`, `INVALID_OFFSET`,
 `CACHE_MISS`, `UNSUPPORTED_CONTENT`, `UNREADABLE_PAGE`.
 JSONL responses echo request IDs and optional protocol version 1.

@@ -229,6 +229,18 @@ pub fn reported_error_usage(error: &anyhow::Error) -> Option<&Usage> {
         .map(|failure| &failure.usage)
 }
 
+/// A response stopped for an output-token ceiling, not a transport fault or
+/// a context-window rejection. The Agent can retry this once ONLY when it
+/// has not already displayed text or executed any tools for the attempt.
+pub(crate) fn is_output_truncation(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let detail = cause.to_string();
+        detail.starts_with("model response was truncated (finish_reason=length)")
+            || detail.starts_with("Anthropic response truncated at max_tokens")
+            || detail.starts_with("Responses stream was not completed: Some(\"incomplete\")")
+    })
+}
+
 /// Preserve provider-reported usage on every early failure path, including an
 /// SSE `error` event or a connection reset after `message_start`, not only on
 /// a structurally complete response that fails final validation.
@@ -319,20 +331,21 @@ fn is_transient_transport(error: &anyhow::Error) -> bool {
 }
 
 /// A summary request that ultimately failed after the provider had already
-/// reported usage for an earlier attempt. The caller records that known cost
-/// instead of losing it; attempts without a measurement stay unknown.
+/// reported usage for some attempts. Count all actually started attempts,
+/// even when some returned no usage; report known tokens as a lower bound.
 #[derive(Debug)]
 struct SummaryFailure {
     cause: anyhow::Error,
     usage: Usage,
     requests: usize,
+    measured_requests: usize,
 }
 impl fmt::Display for SummaryFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "summary request failed after {} measured attempt(s)",
-            self.requests
+            "summary request failed after {} attempt(s) ({} with reported usage)",
+            self.requests, self.measured_requests,
         )
     }
 }
@@ -343,11 +356,20 @@ impl std::error::Error for SummaryFailure {
 }
 
 /// Usage already reported by the provider for a summary that still failed.
+#[cfg(test)]
 pub(crate) fn failed_summary_usage(error: &anyhow::Error) -> Option<(&Usage, usize)> {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<SummaryFailure>())
-        .map(|failure| (&failure.usage, failure.requests))
+        .filter(|failure| failure.measured_requests > 0)
+        .map(|failure| (&failure.usage, failure.measured_requests))
+}
+
+pub(crate) fn failed_summary_attempts(error: &anyhow::Error) -> Option<(&Usage, usize, usize)> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<SummaryFailure>())
+        .map(|failure| (&failure.usage, failure.requests, failure.measured_requests))
 }
 
 fn retry_delay(error: &anyhow::Error, retry_index: u32) -> Option<Duration> {
@@ -841,6 +863,24 @@ fn combine_apec_usage(first: Option<Usage>, second: Option<Usage>) -> Option<Usa
         cached: add(first.cached, second.cached),
         reasoning: add(first.reasoning, second.reasoning),
     })
+}
+
+fn record_known_summary_attempt(
+    spent: &mut Option<Usage>,
+    reported: &mut usize,
+    incoming: Option<Usage>,
+) -> bool {
+    let Some(incoming) = incoming else {
+        return false;
+    };
+    *spent = Some(match spent.take() {
+        Some(previous) => {
+            combine_apec_usage(Some(previous), Some(incoming)).expect("two usage records combine")
+        }
+        None => incoming,
+    });
+    *reported = reported.saturating_add(1);
+    true
 }
 
 // The checkpoint output target is deliberately short. The larger completion
@@ -1647,8 +1687,8 @@ impl ModelClient {
                 .hard_output_limit()
                 .map_or(budget, |limit| budget.min(limit))
                 .min(MAX_TURN_OUTPUT_TOKENS);
-            requests += 1;
             let payload = payload_for(max_tokens)?;
+            requests += 1;
             let request = self.request(&payload);
             let start = Instant::now();
             let attempt_timeout = text_attempt_timeout(short);
@@ -1717,22 +1757,18 @@ impl ModelClient {
                             requests,
                         });
                     }
-                    let measured = usage.is_some();
-                    spent_usage = if requests == 1 {
-                        usage
-                    } else if usage_known {
-                        combine_apec_usage(spent_usage, usage)
-                    } else {
-                        None
-                    };
-                    usage_known &= spent_usage.is_some();
-                    if spent_usage.is_some() {
-                        measured_requests += usize::from(measured);
-                    } else {
-                        measured_requests = 0;
-                    }
+                    usage_known &= record_known_summary_attempt(
+                        &mut spent_usage,
+                        &mut measured_requests,
+                        usage,
+                    );
                     if truncations >= 3 {
-                        bail!("checkpoint summary remained truncated after 4 completion budgets; original history preserved");
+                        return Err(anyhow::Error::new(SummaryFailure {
+                            cause: anyhow::anyhow!("checkpoint summary remained truncated after 4 completion budgets; original history preserved"),
+                            usage: spent_usage.unwrap_or_default(),
+                            requests,
+                            measured_requests,
+                        }));
                     }
                     truncations += 1;
                     crate::runtime_log!(
@@ -1753,16 +1789,12 @@ impl ModelClient {
                     );
                 }
                 Err(error) => {
-                    return Err(match spent_usage {
-                        Some(usage) if measured_requests > 0 => {
-                            anyhow::Error::new(SummaryFailure {
-                                cause: error,
-                                usage,
-                                requests: measured_requests,
-                            })
-                        }
-                        _ => error,
-                    });
+                    return Err(anyhow::Error::new(SummaryFailure {
+                        cause: error,
+                        usage: spent_usage.unwrap_or_default(),
+                        requests,
+                        measured_requests,
+                    }));
                 }
             }
         }
@@ -2112,6 +2144,36 @@ impl ModelClient {
 }
 
 impl ModelBackend for ModelClient {
+    fn connection_info(&self) -> Option<crate::model::ModelConnection> {
+        // A URL with userinfo/query credentials must not cross into a plugin
+        // request. In that case the child falls back to its saved profile.
+        let url = reqwest::Url::parse(&self.base_url).ok()?;
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        Some(crate::model::ModelConnection {
+            model: self.model.clone(),
+            base_url: self.base_url.clone(),
+            api_protocol: match self.protocol {
+                ApiProtocol::Chat => "chat",
+                ApiProtocol::Responses => "responses",
+                ApiProtocol::Anthropic => "anthropic",
+            }
+            .into(),
+            reasoning_effort: self.reasoning_level().filter(|value| {
+                matches!(
+                    value.as_str(),
+                    "auto" | "minimal" | "low" | "medium" | "high" | "xhigh"
+                )
+            }),
+            deepseek_thinking: self.deepseek_thinking.clone(),
+            provider_profile: None,
+        })
+    }
     fn project_for_budget(&self, messages: &mut [Message]) {
         let active_turn = messages
             .iter()
@@ -3091,6 +3153,13 @@ mod tests {
         assert_eq!(requests, 1);
         assert_eq!(usage.input, Some(100));
         assert_eq!(usage.output, Some(10));
+        let (_, attempted, measured) =
+            failed_summary_attempts(&error).expect("all started attempts must be counted");
+        assert_eq!(
+            attempted, 2,
+            "the terminal rejection also started a request"
+        );
+        assert_eq!(measured, 1);
     }
 
     #[test]
@@ -3750,6 +3819,11 @@ mod tests {
             Err(error) => error,
         };
         assert!(format!("{error:#}").contains("truncated"), "{error:#}");
+        let (usage, attempted, measured) =
+            failed_summary_attempts(&error).expect("truncation sequence must preserve usage");
+        assert_eq!((attempted, measured), (4, 4));
+        assert_eq!(usage.input, Some(12));
+        assert_eq!(usage.output, Some(4));
         let budgets = server.join().unwrap();
         assert_eq!(budgets[0], Some(4096), "first attempt keeps cache cap");
         assert!(

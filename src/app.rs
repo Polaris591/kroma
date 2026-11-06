@@ -12,6 +12,7 @@ use crate::{
     prompt::PromptComposer,
     provider::{MetadataStatus, ModelClient},
     skills::{LoadSkill, SkillCatalog},
+    subagent_policy::SubagentPolicy,
     tools::ToolRegistry,
 };
 use anyhow::Result;
@@ -149,6 +150,24 @@ pub async fn default_runtime_with(
     plugin_warnings.splice(0..0, plugins.warnings.clone());
     plugin_warnings.extend(plugins.contribute(&mut components.tools, &mut components.prompt));
     plugin_warnings.extend(plugins.replace_context(&mut components.context_factory));
+    // A child Kroma applies its own policy after all plugin/MCP tools have
+    // been registered. The parent/default runtime has no added checks.
+    let subagent_policy = SubagentPolicy::from_env()?;
+    if std::env::var("KROMA_SUBAGENT_DEPTH").ok().as_deref() == Some("1") {
+        for name in ["subagent", "memory_remember", "memory_forget"] {
+            if components
+                .tools
+                .definitions()
+                .iter()
+                .any(|definition| definition["function"]["name"] == name)
+            {
+                components.tools.disable(name)?;
+            }
+        }
+    }
+    if let Some(policy) = &subagent_policy {
+        policy.apply(&mut components.tools, &mut components.prompt)?;
+    }
     components.model = plugins.model_hooks(components.model, components.context_budget);
     components.events = plugins.wrap_events(components.events)?;
     let selected_model_name = components.model_report.as_ref().and_then(|report| {
@@ -167,6 +186,9 @@ pub async fn default_runtime_with(
         components.defer_initial_session,
     )?;
     let mut agent = agent;
+    if let Some(policy) = &subagent_policy {
+        agent.set_subagent_limits(policy.limits());
+    }
     if let Some(report) = model_report {
         agent.set_model_report(report);
     }

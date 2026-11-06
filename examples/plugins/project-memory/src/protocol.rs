@@ -815,8 +815,13 @@ fn dispatch_task_summary(object: &Map<String, Value>, request_id: &Value) -> Val
 fn build_summary(object: &Map<String, Value>) -> Result<String, String> {
     let recent = recent_users(object);
     let mut storage = open_storage(object)?;
+    // Only the newest user instruction can authorize a new durable rule.
+    // Older messages are useful context for the model, but are not evidence
+    // that the user repeated the quote in this specific task. Previously the
+    // last eight turns could silently validate unrelated pending proposals.
+    let current: &[String] = recent.last().map(std::slice::from_ref).unwrap_or(&[]);
     // Promotion is best effort: a storage failure still acknowledges the task.
-    let _ = storage.store.promote_pending(&recent, now_ts());
+    let _ = storage.store.promote_pending(current, now_ts());
     Ok(TASK_SUMMARY_OK.to_string())
 }
 
@@ -1864,6 +1869,70 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn only_current_user_quote_can_promote_one_pending_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("project")).unwrap();
+        let earlier = "以后这个项目始终使用旧版 yarn 包管理器";
+        let current = "从现在开始这个项目改用 pnpm 包管理器";
+        let old = handle(storage_request(
+            temp.path(),
+            "tool",
+            "memory_remember",
+            json!({"kind":"preference","text":"Use yarn","quote":earlier}),
+        ));
+        assert_eq!(old["is_error"], false);
+        let first = handle(storage_request(
+            temp.path(),
+            "tool",
+            "memory_remember",
+            json!({"kind":"preference","text":"Use pnpm","quote":current}),
+        ));
+        assert_eq!(first["is_error"], false);
+        let second = handle(storage_request(
+            temp.path(),
+            "tool",
+            "memory_remember",
+            json!({"kind":"decision","text":"Prefer pnpm workspace files","quote":current}),
+        ));
+        assert_eq!(second["is_error"], false);
+        let summary = handle(storage_request(
+            temp.path(),
+            "task_summary",
+            "task_summary",
+            json!({"status":"completed","recent_users":[earlier,current]}),
+        ));
+        assert_eq!(summary["is_error"], false);
+        let current_hits = handle(storage_request(
+            temp.path(),
+            "tool",
+            "memory_search",
+            json!({"query":"pnpm"}),
+        ));
+        assert_eq!(current_hits["is_error"], false);
+        assert_eq!(
+            reply_content(&current_hits)["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let old_hits = handle(storage_request(
+            temp.path(),
+            "tool",
+            "memory_search",
+            json!({"query":"yarn"}),
+        ));
+        assert_eq!(old_hits["is_error"], false);
+        assert_eq!(
+            reply_content(&old_hits)["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]

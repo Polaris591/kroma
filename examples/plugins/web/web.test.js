@@ -438,7 +438,7 @@ for (const provider of ["tavily", "you", "parallel", "firecrawl"]) {
   });
 }
 
-test("all new credentials participate in auto and per-call provider overrides config", async () => {
+test("all new credentials participate in auto and tool callers cannot select a paid provider", async () => {
   for (const [provider, env] of Object.entries({tavily: "TAVILY_API_KEY", you: "YDC_API_KEY", parallel: "PARALLEL_API_KEY", firecrawl: "FIRECRAWL_API_KEY"})) {
     process.env[env] = "fake-env-key";
     global.fetch = async () => new Response(null, {status: 401});
@@ -446,9 +446,8 @@ test("all new credentials participate in auto and per-call provider overrides co
     await assert.rejects(search("test", {exa_api_key: "other-key", search_priority: [provider, "exa"]}), {code: "HTTP_ERROR"});
     delete process.env[env];
     global.fetch = async () => mock(JSON.stringify({results: [{title: "Found", url: "https://example.org"}]}), "application/json");
-    const result = JSON.parse(await dispatch({type: "tool", name: "web_search", config: {provider, exa_api_key: "key"},
-      arguments: {query: "test", provider: "exa"}}));
-    assert.equal(result.provider, "exa");
+    await assert.rejects(dispatch({type: "tool", name: "web_search", config: {provider, exa_api_key: "key"},
+      arguments: {query: "test", provider: "exa"}}), {code: "INVALID_ARGUMENT"});
   }
 });
 
@@ -500,7 +499,7 @@ test("Firecrawl reads apply the same target check instead of forwarding a privat
   }
 });
 
-const priorityKeys = {parallel_api_key: "fake-p", you_api_key: "fake-y", exa_api_key: "fake-e", tavily_api_key: "fake-t"};
+const priorityKeys = {parallel_api_key: "fake-p", you_api_key: "fake-y", exa_api_key: "fake-e", tavily_api_key: "fake-t", paid_fallback: true};
 const found = {title: "Docs", url: "https://nodejs.org/api/globals.html", snippets: ["Source"], highlights: ["Source"], content: "Source", excerpts: ["Source"]};
 function priorityResponse(host) {
   return mock(JSON.stringify(host === "ydc-index.io" ? {results: {web: [found]}} : {results: [found]}), "application/json");
@@ -590,16 +589,28 @@ test("auto stops on auth, query/config errors, no results, invalid data and redi
   assert.equal(calls, 0);
 });
 
-test("explicit provider or per-call override never falls back even when priority and keys are present", async () => {
+test("paid provider selection is configured, never selected by the model", async () => {
   const calls = [];
   global.fetch = async url => { calls.push(new URL(url).hostname); return new Response(null, {status: 503}); };
   await assert.rejects(dispatch({type: "tool", name: "web_search", config: priorityKeys,
     arguments: {query: "timeout", provider: "exa"}}), error => {
-    assert.equal(error.code, "HTTP_ERROR");
+    assert.equal(error.code, "INVALID_ARGUMENT");
     assert.equal(error.attempts, undefined);
     return true;
   });
+  await assert.rejects(search("timeout", {provider:"exa", exa_api_key:"test", ...priorityKeys}), {code:"HTTP_ERROR"});
   assert.deepEqual(calls, ["api.exa.ai"]);
+});
+
+test("auto pays at most one configured backend by default, failover requires user opt-in", async () => {
+  const calls = [];
+  global.fetch = async url => { calls.push(new URL(url).hostname); return new Response(null, {status: 503}); };
+  await assert.rejects(search("rust docs", {...priorityKeys, paid_fallback: false}), {code: "HTTP_ERROR"});
+  assert.deepEqual(calls, ["api.parallel.ai"]);
+  await assert.rejects(search("rust docs", {...priorityKeys, paid_fallback: true}), {code: "HTTP_ERROR"});
+  assert.deepEqual(calls, ["api.parallel.ai", "api.parallel.ai", "ydc-index.io", "api.exa.ai", "api.tavily.com"]);
+  await assert.rejects(dispatch({type:"tool", name:"web_fetch", config:{fetch_provider:"http"},
+    arguments:{url:"https://example.com", provider:"firecrawl"}}), {code:"INVALID_ARGUMENT"});
 });
 
 test("auto timeout advances to next backend without starting requests concurrently", async () => {
@@ -716,7 +727,7 @@ test("free ignores configured and environment API keys and never calls paid host
   };
   try {
     const result = JSON.parse(await dispatch({type: "tool", name: "web_search",
-      config: {...priorityKeys, provider: "parallel"}, arguments: {query: "test", provider: "free"}}));
+      config: {...priorityKeys, provider: "free"}, arguments: {query: "test"}}));
     assert.equal(result.provider, "duckduckgo");
     assert.equal(result.mode, "free");
     assert.deepEqual(calls, ["api.mwmbl.org", "html.duckduckgo.com"]);
