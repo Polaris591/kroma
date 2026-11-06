@@ -204,14 +204,14 @@ memories(
 
 只需要两个窄接口，不引入完整协议框架：
 
-1. **`request_context`**：任务开始时，宿主带预算和最小上下文调用插件，插件返回低信任块；
+1. **`provide_context`**（旧称 `request_context`）：任务开始时，宿主带预算和最小上下文调用插件，插件返回低信任块；
    宿主负责预算、格式、超时、失败跳过、缓存测量。
-2. **`task_summary`**：任务结束时，宿主发送有界摘要，插件幂等保存 `last_activity`
+2. **`task_finished`**（旧称 `task_summary`）：WAL 任务结束后，宿主非阻塞发送有界摘要，插件幂等保存 `last_activity`
    和可选的审查运行记录；失败不影响任务。
 
 实现方式：
 
-- 在现有插件清单增加 `api_version = 2` 和 `capabilities = ["request_context", "task_summary"]`；
+- 在现有插件清单增加 `api_version = 2` 和 `capabilities = ["provide_context", "task_finished"]`（兼容旧名称）；
 - 宿主只对声明了能力的 V2 插件调用；V1 插件完全不变；
 - 不做握手、不做字段级协议框架、不做来源分页、不做持久 ledger；
 - 两个调用都有硬超时，失败只记本地诊断，不向用户报错；
@@ -296,7 +296,7 @@ memories(
 
 **R1：最小自动召回（已实现）**
 
-- `request_context` + `task_summary` 两个能力；
+- `provide_context` + `task_finished` 两个能力；
 - 硬预算、失败跳过、低信任注入、任务级一次注入；
 - 用真实使用测量相关率和 token 开销。
 

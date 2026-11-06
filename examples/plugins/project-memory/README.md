@@ -17,7 +17,8 @@ and the [V2 contract](../../../docs/project-memory-v2-contract.md).
 - **Quote-anchored rules.** A `memory_remember` quote verified against the
   host-supplied **current user turn** becomes active immediately (at most one
   per user turn). Legacy hosts lacking trusted turn context retain a pending
-  compatibility path until `task_summary`; there is no approval queue.
+  compatibility path until the post-WAL `task_finished` (legacy `task_summary`)
+  lifecycle call; there is no approval queue.
 - **Provisional review notes.** `kind=review` requires a path and an evidence
   reference, is labeled unverified, and expires after 30 days.
 - **Self-maintenance.** Pending rules not verified within 7 days are dropped;
@@ -34,7 +35,7 @@ Defaults are on. Normal use needs no commands.
 
 ## Install
 
-Requires Kroma with the V2 `request_context` / `task_summary` capabilities
+Requires Kroma with V2 `provide_context` / `task_finished` capabilities
 (this tree). The plugin needs a prebuilt `kroma-memory` binary; no Rust
 toolchain is required for users.
 

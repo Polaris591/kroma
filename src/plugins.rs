@@ -15,7 +15,13 @@ const PLUGIN_API_VERSION_V2: u32 = 2;
 /// Host memory calls are fail-open and bounded apart from the 120-second
 /// tool/hook timeout, so a slow plugin cannot stall the model request.
 const PLUGIN_MEMORY_CALL_TIMEOUT: Duration = Duration::from_secs(2);
-const PLUGIN_CAPABILITIES: [&str; 2] = ["request_context", "task_summary"];
+// New generic lifecycle capabilities; legacy V2 names remain accepted.
+const PLUGIN_CAPABILITIES: [&str; 4] = [
+    "provide_context",
+    "task_finished",
+    "request_context",
+    "task_summary",
+];
 const MAX_INSTALL_ENTRIES: usize = 20_000;
 const MAX_INSTALL_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -263,6 +269,90 @@ fn empty_parameters() -> Value {
     json!({"type": "object", "properties": {}})
 }
 
+/// Admit the small, standard JSON Schema subset accepted by tool providers.
+/// Reject structurally invalid declarations at discovery rather than letting
+/// one plugin's malformed schema break every model request. This is a shape
+/// check, not a second JSON Schema interpreter or a runtime argument filter.
+fn validate_tool_schema(schema: &Value) -> Result<()> {
+    fn walk(value: &Value, depth: usize, remaining: &mut usize) -> Result<()> {
+        if depth > 12 || *remaining == 0 {
+            bail!("tool JSON schema exceeds the supported complexity budget");
+        }
+        *remaining -= 1;
+        let map = value.as_object().context("tool schema must be an object")?;
+        if let Some(kind) = map.get("type") {
+            let check = |name: &str| {
+                matches!(
+                    name,
+                    "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+                )
+            };
+            if !kind.as_str().is_some_and(check) {
+                bail!("tool schema has an unsupported type");
+            }
+        }
+        if let Some(props) = map.get("properties") {
+            let props = props
+                .as_object()
+                .context("schema properties must be an object")?;
+            if map.get("type").and_then(Value::as_str) != Some("object") {
+                bail!("schema properties require type=object");
+            }
+            for (_, child) in props {
+                walk(child, depth + 1, remaining)?;
+            }
+        }
+        if let Some(required) = map.get("required") {
+            let required = required
+                .as_array()
+                .context("schema required must be an array")?;
+            let props = map
+                .get("properties")
+                .and_then(Value::as_object)
+                .context("schema required needs properties")?;
+            let mut names = BTreeSet::new();
+            for item in required {
+                let name = item
+                    .as_str()
+                    .context("schema required keys must be strings")?;
+                if !props.contains_key(name) || !names.insert(name) {
+                    bail!("schema required key is absent or duplicated");
+                }
+            }
+        }
+        if let Some(items) = map.get("items") {
+            if map.get("type").and_then(Value::as_str) != Some("array") {
+                bail!("schema items require type=array");
+            }
+            walk(items, depth + 1, remaining)?;
+        }
+        if let Some(extra) = map.get("additionalProperties") {
+            if !extra.is_boolean() {
+                walk(extra, depth + 1, remaining)?;
+            }
+        }
+        if let Some(variants) = map.get("anyOf").or_else(|| map.get("oneOf")) {
+            let variants = variants
+                .as_array()
+                .filter(|items| !items.is_empty())
+                .context("schema union must be a nonempty array")?;
+            for child in variants {
+                walk(child, depth + 1, remaining)?;
+            }
+        }
+        if let Some(values) = map.get("enum") {
+            if values.as_array().is_none_or(Vec::is_empty) {
+                bail!("schema enum must be a nonempty array");
+            }
+        }
+        Ok(())
+    }
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        bail!("tool parameters must declare type=object");
+    }
+    walk(schema, 0, &mut 256)
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PluginCommandSpec {
     pub name: String,
@@ -389,6 +479,8 @@ impl PluginManifest {
             {
                 bail!("plugin '{}' has an invalid tool '{}'", self.id, tool.name);
             }
+            validate_tool_schema(&tool.parameters)
+                .with_context(|| format!("plugin '{}' tool '{}'", self.id, tool.name))?;
             if !names.insert(tool.name.clone()) {
                 bail!("plugin '{}' declares tool '{}' twice", self.id, tool.name);
             }
@@ -628,10 +720,12 @@ struct PluginState {
     enabled: BTreeSet<String>,
     #[serde(default)]
     enabled_projects: BTreeSet<String>,
-    /// Content approved for each enabled project plugin, keyed like
-    /// `enabled_projects`. Approval is bound to the exact manifest and local
-    /// script bytes, so a repository cannot gain code execution later by
-    /// editing a plugin after somebody enabled it.
+    /// A broken optional tool/prompt plugin is skipped, but an explicitly
+    /// selected model or context backend must never silently fall back to a
+    /// different runtime when its manifest later becomes invalid.
+    #[serde(default)]
+    critical_plugins: BTreeSet<String>,
+    /// Legacy state from older Kroma releases, ignored for activation.
     #[serde(default)]
     project_fingerprints: BTreeMap<String, String>,
     #[serde(default)]
@@ -674,6 +768,7 @@ impl PluginState {
 #[derive(Clone)]
 pub struct PluginCatalog {
     directory: PathBuf,
+    bundled: Option<PathBuf>,
     state_path: PathBuf,
     workdir: PathBuf,
     plugins: Vec<Plugin>,
@@ -722,11 +817,13 @@ impl Plugin {
     }
 
     fn has_request_context(&self) -> bool {
-        self.manifest.has_capability("request_context")
+        self.manifest.has_capability("provide_context")
+            || self.manifest.has_capability("request_context")
     }
 
     fn has_task_summary(&self) -> bool {
-        self.manifest.has_capability("task_summary")
+        self.manifest.has_capability("task_finished")
+            || self.manifest.has_capability("task_summary")
     }
 
     /// Model hooks and both V2 host calls keep process-local state, so the
@@ -858,8 +955,8 @@ impl PluginCatalog {
         let mut seen = BTreeSet::new();
         let project_plugins = workdir.join(".kroma").join("plugins");
         let mut sources = vec![directory.clone()];
-        if let Some(bundle) = bundled {
-            sources.push(bundle);
+        if let Some(bundle) = bundled.as_ref() {
+            sources.push(bundle.clone());
         }
         sources.push(project_plugins.clone());
         for source in &sources {
@@ -941,38 +1038,12 @@ impl PluginCatalog {
                                 data_root.join(&manifest.id),
                             )
                         });
-                        let approved_content = match &project_key {
-                            Some(_) if requested => Some(approval::fingerprint(&dir, &worker.scan)),
-                            _ => None,
-                        };
-                        let blocked = match (&project_key, &approved_content) {
-                            (Some(key), Some(content)) => {
-                                // Fail closed: an unreadable file or a
-                                // missing approval must never compare equal.
-                                let unchanged = match (content, state.project_fingerprints.get(key))
-                                {
-                                    (Ok(content), Some(approved)) => content == approved,
-                                    _ => false,
-                                };
-                                if requested && !unchanged {
-                                    let reason = match content {
-                                        Ok(_) => "code changed since it was approved".to_owned(),
-                                        Err(error) => format!("cannot verify its code: {error:#}"),
-                                    };
-                                    warnings.push(format!(
-                                        "project plugin '{}' is not loaded: {reason}; run `kroma plugins enable {}` again to approve the current code",
-                                        manifest.id, manifest.id
-                                    ));
-                                    Some(reason)
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        };
-                        // `enabled` is what actually runs, so a listing can never
-                        // claim a plugin is active while its code is unapproved.
-                        let enabled = requested && blocked.is_none();
+                        // Activation is one user switch, not a fingerprint
+                        // approval workflow. Source edits take effect at an
+                        // idle reload; process identity scans still determine
+                        // whether an existing worker can be safely reused.
+                        let blocked = None;
+                        let enabled = requested;
                         // A user-installed plugin is trusted by its
                         // installation, so there an incomplete scan only
                         // weakens change tracking. Report it instead of
@@ -1009,7 +1080,10 @@ impl PluginCatalog {
                                 .as_ref()
                                 .is_some_and(|key| state.enabled_projects.contains(key))
                         {
-                            invalid_enabled.push(label.clone());
+                            let critical_key = project_key.as_deref().unwrap_or(&id);
+                            if state.critical_plugins.contains(critical_key) {
+                                invalid_enabled.push(label.clone());
+                            }
                         }
                         warnings.push(label);
                     }
@@ -1056,6 +1130,7 @@ impl PluginCatalog {
         }
         Ok(Self {
             directory,
+            bundled,
             state_path,
             workdir: workdir.to_path_buf(),
             plugins,
@@ -1078,11 +1153,12 @@ impl PluginCatalog {
     }
 
     fn refresh(&self) -> Result<Self> {
-        Self::discover_at_with_transient(
+        Self::discover_at_with_bundled(
             self.directory.clone(),
             self.state_path.clone(),
             &self.workdir,
             self.transient.clone(),
+            self.bundled.clone(),
         )
     }
 
@@ -1208,10 +1284,12 @@ impl PluginCatalog {
             // A broken manifest is not discoverable, but must still be
             // possible to disable so a later reload can drop the old worker.
             let mut found = state.enabled.remove(id);
+            state.critical_plugins.remove(id);
             let project_dir = self.workdir.join(".kroma").join("plugins");
             if let Ok(directory) = project_dir.canonicalize() {
                 let key = format!("{}::{id}", directory.display());
                 found |= state.enabled_projects.remove(&key);
+                state.critical_plugins.remove(&key);
                 state.project_fingerprints.remove(&key);
             }
             if found {
@@ -1223,38 +1301,33 @@ impl PluginCatalog {
         }
         let plugin = plugin.ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
         let key = plugin.project_key.as_deref().unwrap_or(id).to_owned();
-        // Disabling never needs content approval. A plugin whose code is
-        // oversized, unreadable or otherwise unverifiable must still be
-        // possible to turn off, and disabling always clears the stored
-        // request so a later reload cannot resurrect it.
+        // Disabling is always possible, including a malformed manifest.
         if !enabled {
             state.enabled.remove(&key);
             state.enabled_projects.remove(&key);
+            state.critical_plugins.remove(&key);
             state.project_fingerprints.remove(&key);
             state.save(&self.state_path)?;
             return Ok(format!(
                 "Plugin '{id}' disabled. Restart Kroma, or run /plugins reload while idle (model/context plugins require restart)."
             ));
         }
-        // Enabling approves exactly what will run, so it rescans instead of
-        // trusting the lazy worker that disabled discovery built. Any
-        // incomplete scan fails the approval instead of approving a subset.
-        let scanned = plugin.worker.rescanned();
-        let approved_content = match plugin.project_key {
-            Some(_) => Some(approval::fingerprint(
-                &plugin.worker.directory,
-                &scanned.scan,
-            )?),
-            None => None,
-        };
+        // No approval fingerprint or second confirmation is needed. Plugin
+        // identity still controls lazy worker reuse and idle reload.
         if plugin.project_key.is_some() {
             state.enabled_projects.insert(key.clone());
         } else {
             state.enabled.insert(key.clone());
         }
-        if let Some(content) = approved_content {
-            state.project_fingerprints.insert(key, content);
+        if plugin.manifest.model.is_some()
+            || plugin.manifest.context.is_some()
+            || plugin.has_model_hook()
+        {
+            state.critical_plugins.insert(key.clone());
+        } else {
+            state.critical_plugins.remove(&key);
         }
+        state.project_fingerprints.remove(&key);
         state.save(&self.state_path)?;
         Ok(format!(
             "Plugin '{id}' enabled. Restart Kroma, or run /plugins reload while idle (model/context plugins require restart)."
@@ -1348,6 +1421,13 @@ impl PluginCatalog {
             .find(|plugin| plugin.project_key.is_none() && plugin.manifest.id == id)
             .map(|plugin| plugin.worker.directory.clone())
             .unwrap_or_else(|| self.directory.join(id));
+        // The user plugin directory is the only uninstallable source. Official
+        // bundles are owned by the package manager and project plugins by
+        // their workspace. Never delete either through this command.
+        if !target.starts_with(&self.directory) || target.parent() != Some(self.directory.as_path())
+        {
+            bail!("plugin '{id}' is bundled or project-managed; disable it instead of uninstalling its source");
+        }
         if !target.is_dir() {
             let project = self.workdir.join(".kroma").join("plugins").join(id);
             if project.is_dir() {
@@ -1362,6 +1442,7 @@ impl PluginCatalog {
         let mut state = PluginState::load(&self.state_path)?;
         fs::remove_dir_all(&target).with_context(|| format!("uninstalling plugin '{id}'"))?;
         state.enabled.remove(id);
+        state.critical_plugins.remove(id);
         state.settings.remove(id);
         state.save(&self.state_path)?;
         Ok(format!(
@@ -1378,12 +1459,15 @@ impl PluginCatalog {
             bail!("plugin source must be a directory");
         }
         let manifest = PluginManifest::read(&source)?;
-        if self
-            .refresh()?
-            .plugins
-            .iter()
-            .any(|plugin| plugin.manifest.id == manifest.id)
-        {
+        // Installing a user override of an official bundled plugin is valid.
+        // Only an existing user-installed copy or a project/transient copy
+        // blocks the operation; discovery already gives user copies priority.
+        if self.refresh()?.plugins.iter().any(|plugin| {
+            plugin.manifest.id == manifest.id
+                && (plugin.worker.directory.starts_with(&self.directory)
+                    || plugin.project_key.is_some()
+                    || plugin.transient)
+        }) {
             bail!("plugin '{}' is already installed", manifest.id);
         }
         let target = self.directory.join(&manifest.id);
@@ -1400,6 +1484,7 @@ impl PluginCatalog {
         let result = (|| -> Result<()> {
             let mut state = PluginState::load(&self.state_path)?;
             state.enabled.remove(&manifest.id);
+            state.critical_plugins.remove(&manifest.id);
             state.settings.remove(&manifest.id);
             state.save(&self.state_path)
         })();
@@ -1513,9 +1598,9 @@ impl PluginCatalog {
             let found = next.plugins.iter().any(|plugin| {
                 plugin.manifest.id == old.manifest.id && plugin.project_key == old.project_key
             });
-            if !found && old.requests(&desired) {
+            if !found && old.requests(&desired) && old.has_stateful_backend() {
                 bail!(
-                    "enabled plugin '{}' is missing or invalid; fix it or disable it first",
+                    "active model/context plugin '{}' is missing or invalid; fix it or disable it first",
                     old.manifest.id
                 );
             }
@@ -1559,6 +1644,11 @@ impl PluginCatalog {
                 // definition fingerprint includes plugin-local imported JS,
                 // so a helper change invalidates reuse without node_modules.
                 plugin.worker = old.worker.clone();
+                // Event subscriptions use an isolated process; retain its
+                // state when an unrelated plugin changes during idle reload.
+                if plugin.manifest.events == old.manifest.events {
+                    plugin.event_worker = old.event_worker.clone();
+                }
             }
         }
         next.prepare_idle_reload(base_tools, base_prompt)
@@ -1606,6 +1696,12 @@ impl PluginCatalog {
                 ));
                 continue;
             }
+            // Stage each plugin's full set of contributions on copies. A
+            // failed prompt or tool registration must not leave half a plugin
+            // installed in the active Agent or its advertised schema.
+            let mut candidate_tools = tools.clone();
+            let mut candidate_prompt = prompt.clone();
+            let mut plugin_errors = Vec::new();
             if let Some(base) = plugin.manifest.replace_prompt.as_deref() {
                 if replaced_prompt {
                     warnings.push(format!(
@@ -1614,11 +1710,10 @@ impl PluginCatalog {
                     ));
                     continue;
                 }
-                if let Err(error) = prompt.replace_system_prompt(base) {
+                if let Err(error) = candidate_prompt.replace_system_prompt(base) {
                     warnings.push(format!("{}: {error:#}", plugin.manifest.id));
                     continue;
                 }
-                replaced_prompt = true;
             }
             if let Some(text) = plugin
                 .manifest
@@ -1626,8 +1721,8 @@ impl PluginCatalog {
                 .as_deref()
                 .filter(|text| !text.trim().is_empty())
             {
-                if let Err(error) = prompt.push_trailing(text) {
-                    warnings.push(format!("{}: {error:#}", plugin.manifest.id));
+                if let Err(error) = candidate_prompt.push_trailing(text) {
+                    plugin_errors.push(format!("{}: {error:#}", plugin.manifest.id));
                 }
             }
             for tool in &plugin.manifest.tools {
@@ -1643,17 +1738,12 @@ impl PluginCatalog {
                     worker: plugin.worker.clone(),
                 };
                 let result = if tool.replace {
-                    tools.replace(&tool.name, Arc::new(adapter))
+                    candidate_tools.replace(&tool.name, Arc::new(adapter))
                 } else {
-                    tools.register(Arc::new(adapter))
+                    candidate_tools.register(Arc::new(adapter))
                 };
                 if let Err(error) = result {
-                    warnings.push(format!("{}: {error:#}", plugin.manifest.id));
-                } else {
-                    names.insert(tool.name.clone());
-                    if tool.replace {
-                        replaced_tools.insert(tool.name.clone());
-                    }
+                    plugin_errors.push(format!("{}: {error:#}", plugin.manifest.id));
                 }
             }
             if plugin
@@ -1662,7 +1752,7 @@ impl PluginCatalog {
                 .iter()
                 .any(|hook| hook == "before_tool_call" || hook == "after_tool_result")
             {
-                tools.register_interceptor(Arc::new(PluginToolHooks {
+                candidate_tools.register_interceptor(Arc::new(PluginToolHooks {
                     before: plugin
                         .manifest
                         .hooks
@@ -1675,6 +1765,19 @@ impl PluginCatalog {
                         .any(|hook| hook == "after_tool_result"),
                     worker: plugin.worker.clone(),
                 }));
+            }
+            if !plugin_errors.is_empty() {
+                warnings.extend(plugin_errors);
+                continue;
+            }
+            *tools = candidate_tools;
+            *prompt = candidate_prompt;
+            replaced_prompt |= plugin.manifest.replace_prompt.is_some();
+            for tool in &plugin.manifest.tools {
+                names.insert(tool.name.clone());
+                if tool.replace {
+                    replaced_tools.insert(tool.name.clone());
+                }
             }
         }
         warnings
@@ -1695,7 +1798,15 @@ impl PluginCatalog {
             .plugins
             .iter()
             .filter(|plugin| plugin.enabled && plugin.has_request_context())
-            .map(|plugin| plugin.worker.clone())
+            .map(|plugin| model::CapabilityWorker {
+                worker: plugin.worker.clone(),
+                source: plugin.manifest.id.clone(),
+                operation: if plugin.manifest.has_capability("provide_context") {
+                    "provide_context"
+                } else {
+                    "request_context"
+                },
+            })
             .collect::<Vec<_>>();
         let summary_workers = self
             .plugins
@@ -1709,7 +1820,15 @@ impl PluginCatalog {
                         .as_deref()
                         != Some("1")
             })
-            .map(|plugin| plugin.worker.clone())
+            .map(|plugin| model::CapabilityWorker {
+                worker: plugin.worker.clone(),
+                source: plugin.manifest.id.clone(),
+                operation: if plugin.manifest.has_capability("task_finished") {
+                    "task_finished"
+                } else {
+                    "task_summary"
+                },
+            })
             .collect::<Vec<_>>();
         if workers.is_empty() && context_workers.is_empty() && summary_workers.is_empty() {
             backend
@@ -1895,6 +2014,7 @@ impl PluginCatalog {
             subscriptions.push(PluginEventSubscription {
                 events,
                 sender,
+                dropped: AtomicU64::new(0),
                 stopped,
                 worker: subscriber,
             });
@@ -2483,6 +2603,7 @@ impl ToolInterceptor for PluginToolHooks {
 struct PluginEventSubscription {
     events: BTreeSet<String>,
     sender: SyncSender<Value>,
+    dropped: AtomicU64,
     stopped: Arc<AtomicBool>,
     worker: Arc<PluginWorker>,
 }
@@ -2535,7 +2656,20 @@ impl EventSink for PluginEventSink {
                     if subscriber.events.contains(name) {
                         // A slow listener drops only its own notifications;
                         // tools, transcripts, and other plugins stay live.
-                        let _ = subscriber.sender.try_send(payload.clone());
+                        match subscriber.sender.try_send(payload.clone()) {
+                            Ok(()) => {}
+                            Err(mpsc::TrySendError::Full(_)) => {
+                                let count = subscriber.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                                if count.is_power_of_two() {
+                                    crate::runtime_log!("[plugin] event subscriber queue full: {count} event(s) dropped");
+                                }
+                            }
+                            Err(mpsc::TrySendError::Disconnected(_)) => {
+                                if !subscriber.stopped.swap(true, Ordering::Relaxed) {
+                                    crate::runtime_log!("[plugin] event subscriber disconnected");
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2749,21 +2883,6 @@ impl PluginWorker {
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
             terminated_pid: Arc::new(AtomicU32::new(0)),
-        }
-    }
-
-    /// Rescan the current disk state. Approval must never rely on the lazy
-    /// metadata-only worker built by disabled discovery.
-    fn rescanned(&self) -> Self {
-        let scan = approval::scan(
-            &self.directory,
-            self.command.as_deref(),
-            &self.args,
-            &PLUGIN_SCAN_LIMITS,
-        );
-        Self {
-            scan,
-            ..self.isolated()
         }
     }
 
@@ -3178,6 +3297,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn official_plugin_bundle_is_read_only_and_user_override_wins() -> Result<()> {
+        let root = test_root("bundled-override");
+        let user = root.join("user-plugins");
+        let bundle = root.join("official");
+        let replacement = root.join("replacement");
+        let state = root.join("plugins.toml");
+        let project = root.join("project");
+        fs::create_dir_all(bundle.join("example"))?;
+        fs::create_dir_all(&replacement)?;
+        fs::create_dir_all(&project)?;
+        fs::write(
+            bundle.join("example/plugin.toml"),
+            "id='example'\nname='Official'\nprompt='Official variant'\n",
+        )?;
+        fs::write(
+            replacement.join("plugin.toml"),
+            "id='example'\nname='Custom'\nprompt='Custom variant'\n",
+        )?;
+        let discover = || {
+            PluginCatalog::discover_at_with_bundled(
+                user.clone(),
+                state.clone(),
+                &project,
+                None,
+                Some(bundle.clone()),
+            )
+        };
+        let initial = discover()?;
+        assert!(initial.list()?.contains("off  example"));
+        initial.set_enabled("example", true)?;
+        let official = discover()?;
+        assert!(official.list()?.contains("Official"));
+        assert!(
+            official.uninstall("example").is_err(),
+            "uninstall must never delete package-manager-owned official code"
+        );
+        assert!(bundle.join("example/plugin.toml").is_file());
+        official.install(&replacement)?;
+        let custom = discover()?;
+        assert!(custom.list()?.contains("Custom"));
+        assert!(!custom.list()?.contains("Official"));
+        custom.set_enabled("example", true)?;
+        let enabled = discover()?;
+        assert!(enabled.list()?.contains("on   example"));
+        enabled.uninstall("example")?;
+        assert!(bundle.join("example/plugin.toml").exists());
+        assert!(discover()?.list()?.contains("Official"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_plugin_contributions_are_atomic_including_prompt_and_tools() -> Result<()> {
+        let root = test_root("atomic-contributions");
+        let dir = root.join("plugins/half");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("plugin.toml"),
+            "id='half'\nname='Half'\ncommand='node'\nreplace_prompt='   '\n[[tools]]\nname='half_tool'\ndescription='should not survive a failed prompt'\n")?;
+        let state = root.join("plugins.toml");
+        let catalog = PluginCatalog::discover_at(root.join("plugins"), state.clone(), &root)?;
+        catalog.set_enabled("half", true)?;
+        let active = PluginCatalog::discover_at(root.join("plugins"), state, &root)?;
+        let mut tools = ToolRegistry::builtin();
+        let mut prompt = PromptComposer::default();
+        let original = prompt.initial_history(&root);
+        let warnings = active.contribute(&mut tools, &mut prompt);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            tools.is_builtin_only(),
+            "a failed plugin must contribute no tool or hook"
+        );
+        assert_eq!(
+            serde_json::to_value(prompt.initial_history(&root))?,
+            serde_json::to_value(original)?,
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn generic_v2_caps_accept_valid_schemas_and_reject_bad_parameter_shapes() -> Result<()> {
+        let generic: PluginManifest = toml::from_str(
+            "api_version=2\nid='extension'\nname='Extension'\ncommand='node'\ncapabilities=['provide_context','task_finished']\n"
+        )?;
+        generic.validate()?;
+        let bad_schema: PluginManifest = toml::from_str(
+            "id='bad'\nname='Bad'\ncommand='node'\n[[tools]]\nname='bad_tool'\ndescription='invalid schema'\n[tools.parameters]\ntype='object'\nrequired=['unknown']\n[tools.parameters.properties.actual]\ntype='string'\n"
+        )?;
+        assert!(bad_schema
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("bad_tool"));
+        let invalid_nesting: PluginManifest = toml::from_str(
+            "id='bad'\nname='Bad'\ncommand='node'\n[[tools]]\nname='bad_tool'\ndescription='invalid items'\n[tools.parameters]\ntype='object'\n[tools.parameters.properties.data]\ntype='array'\nitems='not a schema'\n"
+        )?;
+        assert!(invalid_nesting.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn edited_imported_js_helper_invalidates_worker_reuse_without_touching_main() -> Result<()> {
         let root = test_root("imported-helper");
         fs::write(root.join("main.js"), "require('./helper')")?;
@@ -3417,7 +3637,7 @@ base_url = "https://example.com""#,
     }
 
     #[test]
-    fn an_approval_without_a_stored_fingerprint_does_not_load() {
+    fn old_project_enabled_state_needs_no_additional_approval() {
         let root = test_root("stale-approval");
         let plugins = root.join("plugins");
         let project = root.join("project");
@@ -3446,14 +3666,17 @@ base_url = "https://example.com""#,
         )
         .unwrap();
         let catalog = PluginCatalog::discover_at(plugins, state, &project).unwrap();
-        assert!(!catalog.plugins[0].enabled, "unverified code must not load");
+        assert!(
+            catalog.plugins[0].enabled,
+            "an explicit enablement is sufficient"
+        );
         assert!(catalog.plugins[0].requested);
-        assert!(catalog.plugins[0].blocked.is_some());
+        assert!(catalog.plugins[0].blocked.is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn project_plugin_approval_is_bound_to_non_script_entry_bytes() {
+    fn project_plugin_code_edits_do_not_demand_reapproval() {
         let root = test_root("approval-bytes");
         let plugins = root.join("plugins");
         let project = root.join("project");
@@ -3471,36 +3694,33 @@ base_url = "https://example.com""#,
         catalog.set_enabled("scripted", true).unwrap();
         let approved =
             PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
-        assert!(approved.plugins[0].enabled, "approved code must run");
-        // Same size, different bytes: approval must not survive on a length.
+        assert!(approved.plugins[0].enabled);
+        // Same-size edits are seen on next discovery/reload, not blocked by
+        // an approval queue. The user retains the original enabled switch.
         fs::write(dir.join("main.py"), "print(2)\n").unwrap();
         let changed = PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
-        assert!(!changed.plugins[0].enabled);
+        assert!(changed.plugins[0].enabled);
         assert!(changed.plugins[0].requested);
         let summaries = changed.summaries().unwrap();
         assert_eq!(
-            summaries[0]["enabled"], false,
-            "a listing must never claim blocked code runs"
+            summaries[0]["enabled"], true,
+            "a user-enabled project plugin stays enabled after an edit"
         );
         assert_eq!(summaries[0]["requested"], true);
-        assert!(summaries[0]["blocked"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("changed")));
-        // Approving again accepts the new bytes, and a manifest edit blocks it.
-        changed.set_enabled("scripted", true).unwrap();
+        assert!(summaries[0]["blocked"].is_null());
         fs::write(
             dir.join("plugin.toml"),
             "id='scripted'\nname='Renamed'\nprompt='scripted audit'\ncommand='python'\nargs=['main.py']\n",
         )
         .unwrap();
         let manifest_changed = PluginCatalog::discover_at(plugins, state, &project).unwrap();
-        assert!(!manifest_changed.plugins[0].enabled);
+        assert!(manifest_changed.plugins[0].enabled);
         assert!(manifest_changed.plugins[0].requested);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn approval_covers_python_extensionless_data_and_large_js_helpers() {
+    fn plugin_sources_change_without_a_second_activation_prompt() {
         let root = test_root("all-files");
         let project = root.join("project");
         let dir = project.join(".kroma/plugins/demo");
@@ -3534,7 +3754,10 @@ prompt='audit'
             fs::write(dir.join(name), changed).unwrap();
             let catalog =
                 PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
-            assert!(!catalog.plugins[0].enabled, "{name} edit retained approval");
+            assert!(
+                catalog.plugins[0].enabled,
+                "{name} edit must not disable user choice"
+            );
         }
         // A broken requested plugin can always be disabled, without approving it.
         let oversized = fs::File::create(dir.join("oversized")).unwrap();
@@ -3543,7 +3766,7 @@ prompt='audit'
             .unwrap();
         drop(oversized);
         let catalog = PluginCatalog::discover_at(plugins.clone(), state.clone(), &project).unwrap();
-        assert!(catalog.set_enabled("demo", true).is_err());
+        assert!(catalog.set_enabled("demo", true).is_ok());
         catalog.set_enabled("demo", false).unwrap();
         let disabled = PluginCatalog::discover_at(plugins, state, &project).unwrap();
         assert!(!disabled.plugins[0].requested);

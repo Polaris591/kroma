@@ -84,6 +84,24 @@ pub trait ModelBackend: Send + Sync {
     /// Called at session boundaries, not per token. External adapters may
     /// attach session identity to their JSONL requests without altering messages.
     fn set_session_context(&self, _id: &str, _archive: &Path) {}
+    /// Allows the host to avoid allocating a task snapshot when no plugin
+    /// needs a post-WAL event; disabled/default harness stays zero-overhead.
+    fn has_task_finished_hook(&self) -> bool {
+        false
+    }
+    /// Optional post-task extension notification. The host calls this only
+    /// after the final task boundary is committed (or an error boundary has
+    /// been attempted); never from an intermediate model response. Providers
+    /// without extensions pay no additional runtime or network cost.
+    fn task_finished<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _archive: &'a Path,
+        _messages: &'a [Message],
+        _status: &'a str,
+    ) -> ModelFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
     /// Remove metadata that this backend will not send on the wire, solely
     /// for context planning. Never mutate the durable transcript; an adapter
     /// without protocol-specific filtering can keep the conservative default.

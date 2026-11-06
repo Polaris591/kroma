@@ -366,15 +366,20 @@ Modifying hooks:
 
 V2 host capabilities (`api_version = 2`):
 
-- `capabilities = ["request_context", "task_summary"]` is opt-in and requires a command.
+- `capabilities = ["provide_context", "task_finished"]` is the generic V2
+  opt-in and requires a command. Existing `request_context` / `task_summary`
+  V2 plugins remain supported without modification.
   V1 plugins keep the exact V1 frames and behavior.
-- `request_context` is sent once per user task with an intent, project/session fields and a
+- `provide_context` is sent once per user task with an intent, project/session fields and a
   token budget. The plugin returns compact blocks; the host appends them to the current
   request projection as untrusted reference data. Empty, slow, malformed or failed replies
   mean no injection and never fail the model request.
-- `task_summary` is sent after a final assistant message with no tool calls, carrying recent
-  user messages (bounded). It is best effort and idempotent; a plugin may use it to verify
-  quote-anchored writes. It never changes the persisted transcript.
+- `task_finished` is dispatched after the Agent's final WAL boundary, **not**
+  after each assistant reply; it carries the final status and bounded user task
+  text, and is best effort, nonblocking and idempotent. A plugin can use it to
+  update a project history without ever becoming an Agent Loop or a scheduler.
+- `[[tools]] invalidates_context = true` forces a fresh context projection
+  after a successful tool mutation (e.g. remembering or forgetting a rule).
 - See `docs/project-memory-v2-contract.md` for the exact fields and limits.
 External context operations (`[context]`):
 

@@ -1,5 +1,4 @@
-//! Bounded plugin content scanning and approval fingerprints. No process or Host ownership.
-use anyhow::{bail, Context, Result};
+//! Bounded source scanning for idle worker reuse, not an approval workflow.
 use std::{
     collections::BTreeSet,
     fs,
@@ -8,18 +7,9 @@ use std::{
     time::SystemTime,
 };
 
-/// Trust boundary for project plugin approval.
-///
-/// Kroma is not a sandbox: an enabled plugin is a child process with the
-/// user's own privileges and can read anything that user can read. What the
-/// approval binds is the plugin's authored local code: the manifest, every
-/// regular file below the plugin directory, and the script paths
-/// named by `command`/`args`. Dependency and build output (`node_modules`,
-/// `.git`, `target`) is excluded on purpose, because it is install artifact
-/// and not plugin source, and the real dependency graph can be huge.
-/// Everything else that carries code is bounded, and anything the scan cannot
-/// read or bound makes the scan incomplete. An incomplete scan never approves
-/// code, and a partial set of files is never trusted as a complete one.
+/// Tracked authored code excludes generated dependency/build folders. This
+/// scan detects source changes for idle worker replacement, never asks the
+/// user to approve edits or forbids enabled plugins from running.
 const PLUGIN_IGNORED_DIRECTORIES: &[&str] = &[
     "node_modules",
     ".git",
@@ -29,8 +19,7 @@ const PLUGIN_IGNORED_DIRECTORIES: &[&str] = &[
 ];
 
 /// One tracked plugin file: path, content digest and modification time. The
-/// digest is `None` only when the scan failed to read the file, and a read
-/// failure blocks approval instead of falling back to a size or mtime.
+/// digest is `None` only when reading the file failed.
 type PluginEntryPoint = (PathBuf, Option<String>, Option<SystemTime>);
 
 #[derive(Clone, Default)]
@@ -46,7 +35,7 @@ pub(super) struct PluginScanLimits {
     pub(super) max_entries: usize,
     /// Total code bytes hashed before the scan gives up.
     pub(super) max_bytes: u64,
-    /// Largest single plugin-local code file that can be approved.
+    /// Largest single source file included in a change scan.
     pub(super) max_file_bytes: u64,
     /// Largest explicit `command`/`args` script that can be approved.
     pub(super) max_explicit_bytes: u64,
@@ -77,42 +66,6 @@ fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
 }
 
 /// Length-prefixed fields keep "ab"+"c" from hashing like "a"+"bc".
-fn push_approval_field(material: &mut Vec<u8>, bytes: &[u8]) {
-    material.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    material.extend_from_slice(bytes);
-}
-
-/// Bind a project plugin approval to the bytes that will actually run: the
-/// manifest, every authored plugin-local file the bounded scan tracks (including
-/// non-JS helpers and native artifacts the plugin can load or exec), and
-/// the explicit `command`/`args` scripts. Dependency/build directories are
-/// outside this boundary on purpose, so this is an approval and change
-/// boundary, not a sandbox: an approved plugin still runs with user rights.
-/// The scan must be complete: an unreadable directory or file, an exhausted
-/// budget or an oversized file fails closed instead of approving a partial
-/// set. The v3 tag is a deterministic domain separator, so approvals written
-/// by the older JS-only v2 scan never match this stricter boundary.
-pub(super) fn fingerprint(directory: &Path, scan: &PluginCodeScan) -> Result<String> {
-    if let Some(reason) = scan.error.as_deref() {
-        bail!("local code scan is incomplete: {reason}");
-    }
-    let manifest = fs::read(directory.join("plugin.toml"))
-        .context("reading the plugin manifest for approval")?;
-    let mut material = Vec::new();
-    push_approval_field(&mut material, b"kroma-project-plugin-approval-v3");
-    push_approval_field(&mut material, &manifest);
-    let mut entrypoints: Vec<_> = scan.entrypoints.iter().collect();
-    entrypoints.sort_by(|left, right| left.0.cmp(&right.0));
-    for (path, digest, _) in entrypoints {
-        let digest = digest
-            .as_deref()
-            .with_context(|| format!("cannot read {} for approval", path.display()))?;
-        push_approval_field(&mut material, path.to_string_lossy().as_bytes());
-        push_approval_field(&mut material, digest.as_bytes());
-    }
-    Ok(crate::mcp::content_digest(&material))
-}
-
 /// Bounded scan of plugin-local code plus explicit `command`/`args` script
 /// paths. It is cycle-safe and budgeted, and every read or listing failure
 /// is reported instead of skipped: an unreadable directory, an unreadable
@@ -338,57 +291,5 @@ impl PluginCodeScan {
                     .entrypoints
                     .iter()
                     .map(|(path, digest, _)| (path, digest)))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fingerprint_preserves_v3_field_layout_and_ignores_mtime() -> Result<()> {
-        let root = std::env::temp_dir().join(format!(
-            "kroma-approval-layout-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root)?;
-        let manifest = b"id='layout'
-name='Layout'
-prompt='unchanged'
-";
-        fs::write(root.join("plugin.toml"), manifest)?;
-        let mut scan = PluginCodeScan {
-            error: None,
-            entrypoints: vec![
-                (root.join("b"), Some("digest-b".into()), None),
-                (root.join("a"), Some("digest-a".into()), None),
-            ],
-        };
-        let mut reference = Vec::new();
-        for field in [
-            b"kroma-project-plugin-approval-v3".as_slice(),
-            manifest.as_slice(),
-        ] {
-            reference.extend_from_slice(&(field.len() as u64).to_le_bytes());
-            reference.extend_from_slice(field);
-        }
-        for (name, digest) in [("a", "digest-a"), ("b", "digest-b")] {
-            let path = root.join(name).to_string_lossy().into_owned();
-            for field in [path.as_bytes(), digest.as_bytes()] {
-                reference.extend_from_slice(&(field.len() as u64).to_le_bytes());
-                reference.extend_from_slice(field);
-            }
-        }
-        let expected = crate::mcp::content_digest(&reference);
-        assert_eq!(fingerprint(&root, &scan)?, expected);
-        scan.entrypoints[0].2 = Some(SystemTime::now());
-        assert_eq!(fingerprint(&root, &scan)?, expected);
-        scan.error = Some("incomplete".into());
-        assert!(fingerprint(&root, &scan).is_err());
-        fs::remove_dir_all(root)?;
-        Ok(())
     }
 }

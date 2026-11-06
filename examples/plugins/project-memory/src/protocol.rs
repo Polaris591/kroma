@@ -211,8 +211,8 @@ fn dispatch(request: &Value, request_id: &Value) -> Value {
     match kind {
         "ping" => make_reply(request_id, "pong".to_string(), false),
         "tool" => dispatch_tool(object, request_id),
-        "request_context" => dispatch_request_context(object, request_id),
-        "task_summary" => dispatch_task_summary(object, request_id),
+        "request_context" | "provide_context" => dispatch_request_context(object, request_id),
+        "task_summary" | "task_finished" => dispatch_task_summary(object, request_id),
         "command" => dispatch_command(object, request_id),
         "ui" => dispatch_ui(object, request_id),
         _ => make_reply(request_id, "Unsupported request type".to_string(), true),

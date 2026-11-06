@@ -1,5 +1,5 @@
 api_version = 2
-capabilities = ["request_context", "task_summary"]
+capabilities = ["provide_context", "task_finished"]
 id = "project-memory"
 name = "Project Memory"
 version = "0.3.0"
@@ -18,6 +18,7 @@ store secrets or raw tool output, and use `memory_forget` only when the user exp
 
 [[tools]]
 name = "memory_remember"
+invalidates_context = true
 requires_user_context = true
 description = "Immediately record a durable user rule when the host verifies a quote from the current user turn (one rule per turn); isolate same-topic conflicts. Review findings require evidence and are provisional. Never store secrets, guesses or raw tool output."
 [tools.parameters]
