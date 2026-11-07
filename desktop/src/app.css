@@ -41,6 +41,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .session-list button { width:100%; height:36px; white-space:nowrap; gap:9px; font-size:12px; }
 .session-list button span {text-overflow:ellipsis; overflow:hidden; white-space:nowrap;}
 .sessions-empty {padding:0 12px;color:#77869b;font-size:12px;line-height:1.7;}
+.session-search { width:calc(100% - 8px); flex-shrink:0; margin:0 4px 12px; padding:9px 11px; border:1px solid #344156; border-radius:8px; background:#171f2d; color:#dce6f6; font-size:12px; outline:0; }
+.session-search::placeholder { color:#718099; }
+.session-search:focus-visible { border-color:#829bc4; }
 .sidebar-bottom { margin-top:auto; padding-top:15px; border-top:1px solid #273140; }
 .workspace-button {display:flex; align-items:center; gap:11px; padding:8px 11px; width:100%; text-align:left; border-radius:9px; }
 .workspace-button:hover {background:#1c2635;}
