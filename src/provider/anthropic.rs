@@ -222,7 +222,15 @@ pub(super) fn apply_reasoning(
 enum Block {
     #[default]
     Empty,
-    Text(String),
+    Text {
+        text: String,
+        citations: Vec<Value>,
+    },
+    ServerTool {
+        original: Value,
+        input: String,
+    },
+    NativeResult(Value),
     Tool {
         id: String,
         name: String,
@@ -276,14 +284,33 @@ pub(super) struct Stream {
     output: Option<u64>,
     pub received_delta: bool,
     pub done: bool,
+    web_searches: Option<u64>,
+    native_calls: BTreeMap<String, NativeSearchState>,
+}
+
+#[derive(Default)]
+struct NativeSearchState {
+    started: bool,
+    finished: bool,
 }
 
 impl Stream {
+    #[cfg(test)]
     pub fn apply_with_reasoning(
         &mut self,
         data: &str,
         on_text: &mut (impl FnMut(&str) + Send),
         on_reasoning: &mut (impl FnMut(&str) + Send),
+    ) -> Result<()> {
+        self.apply_with_activity(data, on_text, on_reasoning, &mut |_| {})
+    }
+
+    pub fn apply_with_activity(
+        &mut self,
+        data: &str,
+        on_text: &mut (impl FnMut(&str) + Send),
+        on_reasoning: &mut (impl FnMut(&str) + Send),
+        on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
     ) -> Result<()> {
         if data == "[DONE]" {
             return Ok(());
@@ -294,6 +321,9 @@ impl Stream {
                 let usage = &v["message"]["usage"];
                 self.input.update(usage);
                 self.output = usage["output_tokens"].as_u64();
+                if let Some(count) = usage.pointer("/server_tool_use/web_search_requests").and_then(Value::as_u64) {
+                    self.web_searches = Some(count);
+                }
             }
             "content_block_start" => {
                 let index = v["index"]
@@ -307,7 +337,47 @@ impl Stream {
                             on_text(&text);
                             self.received_delta = true;
                         }
-                        Block::Text(text)
+                        Block::Text {
+                            text,
+                            citations: block["citations"].as_array().cloned().unwrap_or_default(),
+                        }
+                    }
+                    "server_tool_use" => {
+                        if block["name"] == "web_search" {
+                            if let Some(id) = block["id"].as_str().filter(|id| !id.is_empty()) {
+                                self.native_calls.entry(id.to_owned()).or_default();
+                            }
+                        }
+                        Block::ServerTool { original: block.clone(), input: String::new() }
+                    }
+                    "web_search_tool_result" => {
+                        if let Some(id) = block["tool_use_id"].as_str() {
+                            if let Some(state) = self.native_calls.get_mut(id) {
+                                if !state.finished {
+                                    let failed = block["content"]["type"] == "web_search_tool_result_error";
+                                    let summary = if failed {
+                                        format!("Search error: {}", block["content"]["error_code"].as_str().unwrap_or("unknown"))
+                                    } else {
+                                        let sources = block["content"].as_array().into_iter().flatten()
+                                            .filter_map(|item| {
+                                                let url = item["url"].as_str()?;
+                                                let title = item["title"].as_str().unwrap_or("");
+                                                Some(format!("- {url} ({title})"))
+                                            })
+                                            .take(8).collect::<Vec<_>>();
+                                        if sources.is_empty() { "Search returned no sources".into() }
+                                        else { format!("Sources:\n{}", sources.join("\n")) }
+                                    };
+                                    on_activity(crate::model::NativeActivity {
+                                        name: "web_search".into(), id: id.to_owned(),
+                                        arguments: "{}".into(), result: Some(summary),
+                                        done: true, failed,
+                                    });
+                                    state.finished = true;
+                                }
+                            }
+                        }
+                        Block::NativeResult(block.clone())
                     }
                     "tool_use" => Block::Tool {
                         id: block["id"]
@@ -347,13 +417,22 @@ impl Stream {
                     .get_mut(&index)
                     .context("Anthropic delta without block start")?;
                 match (part, delta["type"].as_str().unwrap_or("")) {
-                    (Block::Text(text), "text_delta") => {
+                    (Block::Text { text, .. }, "text_delta") => {
                         let s = delta["text"].as_str().unwrap_or("");
                         text.push_str(s);
                         if !s.is_empty() {
                             self.received_delta = true;
                             on_text(s);
                         }
+                    }
+                    (Block::Text { citations, .. }, "citations_delta") => {
+                        if delta["citation"].is_object() {
+                            citations.push(delta["citation"].clone());
+                        }
+                    }
+                    (Block::ServerTool { input, .. }, "input_json_delta") => {
+                        input.push_str(delta["partial_json"].as_str().unwrap_or(""));
+                        self.received_delta = true;
                     }
                     (Block::Tool { input, .. }, "input_json_delta") => {
                         input.push_str(delta["partial_json"].as_str().unwrap_or(""));
@@ -373,7 +452,33 @@ impl Stream {
                     _ => {}
                 }
             }
+            "content_block_stop" => {
+                let index = v["index"].as_u64().context("Anthropic block index missing")? as usize;
+                if let Some(Block::ServerTool { original, input }) = self.blocks.get_mut(&index) {
+                    if !input.is_empty() {
+                        original["input"] = serde_json::from_str(input)
+                            .context("incomplete Anthropic server tool input")?;
+                    }
+                    if original["name"] == "web_search" {
+                        if let Some(id) = original["id"].as_str() {
+                            if let Some(state) = self.native_calls.get_mut(id) {
+                                if !state.started {
+                                    state.started = true;
+                                    on_activity(crate::model::NativeActivity {
+                                        name: "web_search".into(), id: id.to_owned(),
+                                        arguments: original["input"].to_string(),
+                                        result: None, done: false, failed: false,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             "message_delta" => {
+                if let Some(count) = v["usage"].pointer("/server_tool_use/web_search_requests").and_then(Value::as_u64) {
+                    self.web_searches = Some(count);
+                }
                 self.finish_reason = v["delta"]["stop_reason"].as_str().map(str::to_owned);
                 self.input.update(&v["usage"]);
                 if let Some(n) = v["usage"]["output_tokens"].as_u64() {
@@ -381,11 +486,28 @@ impl Stream {
                 }
             }
             "message_stop" => self.done = true,
-            "ping" | "content_block_stop" => {}
+            "ping" => {}
             "error" => bail!("Anthropic stream error: {}", v["error"]),
             _ => {}
         }
         Ok(())
+    }
+
+    /// Close live search entries on stream failure, pause, or completion.
+    pub(super) fn drain_finished_native(&mut self) -> Vec<crate::model::NativeActivity> {
+        let paused = self.finish_reason.as_deref() == Some("pause_turn");
+        let mut finished = Vec::new();
+        for (id, state) in &mut self.native_calls {
+            if state.finished { continue; }
+            state.finished = true;
+            finished.push(crate::model::NativeActivity {
+                name: "web_search".into(), id: id.clone(), arguments: "{}".into(),
+                result: Some(if paused { "Search paused; resuming".into() }
+                    else { "Search was interrupted before receiving results".into() }),
+                done: true, failed: !paused,
+            });
+        }
+        finished
     }
 
     pub(super) fn reported_usage(&self) -> Option<Usage> {
@@ -400,13 +522,14 @@ impl Stream {
             total: input.and_then(|i| output.and_then(|o| i.checked_add(o))),
             cached: self.input.read,
             reasoning: None,
-            web_searches: None,
+            web_searches: self.web_searches,
         })
     }
 
     pub fn finish(self) -> Result<(Message, Option<Usage>)> {
+        let paused = self.finish_reason.as_deref() == Some("pause_turn");
         match self.finish_reason.as_deref() {
-            Some("end_turn" | "tool_use" | "stop_sequence") => {}
+            Some("end_turn" | "tool_use" | "stop_sequence" | "pause_turn") => {}
             Some("max_tokens") => bail!("Anthropic response truncated at max_tokens"),
             Some(reason) => bail!("Anthropic stopped unexpectedly: {reason}"),
             None => bail!("Anthropic stream ended without stop_reason"),
@@ -422,9 +545,17 @@ impl Stream {
         let mut seen = HashSet::new();
         for block in self.blocks.into_values() {
             match block {
-                Block::Text(text) => {
+                Block::Text { text, citations } => {
                     content.push_str(&text);
-                    native_blocks.push(json!({"type":"text","text":text}));
+                    let mut block = json!({"type":"text","text":text});
+                    if !citations.is_empty() { block["citations"] = json!(citations); }
+                    native_blocks.push(block);
+                }
+                Block::ServerTool { original, .. } => {
+                    native_blocks.push(original);
+                }
+                Block::NativeResult(value) => {
+                    native_blocks.push(value);
                 }
                 Block::Tool {
                     id,
@@ -467,11 +598,18 @@ impl Stream {
                 Block::Empty => {}
             }
         }
-        if !opaque.is_empty() {
+        let has_server_search = native_blocks.iter().any(|block| {
+            matches!(block["type"].as_str(), Some("server_tool_use" | "web_search_tool_result"))
+                || block["citations"].as_array().is_some_and(|items| !items.is_empty())
+        });
+        if !opaque.is_empty() || has_server_search || paused {
             opaque.push(json!({"type":"kroma_anthropic_content_blocks",
                 "blocks":native_blocks}));
         }
-        if content.trim().is_empty() && calls.is_empty() {
+        if paused {
+            opaque.push(json!({"type":"kroma_anthropic_pause_turn"}));
+        }
+        if content.trim().is_empty() && calls.is_empty() && !paused {
             bail!("Anthropic returned no text or tool calls");
         }
         let input = self.input.total();
@@ -491,7 +629,7 @@ impl Stream {
                 total,
                 cached: self.input.read,
                 reasoning: None,
-                web_searches: None,
+                web_searches: self.web_searches,
             }),
         ))
     }
