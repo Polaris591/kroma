@@ -929,11 +929,20 @@ fn anthropic_cache_rejection(error: &anyhow::Error) -> bool {
 
 fn anthropic_web_search_rejection(error: &anyhow::Error) -> bool {
     error.downcast_ref::<ModelHttpError>().is_some_and(|http| {
-        matches!(http.status, StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
-            && http.message.to_ascii_lowercase().contains("web_search")
-            && ["unsupported", "not supported", "unknown", "unrecognized", "not allowed", "invalid tool"]
-                .iter()
-                .any(|reason| http.message.to_ascii_lowercase().contains(reason))
+        matches!(
+            http.status,
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+        ) && http.message.to_ascii_lowercase().contains("web_search")
+            && [
+                "unsupported",
+                "not supported",
+                "unknown",
+                "unrecognized",
+                "not allowed",
+                "invalid tool",
+            ]
+            .iter()
+            .any(|reason| http.message.to_ascii_lowercase().contains(reason))
     })
 }
 
@@ -2520,8 +2529,10 @@ impl ModelBackend for ModelClient {
     fn native_web_search(&self) -> bool {
         // Only count a compatible server-side protocol that has not rejected
         // the capability. No model-name heuristics or implicit paid search.
-        matches!(self.protocol, ApiProtocol::Responses | ApiProtocol::Anthropic)
-            && self.native_web_search
+        matches!(
+            self.protocol,
+            ApiProtocol::Responses | ApiProtocol::Anthropic
+        ) && self.native_web_search
             && !self.native_web_search_rejected.load(Ordering::Relaxed)
     }
 
@@ -3569,7 +3580,9 @@ mod tests {
         assert_eq!(native_request["tools"].as_array().unwrap().len(), 1);
         assert_eq!(native_request["tools"][0]["type"], "web_search_20250305");
         assert!(anthropic.native_web_search());
-        anthropic.native_web_search_rejected.store(true, Ordering::Relaxed);
+        anthropic
+            .native_web_search_rejected
+            .store(true, Ordering::Relaxed);
         let fallback = anthropic
             .payload(&[Message::new("user", "hi")], &tools, Some(4096))
             .unwrap();
