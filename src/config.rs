@@ -156,16 +156,25 @@ impl Config {
                 })
                 .unwrap_or_else(|| "https://api.openai.com/v1".into()),
         )?;
+        // Changing KROMA_BASE_URL must not silently send credentials stored
+        // for a different profile endpoint. An explicit KROMA_API_KEY still
+        // belongs to the environment override and takes precedence.
+        let profile_key_matches_endpoint = profile
+            .map(|saved| credentials_match_endpoint(saved, &base_url))
+            .transpose()?
+            .unwrap_or(false);
         let nonempty_key = |key: String| (!key.trim().is_empty()).then_some(key);
         let api_key = connection_env("KROMA_API_KEY")
             .filter(|key| !key.trim().is_empty())
             .or_else(|| {
                 profile
+                    .filter(|_| profile_key_matches_endpoint)
                     .and_then(|p| p.api_key.clone())
                     .filter(|key| !key.trim().is_empty())
             })
             .or_else(|| {
                 profile
+                    .filter(|_| profile_key_matches_endpoint)
                     .and_then(|p| p.api_key_env.as_deref())
                     .and_then(|name| env::var(name).ok())
                     .and_then(nonempty_key)
@@ -251,7 +260,9 @@ impl Config {
         Ok(Self {
             base_url,
             api_key,
-            api_key_env: profile.and_then(|p| p.api_key_env.clone()),
+            api_key_env: profile
+                .filter(|_| profile_key_matches_endpoint)
+                .and_then(|p| p.api_key_env.clone()),
             model: model.trim().to_owned(),
             workdir,
             deepseek_thinking,
@@ -341,9 +352,13 @@ fn needs_saved_profiles(
     requested_profile.is_some() || model.is_none() || base_url.is_none()
 }
 
+fn credentials_match_endpoint(profile: &profiles::ProviderProfile, endpoint: &str) -> Result<bool> {
+    Ok(profiles::normalize_endpoint(&profile.base_url)? == endpoint)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{needs_saved_profiles, Config};
+    use super::{credentials_match_endpoint, needs_saved_profiles, Config};
     use crate::profiles::ProviderProfile;
     use std::env;
 
@@ -386,6 +401,37 @@ mod tests {
         .unwrap();
         assert_eq!(config.api_key.as_deref(), Some("from-environment"));
         env::remove_var(name);
+    }
+
+    #[test]
+    fn profile_key_is_bound_to_normalized_endpoint() -> anyhow::Result<()> {
+        let profile = ProviderProfile {
+            base_url: "https://old.example/v1/".into(),
+            model: "test".into(),
+            api_key: Some("stored-key".into()),
+            api_key_env: Some("OLD_KEY_ENV".into()),
+            ..ProviderProfile::default()
+        };
+        let config = Config::resolve(
+            Some(&profile),
+            None,
+            std::env::current_dir().unwrap(),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.base_url, "https://old.example/v1");
+        assert_eq!(config.api_key.as_deref(), Some("stored-key"));
+        assert_eq!(config.api_key_env.as_deref(), Some("OLD_KEY_ENV"));
+        assert!(credentials_match_endpoint(
+            &profile,
+            "https://old.example/v1"
+        )?);
+        assert!(!credentials_match_endpoint(
+            &profile,
+            "https://new.example/v1"
+        )?);
+        Ok(())
     }
 
     #[test]

@@ -52,6 +52,9 @@ function parseProfile(source, file) {
   const model = fields.model ?? "inherit";
   const shell = fields.shell ?? "inherit";
   if (!MODEL.has(model) || !SHELL.has(shell)) throw error(`${file}: invalid model or shell policy`);
+  if (fields.thinking !== undefined && !["off", "enabled", "high", "max"].includes(fields.thinking)) {
+    throw error(`${file}: unsupported thinking tier`);
+  }
   const prompt = match[2].trim();
   if (!prompt || Buffer.byteLength(prompt, "utf8") > 32 * 1024) {
     throw error(`${file}: profile prompt must contain 1..32768 bytes`);

@@ -3787,5 +3787,12 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     assert!(log.contains("\"type\":\"task_finished\""));
     assert!(log.contains("\"session\":\"before-switch\""));
     assert!(log.contains("\"status\":\"failed\""));
+    // Identical text in distinct durable user turns must still notify once
+    // per task. The host controls event boundaries; history text is not an ID.
+    model
+        .task_finished("before-switch", &archive, &history, "failed")
+        .await?;
+    let log = fs::read_to_string(plugin.join("events.log"))?;
+    assert_eq!(log.matches("\"type\":\"task_finished\"").count(), 2);
     Ok(())
 }

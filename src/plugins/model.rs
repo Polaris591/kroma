@@ -652,8 +652,6 @@ pub(super) struct PluginModelHooks {
     session: RwLock<Option<(String, PathBuf)>>,
     /// Stable packs, keyed by archive plus boundary user-message digest.
     packs: Mutex<PackCache>,
-    /// Fingerprint of the last summarized task; a repeated round is skipped.
-    last_summary: Mutex<Option<String>>,
     /// Updated by the last projection. The Agent reads it after completion.
     usage_matches_projection: AtomicBool,
 }
@@ -674,7 +672,6 @@ impl PluginModelHooks {
             summary_workers,
             session: RwLock::new(None),
             packs: Mutex::new(PackCache::default()),
-            last_summary: Mutex::new(None),
             usage_matches_projection: AtomicBool::new(true),
         }
     }
@@ -820,13 +817,9 @@ impl PluginModelHooks {
         if recent.is_empty() {
             return;
         }
-        let fingerprint = pack_digest(&[&archive.to_string_lossy(), &recent.join(" | "), status]);
-        if let Ok(mut last) = self.last_summary.lock() {
-            if last.as_deref() == Some(fingerprint.as_str()) {
-                return;
-            }
-            *last = Some(fingerprint);
-        }
+        // The Agent sends this exactly once for each completed foreground
+        // task. De-duplicating by the last few user texts is incorrect: two
+        // separate turns can legitimately have identical user content.
         for capability in &self.summary_workers {
             let request = json!({
             "type": capability.operation, "name": capability.operation,

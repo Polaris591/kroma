@@ -43,6 +43,9 @@ fn temp_workdir(label: &str) -> Result<PathBuf> {
 }
 
 fn read_http(stream: &TcpStream) -> Result<(String, Vec<String>, Value)> {
+    // On Windows an accepted socket can inherit the listener's nonblocking
+    // mode. The mock HTTP reader requires blocking reads on every connection.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(6)))?;
     let mut reader = BufReader::new(stream);
     let mut first = String::new();

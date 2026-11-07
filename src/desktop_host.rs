@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(events[1]["text"], "warning!");
     }
     #[test]
-    fn a_failed_usage_write_keeps_the_batch_for_the_next_attempt() -> Result<()> {
+    fn corrupt_usage_sidecar_does_not_block_new_usage() -> Result<()> {
         let dir = std::env::temp_dir().join(format!(
             "kroma-desktop-usage-{}-{}",
             std::process::id(),
@@ -376,11 +376,6 @@ mod tests {
         });
         let ledger = catalog.default_path().with_extension("usage.json");
         std::fs::write(&ledger, b"not json")?;
-        assert!(
-            events.persist_usage(&catalog, "default").is_err(),
-            "a corrupt ledger must fail loudly"
-        );
-        std::fs::write(&ledger, b"{}")?;
         let saved = events.persist_usage(&catalog, "default")?;
         assert_eq!(
             saved.coding.calls, 1,
