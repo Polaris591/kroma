@@ -15,6 +15,7 @@
   let deepseek_thinking = 'off';
   let context_window = '';
   let max_output_tokens = '';
+  let native_web_search = false;
   let busy = false;
   let dirty = false;
 
@@ -26,12 +27,14 @@
     reasoning = p.reasoning; deepseek_thinking = p.deepseek_thinking;
     context_window = String(p.context_window ?? '');
     max_output_tokens = String(p.max_output_tokens ?? '');
+    native_web_search = p.native_web_search ?? false;
     dirty = false;
   }
   function blank() {
     selected = ''; name = ''; base_url = 'https://api.openai.com/v1';
     model = ''; api_key = ''; clear_key = false; protocol = 'chat';
     reasoning = 'auto'; deepseek_thinking = 'off'; context_window = ''; max_output_tokens = '';
+    native_web_search = false;
     dirty = true;
   }
   $: if (!dirty && !selected && data.profiles.length > 0) {
@@ -45,6 +48,7 @@
         protocol, reasoning, deepseek_thinking,
         context_window: context_window ? Number(context_window) : null,
         max_output_tokens: max_output_tokens ? Number(max_output_tokens) : null,
+        native_web_search,
       });
       selected = name; api_key = ''; clear_key = false; dirty = false;
     } finally { busy = false; }
@@ -92,6 +96,7 @@
       <label>上下文窗口（可选） <input type="number" min="1024" bind:value={context_window} oninput={() => dirty = true} placeholder="自动发现"/></label>
       <label>最大输出 Token（可选） <input type="number" min="1" bind:value={max_output_tokens} oninput={() => dirty = true} placeholder="自动发现"/></label>
     </div>
+    <label class="inline-check"><input type="checkbox" bind:checked={native_web_search} onchange={() => dirty = true}/>启用模型原生联网搜索（需上游支持，可能单独计费）</label>
     <div class="form-actions">
       <button type="submit" class="primary" disabled={busy || !name || !model}><Save size={16}/> {busy ? '保存中…' : '保存配置'}</button>
       <button type="button" class="secondary" disabled={busy || !selected} onclick={() => onConnect(selected)}><PlugZap size={16}/> 连接此模型</button>

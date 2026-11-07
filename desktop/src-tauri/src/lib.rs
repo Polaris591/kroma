@@ -110,7 +110,8 @@ fn profile_list() -> Result<Value> {
             "protocol":p.api_protocol.as_deref().unwrap_or("chat"),
             "reasoning":p.reasoning_effort.as_deref().unwrap_or("auto"),
             "deepseek_thinking":p.deepseek_thinking.as_deref().unwrap_or("off"),
-            "context_window":p.context_window,"max_output_tokens":p.max_output_tokens
+            "context_window":p.context_window,"max_output_tokens":p.max_output_tokens,
+            "native_web_search":p.native_web_search()
         })).collect::<Vec<_>>()
     }))
 }
@@ -265,6 +266,9 @@ struct ProfileInput {
     deepseek_thinking: Option<String>,
     context_window: Option<usize>,
     max_output_tokens: Option<usize>,
+    /// `None` is an older Desktop caller and must retain the saved value.
+    #[serde(default)]
+    native_web_search: Option<bool>,
 }
 
 fn merge_profile_input(old: ProviderProfile, profile: ProfileInput) -> ProviderProfile {
@@ -289,6 +293,7 @@ fn merge_profile_input(old: ProviderProfile, profile: ProfileInput) -> ProviderP
         deepseek_thinking: profile.deepseek_thinking.filter(|v| v != "off"),
         context_window: profile.context_window,
         max_output_tokens: profile.max_output_tokens,
+        native_web_search: profile.native_web_search.or(old.native_web_search),
         // These fields are not exposed by the compact Desktop form. Preserve
         // them across saves, including the explicit catalog alias.
         thinking_levels: old.thinking_levels,
@@ -672,6 +677,7 @@ mod tests {
             deepseek_thinking: None,
             context_window: Some(200_000),
             max_output_tokens: Some(8_000),
+            native_web_search: Some(true),
         }
     }
 
@@ -702,6 +708,23 @@ mod tests {
         assert_eq!(saved.thinking_levels, Some(vec!["low".into()]));
         assert_eq!(saved.api_key.as_deref(), Some("old-key"));
         assert_eq!(saved.context_window, Some(200_000));
+        assert_eq!(saved.native_web_search, Some(true));
+    }
+
+    #[test]
+    fn an_old_desktop_caller_keeps_native_search_but_explicit_off_disables_it() {
+        let old = ProviderProfile {
+            native_web_search: Some(true),
+            ..Default::default()
+        };
+        let mut input = profile_input();
+        input.native_web_search = None;
+        let saved = merge_profile_input(old, input);
+        assert_eq!(saved.native_web_search, Some(true));
+        let mut input = profile_input();
+        input.native_web_search = Some(false);
+        let saved = merge_profile_input(saved, input);
+        assert_eq!(saved.native_web_search, Some(false));
     }
 
     #[test]

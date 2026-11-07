@@ -116,7 +116,7 @@ impl DesktopEvents {
 impl EventSink for DesktopEvents {
     fn on_event(&self, event: RuntimeEvent<'_>) {
         match event {
-            RuntimeEvent::FinalAnswerReady => return,
+            RuntimeEvent::FinalAnswerReady => (),
             RuntimeEvent::TaskStarted => self.push(json!({"kind":"task_started"})),
             RuntimeEvent::CompactionStarted => self.push(json!({"kind":"compaction_started"})),
             RuntimeEvent::ModelStarted { request } => {
