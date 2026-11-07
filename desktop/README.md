@@ -52,6 +52,22 @@ cargo --config 'source.crates-io.replace-with="rsproxy-sparse"' \
 
 Windows GNU startup, frontend loading, model connection, and a real model chat were smoke-tested locally on 2026-10-30. MSVC packaging, macOS/Linux GUI testing, installer signing, and performance certification remain separate release checks.
 
+## First Desktop daily-driver pass
+
+- Search sessions by title or ID in the sidebar. Ctrl/Cmd+K focuses the search,
+  Ctrl/Cmd+N creates a new session when idle, and Ctrl/Cmd+, opens Settings.
+- Loading older messages preserves the reader's scroll position; the jump-to-latest
+  control appears only when the transcript is scrolled away from the bottom.
+- Native web search can be enabled per saved model profile. It is opt-in,
+  supported only when the configured upstream protocol and endpoint provide it,
+  and may incur provider charges. Older saved Desktop profiles preserve the
+  setting when edited.
+- The drag-and-drop listener is removed if the view unmounts while registration
+  is pending.
+
+The first pass has frontend unit coverage. Full hardware/installer validation
+remains part of Desktop acceptance, not a prerequisite for continuing UI work.
+
 ## Delivered P0–P2
 
 Project selection, model profiles and keys, real Agent text/reasoning/tool streaming, cancellation, steer, session history/resume/rename, file and image references, Markdown, code, plugin manager, Token/cache metrics and cross-platform build workflow.
