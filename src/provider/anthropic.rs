@@ -675,6 +675,93 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_search_stream_keeps_replayable_encrypted_results_citations_and_usage() {
+        let mut stream = Stream::default();
+        let events = [
+            json!({"type":"message_start","message":{"usage":{"input_tokens":15}}}),
+            json!({"type":"content_block_start","index":0,
+                "content_block":{"type":"server_tool_use","id":"srvtoolu_1",
+                    "name":"web_search","input":{}}}),
+            json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"Rust updates\\"}"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,
+                "content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1",
+                    "content":[{"type":"web_search_result","title":"Rust releases",
+                        "url":"https://blog.rust-lang.org","encrypted_content":"encrypted-opaque-data"}]}}),
+            json!({"type":"content_block_start","index":2,
+                "content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":2,
+                "delta":{"type":"text_delta","text":"Rust released an update."}}),
+            json!({"type":"content_block_delta","index":2,
+                "delta":{"type":"citations_delta","citation":{
+                    "type":"web_search_result_location","title":"Rust releases",
+                    "url":"https://blog.rust-lang.org","encrypted_index":"reference-key",
+                    "cited_text":"Rust released an update."}}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+                "usage":{"output_tokens":8,"server_tool_use":{"web_search_requests":2}}}),
+            json!({"type":"message_stop"}),
+        ];
+        let mut activity = Vec::new();
+        for event in events {
+            stream.apply_with_activity(&event.to_string(), &mut |_| {}, &mut |_| {},
+                &mut |item| activity.push(item)).unwrap();
+        }
+        assert!(stream.drain_finished_native().is_empty());
+        assert_eq!(activity.len(), 2);
+        assert!(!activity[0].done);
+        assert!(activity[0].arguments.contains("Rust updates"));
+        assert!(activity[1].done);
+        assert!(activity[1].result.as_deref().unwrap().contains("https://blog.rust-lang.org"));
+        let (answer, usage) = stream.finish().unwrap();
+        assert_eq!(usage.unwrap().web_searches, Some(2));
+        assert!(answer.tool_calls.is_none(), "server search is not a local tool");
+        assert_eq!(answer.content.as_deref(), Some("Rust released an update."));
+        let request = payload(
+            "claude",
+            &[Message::new("user", "Research Rust"), answer],
+            &[], 4096, "auto", &ModelInfo::default(), "origin",
+        ).unwrap();
+        let blocks = request["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "server_tool_use");
+        assert_eq!(blocks[0]["input"]["query"], "Rust updates");
+        assert_eq!(blocks[1]["content"][0]["encrypted_content"], "encrypted-opaque-data");
+        assert_eq!(blocks[2]["citations"][0]["encrypted_index"], "reference-key");
+    }
+
+    #[test]
+    fn paused_anthropic_native_search_can_resume_with_opaque_assistant_blocks() {
+        let mut stream = Stream::default();
+        let events = [
+            json!({"type":"message_start","message":{"usage":{"input_tokens":2}}}),
+            json!({"type":"content_block_start","index":0,
+                "content_block":{"type":"server_tool_use","id":"srvtoolu_paused",
+                    "name":"web_search","input":{"query":"long research"}}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"pause_turn"},
+                "usage":{"output_tokens":5,"server_tool_use":{"web_search_requests":1}}}),
+            json!({"type":"message_stop"}),
+        ];
+        let mut activity = Vec::new();
+        for event in events {
+            stream.apply_with_activity(&event.to_string(), &mut |_| {}, &mut |_| {},
+                &mut |item| activity.push(item)).unwrap();
+        }
+        assert_eq!(stream.drain_finished_native().len(), 1);
+        let (answer, usage) = stream.finish().unwrap();
+        assert_eq!(usage.unwrap().web_searches, Some(1));
+        assert!(answer.provider_items.as_deref().unwrap().iter()
+            .any(|p| p["type"] == "kroma_anthropic_pause_turn"));
+        assert!(answer.tool_calls.is_none());
+        let request = payload(
+            "claude",
+            &[Message::new("user", "Research"), answer],
+            &[], 4096, "auto", &ModelInfo::default(), "origin",
+        ).unwrap();
+        assert_eq!(request["messages"][1]["content"][0]["id"], "srvtoolu_paused");
+    }
+
+    #[test]
     fn native_anthropic_request_enables_prompt_caching() {
         let history = [
             Message::new("system", "You are a coding assistant."),
