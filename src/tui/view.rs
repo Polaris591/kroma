@@ -2844,11 +2844,7 @@ impl UiState {
                 raw,
                 usize::from(content_width),
                 &preformatted_rows,
-                if self.plain_style {
-                    &[]
-                } else {
-                    &reading_rows
-                },
+                if self.plain_style { &[] } else { &reading_rows },
                 if self.plain_style { usize::MAX } else { 100 },
             );
             let mut link_regions = markdown_link_regions(&text, &targets);
