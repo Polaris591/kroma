@@ -551,7 +551,7 @@ impl Stream {
     pub(super) fn reported_usage(&self) -> Option<Usage> {
         let input = self.input.total();
         let output = self.output;
-        if input.is_none() && output.is_none() {
+        if input.is_none() && output.is_none() && self.web_searches.is_none() {
             return None;
         }
         Some(Usage {
