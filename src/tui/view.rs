@@ -672,13 +672,6 @@ impl UiState {
         colors
     }
 
-    fn full_width_prose(&self) -> bool {
-        self.plugin_layout
-            .as_ref()
-            .and_then(|layout| layout.full_width_prose)
-            .unwrap_or(self.preferences.full_width)
-    }
-
     pub fn set_link_workdir(&mut self, workdir: &Path) {
         self.link_workdir = workdir.to_path_buf();
         self.history_cache = None;
@@ -2718,15 +2711,13 @@ impl UiState {
             Block::default().style(Style::default().bg(colors.background)),
             full_area,
         );
-        let area = reading_area(full_area, self.plain_style || self.full_width_prose());
+        let area = reading_area(full_area, self.plain_style);
         let header_rows = if self.plain_style {
             u16::from(area.height >= 20)
+        } else if area.height < 20 {
+            1
         } else {
-            self.plugin_layout
-                .as_ref()
-                .and_then(|layout| layout.header_rows)
-                .unwrap_or(if area.height < 20 { 1 } else { 2 })
-                .min(area.height.saturating_sub(5))
+            2
         };
         // The model's activity follows the conversation itself instead of
         // living in a fixed bar away from its latest output. Only history
@@ -2853,7 +2844,7 @@ impl UiState {
                 raw,
                 usize::from(content_width),
                 &preformatted_rows,
-                if self.plain_style || self.full_width_prose() {
+                if self.plain_style {
                     &[]
                 } else {
                     &reading_rows
