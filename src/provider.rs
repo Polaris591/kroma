@@ -3538,6 +3538,76 @@ mod tests {
             .unwrap()
     }
 
+
+    #[tokio::test]
+    async fn rejected_anthropic_search_retries_with_generic_web_plugin() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for attempt in 0..3 {
+                let (mut connection, _) = listener.accept().unwrap();
+                connection.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut reader = BufReader::new(&connection);
+                let mut length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some(raw) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = raw.trim().parse().unwrap();
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).unwrap();
+                requests.push(serde_json::from_slice::<Value>(&bytes).unwrap());
+                drop(reader);
+                if attempt == 0 {
+                    let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"unknown tool type web_search_20250305","param":"tools.0.type"}}"#;
+                    write!(connection, "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                } else {
+                    let events = [
+                        json!({"type":"message_start","message":{"usage":{"input_tokens":5}}}),
+                        json!({"type":"content_block_start","index":0,
+                            "content_block":{"type":"text","text":"ok"}}),
+                        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+                            "usage":{"output_tokens":1}}),
+                        json!({"type":"message_stop"}),
+                    ];
+                    let body = events.iter().map(|e| format!("data: {e}\n\n")).collect::<String>();
+                    write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+                connection.flush().unwrap();
+            }
+            requests
+        });
+        let client = ModelClient::new(&format!("http://{address}/v1"), None, "mock".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap()
+            .with_native_web_search(true);
+        let tools = vec![json!({"type":"function","function":{
+            "name":"web_search","description":"local plugin",
+            "parameters":{"type":"object"}}})];
+        for _ in 0..2 {
+            let reply = client
+                .complete_with_tools(&[Message::new("user", "Search")], &tools, &mut |_| {})
+                .await
+                .unwrap();
+            assert_eq!(reply.message.content.as_deref(), Some("ok"));
+        }
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0]["tools"][0]["type"], "web_search_20250305");
+        assert_eq!(requests[1]["tools"][0]["name"], "web_search");
+        assert_eq!(requests[1]["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(requests[2]["tools"][0]["name"], "web_search");
+        assert!(!client.native_web_search());
+    }
+
     #[test]
     fn server_side_search_is_opt_in_and_protocol_aware() {
         let responses = responses_client("http://127.0.0.1:9");
