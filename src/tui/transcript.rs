@@ -308,7 +308,7 @@ impl UiState {
         }
         if self.reasoning_expanded {
             let prose = width.saturating_sub(if self.plain_style { 4 } else { 5 });
-            let prose = if self.plain_style || self.full_width_prose() {
+            let prose = if self.plain_style {
                 prose
             } else {
                 super::super::tool_display::prose_width(prose)
