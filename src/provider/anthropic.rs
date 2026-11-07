@@ -638,6 +638,9 @@ impl Stream {
                 Block::Empty => {}
             }
         }
+        if paused && native_blocks.is_empty() {
+            bail!("Anthropic pause_turn had no assistant blocks to resume");
+        }
         let has_server_search = native_blocks.iter().any(|block| {
             matches!(
                 block["type"].as_str(),
