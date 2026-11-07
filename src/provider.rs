@@ -775,7 +775,9 @@ impl CompletionStream {
             Self::Responses(stream) => {
                 stream.apply_with_reasoning(data, on_text, on_reasoning, on_activity)
             }
-            Self::Anthropic(stream) => stream.apply_with_reasoning(data, on_text, on_reasoning),
+            Self::Anthropic(stream) => {
+                stream.apply_with_reasoning(data, on_text, on_reasoning, on_activity)
+            }
         }
     }
 
@@ -923,6 +925,16 @@ fn summary_capability_rejection(error: &anyhow::Error) -> bool {
 
 fn anthropic_cache_rejection(error: &anyhow::Error) -> bool {
     rejected_request_field(error, &["cache_control"])
+}
+
+fn anthropic_web_search_rejection(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ModelHttpError>().is_some_and(|http| {
+        matches!(http.status, StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
+            && http.message.to_ascii_lowercase().contains("web_search")
+            && ["unsupported", "not supported", "unknown", "unrecognized", "not allowed", "invalid tool"]
+                .iter()
+                .any(|reason| http.message.to_ascii_lowercase().contains(reason))
+    })
 }
 
 /// Treat structured error.param as authoritative when present. Otherwise
@@ -1094,13 +1106,18 @@ impl ModelClient {
     /// profile enabled them, the protocol can carry them and the endpoint has
     /// not already refused them.
     fn server_side_tools(&self) -> Vec<Value> {
-        if !self.native_web_search
-            || self.protocol != ApiProtocol::Responses
-            || self.native_web_search_rejected.load(Ordering::Relaxed)
-        {
+        if !self.native_web_search() {
             return Vec::new();
         }
-        vec![json!({"type":"web_search"})]
+        match self.protocol {
+            ApiProtocol::Responses => vec![json!({"type":"web_search"})],
+            // Basic Anthropic server tool works across supported Anthropic
+            // models and compatible gateways, without dynamic filtering.
+            ApiProtocol::Anthropic => {
+                vec![json!({"type":"web_search_20250305","name":"web_search"})]
+            }
+            ApiProtocol::Chat => Vec::new(),
+        }
     }
 
     /// Fields absent from the current endpoint may use the verified catalog.
@@ -1253,6 +1270,20 @@ impl ModelClient {
         images: Option<&TaskImageCache>,
     ) -> Result<Value> {
         let output = max_tokens.or_else(|| self.effective_output_tokens());
+        // Suppress a duplicate local search definition only while the
+        // server-side tool really is active. If a proxy rejects native
+        // search, the same task's retry can expose the generic web plugin.
+        let filtered_tools;
+        let tools = if self.native_web_search() {
+            filtered_tools = tools
+                .iter()
+                .filter(|tool| tool["function"]["name"] != "web_search")
+                .cloned()
+                .collect::<Vec<_>>();
+            filtered_tools.as_slice()
+        } else {
+            tools
+        };
         match self.protocol {
             ApiProtocol::Chat => {
                 let mut value = self.chat_payload_with_tools(messages, tools);
@@ -1334,6 +1365,15 @@ impl ModelClient {
                 )?;
                 if self.anthropic_cache_rejected.load(Ordering::Relaxed) {
                     request.as_object_mut().unwrap().remove("cache_control");
+                }
+                let native = self.server_side_tools();
+                if !native.is_empty() {
+                    let definitions = request
+                        .as_object_mut()
+                        .unwrap()
+                        .entry("tools")
+                        .or_insert_with(|| json!([]));
+                    definitions.as_array_mut().unwrap().extend(native);
                 }
                 Ok(request)
             }
@@ -1603,7 +1643,11 @@ impl ModelClient {
                     if !received_protocol_data
                         && self.native_web_search
                         && !self.native_web_search_rejected.load(Ordering::Relaxed)
-                        && rejected_request_field(&error, &["web_search"]) =>
+                        && (rejected_request_field(
+                            &error,
+                            &["web_search", "web_search_20250305"],
+                        ) || (self.protocol == ApiProtocol::Anthropic
+                            && anthropic_web_search_rejection(&error))) =>
                 {
                     // The endpoint refused server-side search before doing any
                     // work. Retry the same request without it instead of
@@ -2222,10 +2266,18 @@ fn drain_native_activity(
     result: &mut CompletionStream,
     on_activity: &mut (impl FnMut(crate::model::NativeActivity) + Send),
 ) {
-    if let CompletionStream::Responses(stream) = result {
-        for activity in stream.drain_finished_native() {
-            on_activity(activity);
+    match result {
+        CompletionStream::Responses(stream) => {
+            for activity in stream.drain_finished_native() {
+                on_activity(activity);
+            }
         }
+        CompletionStream::Anthropic(stream) => {
+            for activity in stream.drain_finished_native() {
+                on_activity(activity);
+            }
+        }
+        CompletionStream::Chat(_) => {}
     }
 }
 
@@ -2466,9 +2518,9 @@ impl ModelBackend for ModelClient {
     }
 
     fn native_web_search(&self) -> bool {
-        // Report only what this client will really send: the Responses
-        // protocol, an opt-in profile and an endpoint that never refused it.
-        self.protocol == ApiProtocol::Responses
+        // Only count a compatible server-side protocol that has not rejected
+        // the capability. No model-name heuristics or implicit paid search.
+        matches!(self.protocol, ApiProtocol::Responses | ApiProtocol::Anthropic)
             && self.native_web_search
             && !self.native_web_search_rejected.load(Ordering::Relaxed)
     }
@@ -3476,7 +3528,7 @@ mod tests {
     }
 
     #[test]
-    fn server_side_search_is_opt_in_and_responses_only() {
+    fn server_side_search_is_opt_in_and_protocol_aware() {
         let responses = responses_client("http://127.0.0.1:9");
         let plain = responses
             .payload(&[Message::new("user", "hi")], &[], Some(64))
@@ -3503,6 +3555,27 @@ mod tests {
             .unwrap();
         assert!(!chat_payload.to_string().contains("web_search"));
         assert!(!chat.native_web_search());
+
+        let anthropic = ModelClient::new("http://127.0.0.1:9/v1", None, "claude".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap()
+            .with_native_web_search(true);
+        let tools = vec![json!({"type":"function","function":{
+            "name":"web_search","description":"local","parameters":{"type":"object"}}})];
+        let native_request = anthropic
+            .payload(&[Message::new("user", "hi")], &tools, Some(4096))
+            .unwrap();
+        assert_eq!(native_request["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(native_request["tools"][0]["type"], "web_search_20250305");
+        assert!(anthropic.native_web_search());
+        anthropic.native_web_search_rejected.store(true, Ordering::Relaxed);
+        let fallback = anthropic
+            .payload(&[Message::new("user", "hi")], &tools, Some(4096))
+            .unwrap();
+        assert_eq!(fallback["tools"][0]["name"], "web_search");
+        assert_eq!(fallback["tools"][0]["input_schema"]["type"], "object");
+        assert!(!anthropic.native_web_search());
     }
 
     #[tokio::test]
