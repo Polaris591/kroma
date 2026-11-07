@@ -16,9 +16,7 @@ fn plugin_presentation_slots_render_without_changing_model_history() {
         vec![".".into(), "o".into()],
         labels,
         Some(PluginLayoutSpec {
-            header_rows: Some(3),
             composer_max_rows: Some(6),
-            full_width_prose: Some(true),
         }),
         BTreeMap::from([("accent".into(), "#112233".into())]),
     );
@@ -1100,7 +1098,7 @@ fn widescreen_centres_the_reading_column_instead_of_gluing_it_left() {
     let small = reading_area(Rect::new(0, 0, 40, 20), false);
     assert_eq!(small.width, 38);
     assert_eq!(small.x, 1);
-    // `/layout wide` still fills the terminal, edge to edge.
+    // The full-width reading area fills the terminal, edge to edge.
     let wide = reading_area(Rect::new(0, 0, 210, 35), true);
     assert_eq!(wide.width, 206);
     assert_eq!(wide.x, 2);
@@ -2881,7 +2879,6 @@ fn bilingual_chrome_picker_descriptions_and_unknown_usage_render_at_multiple_siz
     );
     ui.apply_preferences(super::super::preferences::Preferences {
         language: super::super::preferences::Language::Zh,
-        full_width: false,
     });
     ui.configure_status(500_000, Some("high".into()));
     ui.event(UiEvent::Context { estimated: 100_000 });
@@ -3029,7 +3026,6 @@ fn screenshot_regressions_compact_tools_localized_labels_and_single_history_hint
     );
     ui.apply_preferences(super::super::preferences::Preferences {
         language: super::super::preferences::Language::Zh,
-        full_width: false,
     });
     ui.event(UiEvent::ToolStarted {
         name: "shell".into(),
@@ -3126,7 +3122,6 @@ fn svg_task_layout_is_readable_across_narrow_and_wide_chinese_terminals() {
     );
     ui.apply_preferences(super::super::preferences::Preferences {
         language: super::super::preferences::Language::Zh,
-        full_width: false,
     });
     ui.add_user("画一个蹦蹦跳跳的动态 SVG");
     ui.event(UiEvent::ReasoningDelta("先检查 Node 是否可用".into()));
