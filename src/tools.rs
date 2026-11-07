@@ -46,6 +46,11 @@ pub struct ToolContext<'a> {
     /// tool arguments. A plugin must explicitly opt in to receive it.
     pub user_message: Option<&'a str>,
     pub user_turn: Option<usize>,
+    /// Immutable image attachment references from the latest user turn.
+    /// Only tools explicitly declaring requires_user_attachments receive them.
+    pub user_images: Option<&'a [Value]>,
+    /// Images from the immediately preceding user turn for short follow-ups.
+    pub previous_user_images: Option<&'a [Value]>,
     pub workdir: &'a Path,
     pub archive: &'a Path,
     pub on_output: Option<&'a shell::OutputCallback<'a>>,
@@ -54,6 +59,10 @@ pub struct ToolContext<'a> {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn definition(&self) -> Value;
+    /// Skip finding message attachments for tools that cannot use them.
+    fn requires_user_attachments(&self) -> bool {
+        false
+    }
     /// A successful execution mutates reference data used by model-level
     /// ephemeral context packs. Plugins declare this in their manifest; the
     /// core does not need to know a particular plugin's tool name.
@@ -168,6 +177,12 @@ impl ToolRegistry {
         self.tools
             .iter()
             .any(|tool| tool.name() == name && tool.invalidates_model_context())
+    }
+
+    pub fn requires_user_attachments(&self, name: &str) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| tool.name() == name && tool.requires_user_attachments())
     }
 
     pub fn is_builtin_only(&self) -> bool {
@@ -304,6 +319,8 @@ pub async fn execute(call: &ToolCall, workdir: &Path, archive: &Path) -> ToolRes
                 model_connection: None,
                 user_message: None,
                 user_turn: None,
+                user_images: None,
+                previous_user_images: None,
                 workdir,
                 archive,
                 on_output: None,
@@ -400,6 +417,8 @@ mod tests {
             model_connection: None,
             user_message: None,
             user_turn: None,
+            user_images: None,
+            previous_user_images: None,
             workdir: &workdir,
             archive: &archive,
             on_output: None,
@@ -465,6 +484,8 @@ mod tests {
             model_connection: None,
             user_message: None,
             user_turn: None,
+            user_images: None,
+            previous_user_images: None,
             workdir: Path::new("."),
             archive: Path::new("session.json"),
             on_output: None,
@@ -617,6 +638,8 @@ mod tests {
                     model_connection: None,
                     user_message: None,
                     user_turn: None,
+                    user_images: None,
+                    previous_user_images: None,
                     workdir: Path::new("."),
                     archive: Path::new("session.json"),
                     on_output: None,

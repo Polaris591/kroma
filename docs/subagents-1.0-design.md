@@ -1,6 +1,7 @@
 # Subagents 1.0 design
 
-Status: proposed, builds on plugin `0.3.0`.
+Status: **archived proposal**, retained as design history, not a specification
+of current behavior. See [current subagent plugin](../examples/plugins/subagents/README.md).
 
 This document specifies the `1.0` release only. It is deliberately about
 **capability boundaries**, not about turning Kroma into a multi-agent platform.

@@ -6,7 +6,7 @@ use kroma::{
     model::{Completion, ModelBackend, ModelFuture, StreamFuture, TextResult},
     protocol::{FunctionCall, Message, ToolCall},
     sessions::SessionCatalog,
-    tools::ToolRegistry,
+    tools::{Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult},
 };
 use serde_json::Value;
 use std::{
@@ -263,4 +263,161 @@ async fn project_instructions_reload_between_tasks_without_polluting_saved_syste
         .contains("PROJECT_VERSION_TWO"));
     cleanup(&dir)?;
     Ok(())
+}
+
+/// First-call edits must be replanned once a nested instruction becomes
+/// relevant. A deferred tool result is durable but the command never ran.
+struct NestedInstructionProbe {
+    seen: Mutex<Vec<Vec<Message>>>,
+    discover_by_result: bool,
+}
+
+impl ModelBackend for NestedInstructionProbe {
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [Message],
+        _: &'a [Value],
+        _: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        Box::pin(async move {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push(messages.to_vec());
+            let turn = seen.len();
+            drop(seen);
+            let calls = if turn == 1 {
+                if self.discover_by_result {
+                    vec![
+                        ("reveal", "{}".to_string()),
+                        (
+                            "shell",
+                            serde_json::json!({"command":"printf touched > marker.txt"})
+                                .to_string(),
+                        ),
+                    ]
+                } else {
+                    vec![(
+                        "shell",
+                        serde_json::json!({"command":"cd src/deep && printf touched > marker.txt"})
+                            .to_string(),
+                    )]
+                }
+            } else {
+                Vec::new()
+            };
+            let message = if calls.is_empty() {
+                Message::new("assistant", "replanned")
+            } else {
+                Message {
+                    role: "assistant".into(),
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Some(
+                        calls
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (name, arguments))| ToolCall {
+                                id: format!("nested-{i}"),
+                                kind: "function".into(),
+                                function: FunctionCall {
+                                    name: name.into(),
+                                    arguments,
+                                },
+                            })
+                            .collect(),
+                    ),
+                    tool_call_id: None,
+                    provider_items: None,
+                }
+            };
+            Ok(Completion {
+                message,
+                usage: None,
+                elapsed: Duration::ZERO,
+                first_token: None,
+            })
+        })
+    }
+
+    fn generate_text<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        Box::pin(async { bail!("unexpected checkpoint") })
+    }
+}
+
+struct RevealNestedPath;
+
+impl Tool for RevealNestedPath {
+    fn name(&self) -> &str {
+        "reveal"
+    }
+
+    fn definition(&self) -> Value {
+        serde_json::json!({"type":"function","function":{"name":"reveal","parameters":{"type":"object"}}})
+    }
+
+    fn execute<'a>(&'a self, _: &'a ToolCall, _: ToolContext<'a>) -> ToolFuture<'a> {
+        Box::pin(async { ToolResult::ok("src/deep/file.rs:12:4") })
+    }
+}
+
+async fn nested_instruction_preflight(discover_by_result: bool) -> Result<()> {
+    let dir = isolated_dir(if discover_by_result {
+        "tool-result"
+    } else {
+        "tool-arguments"
+    })?;
+    fs::create_dir_all(dir.join("src/deep"))?;
+    fs::write(dir.join("src/deep/AGENTS.md"), "DEEP_DIRECTORY_RULE")?;
+    fs::write(dir.join("src/deep/file.rs"), "// source")?;
+    let model = Arc::new(NestedInstructionProbe {
+        seen: Mutex::new(Vec::new()),
+        discover_by_result,
+    });
+    let mut tools = ToolRegistry::builtin();
+    if discover_by_result {
+        tools.register(Arc::new(RevealNestedPath))?;
+    }
+    let mut agent = Agent::with_backends(model.clone(), tools, dir.clone())?;
+    assert_eq!(agent.run("Fix the bug", &mut |_| {}).await?, "replanned");
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(!seen[0][0]
+        .content
+        .as_deref()
+        .unwrap()
+        .contains("DEEP_DIRECTORY_RULE"));
+    assert!(seen[1][0]
+        .content
+        .as_deref()
+        .unwrap()
+        .contains("DEEP_DIRECTORY_RULE"));
+    let tool_results: Vec<_> = seen[1].iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tool_results.len(), if discover_by_result { 2 } else { 1 });
+    assert!(tool_results
+        .last()
+        .unwrap()
+        .content
+        .as_deref()
+        .unwrap()
+        .contains("not_executed"));
+    assert!(!dir.join("marker.txt").exists());
+    assert!(!dir.join("src/deep/marker.txt").exists());
+    drop(seen);
+    drop(agent);
+    cleanup(&dir)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn first_write_into_nested_directory_is_not_dispatched_before_instructions() -> Result<()> {
+    nested_instruction_preflight(false).await
+}
+
+#[tokio::test]
+async fn newly_discovered_nested_instructions_defer_remaining_batch_tools() -> Result<()> {
+    nested_instruction_preflight(true).await
 }

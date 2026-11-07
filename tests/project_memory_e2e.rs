@@ -162,6 +162,8 @@ async fn call_tool_with_user(
                 model_connection: None,
                 user_message: user,
                 user_turn: turn,
+                user_images: None,
+                previous_user_images: None,
                 workdir,
                 archive,
                 on_output: None,

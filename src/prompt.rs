@@ -1,7 +1,11 @@
 //! Deterministic projection-only prompts: never mutate the durable transcript.
 use crate::protocol::Message;
 use anyhow::{bail, Context, Result};
-use std::{env, fs, io, path::Path};
+use std::{
+    collections::BTreeSet,
+    env, fs, io,
+    path::{Path, PathBuf},
+};
 
 pub const EXECUTION_GUIDANCE: &str = "\nFor coding tasks, locate relevant symbols before reading large files and keep inspections focused on relevant files and ranges; prefer focused ranges and diagnostic excerpts over dumping entire files or logs unless full context is necessary; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.";
 
@@ -25,6 +29,7 @@ pub struct PromptComposer {
     initial_system_override: Option<String>,
     additions: Vec<String>,
     instruction_files: Vec<String>,
+    nested_paths: BTreeSet<PathBuf>,
     trailing: Vec<String>,
     custom_tools: bool,
 }
@@ -36,6 +41,7 @@ impl Default for PromptComposer {
             initial_system_override: None,
             additions: vec![EXECUTION_GUIDANCE.to_owned(), V7_GUIDANCE.to_owned()],
             instruction_files: Vec::new(),
+            nested_paths: BTreeSet::new(),
             trailing: Vec::new(),
             custom_tools: false,
         }
@@ -58,14 +64,29 @@ impl PromptComposer {
             .map(|home| std::path::PathBuf::from(home).join(".kroma/AGENTS.md"));
         let project = workdir.join("AGENTS.md");
         self.load_instruction_paths(global.as_deref(), &project)?;
+        self.include_discovered_paths(workdir, task)?;
+        Ok(())
+    }
+
+    /// Tool outputs and arguments can reveal a nested component that the
+    /// original user request did not name. Load only instructions on paths
+    /// actually discovered in this workspace, never scan unrelated trees.
+    /// Returns whether the model-facing instruction projection changed.
+    pub(crate) fn include_discovered_paths(&mut self, workdir: &Path, text: &str) -> Result<bool> {
         let root = workdir
             .canonicalize()
             .unwrap_or_else(|_| workdir.to_path_buf());
-        let mut included = std::collections::BTreeSet::new();
-        for token in task.split_whitespace() {
+        let mut changed = false;
+        // Tool output is unbounded; a short bounded inspection keeps ordinary
+        // logs from turning into a filesystem traversal.
+        let mut previous = "";
+        for token in text.split_whitespace().take(4096) {
             let explicit = token.starts_with('@');
             let token = token.trim_start_matches('@').trim_matches(|c: char| {
-                matches!(c, ',' | ';' | ')' | '(' | '[' | ']' | '\'' | '"' | '`')
+                matches!(
+                    c,
+                    ',' | ';' | ')' | '(' | '[' | ']' | '\'' | '"' | '`' | '{' | '}' | ':' | '>'
+                )
             });
             // Strip standard source-location suffixes (file.rs:12 or file.rs:12:4)
             // without treating the colon in a Windows drive letter as a suffix.
@@ -80,7 +101,13 @@ impl PromptComposer {
             // Don't stat/canonicalize every prose word in a long prompt.
             // An ordinary "hello" is not an explicit reference to ./hello
             // even if a directory of that name happens to exist.
-            if !explicit && !token.contains(['/', '\\']) && Path::new(token).extension().is_none() {
+            let directory_argument = matches!(previous, "cd" | "pushd" | "--workdir");
+            previous = token;
+            if !explicit
+                && !directory_argument
+                && !token.contains(['/', '\\'])
+                && Path::new(token).extension().is_none()
+            {
                 continue;
             }
             let candidate = if Path::new(token).is_absolute() {
@@ -88,7 +115,20 @@ impl PromptComposer {
             } else {
                 workdir.join(token)
             };
-            let Ok(path) = candidate.canonicalize() else {
+            // A new file does not exist yet. Resolve its nearest existing
+            // ancestor so a first-write into an existing nested directory
+            // still loads that directory's AGENTS.md before execution.
+            let mut existing = candidate.as_path();
+            while !existing.exists() {
+                let Some(parent) = existing.parent() else {
+                    break;
+                };
+                if parent == existing {
+                    break;
+                }
+                existing = parent;
+            }
+            let Ok(path) = existing.canonicalize() else {
                 continue;
             };
             // Canonicalize the root too: on Windows `canonicalize` returns a
@@ -109,17 +149,19 @@ impl PromptComposer {
             }
             for folder in chain.into_iter().rev() {
                 let nested = folder.join("AGENTS.md");
-                if included.insert(nested.clone()) {
+                if !self.nested_paths.contains(&nested) {
                     if let Some(contents) = read_instruction_file(&nested)? {
+                        self.nested_paths.insert(nested.clone());
                         self.instruction_files.push(format!(
                             "\n\nNested instructions ({}):\n{contents}",
                             nested.display()
                         ));
+                        changed = true;
                     }
                 }
             }
         }
-        Ok(())
+        Ok(changed)
     }
 
     fn load_instruction_paths(&mut self, global: Option<&Path>, project: &Path) -> Result<()> {
@@ -135,6 +177,7 @@ impl PromptComposer {
             loaded.push(format!("\n\nProject instructions (AGENTS.md):\n{text}"));
         }
         self.instruction_files = loaded;
+        self.nested_paths.clear();
         Ok(())
     }
 
@@ -532,6 +575,50 @@ mod tests {
                 .contains("NESTED_INSTRUCTION"),
             "backtick-and-line-number references must load nested instructions"
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn tool_discovered_nested_instructions_extend_next_projection_once() -> Result<()> {
+        let root = env::temp_dir().join(format!(
+            "kroma-discovered-instructions-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir_all(root.join("src/deep"))?;
+        fs::create_dir_all(root.join("unrelated"))?;
+        fs::write(root.join("AGENTS.md"), "ROOT_RULE")?;
+        fs::write(root.join("src/AGENTS.md"), "SRC_RULE")?;
+        fs::write(root.join("src/deep/AGENTS.md"), "DEEP_RULE")?;
+        fs::write(root.join("unrelated/AGENTS.md"), "UNRELATED_RULE")?;
+        fs::write(root.join("src/deep/mod.rs"), "pub fn sample() {}")?;
+        let mut composer = PromptComposer::default();
+        composer.refresh_for_task(&root, "Fix failing tests")?;
+        let original = composer.initial_history(&root);
+        let mut initial = original.clone();
+        composer.apply(&mut initial);
+        assert!(!initial[0].content.as_deref().unwrap().contains("DEEP_RULE"));
+
+        // A file discovered via command output is enough, even if the user
+        // never named the directory in the original request.
+        assert!(composer.include_discovered_paths(&root, "src/deep/mod.rs:12:4")?);
+        assert!(!composer.include_discovered_paths(&root, "src/deep/mod.rs")?);
+        let mut updated = original.clone();
+        composer.apply(&mut updated);
+        let projected = updated[0].content.as_deref().unwrap();
+        assert!(projected.contains("ROOT_RULE"));
+        assert!(projected.contains("SRC_RULE"));
+        assert!(projected.contains("DEEP_RULE"));
+        assert!(!projected.contains("UNRELATED_RULE"));
+        assert_eq!(projected.matches("DEEP_RULE").count(), 1);
+        assert!(composer.extra_estimated_tokens(&original[0]) > 0);
+
+        // A new task must discard dynamically discovered paths.
+        composer.refresh_for_task(&root, "Fix another test")?;
+        let mut next = original;
+        composer.apply(&mut next);
+        assert!(!next[0].content.as_deref().unwrap().contains("DEEP_RULE"));
         fs::remove_dir_all(root)?;
         Ok(())
     }

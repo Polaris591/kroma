@@ -49,6 +49,8 @@ async fn run_command(dir: &Path, command: &str) -> Result<(ToolResult, Value)> {
                 model_connection: None,
                 user_message: None,
                 user_turn: None,
+                user_images: None,
+                previous_user_images: None,
                 workdir: dir,
                 archive: &archive,
                 on_output: None,

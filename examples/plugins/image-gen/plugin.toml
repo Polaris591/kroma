@@ -1,0 +1,46 @@
+id = "image-gen"
+name = "Image Generation"
+version = "0.1.0"
+description = "Generate and edit images using OpenAI Images or Gemini"
+command = "node"
+args = ["main.js"]
+prompt = """
+When the user requests an image, call image_generate with the user's intended visual description. For an uploaded reference picture use input_images=["attachment:1"] (or attachment:2); for the previous user turn use "previous:1". To edit a generated image use its returned image:<id> reference, never guess it. Specify an output_path only when the user requests a project asset. Do not claim a requested aspect ratio or dimensions were achieved unless the returned dimensions confirm it. Do not re-run a paid generation after an ambiguous failure unless the user requests another attempt. This plugin does not change the chat model.
+"""
+
+[settings]
+provider = "openai-images"
+base_url = ""
+model = ""
+api_key_env = "KROMA_IMAGE_API_KEY"
+
+[ui.tool_labels]
+image_generate = "Generate image"
+
+[[tools]]
+name = "image_generate"
+description = "Generate one image from a prompt or edit using input_images. References: attachment:N from the current user turn, previous:N from the preceding user turn, or image:<id> returned by this plugin. Returns a durable image id, local path, and actual dimensions. Never automatically repeat paid calls on uncertain failure."
+streaming = true
+requires_user_attachments = true
+timeout_secs = 600
+
+[tools.parameters]
+type = "object"
+required = ["prompt"]
+additionalProperties = false
+[tools.parameters.properties.prompt]
+type = "string"
+description = "Full image description or editing instructions."
+maxLength = 32000
+[tools.parameters.properties.input_images]
+type = "array"
+maxItems = 8
+description = "Reference images: attachment:1, previous:1, image:<id> returned previously, or project:assets/reference.png."
+items = {type = "string"}
+[tools.parameters.properties.aspect_ratio]
+type = "string"
+description = "Desired aspect ratio. Unsupported ratios fail explicitly rather than silently changing."
+enum = ["1:1", "3:2", "2:3", "16:9", "9:16", "4:3", "3:4"]
+[tools.parameters.properties.output_path]
+type = "string"
+description = "Optional relative path inside the current project; never overwrites existing files."

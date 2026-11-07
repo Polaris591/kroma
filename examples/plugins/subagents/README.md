@@ -218,11 +218,11 @@ task:
 ```text
 ▷ [1/3] List the failing tests
 ▷ [2/3] Read Cargo.toml
-1▶ 2▶ · 5s/600s · in 0 / out 0
+1▶ 2▶ · 5s · in 0 / out 0
 [1/3] List the failing t… 0:05 ▶ model turn 2 · 5.2k tok · "checking the recovery test"
 [2/3] Read Cargo.toml 0:05 ▶ shell 0:02 · 2.6k tok
 ✓ [2/3]   9.9s · in 5.3k / out 89 · "0.4.0"
-1✓ 2✓ · 10s/600s · in 10.5k / out 164
+1✓ 2✓ · 10s · in 10.5k / out 164
 ✓ 2/2 done · 12.4s · in 12.8k / out 171
 1 "three failures" · 2 "0.4.0"
 ```
@@ -238,9 +238,9 @@ answer (or of the recovered partial answer).
 
 The roster row is positional: `1✓ 2▶ 3·` means task 1 finished, task 2 is
 running and task 3 is queued (`·` queued, `▶` running, `✓` completed, `✗` failed,
-`–` never started), followed by elapsed time against the deadline the host will
-enforce (the manifest value, capped by `KROMA_PLUGIN_TOOL_TIMEOUT_SECS`) and the
-tokens spent so far.
+`–` never started), followed by elapsed time and the tokens spent so far.
+When `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` sets an explicit host deadline, the
+progress line also shows it.
 
 The host keeps the last eight rows of a running tool (`src/tui/tool_records.rs`).
 After the call it renders the result JSON: a summary line and one line of
@@ -250,10 +250,15 @@ never changes the outcome, and the final result stays authoritative.
 
 ## Deadline and cancellation
 
-The manifest declares `timeout_secs = 600` for the batch and `task_timeout_secs = 300`
-per task. A task that exceeds `task_timeout_secs` is terminated with `CHILD_TIMEOUT`
-without aborting its siblings, and the batch cuts off stragglers just before
-the host deadline so completed task results are still returned. A task killed
+There is **no automatic task deadline, batch deadline, model-turn limit or
+token limit** by default. A child finishes when its task finishes or the user
+cancels it. Profile `maxTurns` and `maxTokens` default to `0` (unlimited);
+`task_timeout_secs = 0` also means unlimited. A user can explicitly set a
+positive `task_timeout_secs`, per-profile budgets or
+`KROMA_PLUGIN_TOOL_TIMEOUT_SECS`. A task that exceeds an explicitly configured
+deadline is terminated with `CHILD_TIMEOUT` without aborting its siblings,
+and the batch cuts off stragglers just before an explicit host deadline so
+completed results are still returned. A task killed
 by its own timeout or by a batch cut-off keeps the text it had streamed as
 `output` with `partial: true`, and `partial.txt` is written for it. The
 host timeout message names the tool call and the evidence root, so the run can
@@ -286,7 +291,7 @@ check the evidence directory before deciding what to run again.
 | `BATCH_ABORTED` | A sibling fault stopped this task |
 | `CHILD_PROTOCOL` | Invalid child output; fatal, the worker is discarded |
 | `RESUME_MISSING` | The token has no state record or no saved session |
-| `RESUME_ACTIVE` | The source task is still running in this worker |
+| `RESUME_ACTIVE` | The source task is still running or claimed by another Kroma worker |
 | `RESUME_STALE` | The saved session cannot be copied or its cwd is gone |
 
 Fatal codes reject the whole call with one error instead of returning per-task
@@ -313,9 +318,8 @@ Ctrl+C still leaves the diagnostics that explain what the child was doing.
 
 The session file belongs to the child Kroma, which writes its own snapshot and
 WAL. Evidence may contain repository content; treat it as untrusted data.
-Runs are never pruned automatically: remove old `<run-id>` directories when
-their evidence is no longer needed, remembering that this also removes any
-`resume` source kept there.
+Completed runs are pruned after 30 days or after more than 150 completed run
+archives; in-flight and explicitly resumed source runs are preserved.
 
 ## Limits
 
@@ -324,7 +328,7 @@ their evidence is no longer needed, remembering that this also removes any
 | Tasks per call | 8 |
 | Task text | 16 KiB |
 | Child JSON line | 2 MiB of UTF-8 (checked per line, before parsing) |
-| Time per task | `task_timeout_secs` (default 300s) |
+| Time per task | `task_timeout_secs` (default 0 = unlimited) |
 | Tailored output per task | `max_output_chars` (default 12000) |
 | In-memory streamed draft | 64 KiB tail per task (never in `events.ndjson`) |
 | Tool response | 512 KiB |

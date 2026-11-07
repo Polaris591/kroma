@@ -250,6 +250,8 @@ pub struct PluginToolSpec {
     pub invalidates_context: bool,
     #[serde(default)]
     pub requires_user_context: bool,
+    #[serde(default)]
+    pub requires_user_attachments: bool,
     /// Optional whole-call deadline for this tool, enforced by the host for
     /// streaming and non-streaming calls alike. A global
     /// `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` value caps it when smaller.
@@ -1720,6 +1722,7 @@ impl PluginCatalog {
                     streaming: tool.streaming,
                     invalidates_context: tool.invalidates_context,
                     requires_user_context: tool.requires_user_context,
+                    requires_user_attachments: tool.requires_user_attachments,
                     timeout: effective_tool_timeout(tool.timeout_secs, plugin_tool_timeout()),
                     data_dir: plugin.worker.data_dir.clone(),
                     worker: plugin.worker.clone(),
@@ -2357,6 +2360,7 @@ struct PluginToolAdapter {
     streaming: bool,
     invalidates_context: bool,
     requires_user_context: bool,
+    requires_user_attachments: bool,
     timeout: Option<Duration>,
     data_dir: PathBuf,
     worker: Arc<PluginWorker>,
@@ -2365,6 +2369,9 @@ struct PluginToolAdapter {
 impl Tool for PluginToolAdapter {
     fn invalidates_model_context(&self) -> bool {
         self.invalidates_context
+    }
+    fn requires_user_attachments(&self) -> bool {
+        self.requires_user_attachments
     }
     fn name(&self) -> &str {
         &self.name
@@ -2400,6 +2407,27 @@ impl Tool for PluginToolAdapter {
                 })
             })
             .flatten();
+        let user_attachments = self.requires_user_attachments.then(|| {
+            let capture = |items: Option<&[Value]>, prefix: &str| {
+                items
+                    .into_iter()
+                    .flatten()
+                    .filter(|part| part["type"] == "kroma_attachment")
+                    .enumerate()
+                    .filter(|(_, part)| part["kind"] == "image")
+                    .map(|(index, part)| {
+                        json!({
+                            "ref": format!("{prefix}:{}", index + 1),
+                            "name": part["name"], "path": part["path"],
+                            "mime": part["mime"], "bytes": part["bytes"]
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut images = capture(context.user_images, "attachment");
+            images.extend(capture(context.previous_user_images, "previous"));
+            images
+        });
         let call_id = call.id.clone();
         Box::pin(async move {
             let Ok(arguments) = arguments else {
@@ -2411,7 +2439,8 @@ impl Tool for PluginToolAdapter {
             let payload = json!({"type":if streaming {"tool_stream"} else {"tool"},
                 "name":name, "arguments":arguments, "workdir":workdir,
                 "archive":archive, "call_id":call_id.clone(), "model_connection":model_connection,
-                "trusted_user_context":user_context});
+                "trusted_user_context":user_context,
+                "trusted_user_attachments":user_attachments});
             if streaming {
                 let mut stream = worker.start_stream(payload);
                 let consumed = async {
@@ -3585,6 +3614,7 @@ base_url = "https://example.com""#,
             streaming: false,
             invalidates_context: false,
             requires_user_context: false,
+            requires_user_attachments: false,
             timeout_secs: None,
             replace: false,
             parameters: empty_parameters(),

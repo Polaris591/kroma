@@ -15,7 +15,8 @@ test("built-in profiles load without user setup and expose valid limits", () => 
   const found = loadProfiles(process.cwd(), {user: "/path/that/does/not/exist", project: "/path/that/does/not/exist"});
   assert.deepEqual([...found.keys()].sort(), ["explore", "general", "planner", "reviewer", "verifier"]);
   assert.equal(found.get("reviewer").shell, "allow");
-  assert.equal(found.get("verifier").maxTurns, 30);
+  assert.equal(found.get("verifier").maxTurns, 0);
+  assert.equal(found.get("general").maxTokens, 0);
   assert.equal(found.get("general").tools, null);
 });
 
@@ -39,7 +40,7 @@ test("profile layers use project over user over bundled, without merging policie
 
 test("invalid profiles and duplicate names cannot silently widen child permissions", () => {
   for (const malformed of [
-    profile("test").replace("maxTurns: 20", "maxTurns: 0"),
+    profile("test").replace("maxTurns: 20", "maxTurns: -1"),
     profile("test").replace("model: light", "model: light\nthinking: turbo"),
     profile("test").replace("shell: deny", "shell: unrestricted"),
     profile("test").replace("tools: [shell]", "tools: [shell, shell]"),

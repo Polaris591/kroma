@@ -15,10 +15,14 @@ and the [V2 contract](../../../docs/project-memory-v2-contract.md).
   injects it as untrusted reference data. The model does not have to remember to
   search.
 - **Quote-anchored rules.** A `memory_remember` quote verified against the
-  host-supplied **current user turn** becomes active immediately (at most one
-  per user turn). Legacy hosts lacking trusted turn context retain a pending
+  host-supplied **current user turn** becomes active immediately (up to five
+  distinct rules per user turn; exact replays are idempotent). Legacy hosts lacking trusted turn context retain a pending
   compatibility path until the post-WAL `task_finished` (legacy `task_summary`)
   lifecycle call; there is no approval queue.
+- **Small core-rule pack.** When the user explicitly makes a rule apply to
+  the entire project, `memory_remember(core=true)` pins it as one of up to four
+  core project rules. A compact copy is injected on every task even if its
+  keywords do not match. Ordinary memories remain intent-scoped.
 - **Provisional review notes.** `kind=review` requires a path and an evidence
   reference, is labeled unverified, and expires after 30 days.
 - **Self-maintenance.** Pending rules not verified within 7 days are dropped;
@@ -72,7 +76,7 @@ user-level install above or keep the binary in a trusted location.
 
 | Tool | Purpose |
 | --- | --- |
-| `memory_remember(kind, text, quote?, paths?, evidence?, supersedes?)` | `preference`/`decision` require a 8–500 char verbatim user quote, accepted as soon as the current host turn verifies it. `review` requires path and evidence, expires after 30 days, and leaves recall in a worktree whose recorded file changed. `supersedes` names the single memory being replaced; memory infers nothing from similar wording. |
+| `memory_remember(kind, text, quote?, core?, paths?, evidence?, supersedes?)` | `preference`/`decision` require an 8–500 char verbatim user quote, accepted as soon as the current host turn verifies it. `core=true` is only for explicit project-wide rules; replacing one retains its core status. `review` requires path and evidence, expires after 30 days, and leaves recall in a worktree whose recorded file changed. `supersedes` names the single memory being replaced; memory infers nothing from similar wording. |
 | `memory_search(query, paths?, limit?)` | Active entries only; compact ids, kinds, summaries and path hints. |
 | `memory_read(ids)` | 1–8 active entries; any unknown/pending/deleted id fails the whole batch. |
 | `memory_forget(id)` | Immediate tombstone; excluded from search, read and recall. |
@@ -112,8 +116,8 @@ for migration and debugging, but are not part of the normal workflow.
    quote. The host provides the current user message separately, not as
    model-controlled function arguments. The plugin validates it and stores an
    active memory immediately; an unverified older host uses the pending path.
-3. `task_summary` promotes any legacy pending entry only when its quote
-   matches the latest user instruction, at most one per summary.
+3. `task_summary` promotes legacy pending entries only when their quotes
+   match the latest user instruction, at most five per summary.
 4. The next task's automatic recall can include it. A pending entry that is
    never verified is dropped after 7 days.
 
