@@ -1140,37 +1140,21 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
         return true;
     }
     let (name, argument) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
-    if matches!(name, "/language" | "/layout") {
+    if name == "/language" {
         let mut next = state.preferences;
         let argument = argument.trim();
-        let outcome = if name == "/language" {
-            let choice = if argument.is_empty() {
-                Ok(match next.language {
-                    preferences::Language::En => preferences::Language::Zh,
-                    preferences::Language::Zh => preferences::Language::En,
-                })
-            } else {
-                preferences::Language::parse(argument)
-            };
-            choice.map(|language| next.language = language)
+        let outcome = if argument.is_empty() {
+            Ok(match next.language {
+                preferences::Language::En => preferences::Language::Zh,
+                preferences::Language::Zh => preferences::Language::En,
+            })
         } else {
-            match argument {
-                "" => {
-                    next.full_width = !next.full_width;
-                    Ok(())
-                }
-                "wide" => {
-                    next.full_width = true;
-                    Ok(())
-                }
-                "comfortable" => {
-                    next.full_width = false;
-                    Ok(())
-                }
-                _ => Err(anyhow::anyhow!("/layout [comfortable|wide]")),
-            }
+            preferences::Language::parse(argument)
         };
-        match outcome.and_then(|()| next.save_at(state.preferences_path.as_deref())) {
+        match outcome
+            .map(|language| next.language = language)
+            .and_then(|()| next.save_at(state.preferences_path.as_deref()))
+        {
             Ok(()) => state.apply_preferences(next),
             Err(error) => state.note_with_level(
                 view::NoticeLevel::Error,
@@ -3560,7 +3544,7 @@ mod tests {
         );
         assert!(matches!(action, InputAction::Submit(ref text) if text == "/language zh"));
         // Typing a space also dismisses completion, without eating the argument.
-        for ch in "/layout wide".chars() {
+        for ch in "/think high".chars() {
             input_event(
                 &mut ui,
                 Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
@@ -3570,7 +3554,7 @@ mod tests {
             );
         }
         assert!(ui.picker.is_none());
-        assert_eq!(ui.editor.text(), "/layout wide");
+        assert_eq!(ui.editor.text(), "/think high");
     }
 
     #[test]
@@ -3615,7 +3599,7 @@ mod tests {
     }
 
     #[test]
-    fn language_and_layout_commands_save_and_bad_settings_preserve_current_state() -> Result<()> {
+    fn language_command_saves_and_bad_settings_preserve_current_state() -> Result<()> {
         let (mut ui, model) = setup();
         let root = std::env::temp_dir().join(format!(
             "kroma-ui-command-{}-{}",
@@ -3632,10 +3616,8 @@ mod tests {
             ui.notification.is_empty(),
             "successful changes update in place"
         );
-        assert!(show_local_command(&mut ui, "/layout wide", &model));
         let saved = preferences::Preferences::load_at(Some(&path))?;
         assert_eq!(saved, ui.preferences);
-        assert!(saved.full_width);
         assert!(show_local_command(&mut ui, "/language fr", &model));
         assert_eq!(ui.preferences, saved);
         assert_eq!(preferences::Preferences::load_at(Some(&path))?, saved);

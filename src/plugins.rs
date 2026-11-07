@@ -187,11 +187,7 @@ pub struct PluginUiSpec {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct PluginLayoutSpec {
     #[serde(default)]
-    pub header_rows: Option<u16>,
-    #[serde(default)]
     pub composer_max_rows: Option<u16>,
-    #[serde(default)]
-    pub full_width_prose: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -589,11 +585,8 @@ impl PluginManifest {
             }
             if let Some(layout) = &ui.layout {
                 if layout
-                    .header_rows
-                    .is_some_and(|rows| !(1..=4).contains(&rows))
-                    || layout
-                        .composer_max_rows
-                        .is_some_and(|rows| !(3..=14).contains(&rows))
+                    .composer_max_rows
+                    .is_some_and(|rows| !(3..=14).contains(&rows))
                 {
                     bail!("plugin '{}' has invalid UI layout dimensions", self.id);
                 }
@@ -725,9 +718,6 @@ struct PluginState {
     /// different runtime when its manifest later becomes invalid.
     #[serde(default)]
     critical_plugins: BTreeSet<String>,
-    /// Legacy state from older Kroma releases, ignored for activation.
-    #[serde(default)]
-    project_fingerprints: BTreeMap<String, String>,
     #[serde(default)]
     settings: BTreeMap<String, BTreeMap<String, toml::Value>>,
     #[serde(default)]
@@ -1290,7 +1280,6 @@ impl PluginCatalog {
                 let key = format!("{}::{id}", directory.display());
                 found |= state.enabled_projects.remove(&key);
                 state.critical_plugins.remove(&key);
-                state.project_fingerprints.remove(&key);
             }
             if found {
                 state.save(&self.state_path)?;
@@ -1306,7 +1295,6 @@ impl PluginCatalog {
             state.enabled.remove(&key);
             state.enabled_projects.remove(&key);
             state.critical_plugins.remove(&key);
-            state.project_fingerprints.remove(&key);
             state.save(&self.state_path)?;
             return Ok(format!(
                 "Plugin '{id}' disabled. Restart Kroma, or run /plugins reload while idle (model/context plugins require restart)."
@@ -1327,7 +1315,6 @@ impl PluginCatalog {
         } else {
             state.critical_plugins.remove(&key);
         }
-        state.project_fingerprints.remove(&key);
         state.save(&self.state_path)?;
         Ok(format!(
             "Plugin '{id}' enabled. Restart Kroma, or run /plugins reload while idle (model/context plugins require restart)."
@@ -3297,6 +3284,18 @@ impl Drop for PluginProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn obsolete_ui_slots_and_plugin_fingerprints_are_ignored() -> Result<()> {
+        let old: PluginManifest = toml::from_str(
+            "id='old'\nname='Old'\n[ui.layout]\nheader_rows=3\nfull_width_prose=true\ncomposer_max_rows=6\n",
+        )?;
+        assert_eq!(old.ui.unwrap().layout.unwrap().composer_max_rows, Some(6));
+        let old_state: PluginState =
+            toml::from_str("[project_fingerprints]\n'old-project'='prior-approval'\n")?;
+        assert!(!toml::to_string(&old_state)?.contains("project_fingerprints"));
+        Ok(())
+    }
 
     #[test]
     fn official_plugin_bundle_is_read_only_and_user_override_wins() -> Result<()> {

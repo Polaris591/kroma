@@ -264,7 +264,7 @@ fn execution_picker_preserves_draft_and_invalid_ids_never_open_another_call() {
 }
 
 #[test]
-fn comfortable_prose_caps_at_96_cells_but_code_and_wide_layout_use_more_space() {
+fn comfortable_prose_caps_at_96_cells_but_code_uses_more_space() {
     let mut ui = state();
     ui.event(UiEvent::Text(format!(
         "{}\n\n```text\n{}\n```",
@@ -281,11 +281,4 @@ fn comfortable_prose_caps_at_96_cells_but_code_and_wide_layout_use_more_space() 
         .selection_rows
         .iter()
         .any(|row| row.contains("CCCC") && UnicodeWidthStr::width(row.as_str()) > 100));
-    ui.preferences.full_width = true;
-    ui.invalidate_history_cache();
-    draw(&mut ui, 210, 40);
-    assert!(ui
-        .selection_rows
-        .iter()
-        .any(|row| row.contains("prose") && UnicodeWidthStr::width(row.as_str()) > 100));
 }

@@ -16,7 +16,7 @@ Ctrl+R searches previously sent prompts; Enter recalls for editing without sendi
 File choices complete the current directory, not a project-wide search.
 /compact [instructions] optionally focuses the manual checkpoint on what matters.
 F2 changes theme; Shift+Tab cycles thinking; /think high selects directly.
-/language [en|zh] and /layout [comfortable|wide] are saved settings.
+/language [en|zh] is saved.
 Ctrl+O expands/collapses all tool commands and captured output inline; Ctrl+T previews reasoning; Alt+T opens the full transcript.
 /inspect browses calls; click [view] for a read-only snapshot above the input.
 Alt+T or /transcript opens searchable full history; /help, /hotkeys or ? on an empty draft opens this panel.
@@ -55,7 +55,7 @@ Ctrl+R 搜索已发送的输入历史，Enter 取回编辑但不发送，Esc 保
 文件候选补全当前目录下的路径，不是全项目搜索。
 /compact 后可追加说明，指定本次手动压缩的重点。
 F2 切换主题；Shift+Tab 切换思考强度；/think high 直接选择。
-/language [zh|en] 与 /layout [comfortable|wide] 设置会保存。
+/language [zh|en] 设置会保存。
 Ctrl+O 在对话内展开或折叠全部工具命令与输出；Ctrl+T 预览思考；Alt+T 查看全文记录。
 /inspect 浏览调用；点击 [检视] 在输入台上方查看只读执行快照。
 Alt+T 或 /transcript 查看可搜索的全文记录；/help、/hotkeys 或空草稿按 ? 打开帮助弹层。

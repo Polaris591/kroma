@@ -2021,7 +2021,7 @@ fn declarative_ui_slots_compose_and_detect_conflicting_owners() -> Result<()> {
         fs::write(
             directory.join("plugin.toml"),
             format!(
-                "id='{id}'\nname='UI slots'\n[ui]\nstatus='ready'\n{}\n[ui.layout]\nheader_rows=3\ncomposer_max_rows=6\nfull_width_prose=true\n[ui.colors]\naccent='#112233'\n[ui.tool_labels]\nexample_echo='Echo label'\n",
+                "id='{id}'\nname='UI slots'\n[ui]\nstatus='ready'\n{}\n[ui.layout]\ncomposer_max_rows=6\n[ui.colors]\naccent='#112233'\n[ui.tool_labels]\nexample_echo='Echo label'\n",
                 if frames { "activity_frames=['a','b']" } else { "" }
             ),
         )?;
@@ -2034,7 +2034,7 @@ fn declarative_ui_slots_compose_and_detect_conflicting_owners() -> Result<()> {
     assert!(load()?.ui_colors()?.is_empty());
     load()?.set_enabled("a-ui", true)?;
     assert_eq!(load()?.ui_activity_frames()?, vec!["a", "b"]);
-    assert_eq!(load()?.ui_layout()?.unwrap().header_rows, Some(3));
+    assert_eq!(load()?.ui_layout()?.unwrap().composer_max_rows, Some(6));
     assert_eq!(
         load()?.ui_colors()?.get("accent").map(String::as_str),
         Some("#112233")

@@ -242,7 +242,7 @@ sessions and the existing slash commands. Shortcuts:
   selection active while the viewport moves.
 - **Command index:** type `/` or run `/commands` to see commands with descriptions and argument hints. Up/Down selects; **Tab** (or Enter in this completion list) inserts the command without executing it. Type arguments, then Enter to run; Esc closes the list without clearing the draft.
 - **Interface language:** `/language zh` switches UI chrome, hints, help and command descriptions to Chinese; `/language en` switches to English; `/language` toggles. Model answers, tool output and upstream diagnostics are not translated. The default is English.
-- **Reading layout:** Plain always uses the available workspace width for prose, code, tables and tools. The old `/layout comfortable|wide` preference remains accepted and saved for compatibility, but does not narrow Plain's message text. Language remains saved in `~/.kroma/ui.toml`.
+- **Reading layout:** Plain always uses the available workspace width for prose, code, tables and tools. The obsolete `/layout` width toggle has been removed; legacy `full_width` and `display` fields are ignored when reading `~/.kroma/ui.toml`. Interface language remains saved there.
 - **Tool records:** every invocation has its own record. Adjacent calls are
   never merged into a group or a hidden-step count. Successful calls are one
   quiet line with the semantic marker and effective command segments; generic
