@@ -321,7 +321,10 @@ impl Stream {
                 let usage = &v["message"]["usage"];
                 self.input.update(usage);
                 self.output = usage["output_tokens"].as_u64();
-                if let Some(count) = usage.pointer("/server_tool_use/web_search_requests").and_then(Value::as_u64) {
+                if let Some(count) = usage
+                    .pointer("/server_tool_use/web_search_requests")
+                    .and_then(Value::as_u64)
+                {
                     self.web_searches = Some(count);
                 }
             }
@@ -348,30 +351,49 @@ impl Stream {
                                 self.native_calls.entry(id.to_owned()).or_default();
                             }
                         }
-                        Block::ServerTool { original: block.clone(), input: String::new() }
+                        Block::ServerTool {
+                            original: block.clone(),
+                            input: String::new(),
+                        }
                     }
                     "web_search_tool_result" => {
                         if let Some(id) = block["tool_use_id"].as_str() {
                             if let Some(state) = self.native_calls.get_mut(id) {
                                 if !state.finished {
-                                    let failed = block["content"]["type"] == "web_search_tool_result_error";
+                                    let failed =
+                                        block["content"]["type"] == "web_search_tool_result_error";
                                     let summary = if failed {
-                                        format!("Search error: {}", block["content"]["error_code"].as_str().unwrap_or("unknown"))
+                                        format!(
+                                            "Search error: {}",
+                                            block["content"]["error_code"]
+                                                .as_str()
+                                                .unwrap_or("unknown")
+                                        )
                                     } else {
-                                        let sources = block["content"].as_array().into_iter().flatten()
+                                        let sources = block["content"]
+                                            .as_array()
+                                            .into_iter()
+                                            .flatten()
                                             .filter_map(|item| {
                                                 let url = item["url"].as_str()?;
                                                 let title = item["title"].as_str().unwrap_or("");
                                                 Some(format!("- {url} ({title})"))
                                             })
-                                            .take(8).collect::<Vec<_>>();
-                                        if sources.is_empty() { "Search returned no sources".into() }
-                                        else { format!("Sources:\n{}", sources.join("\n")) }
+                                            .take(8)
+                                            .collect::<Vec<_>>();
+                                        if sources.is_empty() {
+                                            "Search returned no sources".into()
+                                        } else {
+                                            format!("Sources:\n{}", sources.join("\n"))
+                                        }
                                     };
                                     on_activity(crate::model::NativeActivity {
-                                        name: "web_search".into(), id: id.to_owned(),
-                                        arguments: "{}".into(), result: Some(summary),
-                                        done: true, failed,
+                                        name: "web_search".into(),
+                                        id: id.to_owned(),
+                                        arguments: "{}".into(),
+                                        result: Some(summary),
+                                        done: true,
+                                        failed,
                                     });
                                     state.finished = true;
                                 }
@@ -453,7 +475,9 @@ impl Stream {
                 }
             }
             "content_block_stop" => {
-                let index = v["index"].as_u64().context("Anthropic block index missing")? as usize;
+                let index = v["index"]
+                    .as_u64()
+                    .context("Anthropic block index missing")? as usize;
                 if let Some(Block::ServerTool { original, input }) = self.blocks.get_mut(&index) {
                     if !input.is_empty() {
                         original["input"] = serde_json::from_str(input)
@@ -465,9 +489,12 @@ impl Stream {
                                 if !state.started {
                                     state.started = true;
                                     on_activity(crate::model::NativeActivity {
-                                        name: "web_search".into(), id: id.to_owned(),
+                                        name: "web_search".into(),
+                                        id: id.to_owned(),
                                         arguments: original["input"].to_string(),
-                                        result: None, done: false, failed: false,
+                                        result: None,
+                                        done: false,
+                                        failed: false,
                                     });
                                 }
                             }
@@ -476,7 +503,10 @@ impl Stream {
                 }
             }
             "message_delta" => {
-                if let Some(count) = v["usage"].pointer("/server_tool_use/web_search_requests").and_then(Value::as_u64) {
+                if let Some(count) = v["usage"]
+                    .pointer("/server_tool_use/web_search_requests")
+                    .and_then(Value::as_u64)
+                {
                     self.web_searches = Some(count);
                 }
                 self.finish_reason = v["delta"]["stop_reason"].as_str().map(str::to_owned);
@@ -498,13 +528,21 @@ impl Stream {
         let paused = self.finish_reason.as_deref() == Some("pause_turn");
         let mut finished = Vec::new();
         for (id, state) in &mut self.native_calls {
-            if state.finished { continue; }
+            if state.finished {
+                continue;
+            }
             state.finished = true;
             finished.push(crate::model::NativeActivity {
-                name: "web_search".into(), id: id.clone(), arguments: "{}".into(),
-                result: Some(if paused { "Search paused; resuming".into() }
-                    else { "Search was interrupted before receiving results".into() }),
-                done: true, failed: !paused,
+                name: "web_search".into(),
+                id: id.clone(),
+                arguments: "{}".into(),
+                result: Some(if paused {
+                    "Search paused; resuming".into()
+                } else {
+                    "Search was interrupted before receiving results".into()
+                }),
+                done: true,
+                failed: !paused,
             });
         }
         finished
@@ -548,7 +586,9 @@ impl Stream {
                 Block::Text { text, citations } => {
                     content.push_str(&text);
                     let mut block = json!({"type":"text","text":text});
-                    if !citations.is_empty() { block["citations"] = json!(citations); }
+                    if !citations.is_empty() {
+                        block["citations"] = json!(citations);
+                    }
                     native_blocks.push(block);
                 }
                 Block::ServerTool { original, .. } => {
@@ -599,8 +639,12 @@ impl Stream {
             }
         }
         let has_server_search = native_blocks.iter().any(|block| {
-            matches!(block["type"].as_str(), Some("server_tool_use" | "web_search_tool_result"))
-                || block["citations"].as_array().is_some_and(|items| !items.is_empty())
+            matches!(
+                block["type"].as_str(),
+                Some("server_tool_use" | "web_search_tool_result")
+            ) || block["citations"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
         });
         if !opaque.is_empty() || has_server_search || paused {
             opaque.push(json!({"type":"kroma_anthropic_content_blocks",
@@ -704,29 +748,50 @@ mod tests {
         ];
         let mut activity = Vec::new();
         for event in events {
-            stream.apply_with_activity(&event.to_string(), &mut |_| {}, &mut |_| {},
-                &mut |item| activity.push(item)).unwrap();
+            stream
+                .apply_with_activity(&event.to_string(), &mut |_| {}, &mut |_| {}, &mut |item| {
+                    activity.push(item)
+                })
+                .unwrap();
         }
         assert!(stream.drain_finished_native().is_empty());
         assert_eq!(activity.len(), 2);
         assert!(!activity[0].done);
         assert!(activity[0].arguments.contains("Rust updates"));
         assert!(activity[1].done);
-        assert!(activity[1].result.as_deref().unwrap().contains("https://blog.rust-lang.org"));
+        assert!(activity[1]
+            .result
+            .as_deref()
+            .unwrap()
+            .contains("https://blog.rust-lang.org"));
         let (answer, usage) = stream.finish().unwrap();
         assert_eq!(usage.unwrap().web_searches, Some(2));
-        assert!(answer.tool_calls.is_none(), "server search is not a local tool");
+        assert!(
+            answer.tool_calls.is_none(),
+            "server search is not a local tool"
+        );
         assert_eq!(answer.content.as_deref(), Some("Rust released an update."));
         let request = payload(
             "claude",
             &[Message::new("user", "Research Rust"), answer],
-            &[], 4096, "auto", &ModelInfo::default(), "origin",
-        ).unwrap();
+            &[],
+            4096,
+            "auto",
+            &ModelInfo::default(),
+            "origin",
+        )
+        .unwrap();
         let blocks = request["messages"][1]["content"].as_array().unwrap();
         assert_eq!(blocks[0]["type"], "server_tool_use");
         assert_eq!(blocks[0]["input"]["query"], "Rust updates");
-        assert_eq!(blocks[1]["content"][0]["encrypted_content"], "encrypted-opaque-data");
-        assert_eq!(blocks[2]["citations"][0]["encrypted_index"], "reference-key");
+        assert_eq!(
+            blocks[1]["content"][0]["encrypted_content"],
+            "encrypted-opaque-data"
+        );
+        assert_eq!(
+            blocks[2]["citations"][0]["encrypted_index"],
+            "reference-key"
+        );
     }
 
     #[test]
@@ -744,21 +809,36 @@ mod tests {
         ];
         let mut activity = Vec::new();
         for event in events {
-            stream.apply_with_activity(&event.to_string(), &mut |_| {}, &mut |_| {},
-                &mut |item| activity.push(item)).unwrap();
+            stream
+                .apply_with_activity(&event.to_string(), &mut |_| {}, &mut |_| {}, &mut |item| {
+                    activity.push(item)
+                })
+                .unwrap();
         }
         assert_eq!(stream.drain_finished_native().len(), 1);
         let (answer, usage) = stream.finish().unwrap();
         assert_eq!(usage.unwrap().web_searches, Some(1));
-        assert!(answer.provider_items.as_deref().unwrap().iter()
+        assert!(answer
+            .provider_items
+            .as_deref()
+            .unwrap()
+            .iter()
             .any(|p| p["type"] == "kroma_anthropic_pause_turn"));
         assert!(answer.tool_calls.is_none());
         let request = payload(
             "claude",
             &[Message::new("user", "Research"), answer],
-            &[], 4096, "auto", &ModelInfo::default(), "origin",
-        ).unwrap();
-        assert_eq!(request["messages"][1]["content"][0]["id"], "srvtoolu_paused");
+            &[],
+            4096,
+            "auto",
+            &ModelInfo::default(),
+            "origin",
+        )
+        .unwrap();
+        assert_eq!(
+            request["messages"][1]["content"][0]["id"],
+            "srvtoolu_paused"
+        );
     }
 
     #[test]
