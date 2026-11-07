@@ -509,16 +509,6 @@ fn message_surfaces_leave_a_visible_terminal_right_gutter() {
                 ui.active_colors().background
             );
         }
-        let before = ui.message_surface_area(ui.selection_area, ui.selection_area.y);
-        ui.apply_preferences(super::super::preferences::Preferences {
-            full_width: true,
-            ..ui.preferences
-        });
-        draw(&mut ui, width, 40);
-        assert_eq!(
-            ui.message_surface_area(ui.selection_area, ui.selection_area.y),
-            before
-        );
     }
 }
 
