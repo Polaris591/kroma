@@ -104,6 +104,7 @@ checked separately using the [live acceptance set](web/evaluation.md).
 | Directory | How to use | What it demonstrates |
 | --- | --- | --- |
 | `hello` | `/echo hello`, Alt+E, `/plugins view hello` | Basic tool, slash command, Prompt, shortcut and live panel showing processed requests |
+| `image-gen` | Install, configure an image API and ask Kroma to generate or edit a picture | OpenAI Images / Gemini, recent user images, reusable image IDs, atomic file outputs; see [image-gen guide](image-gen/README.md) |
 | `transform` | Ask model to call `shell` | Explicit builtin tool replacement, Prompt replacement, before/after tool hooks |
 | `context-demo` | Enable before creating a **new** session | External ContextFactory/Policy state, persisted revision counter, branches; **does not compact messages** |
 | `model-http` | Edit example `base_url`, `model` and budget first | HTTP model profile replacement + context budget |
