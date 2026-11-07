@@ -4,6 +4,23 @@ Dependency-free process plugin for Node.js 20+. Two tools: `web_search` finds
 sources; `web_fetch` reads them. The agent decides which queries/pages to use.
 No browser, research loop, generated search answers, database or extra SDK.
 
+## Model-native search (optional)
+
+The model profile's `native_web_search` setting also supports the OpenAI
+Responses `web_search` tool and the Anthropic Messages `web_search_20250305`
+server tool. It defaults to **off**, and Kroma never assumes support from the
+model's name. With native search active, the built-in provider hides the
+duplicate local `web_search` definition; the optional `web_fetch` plugin tool
+remains available. If a gateway rejects the native search tool **before
+streaming**, the provider retries without it and offers the local `web_search`
+tool if the plugin was enabled. No local fallback is possible unless the
+plugin itself is installed and enabled.
+
+Anthropic search incurs separate provider charges; Kroma retains encrypted
+source blocks and citation metadata for subsequent model turns. Search-result
+errors reported inside an otherwise successful native stream do not trigger
+an automatic second paid search.
+
 ## Configure search
 
 Configure search APIs or a trusted SearXNG instance. Supported API backends:
