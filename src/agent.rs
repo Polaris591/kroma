@@ -1254,7 +1254,7 @@ impl Agent {
 
         let mut overflow_retries = 0;
         let mut truncation_retries = 0;
-        let mut native_pause_rounds = 0usize;
+        let mut continuing_native_search = false;
         let mut checkpoint_ready = false;
         loop {
             // Steering is a durable new user instruction, delivered only
@@ -1262,7 +1262,7 @@ impl Agent {
             // An Anthropic pause_turn is a continuation of the same server
             // tool turn. Keep intervening steering messages queued until
             // that turn resumes or fails.
-            if native_pause_rounds == 0 {
+            if !continuing_native_search {
                 self.append_pending_steering()?;
             }
             if let Some(limits) = self.execution_limits {
@@ -1613,13 +1613,12 @@ impl Agent {
             }
 
             if native_paused {
-                native_pause_rounds += 1;
-                if native_pause_rounds > 6 {
-                    bail!("Anthropic server-side search exceeded six pause_turn continuations");
-                }
+                // Resume the same server tool turn. Normal task limits, if
+                // explicitly configured, still govern model requests.
+                continuing_native_search = true;
                 continue;
             }
-            native_pause_rounds = 0;
+            continuing_native_search = false;
             if calls.is_empty() {
                 // Seal only when this model turn truly ends the task. A
                 // steering message that arrived during streaming gets another
