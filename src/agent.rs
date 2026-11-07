@@ -617,15 +617,12 @@ impl Agent {
             .collect()
     }
 
-    /// Tool schemas for one model request. A backend that runs its own
-    /// server-side search owns that capability, so the duplicate local search
-    /// tool is not offered next to it.
+    /// Keep the complete local tool catalog available to the provider.
+    /// The HTTP adapter hides duplicate search tools only while native
+    /// search is active; if a gateway refuses it, the same task can retry
+    /// with the generic web_search plugin without rebuilding this catalog.
     fn model_tool_definitions(&self) -> Vec<serde_json::Value> {
-        let mut definitions = self.tools.definitions();
-        if self.model.native_web_search() {
-            definitions.retain(|tool| tool["function"]["name"] != "web_search");
-        }
-        definitions
+        self.tools.definitions()
     }
 
     /// Atomically switch tool/Prompt/event contributions at an idle task
@@ -1257,11 +1254,17 @@ impl Agent {
 
         let mut overflow_retries = 0;
         let mut truncation_retries = 0;
+        let mut native_pause_rounds = 0usize;
         let mut checkpoint_ready = false;
         loop {
             // Steering is a durable new user instruction, delivered only
             // after the preceding model turn and all its tool results.
-            self.append_pending_steering()?;
+            // An Anthropic pause_turn is a continuation of the same server
+            // tool turn. Keep intervening steering messages queued until
+            // that turn resumes or fails.
+            if native_pause_rounds == 0 {
+                self.append_pending_steering()?;
+            }
             if let Some(limits) = self.execution_limits {
                 if stats.calls >= limits.max_turns {
                     bail!(
@@ -1572,6 +1575,12 @@ impl Agent {
                             "revision":state.revision}));
                 }
             }
+            let native_paused = response
+                .provider_items
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .any(|item| item["type"] == "kroma_anthropic_pause_turn");
             let calls = response.tool_calls.clone().unwrap_or_default();
             if stats.profile {
                 crate::runtime_log!(
@@ -1603,6 +1612,14 @@ impl Agent {
                 });
             }
 
+            if native_paused {
+                native_pause_rounds += 1;
+                if native_pause_rounds > 6 {
+                    bail!("Anthropic server-side search exceeded six pause_turn continuations");
+                }
+                continue;
+            }
+            native_pause_rounds = 0;
             if calls.is_empty() {
                 // Seal only when this model turn truly ends the task. A
                 // steering message that arrived during streaming gets another
