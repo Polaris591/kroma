@@ -683,7 +683,7 @@ mod tests {
                 "content_block":{"type":"server_tool_use","id":"srvtoolu_1",
                     "name":"web_search","input":{}}}),
             json!({"type":"content_block_delta","index":0,
-                "delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"Rust updates\\"}"}}),
+                "delta":{"type":"input_json_delta","partial_json":r#"{"query":"Rust updates"}"#}}),
             json!({"type":"content_block_stop","index":0}),
             json!({"type":"content_block_start","index":1,
                 "content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1",
