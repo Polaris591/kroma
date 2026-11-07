@@ -163,12 +163,11 @@ fn plain_uses_the_full_workspace_for_prose_and_code() {
 }
 
 #[test]
-fn plain_layout_setting_keeps_the_full_width_reading_area() {
+fn plain_renderer_uses_full_width_without_layout_preference() {
     let mut ui = ui();
     ui.add_user("Review the paragraph");
     ui.event(UiEvent::Text("readable prose ".repeat(60)));
     draw(&mut ui, 160, 40);
-    let area = ui.selection_area;
     let comfortable = ui
         .history_cache
         .as_ref()
@@ -181,24 +180,6 @@ fn plain_layout_setting_keeps_the_full_width_reading_area() {
         .max()
         .unwrap();
     assert!(comfortable > 120);
-    ui.apply_preferences(super::super::preferences::Preferences {
-        full_width: true,
-        ..ui.preferences
-    });
-    draw(&mut ui, 160, 40);
-    assert_eq!(ui.selection_area, area);
-    let wide = ui
-        .history_cache
-        .as_ref()
-        .unwrap()
-        .text
-        .lines
-        .iter()
-        .filter(|line| line.to_string().contains("readable"))
-        .map(Line::width)
-        .max()
-        .unwrap();
-    assert!(wide > 88);
 }
 
 #[test]
