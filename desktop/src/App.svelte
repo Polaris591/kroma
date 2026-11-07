@@ -10,6 +10,7 @@
   import { api, type Bootstrap, type DesktopEvent, type StreamEnvelope, type Message, type ProfileInput } from './lib/api';
   import { compactCount, cachePercentage } from './lib/format';
   import { applySnapshot, createOperationGuard, historyPageBelongsTo, isActiveTask } from './lib/snapshot';
+  import { filterSessions, scrollTopAfterPrepend } from './lib/chat-ui';
   import MessageView from './components/MessageView.svelte';
   import Markdown from './components/Markdown.svelte';
   import SettingsView from './components/SettingsView.svelte';
@@ -30,6 +31,9 @@
   let activeTools: ActiveTool[] = [];
   let draftPrompt = '';
   let historyCount = 150;
+  let sessionSearch = '';
+  let sessionSearchInput: HTMLInputElement;
+  let editorInput: HTMLTextAreaElement;
   let olderMessages: Message[] = [];
   let historyHasMore = false;
   let historyBusy = false;
@@ -48,6 +52,7 @@
   $: snapshot = data?.snapshot ?? null;
   $: history = [...olderMessages, ...(snapshot?.messages ?? [])].filter(m => m.role !== 'system');
   $: visibleHistory = history.slice(-historyCount);
+  $: filteredSessions = filterSessions(data?.sessions ?? [], sessionSearch);
   $: modelName = data?.connected_model || '未连接模型';
   $: usage = snapshot?.usage?.coding;
   $: pluginCount = data?.plugins.filter(p => p.enabled).length ?? 0;
@@ -81,10 +86,11 @@
   onMount(() => {
     void initialize();
     let stop: (() => void) | undefined;
+    let mounted = true;
     void getCurrentWebview().onDragDropEvent(event => {
       if (event.payload.type === 'drop') addPaths(event.payload.paths);
-    }).then(fn => { stop = fn; }).catch(() => {});
-    return () => stop?.();
+    }).then(fn => { if (mounted) stop = fn; else fn(); }).catch(() => {});
+    return () => { mounted = false; stop?.(); };
   });
 
   function syncHistoryState() {
@@ -106,11 +112,15 @@
       // another conversation's messages into the visible transcript.
       if (!historyPageBelongsTo(page.session_id, data?.snapshot?.session_id, generation, taskGeneration)
           || page.session_id !== session) return;
+      const oldHeight = scroller?.scrollHeight ?? 0;
+      const oldTop = scroller?.scrollTop ?? 0;
       olderMessages = [...page.messages, ...olderMessages];
-      // The visible slice is a count of newest messages; expand it by the
-      // page size so prepending older messages actually changes the view.
+      // Expand the visible window and preserve the reader's position when
+      // older messages arrive above the current viewport.
       historyCount += page.messages.length;
       historyHasMore = page.next_before != null && page.next_before > 0;
+      await tick();
+      if (scroller) scroller.scrollTop = scrollTopAfterPrepend(oldTop, oldHeight, scroller.scrollHeight);
     } catch (e) { showError(e); }
     finally { historyBusy = false; }
   }
@@ -301,6 +311,21 @@
       }
     }
   }
+  function handleGlobalKey(event: KeyboardEvent) {
+    if (event.defaultPrevented || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return;
+    const key = event.key.toLowerCase();
+    if (key === 'k') {
+      event.preventDefault();
+      tab = 'chat';
+      void tick().then(() => sessionSearchInput?.focus());
+    } else if (key === 'n' && data?.ready && !running && !busy) {
+      event.preventDefault();
+      void newSession().then(() => editorInput?.focus());
+    } else if (event.key === ',') {
+      event.preventDefault();
+      tab = 'settings';
+    }
+  }
   function handleEditor(event: KeyboardEvent) {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault(); void submit();
@@ -327,7 +352,7 @@
       if(typeof dir === 'string') await pluginAction('install',undefined,dir);
     } catch(e) {showError(e)}
   }
-  async function scrollDown() { await tick(); if(scroller) scroller.scrollTop = scroller.scrollHeight; }
+  async function scrollDown() { await tick(); if(scroller) scroller.scrollTop = scroller.scrollHeight; atBottom = true; }
   async function scrollIfBottom() { if (atBottom) await scrollDown(); }
   function trackScroll() {
     if (!scroller) return;
@@ -338,6 +363,7 @@
 </script>
 
 <svelte:head><title>Kroma Desktop</title></svelte:head>
+<svelte:window onkeydown={handleGlobalKey} />
 <div class="app-shell">
   <aside class="sidebar">
     <div class="brand"><div class="brand-mark"><span>Ｋ</span></div><div><strong>Kroma</strong><small>DESKTOP</small></div></div>
@@ -349,8 +375,10 @@
     </nav>
     <div class="sidebar-section">
       <div class="sidebar-section-title">历史会话 <span>{data?.sessions.length ?? 0}</span></div>
+      <input class="session-search" bind:this={sessionSearchInput} bind:value={sessionSearch}
+        aria-label="搜索会话" placeholder="搜索会话 · Ctrl/⌘ K" />
       <div class="session-list">
-        {#each data?.sessions ?? [] as session (session.id)}
+        {#each filteredSessions as session (session.id)}
           <button class:active={tab === 'chat' && snapshot?.session_id === session.id}
             disabled={running || busy || !data?.ready}
             title={session.id} onclick={() => switchSession(session.id)}>
@@ -358,7 +386,8 @@
             <span>{session.name || (session.id === 'default' ? '默认会话' : session.id)}</span>
           </button>
         {/each}
-        {#if data && !data.sessions.length}<p class="sessions-empty">开始对话后自动创建会话</p>{/if}
+        {#if data && !data.sessions.length}<p class="sessions-empty">开始对话后自动创建会话</p>
+        {:else if data && !filteredSessions.length}<p class="sessions-empty">没有匹配的会话</p>{/if}
       </div>
     </div>
     <div class="sidebar-bottom">
@@ -463,8 +492,8 @@
             </div>
           {/if}
         </div>
-        {#if history.length > 20}
-          <button class="scroll-latest" title="滚动到底部" onclick={scrollDown}><ArrowDown size={17}/></button>
+        {#if !atBottom}
+          <button class="scroll-latest" title="回到最新消息" aria-label="回到最新消息" onclick={scrollDown}><ArrowDown size={17}/></button>
         {/if}
         <div class="composer-outer">
           <div class="composer">
@@ -475,7 +504,7 @@
                 {/each}
               </div>
             {/if}
-            <textarea bind:value={prompt} onkeydown={handleEditor}
+            <textarea bind:this={editorInput} bind:value={prompt} onkeydown={handleEditor}
               placeholder={running ? '输入指令以调整当前任务…' : data?.ready ? '向 Kroma 描述你的任务…' : '配置模型后开始对话'}
               rows="3" aria-label="输入任务"></textarea>
             <div class="composer-actions">

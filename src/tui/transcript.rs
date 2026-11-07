@@ -254,6 +254,7 @@ impl UiState {
         lines.extend(card.lines);
     }
 
+    // Kept stable while the legacy renderer remains used by regression tests.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn append_reasoning(
         &self,

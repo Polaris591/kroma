@@ -32,6 +32,7 @@ export interface ProfileSummary {
   name: string; base_url: string; model: string; has_key: boolean;
   protocol: string; reasoning: string; deepseek_thinking: string;
   context_window: number | null; max_output_tokens: number | null;
+  native_web_search: boolean;
 }
 export interface Profiles {
   active: string | null; profiles: ProfileSummary[];
@@ -59,7 +60,7 @@ export type ProfileInput = {
   name: string; base_url: string; model: string; api_key?: string;
   clear_key?: boolean; protocol: string; reasoning: string;
   deepseek_thinking?: string; context_window?: number | null;
-  max_output_tokens?: number | null;
+  max_output_tokens?: number | null; native_web_search?: boolean;
 };
 
 export const api = {

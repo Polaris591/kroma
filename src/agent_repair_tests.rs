@@ -410,8 +410,8 @@ async fn fork_and_rewind_migrate_summary_captures_before_source_clear() -> Resul
 }
 
 #[tokio::test]
-async fn native_server_search_suppresses_the_duplicate_local_tool() -> Result<()> {
-    for (native_search, offered) in [(true, false), (false, true)] {
+async fn native_search_keeps_local_tool_available_for_provider_retry() -> Result<()> {
+    for native_search in [true, false] {
         let fixture = Fixture::new()?;
         let model = Arc::new(Backend {
             native_search,
@@ -437,10 +437,13 @@ async fn native_server_search_suppresses_the_duplicate_local_tool() -> Result<()
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(
+        // Agent presents the full registry to its backend. The HTTP adapter
+        // suppresses the duplicate local web_search tool only in requests
+        // where native search is enabled; it must retain that local tool
+        // so an unsupported proxy can retry within the same task.
+        assert!(
             names.contains(&"web_search"),
-            offered,
-            "native_search={native_search}: {names:?}"
+            "the provider needs the local fallback: native_search={native_search}: {names:?}"
         );
         assert!(
             names.contains(&"web_fetch"),

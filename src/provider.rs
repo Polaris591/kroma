@@ -3538,7 +3538,6 @@ mod tests {
             .unwrap()
     }
 
-
     #[tokio::test]
     async fn rejected_anthropic_search_retries_with_generic_web_plugin() {
         use std::io::{BufRead, BufReader, Read, Write};
@@ -3549,7 +3548,9 @@ mod tests {
             let mut requests = Vec::new();
             for attempt in 0..3 {
                 let (mut connection, _) = listener.accept().unwrap();
-                connection.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                connection
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let mut reader = BufReader::new(&connection);
                 let mut length = 0usize;
                 loop {
@@ -3578,7 +3579,10 @@ mod tests {
                             "usage":{"output_tokens":1}}),
                         json!({"type":"message_stop"}),
                     ];
-                    let body = events.iter().map(|e| format!("data: {e}\n\n")).collect::<String>();
+                    let body = events
+                        .iter()
+                        .map(|e| format!("data: {e}\n\n"))
+                        .collect::<String>();
                     write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                 }
                 connection.flush().unwrap();
