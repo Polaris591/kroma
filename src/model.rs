@@ -130,8 +130,9 @@ pub trait ModelBackend: Send + Sync {
         None
     }
 
-    /// True only when the backend itself runs a server-side search, so the
-    /// host must not also expose a duplicate local search tool.
+    /// True while this backend sends a server-side search tool. The HTTP
+    /// adapter hides the duplicate local definition at request time, so a
+    /// rejected native tool can fall back within the same task.
     fn native_web_search(&self) -> bool {
         false
     }
